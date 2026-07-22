@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.metadata
+import json
 import os
 import shutil
 import sys
@@ -7,6 +9,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
+from urllib.request import url2pathname
+
+from semble.version import __version__
 
 _HOME = Path.home()
 
@@ -25,26 +31,55 @@ class IntegrationType(str, Enum):
 SEMBLE_START = "<!-- SEMBLE_START -->"
 SEMBLE_END = "<!-- SEMBLE_END -->"
 
+
+def semble_pin() -> str:
+    """Return the uvx --from specifier for the semble MCP server.
+
+    Version-pinned for normal installs (rerunning `semble install` after an
+    upgrade rewrites this pin to match). For an editable or local-directory
+    install, pins to the local source path instead, so generated configs
+    launch the checkout being developed rather than the released package.
+    For a non-editable git install, pins to the exact installed commit, since
+    that source may not correspond to any released PyPI version at all.
+    """
+    try:
+        raw = importlib.metadata.distribution("semble").read_text("direct_url.json")
+        if raw:
+            data = json.loads(raw)
+            url = data.get("url", "")
+            if "dir_info" in data and url.startswith("file://"):
+                path = url2pathname(urlparse(url).path)
+                return f"{path}[mcp]"
+            vcs_info = data.get("vcs_info", {})
+            if vcs_info.get("vcs") == "git" and vcs_info.get("commit_id"):
+                return f"git+{url}@{vcs_info['commit_id']}#egg=semble[mcp]"
+    except Exception:
+        pass
+    return f"semble[mcp]=={__version__}"
+
+
+SEMBLE_PIN = semble_pin()
+
 _STDIO_SERVER_CONFIG: dict[str, object] = {
     "command": "uvx",
-    "args": ["--from", "semble[mcp]", "semble"],
+    "args": ["--from", SEMBLE_PIN, "semble"],
     "type": "stdio",
 }
 
 _OPENCODE_SERVER_CONFIG: dict[str, object] = {
-    "command": ["uvx", "--from", "semble[mcp]", "semble"],
+    "command": ["uvx", "--from", SEMBLE_PIN, "semble"],
     "type": "local",  # opencode uses "local"/"remote", not "stdio"
     "enabled": True,
 }
 
 _BARE_STDIO_SERVER_CONFIG: dict[str, object] = {  # Windsurf: command/args only, no "type"
     "command": "uvx",
-    "args": ["--from", "semble[mcp]", "semble"],
+    "args": ["--from", SEMBLE_PIN, "semble"],
 }
 
 _ZED_SERVER_CONFIG: dict[str, object] = {  # Zed: command/args only, no "source"
     "command": "uvx",
-    "args": ["--from", "semble[mcp]", "semble"],
+    "args": ["--from", SEMBLE_PIN, "semble"],
 }
 
 INSTRUCTIONS = f"""\
@@ -69,7 +104,7 @@ semble find-related src/auth.py 42 ./my-project
 semble search "save model to disk" ./my-project --top-k 10
 ```
 
-The index is built on first run and cached automatically. If `semble` is not on `$PATH`, use `uvx --from "semble[mcp]" semble`.
+The index is built on first run and cached automatically. If `semble` is not on `$PATH`, use `uvx --from "{SEMBLE_PIN}" semble`.
 
 ### Workflow
 
