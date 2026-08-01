@@ -18,39 +18,63 @@ from benchmarks.data import (
     load_filtered_tasks,
     results_path,
     save_results,
-    summarize_modes,
 )
 from benchmarks.metrics import ndcg_at_k, target_rank
-from semble import SembleIndex
-from semble.types import SearchResult
+from semble.index.create import create_index_from_path
+from semble.index.index import SembleIndex
+from semble.types import ContentType, SearchResult
 
 _MODEL_NAME = "nomic-ai/CodeRankEmbed"
 _TOP_K = 10
 _LATENCY_RUNS = 3  # transformer inference is slow; keep runs low
+_ALPHA = 1.0  # SembleIndex.search()'s alpha: 1.0 = full semantic weight
+
+_UNSET = object()
 
 
 class _AsymmetricWrapper:
-    """Wrap SentenceTransformer with asymmetric query/document prompts."""
+    """Wrap SentenceTransformer with asymmetric query/document prompts.
+
+    semble only passes use_multiprocessing during index-time calls, never at query time, so its
+    presence is a reliable query/document discriminator (batch size is not: single-chunk files are
+    real one-element document batches).
+    """
 
     def __init__(self, model: SentenceTransformer, max_seq_length: int = 512) -> None:
         self._model = model
         self._model.max_seq_length = max_seq_length
 
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
-        """Encode texts with query or document prompt based on batch size."""
+    def encode(self, texts: Sequence[str], use_multiprocessing: object = _UNSET) -> np.ndarray:
+        """Encode with the query prompt only when use_multiprocessing wasn't passed."""
         text_list = list(texts)
-        if len(text_list) == 1:
+        if use_multiprocessing is _UNSET:
             return self._model.encode(text_list, prompt_name="query", batch_size=1)  # type: ignore[return-value]
         return self._model.encode(text_list, batch_size=1)  # type: ignore[return-value]
 
 
+def _build_index(benchmark_dir: Path, model: _AsymmetricWrapper) -> SembleIndex:
+    """Build a SembleIndex using CodeRankEmbed embeddings for both BM25 enrichment and dense search."""
+    bm25_index, semantic_index, chunks, _manifest = create_index_from_path(
+        benchmark_dir,
+        model=model,  # type: ignore[arg-type]
+        content=(ContentType.CODE,),  # type: ignore[arg-type]
+    )
+    return SembleIndex(
+        model=model,  # type: ignore[arg-type]
+        bm25_index=bm25_index,
+        semantic_index=semantic_index,
+        chunks=chunks,
+        model_path=_MODEL_NAME,
+        root=benchmark_dir,
+    )
+
+
 @dataclass(frozen=True)
 class RepoResult:
-    """Per-repo benchmark result for one search mode."""
+    """Per-repo benchmark result."""
 
     repo: str
     language: str
-    mode: str
     chunks: int
     ndcg5: float
     ndcg10: float
@@ -77,7 +101,7 @@ def _evaluate(
         results: list[SearchResult] = []
         for _ in range(_LATENCY_RUNS):
             started = time.perf_counter()
-            results = index.search(task.query, top_k=_TOP_K)
+            results = index.search(task.query, top_k=_TOP_K, alpha=_ALPHA)
             query_latencies.append((time.perf_counter() - started) * 1000)
         latencies.append(float(np.median(query_latencies)))
 
@@ -107,27 +131,26 @@ def _evaluate(
     return ndcg5_sum / total, ndcg10_sum / total, latencies, by_category
 
 
-def _build_summary(results: list[RepoResult], modes: list[str]) -> dict[str, object]:
+def _build_summary(results: list[RepoResult]) -> dict[str, object]:
     """Build the JSON summary dict from the current (possibly partial) results list."""
+    n = len(results)
     return {
         "tool": "coderankembed",
-        "model": _MODEL_NAME,
-        "by_mode": summarize_modes(results, modes),
+        "note": f"{_MODEL_NAME} (137M params), semantic-only dense search (alpha=1.0)",
         "repos": [asdict(result) for result in results],
+        "avg_ndcg10": round(sum(r.ndcg10 for r in results) / n, 4) if n else 0.0,
+        "avg_p50_ms": round(sum(r.p50_ms for r in results) / n, 1) if n else 0.0,
+        "avg_index_ms": round(sum(r.index_ms for r in results) / n, 1) if n else 0.0,
     }
 
 
-def _load_completed(out_path: Path, modes: list[str]) -> dict[str, list[RepoResult]]:
-    """Load repos where all requested modes are already saved in a previous run."""
+def _load_completed(out_path: Path) -> dict[str, RepoResult]:
+    """Load repos already saved in a previous run, keyed by repo name."""
     if not out_path.exists():
         return {}
     try:
         data = json.loads(out_path.read_text(encoding="utf-8"))
-        by_repo: dict[str, list[RepoResult]] = {}
-        for entry in data.get("repos", []):
-            result = RepoResult(**entry)
-            by_repo.setdefault(result.repo, []).append(result)
-        return {repo: results for repo, results in by_repo.items() if {result.mode for result in results} >= set(modes)}
+        return {entry["repo"]: RepoResult(**entry) for entry in data.get("repos", [])}
     except (json.JSONDecodeError, KeyError, TypeError):
         return {}
 
@@ -136,36 +159,31 @@ def _bench(
     repo_tasks: dict[str, list[Task]],
     specs: dict[str, RepoSpec],
     model: _AsymmetricWrapper,
-    modes: list[str],
     out_path: Path | None,
     *,
     verbose: bool = False,
 ) -> list[RepoResult]:
-    """Index each repo once, evaluate each mode, and save after every repo."""
-    completed = _load_completed(out_path, modes) if out_path else {}
+    """Index and evaluate each repo, saving after every repo."""
+    completed = _load_completed(out_path) if out_path else {}
     if completed:
         print(f"Resuming: {len(completed)} repo(s) already done, skipping.", file=sys.stderr)
 
-    results: list[RepoResult] = [r for repo_results in completed.values() for r in repo_results]
+    results: list[RepoResult] = list(completed.values())
 
     header = (
-        f"{'Repo':<12} {'Language':<12} {'Mode':<10} {'Chunks':>6}"
-        f" {'Index':>9} {'NDCG@5':>8} {'NDCG@10':>8} {'p50':>8} {'p90':>8}"
+        f"{'Repo':<12} {'Language':<12} {'Chunks':>6} {'Index':>9} {'NDCG@5':>8} {'NDCG@10':>8} {'p50':>8} {'p90':>8}"
     )
     print(header, file=sys.stderr)
-    print(
-        f"{'-' * 12} {'-' * 12} {'-' * 10} {'-' * 6} {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}",
-        file=sys.stderr,
-    )
+    print(f"{'-' * 12} {'-' * 12} {'-' * 6} {'-' * 10} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}", file=sys.stderr)
 
     for repo in sorted(completed):
-        for r in completed[repo]:
-            print(
-                f"{r.repo:<12} {r.language:<12} {r.mode:<10} {r.chunks:>6}"
-                f" {r.index_ms:>8.0f}ms {r.ndcg5:>8.3f} {r.ndcg10:>8.3f}"
-                f" {r.p50_ms:>7.2f}ms {r.p90_ms:>7.2f}ms (cached)",
-                file=sys.stderr,
-            )
+        r = completed[repo]
+        print(
+            f"{r.repo:<12} {r.language:<12} {r.chunks:>6}"
+            f" {r.index_ms:>8.0f}ms {r.ndcg5:>8.3f} {r.ndcg10:>8.3f}"
+            f" {r.p50_ms:>7.2f}ms {r.p90_ms:>7.2f}ms (cached)",
+            file=sys.stderr,
+        )
 
     for repo, tasks in sorted(repo_tasks.items()):
         if repo in completed:
@@ -175,35 +193,31 @@ def _bench(
             print(f"\n--- {repo} ---", file=sys.stderr)
 
         started = time.perf_counter()
-        index = SembleIndex.from_path(spec.benchmark_dir)
+        index = _build_index(spec.benchmark_dir, model)
         index_ms = (time.perf_counter() - started) * 1000
 
-        repo_results: list[RepoResult] = []
-        for mode in modes:
-            ndcg5, ndcg10, latencies, by_category = _evaluate(index, tasks, verbose=verbose)
-            p50, p90 = np.percentile(latencies, [50, 90]).tolist()
-            result = RepoResult(
-                repo=repo,
-                language=spec.language,
-                mode=mode,
-                chunks=len(index.chunks),
-                ndcg5=ndcg5,
-                ndcg10=ndcg10,
-                p50_ms=p50,
-                p90_ms=p90,
-                index_ms=index_ms,
-                by_category=by_category,
-            )
-            repo_results.append(result)
-            print(
-                f"{repo:<12} {spec.language:<12} {mode:<10} {len(index.chunks):>6}"
-                f" {index_ms:>8.0f}ms {ndcg5:>8.3f} {ndcg10:>8.3f} {p50:>7.2f}ms {p90:>7.2f}ms",
-                file=sys.stderr,
-            )
+        ndcg5, ndcg10, latencies, by_category = _evaluate(index, tasks, verbose=verbose)
+        p50, p90 = np.percentile(latencies, [50, 90]).tolist()
+        result = RepoResult(
+            repo=repo,
+            language=spec.language,
+            chunks=len(index.chunks),
+            ndcg5=ndcg5,
+            ndcg10=ndcg10,
+            p50_ms=p50,
+            p90_ms=p90,
+            index_ms=index_ms,
+            by_category=by_category,
+        )
+        results.append(result)
+        print(
+            f"{repo:<12} {spec.language:<12} {len(index.chunks):>6}"
+            f" {index_ms:>8.0f}ms {ndcg5:>8.3f} {ndcg10:>8.3f} {p50:>7.2f}ms {p90:>7.2f}ms",
+            file=sys.stderr,
+        )
 
-        results.extend(repo_results)
         if out_path:
-            save_results("coderankembed", _build_summary(results, modes))
+            save_results("coderankembed", _build_summary(results))
 
     return results
 
@@ -211,16 +225,12 @@ def _bench(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark CodeRankEmbed on the semble benchmark suite.")
     add_filter_args(parser, verbose=True)
-    parser.add_argument(
-        "--mode", action="append", default=[], choices=["semantic", "hybrid"], help="Search mode(s) (default: both)."
-    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Run the CodeRankEmbed baseline benchmark."""
     args = _parse_args()
-    modes = args.mode or ["semantic", "hybrid"]
     is_full_run = not args.repo and not args.language
 
     repo_specs, tasks = load_filtered_tasks(args.repo or None, args.language or None)
@@ -233,24 +243,17 @@ def main() -> None:
     print(file=sys.stderr)
 
     out_path = results_path("coderankembed") if is_full_run else None
-    results = _bench(grouped_tasks(tasks), repo_specs, model, modes, out_path, verbose=args.verbose)
+    results = _bench(grouped_tasks(tasks), repo_specs, model, out_path, verbose=args.verbose)
 
     if not results:
         return
 
     print(file=sys.stderr)
-    for mode in modes:
-        mode_results = [r for r in results if r.mode == mode]
-        if not mode_results:
-            continue
-        avg_ndcg10 = sum(r.ndcg10 for r in mode_results) / len(mode_results)
-        avg_p50 = sum(r.p50_ms for r in mode_results) / len(mode_results)
-        print(
-            f"  {mode:<10}  avg ndcg@10={avg_ndcg10:.3f}  avg p50={avg_p50:.1f}ms  ({len(mode_results)} repos)",
-            file=sys.stderr,
-        )
+    avg_ndcg10 = sum(r.ndcg10 for r in results) / len(results)
+    avg_p50 = sum(r.p50_ms for r in results) / len(results)
+    print(f"  avg ndcg@10={avg_ndcg10:.3f}  avg p50={avg_p50:.1f}ms  ({len(results)} repos)", file=sys.stderr)
 
-    summary = _build_summary(results, modes)
+    summary = _build_summary(results)
     print(json.dumps(summary, indent=2))
 
     if is_full_run:

@@ -25,7 +25,7 @@ _METHODS: list[_Method] = [
         "name": "ripgrep",
         "ndcg10": 0.126,
         "index_ms": 0.0,  # no persistent index; scans on the fly
-        "query_p50_ms": 12.08,
+        "query_p50_ms": 14.46,
         "color": "#606060",
         "params_m": 0,
     },
@@ -38,18 +38,42 @@ _METHODS: list[_Method] = [
         "params_m": 0,
     },
     {
+        "name": "cs",
+        "ndcg10": 0.1997,
+        "index_ms": 0.0,  # no persistent index; scans on the fly
+        "query_p50_ms": 22.1,
+        "color": "#5aa9a3",
+        "params_m": 0,
+    },
+    {
+        "name": "codebase-memory-mcp",
+        "ndcg10": 0.6298,
+        "index_ms": 454.0,
+        "query_p50_ms": 46.3,
+        "color": "#a3a34a",
+        "params_m": 0,
+    },
+    {
+        "name": "ck",
+        "ndcg10": 0.642,
+        "index_ms": 95892.7,
+        "query_p50_ms": 187.0,
+        "color": "#4a7ba3",
+        "params_m": 33,
+    },
+    {
         "name": "BM25",
         "ndcg10": 0.673,
-        "index_ms": 262.6,  # same semble index infrastructure; BM25 component adds negligible overhead
-        "query_p50_ms": 0.019,
+        "index_ms": 46.6,  # standalone BM25 build time, not shared with semble's dense index
+        "query_p50_ms": 0.17,  # standalone bm25_index.get_scores() + top-k sort, not hybrid search()
         "color": "#3a9e7e",
         "params_m": 0,
     },
     {
         "name": "ColGREP",
         "ndcg10": 0.6925,
-        "index_ms": 5750.6,
-        "query_p50_ms": 123.83,
+        "index_ms": 5359.0,
+        "query_p50_ms": 122.42,
         "color": "#e8a838",
         "params_m": 16,
     },
@@ -63,25 +87,17 @@ _METHODS: list[_Method] = [
     },
     {
         "name": "CodeRankEmbed",
-        "ndcg10": 0.7648,
-        "index_ms": 57269.4,
-        "query_p50_ms": 16.27,
+        "ndcg10": 0.8393,
+        "index_ms": 115859.8,
+        "query_p50_ms": 15.56,
         "color": "#d9634f",
-        "params_m": 137,
-    },
-    {
-        "name": "CodeRankEmbed\nHybrid",
-        "ndcg10": 0.8617,
-        "index_ms": 57269.4,
-        "query_p50_ms": 16.27,
-        "color": "#922b21",
         "params_m": 137,
     },
     {
         "name": "semble",
         "ndcg10": 0.8544,
-        "index_ms": 262.6,
-        "query_p50_ms": 1.49,
+        "index_ms": 518.2,
+        "query_p50_ms": 0.91,
         "color": "#1a5fa8",
         "params_m": 16,
     },
@@ -93,11 +109,11 @@ _CBRT_LABEL_DELTA_COLD = 2.0
 _CBRT_LABEL_DELTA_WARM = 0.2
 
 # Frontier methods per mode.
-# Cold: incumbent prior-art curve (ripgrep → BM25 → ColGREP → CRE Hybrid); semble floats above it.
-# Warm: BM25 dominates ripgrep (faster and higher NDCG), so incumbent curve is BM25 → CRE Hybrid.
+# Cold: incumbent prior-art curve (ripgrep → BM25 → ColGREP → CodeRankEmbed); semble floats above it.
+# Warm: BM25 dominates ripgrep (faster and higher NDCG), so incumbent curve is BM25 → CodeRankEmbed.
 _FRONTIER_NAMES: dict[str, set[str]] = {
-    "cold": {"ripgrep", "BM25", "ColGREP", "CodeRankEmbed\nHybrid"},
-    "warm": {"BM25", "CodeRankEmbed\nHybrid"},
+    "cold": {"ripgrep", "BM25", "ColGREP", "CodeRankEmbed"},
+    "warm": {"BM25", "CodeRankEmbed"},
 }
 
 
