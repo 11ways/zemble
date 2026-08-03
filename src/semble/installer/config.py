@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from functools import cache
 from pathlib import Path
-from typing import Literal, TypeVar, cast
+from typing import Literal, TypeVar
 
+from semble_grammars import get_parser
 from tree_sitter import Node, Parser
-from tree_sitter_language_pack import SupportedLanguage, download, get_parser
 
 from semble.installer.agents import SEMBLE_END, SEMBLE_PIN, SEMBLE_START, Action
 
@@ -15,23 +16,14 @@ _T = TypeVar("_T")
 _CODEX_MCP_HEADER = "[mcp_servers.semble]"
 _CODEX_MCP_BLOCK = f'[mcp_servers.semble]\ncommand = "uvx"\nargs = ["--from", "{SEMBLE_PIN}", "semble"]\n'
 
-_json5_parser_cache: Parser | None | bool = False  # False = not yet attempted
 
-
+@cache
 def _json5_parser() -> Parser | None:
-    """Return a tree-sitter JSON5 parser, downloading the grammar if needed.
-
-    "json5" ships in tree-sitter-language-pack but isn't in its typed language list, hence the cast.
-    """
-    global _json5_parser_cache
-    if _json5_parser_cache is not False:
-        return _json5_parser_cache  # type: ignore[return-value]
+    """Return a tree-sitter JSON5 parser, or None if unavailable."""
     try:
-        download(["json5"])
-        _json5_parser_cache = get_parser(cast(SupportedLanguage, "json5"))
+        return get_parser("json5")
     except Exception:
-        _json5_parser_cache = None
-    return _json5_parser_cache  # type: ignore[return-value]
+        return None
 
 
 def _json5_object(text: str) -> JsonObjectResult:
