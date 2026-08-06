@@ -22,9 +22,11 @@ def resolve_chunk(chunks: list[Chunk], file_path: str, line: int) -> Chunk | Non
     Reconstructs a Chunk from its JSON-primitive MCP tool arguments (file_path + line)
     before calling into the library.
     """
+    # Normalize separators: file_path is stored with the platform's native separator.
+    file_path = file_path.replace("\\", "/")
     fallback = None
     for chunk in chunks:
-        if chunk.file_path == file_path and chunk.start_line <= line <= chunk.end_line:
+        if chunk.file_path.replace("\\", "/") == file_path and chunk.start_line <= line <= chunk.end_line:
             if line < chunk.end_line:
                 return chunk
             if fallback is None:  # line == end_line: boundary; keep as fallback for end-of-file chunks
