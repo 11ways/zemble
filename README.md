@@ -286,6 +286,15 @@ Embeddings from API providers are cached by content hash, so unchanged code is
 never paid for twice. See [docs/embedders.md](docs/embedders.md) for the full
 spec grammar, environment variables, cache location and cost notes.
 
+### Java compiler facts
+
+For Java codebases, [`javac-facts/`](javac-facts/README.md) holds `zemble-javac-facts`, a small
+standalone javac plugin that emits what the compiler itself resolved -- declared symbols, calls with
+the exact overload javac selected, overrides, supertype edges and constant annotation arguments --
+as JSONL in zemble's graph-facts format. It plugs into any Gradle or Maven build (or plain `javac`),
+depends only on the documented `com.sun.source` API, and gives the graph precise Java edges without
+re-implementing name and overload resolution on top of tree-sitter.
+
 ## Acknowledgements
 
 Thanks to [Greptile](https://greptile.com) for providing free access to their AI code review platform.
