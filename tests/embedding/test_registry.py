@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from zemble.embedding.base import semantic_weight_bonus
 from zemble.embedding.cache import CachingEmbedder
 from zemble.embedding.model2vec import Model2VecEmbedder
 from zemble.embedding.openai_compat import OpenAICompatibleEmbedder
@@ -113,3 +114,23 @@ def test_legacy_env_accepts_a_full_spec(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("ZEMBLE_EMBEDDER", raising=False)
     monkeypatch.setenv("ZEMBLE_MODEL_NAME", "voyage:voyage-code-4@256")
     assert resolve_embedder_spec() == "voyage:voyage-code-4@256"
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("model2vec:minishlab/potion-code-16M-v2", 0.0),
+        ("voyage:voyage-4-lite@1024", 0.15),
+        ("voyage:voyage-code-4", 0.15),
+        ("openai:http://localhost:11434/v1#nomic-embed-text", 0.15),
+    ],
+)
+def test_fusion_bonus_is_declared_per_family(spec: str, expected: float) -> None:
+    """Every shipped embedder declares its dense-lane fusion share, cache wrapper included."""
+    assert semantic_weight_bonus(parse_embedder_spec(spec)) == pytest.approx(expected)
+    assert semantic_weight_bonus(_unwrap(spec)) == pytest.approx(expected)
+
+
+def test_fusion_bonus_of_an_undeclared_embedder_is_zero() -> None:
+    """An embedder from outside this registry never silently retunes ranking."""
+    assert semantic_weight_bonus(object()) == pytest.approx(0.0)

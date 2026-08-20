@@ -38,6 +38,10 @@ class Model2VecEmbedder:
     #: Runs on this machine: free, offline, never budget-gated.
     is_remote = False
 
+    #: A static model is exactly what the shipped fusion weights were tuned on, and every
+    #: increase measured worse (docs/voyage.md): it earns no extra share of the fusion.
+    semantic_weight_bonus = 0.0
+
     def __init__(self, model_path: str) -> None:
         """Initialise the embedder.
 

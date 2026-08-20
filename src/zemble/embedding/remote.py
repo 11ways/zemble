@@ -39,6 +39,11 @@ class HttpEmbedder:
     #: Every HTTP provider is a paid round trip, so the budget guard applies to all of them.
     is_remote = True
 
+    #: A hosted provider is a contextual model, whose dense lane is strong enough to carry a
+    #: larger share of the RRF fusion than the static default was tuned for; measured on
+    #: voyage-4-lite and voyage-code-4 in docs/voyage.md.
+    semantic_weight_bonus = 0.15
+
     @property
     def model_id(self) -> str:
         """The normalized spec string."""

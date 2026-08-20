@@ -1,6 +1,12 @@
 """Pluggable embedding backends."""
 
-from zemble.embedding.base import Embedder, EmbeddingMatrix, declared_dimensions, is_remote
+from zemble.embedding.base import (
+    Embedder,
+    EmbeddingMatrix,
+    declared_dimensions,
+    is_remote,
+    semantic_weight_bonus,
+)
 from zemble.embedding.cache import CachingEmbedder, EmbeddingCache
 from zemble.embedding.pricing import (
     EmbeddingBudgetExceeded,
@@ -34,4 +40,5 @@ __all__ = [
     "price_per_million",
     "build_embedder",
     "resolve_embedder_spec",
+    "semantic_weight_bonus",
 ]

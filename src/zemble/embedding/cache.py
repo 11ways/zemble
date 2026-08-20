@@ -11,7 +11,14 @@ from pathlib import Path
 
 import numpy as np
 
-from zemble.embedding.base import Embedder, EmbeddingMatrix, declared_dimensions, is_remote, normalize_rows
+from zemble.embedding.base import (
+    Embedder,
+    EmbeddingMatrix,
+    declared_dimensions,
+    is_remote,
+    normalize_rows,
+    semantic_weight_bonus,
+)
 from zemble.embedding.pricing import check_budget, estimate_tokens, format_cost, price_per_million
 
 logger = logging.getLogger(__name__)
@@ -184,6 +191,11 @@ class CachingEmbedder:
     def declared_dimensions(self) -> int | None:
         """The wrapped embedder's width, when it is known without a request."""
         return declared_dimensions(self.inner)
+
+    @property
+    def semantic_weight_bonus(self) -> float:
+        """The wrapped embedder's fusion bonus; caching does not change how good its vectors are."""
+        return semantic_weight_bonus(self.inner)
 
     def _announce(self, texts: list[str]) -> None:
         """Refuse or announce a paid embed of the whole pending set, before the first slice is sent.

@@ -7,7 +7,7 @@ import pytest
 from model2vec import StaticModel
 from vicinity.backends.basic import BasicArgs
 
-from tests.conftest import make_chunk
+from tests.conftest import FakeEmbedder, make_chunk
 from zemble.embedding.model2vec import Model2VecEmbedder, load_static_model
 from zemble.index.bm25 import BM25
 from zemble.index.dense import SelectableBasicBackend, embed_chunks
@@ -173,3 +173,30 @@ def test_selectable_basic_backend_rejects_k_below_one(
     """SelectableBasicBackend.query guards against k < 1."""
     with pytest.raises(ValueError, match="k should be >= 1"):
         semantic.query(embeddings[:1], k=0)
+
+
+class _BonusEmbedder(FakeEmbedder):
+    """A FakeEmbedder that claims a larger share of the fusion, the way a hosted model does."""
+
+    semantic_weight_bonus = 0.5
+
+
+def test_search_honours_the_embedders_fusion_bonus(mock_embedder: FakeEmbedder) -> None:
+    """An embedder's declared bonus reaches fusion: the dense lane's pick overtakes BM25's."""
+    lexical = make_chunk("def refresh_session_cookie(request):\n    pass", "cookies.py")
+    semantic_only = make_chunk("class Renewal:\n    pass", "renewal.py")
+    corpus = [lexical, semantic_only]
+    query = "how is a session cookie refreshed"
+
+    # 1. Make the dense lane rank the chunk BM25 cannot see at all: its vector IS the query's.
+    embeddings = np.vstack([mock_embedder.embed_documents([lexical.content]), mock_embedder.embed_queries([query])])
+    semantic_index = SelectableBasicBackend(embeddings.astype(np.float32), BasicArgs())
+    bm25_index = _build_bm25(corpus)
+
+    # 2. At the shipped weights BM25's lexical hit wins the fusion.
+    plain = search(query, mock_embedder, semantic_index, bm25_index, corpus, top_k=2, rerank=False)
+    assert plain[0].chunk is lexical, "without a bonus the lexical match must still win"
+
+    # 3. The same search with a bonus-declaring embedder hands the top spot to the dense lane.
+    boosted = search(query, _BonusEmbedder(), semantic_index, bm25_index, corpus, top_k=2, rerank=False)
+    assert boosted[0].chunk is semantic_only, "a declared bonus must reach the fusion weight"

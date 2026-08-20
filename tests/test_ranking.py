@@ -1,9 +1,21 @@
 import pytest
 
 from tests.conftest import make_chunk
+from zemble.embedding.base import SEMANTIC_WEIGHT_BONUS_ENV, semantic_weight_bonus
 from zemble.ranking.boosting import apply_query_boost, boost_multi_chunk_files
 from zemble.ranking.penalties import rerank_topk
 from zemble.ranking.weighting import resolve_alpha
+
+
+class _BonusEmbedder:
+    """The one fact ranking reads off an embedder, without any of the embedding machinery."""
+
+    def __init__(self, bonus: float) -> None:
+        """Declare a fusion bonus.
+
+        :param bonus: The dense-lane share this embedder claims beyond the shipped weights.
+        """
+        self.semantic_weight_bonus = bonus
 
 
 def test_rerank_topk() -> None:
@@ -154,3 +166,44 @@ def test_boosting_with_empty() -> None:
     """Test that boosting with empty chunks return None."""
     boosted = apply_query_boost({}, "query", [])
     assert boosted == {}
+
+
+@pytest.mark.parametrize(
+    ("query", "bonus", "expected"),
+    [
+        ("MyService", 0.15, 0.45),  # symbol weight plus the bonus
+        ("how does routing work", 0.15, 0.65),  # NL weight plus the bonus
+        ("how does routing work", 0.0, 0.5),  # a declared zero is today's shipped weight
+        ("how does routing work", 0.9, 1.0),  # clamped: the dense lane never exceeds the whole fusion
+        ("MyService", -1.0, 0.3),  # a negative declaration is clamped away, not subtracted
+    ],
+)
+def test_resolve_alpha_adds_the_embedder_bonus(query: str, bonus: float, expected: float) -> None:
+    """A declared fusion bonus shifts both auto-detected weights, clamped to [0, 1]."""
+    assert resolve_alpha(query, None, _BonusEmbedder(bonus)) == pytest.approx(expected)
+
+
+def test_resolve_alpha_ignores_the_bonus_for_an_explicit_alpha() -> None:
+    """An explicit alpha is the caller's number; no embedder retunes it."""
+    assert resolve_alpha("how does routing work", 0.7, _BonusEmbedder(0.15)) == pytest.approx(0.7)
+
+
+def test_resolve_alpha_without_an_embedder_is_the_shipped_weight() -> None:
+    """An embedder that declares nothing - or no embedder at all - gets exactly today's weights."""
+    assert resolve_alpha("MyService", None) == pytest.approx(0.3)
+    assert resolve_alpha("how does routing work", None) == pytest.approx(0.5)
+    assert resolve_alpha("how does routing work", None, object()) == pytest.approx(0.5)
+
+
+def test_semantic_weight_bonus_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ZEMBLE_SEMANTIC_WEIGHT_BONUS overrides every declaration, and a non-number is ignored."""
+    embedder = _BonusEmbedder(0.15)
+    monkeypatch.setenv(SEMANTIC_WEIGHT_BONUS_ENV, "0.20")
+    assert semantic_weight_bonus(embedder) == pytest.approx(0.20)
+    assert resolve_alpha("how does routing work", None, embedder) == pytest.approx(0.70)
+    # The override reaches an embedder that declares nothing at all.
+    assert semantic_weight_bonus(object()) == pytest.approx(0.20)
+    monkeypatch.setenv(SEMANTIC_WEIGHT_BONUS_ENV, "5")
+    assert semantic_weight_bonus(embedder) == pytest.approx(1.0)
+    monkeypatch.setenv(SEMANTIC_WEIGHT_BONUS_ENV, "not-a-number")
+    assert semantic_weight_bonus(embedder) == pytest.approx(0.0)

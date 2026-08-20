@@ -98,7 +98,8 @@ def search(
     :param bm25_index: Pre-built BM25 index.
     :param chunks: All indexed chunks (parallel to BM25 index).
     :param top_k: Number of results to return.
-    :param alpha: Weight for semantic score (1-alpha goes to BM25). None = auto-detect based on query type.
+    :param alpha: Weight for semantic score (1-alpha goes to BM25). None = auto-detect from the query
+        type plus the embedder's declared fusion bonus.
     :param selector: Optional array of chunk indices to filter results by; an empty one matches nothing.
     :param rerank: Whether to perform code-tuned reranking. On by default for code search, off for docs search.
     :param definitions: Persisted symbol-definition lookup used by the rerank pass, when the index has one.
@@ -108,7 +109,7 @@ def search(
     """
     if selector is not None and selector.size == 0:
         return []
-    alpha_weight = resolve_alpha(query, alpha)
+    alpha_weight = resolve_alpha(query, alpha, embedder)
     settings = rerank_settings or RerankSettings()
     # The reranker only sees candidates the heuristics already ranked, so the pool and the
     # ranked list both have to reach its window before it can reorder anything.
