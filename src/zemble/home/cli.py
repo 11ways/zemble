@@ -66,28 +66,35 @@ def _daemon_args(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _in_process(args: argparse.Namespace) -> dict[str, Any]:
-    """Answer in this process, building the index and the graph as needed."""
-    config = HomeConfig.load(args.path)
-    ensure_graph(args.path)
-    provider = SqliteGraphProvider(args.path)
+    """Answer in this process, building the index and the graph as needed.
+
+    A sub-directory of an indexed tree is answered from that tree, so the config and the
+    graph are read from the same root the index speaks.
+    """
+    index, root = _load_index(args.path, args.embedder)
+    config = HomeConfig.load(root)
+    ensure_graph(root)
+    provider = SqliteGraphProvider(root)
     try:
-        return home_payload(_load_index(args.path, args.embedder), provider, config, args.description, args.top_k)
+        return home_payload(index, provider, config, args.description, args.top_k)
     finally:
         provider.close()
 
 
-def _load_index(path: str, embedder: str | None = None) -> ZembleIndex:
-    """Build or load the code-and-docs index for a workspace, saving it back to the cache.
+def _load_index(path: str, embedder: str | None = None) -> tuple[ZembleIndex, str]:
+    """Build or load the code-and-docs index answering for a workspace, saving it back to the cache.
 
     Imported lazily: `zemble.cli` imports this module, so the reverse import can
     only happen once the parser is already built.
+
+    :return: The index, and the root it was built from, which a sub-path request answers from.
     """
     from zemble.cli import _load_index as load
     from zemble.cli import _maybe_save_index
 
-    index = load(path, list(HOME_CONTENT), embedder)
-    _maybe_save_index(index, path)
-    return index
+    index, source_key = load(path, list(HOME_CONTENT), embedder)
+    _maybe_save_index(index, source_key)
+    return index, source_key
 
 
 __all__ = ["HOME_COMMANDS", "HOME_CONTENT", "add_home_parser", "run_home"]

@@ -178,6 +178,10 @@ class Daemon:
     async def index_for(self, args: dict[str, Any]) -> tuple[CacheKey, ZembleIndex]:
         """Resolve the requested root, returning its key and warm index.
 
+        A path inside a root the daemon already holds is answered from that root, filtered to
+        the sub-tree: the returned key names the ancestor, and the index is a view of it whose
+        result paths stay relative to the ancestor's root.
+
         :param args: Request arguments carrying `path` and optional `content` and `ref`.
         :return: The cache key and the index.
         :raises ValueError: If no path was given.
@@ -188,8 +192,7 @@ class Daemon:
         content = _content_types(args.get("content"))
         ref = args.get("ref")
         await self.cache.load_embedder_once()
-        cache_key = compute_cache_key(path, ref, content)
-        index = await self.cache.get(path, ref=ref, content=content)
+        cache_key, index = await self.cache.get_with_key(path, ref=ref, content=content)
         self._ensure_watcher(cache_key, index)
         return cache_key, index
 

@@ -326,10 +326,13 @@ async def test_watchfiles_swaps_the_index_on_a_real_edit(tmp_project: Path) -> N
 
 
 @pytest.mark.anyio
-async def test_eviction_stops_the_watcher(tmp_project: Path, tmp_path: Path) -> None:
-    """The least recently used root leaves memory and stops being watched."""
-    other = tmp_path / "other"
-    other.mkdir()
+async def test_eviction_stops_the_watcher(tmp_project: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """The least recently used root leaves memory and stops being watched.
+
+    The second root is a sibling, not a sub-directory: a sub-directory would be served from
+    the first root's index instead of becoming a second resident index.
+    """
+    other = tmp_path_factory.mktemp("other")
     (other / "thing.py").write_text("def thing():\n    return 1\n", encoding="utf-8")
 
     daemon = _daemon_with_fake_embedder(max_indexes=1, watch=True)
@@ -528,7 +531,7 @@ def test_cli_search_falls_back_when_the_daemon_is_unavailable(
     monkeypatch.setattr(client, "call", _refuse)
     fake_index = MagicMock()
     fake_index.search.return_value = []
-    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: fake_index)
+    monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
     monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
 
     cli._run_search(str(tmp_project), "anything", 5, [ContentType.CODE], None)
@@ -559,7 +562,7 @@ def test_cli_skips_the_daemon_for_an_embedder_override(
     monkeypatch.setattr(client, "call", lambda *args, **kwargs: pytest.fail("must not ask the daemon"))
     fake_index = MagicMock()
     fake_index.search.return_value = []
-    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: fake_index)
+    monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
     monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
 
     cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None, embedder="model2vec:other")
@@ -575,7 +578,7 @@ def test_cli_no_daemon_flag_is_silent(
     monkeypatch.setattr(client, "call", lambda *args, **kwargs: pytest.fail("must not ask the daemon"))
     fake_index = MagicMock()
     fake_index.search.return_value = []
-    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: fake_index)
+    monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
     monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
 
     cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None, no_daemon=True)
@@ -678,4 +681,41 @@ async def test_a_watched_edit_is_searchable_almost_at_once(tmp_project: Path, mo
     results = (await daemon.cache.get(str(tmp_project))).search("brand_new_helper")
     assert results and results[0].chunk.file_path == "extra.py", "the edit is searchable"
     assert elapsed < 1.0, f"visible in under a second, took {elapsed:.2f}s"
+    daemon.shutdown()
+
+
+@pytest.mark.anyio
+async def test_a_sub_path_is_served_from_the_loaded_workspace_index(tmp_path: Path) -> None:
+    """A request for a sub-directory of a loaded root is answered from that root, with no build.
+
+    This is the incident: an agent searching a sub-repo of an indexed workspace used to
+    trigger a second index over the same files, which a paid embedder then refused.
+    """
+    workspace = tmp_path / "work"
+    for repo in ("alpha", "beta"):
+        (workspace / repo).mkdir(parents=True)
+        (workspace / repo / "session.py").write_text(
+            f"def {repo}_session_token(user):\n    return user\n", encoding="utf-8"
+        )
+    daemon = _daemon_with_fake_embedder(watch=False)
+
+    # 1. The workspace is loaded once.
+    workspace_key, workspace_index = await daemon.index_for({"path": str(workspace)})
+    assert workspace_key == compute_cache_key(str(workspace)), "the workspace is its own root"
+    built = list(daemon.cache.loaded())
+
+    # 2. A sub-repo request is answered by the workspace's key and a view of its index.
+    sub_key, sub_index = await daemon.index_for({"path": str(workspace / "alpha")})
+    assert sub_key == workspace_key, "the sub-path is served from the workspace index"
+    assert sub_index is not workspace_index, "but through a restricted view"
+    assert len(daemon.cache.loaded()) == len(built), "no second index was built"
+
+    # 3. Its answers are the workspace index's, filtered to the sub-repo.
+    payload = await server._cmd_search(daemon, {"path": str(workspace / "alpha"), "query": "session token", "top_k": 5})
+    assert payload["results"], "the sub-path search answers"
+    assert all(entry["file_path"].startswith("alpha/") for entry in payload["results"]), "only alpha is returned"
+
+    # 4. Status still reports exactly one index, the workspace.
+    status = await server._cmd_status(daemon, {})
+    assert [entry["root"] for entry in status["indexes"]] == [str(workspace)], "one resident index"
     daemon.shutdown()

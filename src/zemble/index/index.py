@@ -123,6 +123,7 @@ class ZembleIndex:
         manifest: dict[str, FileManifestEntry] | None = None,
         capsules: CapsuleOptions | None = None,
         definitions: SymbolDefinitions | None = None,
+        subtree_prefix: str | None = None,
     ) -> None:
         """Initialize a ZembleIndex. Should be created with from_path or from_git.
 
@@ -136,6 +137,8 @@ class ZembleIndex:
         :param manifest: File modification times and chunk ranges used for incremental reindexing.
         :param capsules: The context-capsule configuration this index's chunks were built with.
         :param definitions: Persisted symbol-definition lookup used by the rerank pass.
+        :param subtree_prefix: Restrict every answer to chunks whose file path starts with this
+            prefix; the stores stay whole, so scores and ranking are the full index's.
         """
         self.embedder = embedder
         self.chunks: Sequence[Chunk] = chunks
@@ -143,13 +146,21 @@ class ZembleIndex:
         self._semantic_index: SelectableBasicBackend = semantic_index
         self._root: Path | None = root
         self._content: tuple[ContentType, ...] = (content,) if isinstance(content, ContentType) else tuple(content)
+        self._subtree_prefix: str | None = subtree_prefix
         self._file_mapping, self._language_mapping = self._populate_mapping()
+        self._subtree_selector: npt.NDArray[np.int_] | None = (
+            np.unique([index for indices in self._file_mapping.values() for index in indices])
+            if subtree_prefix is not None
+            else None
+        )
         self._file_sizes: dict[str, int] = LazyFileSizes(root, self._file_mapping) if root else {}
         self.loaded_from_disk: bool = loaded_from_disk
         self._manifest: dict[str, FileManifestEntry] = manifest or {}
         self._capsules: CapsuleOptions = CapsuleOptions.resolve(capsules)
         self._definitions: SymbolDefinitions | None = definitions
         self._reranker_cache: tuple[str, Reranker | None] | None = None
+        #: Subtree views built from this index, cached per prefix: the mapping pass is O(chunks).
+        self._subtree_views: dict[str, ZembleIndex] = {}
 
     def _resolve_reranker(self, override: Reranker | None) -> Reranker | None:
         """Return the reranker to apply: an explicit one, else the environment's, built once per spec.
@@ -165,10 +176,17 @@ class ZembleIndex:
         return self._reranker_cache[1]
 
     def _populate_mapping(self) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
-        """Build (file → chunk indices, language → chunk indices) mappings, in that order."""
+        """Build (file → chunk indices, language → chunk indices) mappings, in that order.
+
+        A subtree view maps only the files under its prefix; the chunk list itself stays whole
+        because every index into it is also a row of the vector matrix and a BM25 document.
+        """
         language_to_id = defaultdict(list)
         file_to_id = defaultdict(list)
+        prefix = self._subtree_prefix
         for i, (file_path, language) in enumerate(zip(file_paths_of(self.chunks), languages_of(self.chunks))):
+            if prefix is not None and not file_path.replace("\\", "/").startswith(prefix):
+                continue
             if language:
                 language_to_id[language].append(i)
             file_to_id[file_path].append(i)
@@ -178,15 +196,12 @@ class ZembleIndex:
     @property
     def stats(self) -> IndexStats:
         """Stats of an index."""
-        language_counts: dict[str, int] = defaultdict(int)
-        for language in languages_of(self.chunks):
-            if language:
-                language_counts[language] += 1
+        language_counts = {language: len(indices) for language, indices in self._language_mapping.items()}
 
         return IndexStats(
             indexed_files=len(self._file_mapping),
-            total_chunks=len(self.chunks),
-            languages=dict(language_counts),
+            total_chunks=len(self.chunks) if self._subtree_selector is None else len(self._subtree_selector),
+            languages=language_counts,
             embedder=self.embedder.model_id,
             dimensions=self.embedder.dimensions,
         )
@@ -345,14 +360,63 @@ class ZembleIndex:
     def _get_selector_vector(
         self, filter_languages: list[str] | None = None, filter_paths: list[str] | None = None
     ) -> npt.NDArray[np.int_] | None:
-        """Create a vector of chunk indices to restrict retrieval to."""
+        """Create a vector of chunk indices to restrict retrieval to.
+
+        A subtree view's prefix is the floor: an explicit filter narrows it further, it never
+        widens it, so a view can only ever answer from inside its own sub-tree. A filter that
+        was asked for and matched nothing selects nothing, which is what it says; it used to
+        fall back to selecting everything.
+        """
         selector = []
         for language in filter_languages or []:
             selector.extend(self._language_mapping.get(language, []))
         for filename in filter_paths or []:
             selector.extend(self._file_mapping.get(filename, []))
 
-        return np.unique(selector) if selector else None
+        if selector:
+            chosen = np.unique(selector)
+        elif filter_languages or filter_paths:
+            chosen = np.empty(0, dtype=np.int_)
+        else:
+            chosen = None
+        if self._subtree_selector is None:
+            return chosen
+        return self._subtree_selector if chosen is None else np.intersect1d(chosen, self._subtree_selector)
+
+    def subtree(self, prefix: str) -> ZembleIndex | None:
+        """Return a view of this index restricted to one sub-directory, or None if it holds nothing there.
+
+        The view shares this index's chunks, vectors and postings, so a search through it
+        scores and ranks exactly as the whole index does and is then filtered to the prefix;
+        result paths therefore stay relative to THIS index's root, not to the sub-directory.
+
+        :param prefix: A root-relative directory path; a trailing slash is added when missing.
+        :return: The restricted view, or None when no indexed file lives under the prefix.
+        """
+        normalized = prefix.replace("\\", "/").strip("/")
+        if not normalized:
+            return self
+        normalized += "/"
+        cached = self._subtree_views.get(normalized)
+        if cached is not None:
+            return cached
+        view = ZembleIndex(
+            self.embedder,
+            self._bm25_index,
+            self._semantic_index,
+            self.chunks,
+            root=self._root,
+            content=self._content,
+            loaded_from_disk=self.loaded_from_disk,
+            manifest=self._manifest,
+            capsules=self._capsules,
+            definitions=self._definitions,
+            subtree_prefix=normalized,
+        )
+        if not view._file_mapping:
+            return None
+        self._subtree_views[normalized] = view
+        return view
 
     def search(
         self,

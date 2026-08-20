@@ -4,7 +4,7 @@ import logging
 import os
 import shutil
 import sys
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -188,6 +188,81 @@ def get_validated_cache(
         return None
 
     return index_path
+
+
+def has_cached_index(path: str, content: Sequence[ContentType] = (ContentType.CODE,)) -> bool:
+    """Return whether a complete index folder exists for a path, without checking it for staleness."""
+    return not PersistencePath.from_path(find_index_from_cache_folder(path, content)).non_existing()
+
+
+def _ancestor_directories(path: Path) -> list[Path]:
+    """Return the strict ancestors of a directory, nearest first."""
+    return list(path.parents)
+
+
+def find_ancestor_index_root(
+    path: str,
+    embedder_id: str,
+    content: Sequence[ContentType] = (ContentType.CODE,),
+    capsules: CapsuleOptions | None = None,
+    loaded_roots: Collection[str] = (),
+) -> str | None:
+    """Return the nearest ancestor of *path* that already has a usable index of the same content.
+
+    An ancestor held in memory counts without a disk check; one on disk has to validate the
+    way any cache hit does, so a stale ancestor is never served.
+
+    :param path: The requested directory.
+    :param embedder_id: The normalized spec of the embedder that would answer the request.
+    :param content: The requested content types.
+    :param capsules: The requested context-capsule configuration.
+    :param loaded_roots: Roots a caller already holds in memory for exactly this content.
+    :return: The ancestor root, or None when the sub-path needs its own index.
+    """
+    for ancestor in _ancestor_directories(Path(path)):
+        candidate = str(ancestor)
+        if candidate in loaded_roots:
+            return candidate
+        if has_cached_index(candidate, content) and get_validated_cache(candidate, embedder_id, content, capsules):
+            return candidate
+    return None
+
+
+def resolve_index_root(
+    path: str,
+    embedder_id: str,
+    content: Sequence[ContentType] = (ContentType.CODE,),
+    capsules: CapsuleOptions | None = None,
+    loaded_roots: Collection[str] = (),
+) -> tuple[str, str | None]:
+    """Route a request for a path to the index that should answer it.
+
+    A sub-directory of an already indexed tree is answered from that tree, filtered to the
+    sub-directory: a workspace index holds the sub-repo's chunks already, and building a
+    second index over them costs a full re-embed of the sub-tree for nothing.
+
+    :param path: The requested local path or git URL.
+    :param embedder_id: The normalized spec of the embedder that would answer the request.
+    :param content: The requested content types.
+    :param capsules: The requested context-capsule configuration.
+    :param loaded_roots: Roots a caller already holds in memory for exactly this content.
+    :return: The root to index, and the root-relative prefix to restrict it to (None = the whole root).
+    """
+    if is_git_url(path):
+        return path, None
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_dir():
+        return path, None
+    # An index of exactly this path, in memory or on disk, keeps serving it: someone asked for
+    # it deliberately, and it is already paid for.
+    if str(resolved) in loaded_roots or has_cached_index(str(resolved), content):
+        return path, None
+    ancestor = find_ancestor_index_root(str(resolved), embedder_id, content, capsules, loaded_roots)
+    if ancestor is None:
+        return path, None
+    prefix = resolved.relative_to(ancestor).as_posix()
+    logger.info("serving %s from the %s index (subtree filter)", resolved, ancestor)
+    return ancestor, prefix
 
 
 def load_manifest_for_incremental(

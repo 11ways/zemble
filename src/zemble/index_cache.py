@@ -13,7 +13,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from zemble.cache import get_validated_cache, save_index_to_cache
+from zemble.cache import get_validated_cache, resolve_index_root, save_index_to_cache
 from zemble.embedding.base import Embedder
 from zemble.embedding.registry import load_embedder
 from zemble.index import ZembleIndex
@@ -183,13 +183,54 @@ class IndexCache:
         if validated is None and self._tasks.get(cache_key) is cached:
             self.evict(cache_key)
 
+    def loaded_roots(self, content: Sequence[ContentType]) -> set[str]:
+        """Return the roots held in memory right now for exactly these content types."""
+        wanted = tuple(content_type for content_type in ContentType if content_type in content)
+        return {key[0] for key, _index in self.loaded() if key[1] == wanted}
+
     async def get(
         self,
         source: str,
         ref: str | None = None,
         content: Sequence[ContentType] = (ContentType.CODE,),
     ) -> ZembleIndex:
-        """Return an index for the requested source, building and caching it on first access.
+        """Return an index for the requested source, building and caching it on first access."""
+        _cache_key, index = await self.get_with_key(source, ref, content)
+        return index
+
+    async def get_with_key(
+        self,
+        source: str,
+        ref: str | None = None,
+        content: Sequence[ContentType] = (ContentType.CODE,),
+    ) -> tuple[CacheKey, ZembleIndex]:
+        """Return the index answering a request, and the key of the root it was built from.
+
+        A sub-directory of an indexed tree is served from that tree, filtered to the
+        sub-directory, so the key names the ANCESTOR root while the index is a restricted
+        view of it. Only when the ancestor holds nothing under the sub-directory does the
+        sub-directory get an index of its own.
+        """
+        embedder = await self._await_model()
+        root, prefix = await asyncio.to_thread(
+            resolve_index_root, source, embedder.model_id, content, None, self.loaded_roots(content)
+        )
+        if prefix is None:
+            return await self._get_exact(source, ref, content)
+        cache_key, index = await self._get_exact(root, ref, content)
+        view = index.subtree(prefix)
+        if view is not None:
+            return cache_key, view
+        logger.info("the %s index holds nothing under %s; indexing it on its own", root, source)
+        return await self._get_exact(source, ref, content)
+
+    async def _get_exact(
+        self,
+        source: str,
+        ref: str | None = None,
+        content: Sequence[ContentType] = (ContentType.CODE,),
+    ) -> tuple[CacheKey, ZembleIndex]:
+        """Return the index built from exactly this source, building and caching it on first access.
 
         Local paths are revalidated against the on-disk cache on every call (subject to a
         cooldown scaled by build time), so an entry is rebuilt once its files change.
@@ -212,7 +253,7 @@ class IndexCache:
         self.last_used[cache_key] = time.time()
         task = self._tasks[cache_key]
         try:
-            return await asyncio.shield(task)
+            return cache_key, await asyncio.shield(task)
         except asyncio.CancelledError:  # pragma: no cover
             if task.done():
                 self.evict(cache_key)

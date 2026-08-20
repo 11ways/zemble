@@ -10,7 +10,7 @@ from pathlib import Path
 from shutil import rmtree
 from typing import Literal
 
-from zemble.cache import cache_key, resolve_cache_folder, save_index_to_cache
+from zemble.cache import cache_key, resolve_cache_folder, resolve_index_root, save_index_to_cache
 from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser, run_embed_status
@@ -19,7 +19,7 @@ from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
-from zemble.index import ZembleIndex
+from zemble.index import ZembleIndex, resolve_embedder
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
 from zemble.rerank.registry import RerankerSpecError, load_reranker
@@ -65,19 +65,28 @@ _SUBCOMMAND_RUNNERS = {
 _SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
 
 
-def _build_index(path: str, content: list[ContentType], embedder: str | None = None) -> ZembleIndex:
-    """Build an index from a local path or git URL.
+def _build_index(path: str, content: list[ContentType], embedder: str | None = None) -> tuple[ZembleIndex, str]:
+    """Build, or route to, the index that answers a request for a path.
+
+    A sub-directory of an already indexed tree is answered from that tree's index, filtered
+    to the sub-directory, instead of being embedded all over again as an index of its own.
 
     :param path: Local path or git URL.
     :param content: Content types to index.
     :param embedder: Embedder spec, or None for the environment default.
-    :return: The index.
+    :return: The index to answer with, and the source key it must be cached under.
     """
-    return (
-        ZembleIndex.from_git(path, content=content, embedder=embedder)
-        if is_git_url(path)
-        else ZembleIndex.from_path(path, content=content, embedder=embedder)
-    )
+    if is_git_url(path):
+        return ZembleIndex.from_git(path, content=content, embedder=embedder), path
+    root, prefix = resolve_index_root(path, resolve_embedder(embedder).model_id, content)
+    index = ZembleIndex.from_path(root, content=content, embedder=embedder)
+    if prefix is None:
+        return index, root
+    view = index.subtree(prefix)
+    if view is not None:
+        return view, root
+    print(f"the {root} index holds nothing under {path}; indexing it on its own", file=sys.stderr)
+    return ZembleIndex.from_path(path, content=content, embedder=embedder), path
 
 
 def _maybe_save_index(index: ZembleIndex, path: str) -> None:
@@ -107,7 +116,7 @@ def _run_stats(path: str, content: list[ContentType], embedder: str | None = Non
     if remote is not None:
         print(json.dumps(remote))
         return
-    index = _load_index(path, content, embedder)
+    index, source_key = _load_index(path, content, embedder)
     stats = index.stats
     print(
         json.dumps(
@@ -122,7 +131,7 @@ def _run_stats(path: str, content: list[ContentType], embedder: str | None = Non
             }
         )
     )
-    _maybe_save_index(index, path)
+    _maybe_save_index(index, source_key)
 
 
 def _add_content_args(p: argparse.ArgumentParser) -> None:
@@ -241,13 +250,13 @@ def _via_daemon(cmd: str, args: dict[str, object], no_daemon: bool, embedder: st
         return None
 
 
-def _load_index(path: str, content: list[ContentType], embedder: str | None = None) -> ZembleIndex:
-    """Build an index from a local path or git URL, exiting on FileNotFoundError or a bad embedder spec.
+def _load_index(path: str, content: list[ContentType], embedder: str | None = None) -> tuple[ZembleIndex, str]:
+    """Build or route to an index, exiting on FileNotFoundError, a bad embedder spec or a refused build.
 
     :param path: Local path or git URL.
     :param content: Content types to index.
     :param embedder: Embedder spec, or None for the environment default.
-    :return: The index.
+    :return: The index to answer with, and the source key it must be cached under.
     """
     try:
         return _build_index(path, content, embedder)
@@ -284,7 +293,7 @@ def _run_search(
     if remote is not None:
         print(json.dumps(remote))
         return
-    index = _load_index(path, content, embedder)
+    index, source_key = _load_index(path, content, embedder)
     try:
         pairwise = load_reranker(reranker)
     except RerankerSpecError as e:
@@ -293,7 +302,7 @@ def _run_search(
     results = index.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines, reranker=pairwise)
     out = format_results(query, results, max_snippet_lines) if results else {"error": "No results found."}
     print(json.dumps(out))
-    _maybe_save_index(index, path)
+    _maybe_save_index(index, source_key)
 
 
 def _run_find_related(
@@ -326,7 +335,7 @@ def _run_find_related(
             sys.exit(1)
         print(json.dumps(remote))
         return
-    index = _load_index(path, content, embedder)
+    index, source_key = _load_index(path, content, embedder)
     chunk = resolve_chunk(index.chunks, file_path, line)
     if chunk is None:
         print(f"No chunk found at {file_path}:{line}.", file=sys.stderr)
@@ -339,7 +348,7 @@ def _run_find_related(
         else {"error": f"No related chunks found for {file_path}:{line}."}
     )
     print(json.dumps(out))
-    _maybe_save_index(index, path)
+    _maybe_save_index(index, source_key)
 
 
 def _clear_indexes(cache_folder: Path) -> None:

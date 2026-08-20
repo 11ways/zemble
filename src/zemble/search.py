@@ -36,7 +36,9 @@ def _search_semantic(
     top_k: int,
     selector: npt.NDArray[np.int_] | None,
 ) -> list[SearchResult]:
-    """Run semantic search for a query."""
+    """Run semantic search for a query; an empty selector selects nothing, not everything."""
+    if selector is not None and selector.size == 0:
+        return []
     query_embedding = embedder.embed_queries([query])
     indices, scores = semantic_index.query(query_embedding, k=top_k, selector=selector)[0]
     # Vicinity returns cosine distance; convert to similarity so higher = better.
@@ -97,13 +99,15 @@ def search(
     :param chunks: All indexed chunks (parallel to BM25 index).
     :param top_k: Number of results to return.
     :param alpha: Weight for semantic score (1-alpha goes to BM25). None = auto-detect based on query type.
-    :param selector: Optional array of chunk indices to filter results by.
+    :param selector: Optional array of chunk indices to filter results by; an empty one matches nothing.
     :param rerank: Whether to perform code-tuned reranking. On by default for code search, off for docs search.
     :param definitions: Persisted symbol-definition lookup used by the rerank pass, when the index has one.
     :param reranker: Optional pairwise reranker applied to the head of the ranked list.
     :param rerank_settings: Window, blend weight and passage shape for that pass; defaults apply when omitted.
     :return: List of search results sorted by combined score descending.
     """
+    if selector is not None and selector.size == 0:
+        return []
     alpha_weight = resolve_alpha(query, alpha)
     settings = rerank_settings or RerankSettings()
     # The reranker only sees candidates the heuristics already ranked, so the pool and the

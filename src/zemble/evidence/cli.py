@@ -102,15 +102,21 @@ def _daemon_args(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _in_process(args: argparse.Namespace) -> dict[str, Any]:
-    """Answer one evidence subcommand in this process, building whatever it needs."""
-    ensure_graph(args.path)
-    provider = SqliteGraphProvider(args.path)
+    """Answer one evidence subcommand in this process, building whatever it needs.
+
+    An `explain` over a sub-directory of an indexed tree is answered from that tree, so the
+    graph is opened on the same root the index speaks: both name files the same way.
+    """
+    index = None
+    root = args.path
+    if args.command == "explain":
+        index, root = _load_index(args.path, args.embedder)
+    ensure_graph(root)
+    provider = SqliteGraphProvider(root)
     try:
-        if args.command == "explain":
+        if index is not None:
             intent = None if args.intent == AUTO_INTENT else parse_intent(args.intent)
-            return explain_payload(
-                _load_index(args.path, args.embedder), provider, args.query, args.budget, args.top_k, intent
-            )
+            return explain_payload(index, provider, args.query, args.budget, args.top_k, intent)
         if args.command == "outline":
             return outline_payload(provider, args.target, args.members)
         return signatures_payload(provider, args.symbol)
@@ -118,18 +124,20 @@ def _in_process(args: argparse.Namespace) -> dict[str, Any]:
         provider.close()
 
 
-def _load_index(path: str, embedder: str | None = None) -> ZembleIndex:
-    """Build or load the code index for a workspace, saving it back to the cache.
+def _load_index(path: str, embedder: str | None = None) -> tuple[ZembleIndex, str]:
+    """Build or load the code index answering for a workspace, saving it back to the cache.
 
     Imported lazily: `zemble.cli` imports this module, so the reverse import can
     only happen once the parser is already built.
+
+    :return: The index, and the root it was built from, which a sub-path request answers from.
     """
     from zemble.cli import _load_index as load
     from zemble.cli import _maybe_save_index
 
-    index = load(path, [ContentType.CODE], embedder)
-    _maybe_save_index(index, path)
-    return index
+    index, source_key = load(path, [ContentType.CODE], embedder)
+    _maybe_save_index(index, source_key)
+    return index, source_key
 
 
 def _print_explain(args: argparse.Namespace, payload: dict[str, Any]) -> int:
