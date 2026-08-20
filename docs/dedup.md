@@ -7,6 +7,11 @@ reader who knows one report family recognises the other.
 It is a **report, never a gate**: the exit code is 0 however much duplication it
 finds. The only non-zero exits are a bad flag and a missing path.
 
+It is **Java only, deliberately**. `.hwk` templates are indexed and are in the
+symbol graph, but duplicated markup is `zenit-dev duplication`'s job: it matches
+alpha-renamed `.hwk` subtrees off the Hawkeye compiler's own AST, which is a
+better answer than anything a token stream could give here.
+
 ```
 zemble dupes /home/skerit/projects/javaweb --kind exact,renamed --limit 20
 zemble dupes . --kind logic --min-files 2 --json

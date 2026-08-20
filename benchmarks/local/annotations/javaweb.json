@@ -562,5 +562,75 @@
     "secondary": [],
     "category": "semantic",
     "kind": "consumer"
+  },
+  {
+    "query": "zc-inbox",
+    "relevant": ["zenit-comms/src/common/templates/zc-inbox.hwk"],
+    "secondary": [],
+    "category": "symbol",
+    "kind": "symbol"
+  },
+  {
+    "query": "zfm-media-field",
+    "relevant": ["zenit-media/src/common/templates/form/zfm-media-field.hwk"],
+    "secondary": [],
+    "category": "symbol",
+    "kind": "symbol"
+  },
+  {
+    "query": "PlTabsTrigger",
+    "relevant": ["plumage/src/common/templates/components/tabs.hwk"],
+    "secondary": [],
+    "category": "symbol",
+    "kind": "symbol"
+  },
+  {
+    "query": "ZfQueryBuilder",
+    "relevant": ["zenit-forms/src/common/templates/form/zf-query-builder.hwk"],
+    "secondary": [],
+    "category": "symbol",
+    "kind": "symbol"
+  },
+  {
+    "query": "the markup listing a recipient's in-app messages with a button that marks them all seen",
+    "relevant": ["zenit-comms/src/common/templates/zc-inbox.hwk"],
+    "secondary": [],
+    "category": "semantic",
+    "kind": "behavioural"
+  },
+  {
+    "query": "the chrome drawn around every administration page: brand header, navigation sections, theme attribute",
+    "relevant": ["zenit-cms/src/common/templates/shell.hwk"],
+    "secondary": [],
+    "category": "semantic",
+    "kind": "behavioural"
+  },
+  {
+    "query": "the pop-up month grid a date field opens for pointer entry",
+    "relevant": ["plumage/src/common/templates/components/date-picker.hwk"],
+    "secondary": ["plumage/src/common/templates/components/calendar.hwk"],
+    "category": "semantic",
+    "kind": "behavioural"
+  },
+  {
+    "query": "the control a page shows to begin and end tracking time against a project",
+    "relevant": ["orcono/mvp-v01/src/common/templates/orcono/time/components.hwk"],
+    "secondary": [],
+    "category": "semantic",
+    "kind": "behavioural"
+  },
+  {
+    "query": "how a generated administration listing lays out its toolbar, its filter row, its records and its pager",
+    "relevant": ["zenit-cms/src/common/templates/pages/resource-list.hwk"],
+    "secondary": ["zenit-cms/src/common/templates/pages/resource-list-row.hwk"],
+    "category": "architecture",
+    "kind": "architecture"
+  },
+  {
+    "query": "templates that hand a picker a data provider instead of a fixed option list",
+    "relevant": ["zenit-forms/src/common/templates/form/zf-provider-field.hwk", "zenit-forms/src/common/templates/form/zf-relation-field.hwk", "zenit-forms/src/common/templates/form/zf-relation-multi-field.hwk"],
+    "secondary": ["zenit-media/src/common/templates/form/zfm-media-field.hwk", "plumage/src/common/templates/components/capability-matrix.hwk", "plumage/src/common/templates/components/permissions-editor/extra-pick.hwk", "orcono/mvp-v01/src/common/templates/orcono/components.hwk", "orcono/mvp-v01/src/common/templates/orcono/time/components.hwk", "orcono/mvp-v01/src/common/templates/orcono/invoices/components.hwk", "orcono/mvp-v01/src/common/templates/orcono/invoices/detail.hwk"],
+    "category": "semantic",
+    "kind": "consumer"
   }
 ]

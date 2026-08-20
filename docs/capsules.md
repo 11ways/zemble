@@ -32,6 +32,21 @@ definition chain (`class Config > function load`), derived from node types rathe
 than from a per-language rule set. A file with no parse tree - line chunking, or a
 grammar the platform does not bundle - gets the path segment and nothing else.
 
+A Hawkeye `.hwk` template gets its own lane, because its structure is lexical
+rather than syntactic: the borrowed html grammar sees `{% tag %}`, `extend` and
+`block` as plain text. Its segments, after the path, are the custom element the
+chunk sits inside, the template it extends, the enclosing `{% block %}` (or the
+file's block names when the chunk is outside them all), and the custom element
+tags written in the chunk, capped at eight:
+
+```
+zenit-cms/.../pages/resource-list.hwk zenit cms src ... | extends zenitcms:shell | block main | uses pl-empty-state pl-empty-state-title
+plumage/.../components/tabs.hwk plumage src ... | tag <pl-tabs-trigger> PlTabsTrigger
+```
+
+Because those facts are read from the text rather than from a tree, a template
+still gets a full capsule on a platform that bundles no html grammar at all.
+
 Which chunk owns which context is decided by the chunk's **start**, never its span:
 a chunk running out of one method and into the next is credited to the one it opens
 in, a chunk starting mid-body still names that body's member, and a chunk opening on

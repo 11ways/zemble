@@ -18,7 +18,7 @@ A hand-built, hand-verified retrieval evaluation set over the `javaweb`
 workspace (`/home/skerit/projects/javaweb`), a multi-repo Java web framework
 workspace.
 
-- `annotations/javaweb.json` - 80 queries with expected file locations.
+- `annotations/javaweb.json` - 90 queries with expected file locations.
 - `repos.json` - the repo descriptor for the local workspace.
 
 ## Schema
@@ -56,15 +56,24 @@ Copied verbatim from `benchmarks/data.py`. An annotation file is a JSON
 Path matching is suffix-based (`data.path_matches`), so paths relative to the
 repo root - as used here - match regardless of where the checkout lives.
 
-## Query mix (80 total)
+## Query mix (90 total)
 
 | kind          | count | mapped `category` | what it tests |
 | ------------- | ----: | ----------------- | ------------- |
-| `symbol`      |    20 | `symbol`          | bare identifier or `Type.member` lookup |
-| `behavioural` |    25 | `semantic`        | natural language describing behaviour, never reusing the identifier |
-| `architecture`|    15 | `architecture`    | mechanism / design questions ("how is X done") |
+| `symbol`      |    24 | `symbol`          | bare identifier or `Type.member` lookup |
+| `behavioural` |    29 | `semantic`        | natural language describing behaviour, never reusing the identifier |
+| `architecture`|    16 | `architecture`    | mechanism / design questions ("how is X done") |
 | `bug-report`  |    10 | `semantic`        | symptoms only, no identifiers, as a user would report them |
-| `consumer`    |    10 | `semantic`        | tests that prove a behaviour, or the layer that consumes a mechanism |
+| `consumer`    |    11 | `semantic`        | tests that prove a behaviour, or the layer that consumes a mechanism |
+
+Ten of those (added when `.hwk` indexing landed) answer with a **Hawkeye
+template** rather than a Java file: four element-tag / tag-class symbol lookups
+(`zc-inbox`, `zfm-media-field`, `PlTabsTrigger`, `ZfQueryBuilder`), four
+behavioural queries describing what a piece of markup renders, one architecture
+query about how a generated admin listing is laid out, and one consumer query
+asking which templates drive a picker from a data provider. Every one of them
+scored exactly 0 before templates were indexed, because no `.hwk` file could be
+returned at all.
 
 Repos covered: protoblast (incl. protoblast-source-guard), hawkeye, zenit,
 zenit-cms, zenit-auth, zenit-forms-adjacent surfaces, plumage, zenit-widget,
@@ -89,9 +98,21 @@ For every entry:
    only for a `consumer`-kind query where the caller IS the answer
    (`ConditionalRequest` delegating to `EntityTags`, `Paging` calling
    `PageWindow.offsetFor`).
-4. A programmatic check confirms every one of the 100 referenced paths exists
+4. A programmatic check confirms every one of the 121 referenced paths exists
    under `/home/skerit/projects/javaweb`, that no query text repeats, and that
    the file is pure ASCII.
+
+For the ten template queries the same rule applied, read off the `.hwk` source:
+the `{% tag %}` declaration for each element-tag lookup (`{% tag ZcInbox %}`,
+`{% tag ZfmMediaField %}`, `{% tag PlTabsTrigger extends PlTabsMember %}`,
+`{% tag ZfQueryBuilder implements formAssociated %}`), the `markAllTarget` form
+in `zc-inbox.hwk`, the `CmsShell.brandName`/`navSections`/`documentTheme` calls in
+`shell.hwk`, the `.pl-date-picker__popup` rule in `date-picker.hwk`, the
+`tag TimeTimerControl` block in orcono's `time/components.hwk`, and the toolbar,
+filter, row and pagination sections of `pages/resource-list.hwk`. The consumer
+query's eleven targets are every non-ignored `.hwk` file that writes both
+`pl-select` and a `provider={% ... %}` attribute; the three `zenit-forms` field
+templates are `relevant` and the eight application-side users are `secondary`.
 
 The workspace's `CLAUDE.md` capability-to-home map was used as the seed for the
 architectural and mechanism queries; each named home was still opened and
@@ -147,7 +168,8 @@ chunks to 73,901 and cold index time from 155s to 38s.
 
 ### Baseline
 
-Default embedder, `.zembleignore` in place, 80 queries:
+Default embedder, `.zembleignore` in place, 80 queries, before `.hwk` files were
+indexed:
 
 | Metric  | Before ignore list | Baseline (after) |
 | ------- | -----------------: | ---------------: |
@@ -170,6 +192,47 @@ By kind (NDCG@10):
 For reference, the 63-repo upstream benchmark scores NDCG@10 0.8517 overall and
 0.849 on Java. This set is deliberately harder: paraphrased queries over a
 40-repo workspace where many files legitimately discuss the same mechanism.
+
+### Indexing `.hwk` templates
+
+Templates were invisible to the index until they were registered as a code-lane
+language. Adding them grows the workspace by 3,123 chunks. The original 80
+queries, same code, same machine, the extension registration the only difference:
+
+| Metric               | Without `.hwk` | With `.hwk` |
+| -------------------- | -------------: | ----------: |
+| NDCG@5 (original 80) |          0.542 |       0.521 |
+| NDCG@10 (original 80)|          0.567 |       0.545 |
+| NDCG@10 (new 10)     |          0.000 |       0.655 |
+| NDCG@10 (all 90)     |              - |       0.557 |
+| chunks               |         73,957 |      77,080 |
+| cold index           |            45s |         50s |
+| q-p50                |           98ms |       139ms |
+
+**The -0.022 on the original 80 is five queries, and one of them is most of it.**
+Per-query, 74 of the 80 are unchanged, one improves, and these five lose:
+
+| delta | kind | query |
+| ----: | ---- | ----- |
+| -1.000 | architecture | "how do an accordion, a tab strip and a multi-select table share one active-item engine" |
+| -0.369 | bug-report | "asking for a page beyond the last one gives back an empty list instead of the final page" |
+| -0.369 | behavioural | "the single place a credential is assigned to somebody who did not pick it themselves" |
+| -0.043 | symbol | `ChartFunctions.layout` |
+| -0.023 | behavioural | "per-row permission entries where a deny entry beats an allow entry" |
+
+The first one is the whole story and it is a **label** problem more than a
+retrieval one: the query names an accordion, a tab strip and a table, and the new
+top three are `accordion.hwk`, `table.hwk` and `tabs.hwk` - the three components
+it names, every one of them a real consumer of `Selection.*`. The annotated
+answer, `SelectionFunctions.java`, was written when no template could be
+retrieved, and it falls from rank 1 to just outside the top 10. The two -0.369
+queries are genuine dilution: markup that mentions pagination or a date field is
+not the answer to a question about clamping logic or password assignment.
+
+Those annotations were deliberately **not** rewritten to include the templates.
+Widening the ground truth of the queries a change happens to have moved is how a
+benchmark stops measuring anything, and no ranking prior against `.hwk` was added
+for the same reason: a language penalty tuned on five queries is not a finding.
 
 ## Smoke test
 

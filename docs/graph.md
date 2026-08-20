@@ -1,6 +1,6 @@
-# Java symbol graph
+# Symbol graph
 
-`zemble graph` builds a symbol graph over a Java workspace and answers
+`zemble graph` builds a symbol graph over a Java and Hawkeye workspace and answers
 relationship questions about it: who calls this, who implements this, what tests
 cover this. It is stored beside the search index and updated incrementally.
 
@@ -13,7 +13,8 @@ actually knows. Use it to navigate; do not use it as proof.
 Two tables of things, both language neutral (`zemble/graph/model.py`).
 
 **Symbols** are declarations. Kinds: `PACKAGE`, `CLASS`, `INTERFACE`, `ENUM`,
-`RECORD`, `ANNOTATION`, `METHOD`, `CONSTRUCTOR`, `FIELD`, `ENUM_CONSTANT`.
+`RECORD`, `ANNOTATION`, `METHOD`, `CONSTRUCTOR`, `FIELD`, `ENUM_CONSTANT`,
+`TEMPLATE`, `BLOCK`.
 
 A symbol's `id` is `<file-relative-path>#<qualified-name>` with a signature
 disambiguator appended for callables, so the two `scale` overloads of
@@ -29,7 +30,10 @@ The disambiguator holds **erased** parameter types: `List<String>` becomes
 keeps the generics.
 
 Beyond the obvious fields (`file_path`, `start_line`, `end_line`,
-`container_id`, `modifiers`, `annotations`) a symbol carries `is_test`, which is
+`container_id`, `modifiers`, `annotations`) a symbol carries `annotation_args` -
+the **string-literal** arguments of each of its annotations, keyed by annotation
+simple name and then by element name, with the single unnamed argument keyed
+`value` - and `is_test`, which is
 true when any **directory** segment of its path is `test`, `tests`,
 `browserTest`, `integrationTest` or `testFixtures`, matched case insensitively.
 That covers both the Maven layout and the Gradle source sets used across the
@@ -133,11 +137,84 @@ These are real, not hypothetical:
   not match, and falls through to the by-name rung.
 - **Two local classes with the same name in two overloads of one method** share a
   symbol id.
-- **`.hwk` templates are not covered at all.** A call made from a Hawkeye
-  template is invisible to the graph, so `callers` of a `@HawkeyeFunction` under
-  reports. That is the next extractor, not a bug in this one.
-- **Non-Java files are skipped**, counted per language, and named in the note a
-  query prints when it has nothing to say.
+- **Non-Java, non-template files are skipped**, counted per language, and named
+  in the note a query prints when it has nothing to say.
+
+## Hawkeye templates
+
+A `.hwk` file is HTML carrying `{% ... %}` statements. The extractor
+(`zemble/graph/hwk.py`) is **lexical, not a parser**: a component file wraps its
+whole markup in one `{% tag PascalName { ... } %}` block, so the delimiters nest
+and no grammar in the bundle can read them. It reads the facts the graph needs off
+the text (`zemble/hwk.py`), and nothing else.
+
+**Symbols.** One `TEMPLATE` per file, plus one `BLOCK` per `{% block "name" %}`.
+A file that declares exactly one custom element **is** that element: its
+qualified name is the tag (`pl-button`), so `zemble graph definition pl-button`
+finds it. A file that declares none is named by its path. A file that declares
+several - Hawkeye hoists tags globally, so `tabs.hwk` declares five - keeps the
+path-named file symbol and gains one `TEMPLATE` per tag, and references land on
+the element that owns those lines rather than on the file.
+
+The tag itself is derived exactly as the compiler derives it
+(`TypeUtils.toKebabCase`): `PlTabsTrigger` -> `pl-tabs-trigger`.
+
+**Edges** from a template:
+
+| Written | Edge | Resolves to |
+| --- | --- | --- |
+| `{% extend "zenitcms:shell" %}` | `EXTENDS` | the parent template |
+| `{% render "zenitcms:nav-item" %}` | `IMPORTS` | the rendered partial |
+| `<pl-button>` | `REFERENCES_TYPE` | the class or template declaring that tag |
+| `String.presence(x)`, `t("add")` | `CALLS` | the `@HawkeyeFunction` method |
+
+**The ladder, for each of those:**
+
+*Template ids* are `namespace:path/below/templates`. The namespace is a Gradle
+setting no single file can see, so it only narrows: a path that is unique in the
+workspace is `UNIQUE_NAME`, and a path whose repository directory also agrees with
+the written namespace (`zenit-cms` -> `zenitcms`, and a source set may append, as
+in `plumage-browsertest`) is `EXACT`.
+
+*Element tags* resolve to a `@HawkeyeCustomElement`-annotated class first and to
+the declaring template second. A single hit is `EXACT`, because a tag is a global
+registration key the compiler refuses to let two declarations share.
+
+*Calls* resolve **only** against `@HawkeyeFunction` methods - nothing else in the
+workspace is callable from a template, so a same-named plain Java method is never
+a fallback. `namespace` plus `name` from the annotation matching what the template
+wrote is `EXACT`; a name match alone is `UNIQUE_NAME`; several overloads sharing
+one key are `AMBIGUOUS`. Arity is deliberately not compared: a template function's
+Java method may take a leading `RenderContext` the call site never writes.
+
+### Honest limits
+
+- **A tag's region ends where the next one begins.** Its closing `} %}` cannot be
+  found lexically, so in a multi-element file the last declaration owns the rest
+  of the file.
+- **`Foo.bar(x)` is ambiguous in the language itself.** Hawkeye parses it as plain
+  member access and only decides at transpile time whether `Foo` is a namespace or
+  a local. The extractor records every one of them as a call; the ones that were
+  member access simply find no `@HawkeyeFunction` and stay `UNRESOLVED`.
+- **A registration written through a constant is invisible.** `annotation_args`
+  keeps literals only, so `@HawkeyeCustomElement(tag = Microcopy.WRAPPER_TAG)` -
+  two of the three such classes in the javaweb workspace - registers no tag here.
+- **`{% render field.templateId %}`** names a template only at runtime, so it is
+  recorded as a call, not as an include.
+- **A tag's `extends` clause** (`tag PlTabsTrigger extends PlTabsMember`) is not
+  an edge; only a template's `{% extend %}` is.
+- **Style blocks are dropped** before scanning, so a `.hwk` never contributes SCSS
+  identifiers - and never a `var(...)` read as a function call.
+- **Blocks are structure, not behaviour**: a `BLOCK` symbol carries no edges of its
+  own; what a block writes is attributed to the template.
+
+Measured on the javaweb workspace: 619 templates yield 1,033 `TEMPLATE` and 124
+`BLOCK` symbols and 7,806 edges - 4,294 element references of which 98.7 % are
+`EXACT`, 3,291 calls of which 74 % land on one method and 21 % stay `UNRESOLVED`
+(that last figure is mostly bare `name(...)` text that was never a template
+function), and every one of the 106 `EXTENDS` and 115 `IMPORTS` edges resolved.
+Extraction is cheap because it is only a scan: all 619 templates are read,
+scanned and turned into symbols and edges in 0.33 s, single process.
 
 ## Storage and incremental updates
 
@@ -146,7 +223,8 @@ buildable with no search index present (`zemble/graph/store.py`). Tables:
 `symbols`, `edges` (each carrying the `source` that produced it), `files` (path,
 mtime, size, package, imports), `facts_status` (one row per facts file read, see
 [the facts overlay](graph-facts.md)) and `meta` (format version, root, covered
-language, skipped languages).
+languages, skipped languages). A column a graph built by an older zemble lacks is
+added on the next open; a graph is derived data either way.
 
 A rebuild re-extracts only files whose mtime or size changed, then re-resolves
 (a) those files and (b) their **dependents**: every file holding an edge whose
