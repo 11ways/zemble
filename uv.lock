@@ -3810,6 +3810,10 @@ dev = [
 mcp = [
     { name = "mcp" },
 ]
+rerank = [
+    { name = "torch" },
+    { name = "transformers" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -3832,7 +3836,9 @@ requires-dist = [
     { name = "semble-grammars", specifier = ">=0.1.2" },
     { name = "sentence-transformers", marker = "extra == 'benchmark'", specifier = ">=3.0" },
     { name = "tiktoken", marker = "extra == 'benchmark'", specifier = ">=0.7" },
+    { name = "torch", marker = "extra == 'rerank'", specifier = ">=2.0" },
+    { name = "transformers", marker = "extra == 'rerank'", specifier = ">=4.40" },
     { name = "vicinity", specifier = ">=0.4.4" },
     { name = "watchfiles", specifier = ">=0.21" },
 ]
-provides-extras = ["mcp", "benchmark", "dev"]
+provides-extras = ["mcp", "rerank", "benchmark", "dev"]

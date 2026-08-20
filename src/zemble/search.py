@@ -8,6 +8,9 @@ from zemble.index.bm25 import BM25
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.sparse import selector_to_mask
 from zemble.ranking import apply_query_boost, boost_multi_chunk_files, rerank_topk, resolve_alpha
+from zemble.rerank.apply import apply_reranker
+from zemble.rerank.base import Reranker
+from zemble.rerank.registry import RerankSettings
 from zemble.tokens import tokenize
 from zemble.types import Chunk, SearchResult
 
@@ -79,6 +82,8 @@ def search(
     selector: npt.NDArray[np.int_] | None = None,
     rerank: bool = True,
     definitions: "SymbolDefinitions | None" = None,
+    reranker: Reranker | None = None,
+    rerank_settings: RerankSettings | None = None,
 ) -> list[SearchResult]:
     """Hybrid search: alpha-weighted combination of semantic and BM25 scores.
 
@@ -95,12 +100,18 @@ def search(
     :param selector: Optional array of chunk indices to filter results by.
     :param rerank: Whether to perform code-tuned reranking. On by default for code search, off for docs search.
     :param definitions: Persisted symbol-definition lookup used by the rerank pass, when the index has one.
+    :param reranker: Optional pairwise reranker applied to the head of the ranked list.
+    :param rerank_settings: Window, blend weight and passage shape for that pass; defaults apply when omitted.
     :return: List of search results sorted by combined score descending.
     """
     alpha_weight = resolve_alpha(query, alpha)
+    settings = rerank_settings or RerankSettings()
+    # The reranker only sees candidates the heuristics already ranked, so the pool and the
+    # ranked list both have to reach its window before it can reorder anything.
+    ranked_count = max(top_k, settings.top_k) if reranker is not None else top_k
 
     # Over-fetch candidates so the merged pool is large enough after union and re-ranking.
-    candidate_count = top_k * 5
+    candidate_count = max(top_k * 5, ranked_count)
 
     semantic = _search_semantic(query, embedder, semantic_index, chunks, candidate_count, selector)
     semantic_scores: dict[Chunk, float] = {result.chunk: result.score for result in semantic}
@@ -132,8 +143,11 @@ def search(
         # Boost queries with specific identifiers in them.
         combined_scores = apply_query_boost(combined_scores, query, chunks, definitions)
         # Rerank the top-k results by applying path-based penalties.
-        ranked = rerank_topk(combined_scores, top_k, penalise_paths=alpha_weight < 1.0)
+        ranked = rerank_topk(combined_scores, ranked_count, penalise_paths=alpha_weight < 1.0)
     else:
         sorted_by_score = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
-        ranked = sorted_by_score[:top_k]
-    return [SearchResult(chunk=chunk, score=score) for chunk, score in ranked]
+        ranked = sorted_by_score[:ranked_count]
+
+    if reranker is not None:
+        ranked = apply_reranker(query, ranked, reranker, settings)
+    return [SearchResult(chunk=chunk, score=score) for chunk, score in ranked[:top_k]]

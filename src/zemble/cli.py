@@ -19,6 +19,7 @@ from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
 from zemble.index import ZembleIndex
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
+from zemble.rerank.registry import RerankerSpecError, load_reranker
 from zemble.stats import format_savings_report
 from zemble.types import ContentType
 from zemble.utils import format_results, is_git_url, resolve_chunk
@@ -238,8 +239,11 @@ def _run_search(
     max_snippet_lines: int | None,
     embedder: str | None = None,
     no_daemon: bool = False,
+    reranker: str | None = None,
 ) -> None:
     """Handle the `search` subcommand."""
+    # An explicit --reranker cannot ride the daemon protocol, so it runs the search here
+    # rather than being silently dropped; ZEMBLE_RERANKER still reaches a daemon's own env.
     remote = _via_daemon(
         "search",
         {
@@ -249,14 +253,19 @@ def _run_search(
             "content": [c.value for c in content],
             "max_snippet_lines": max_snippet_lines,
         },
-        no_daemon,
+        no_daemon or reranker is not None,
         embedder,
     )
     if remote is not None:
         print(json.dumps(remote))
         return
     index = _load_index(path, content, embedder)
-    results = index.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines)
+    try:
+        pairwise = load_reranker(reranker)
+    except RerankerSpecError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    results = index.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines, reranker=pairwise)
     out = format_results(query, results, max_snippet_lines) if results else {"error": "No results found."}
     print(json.dumps(out))
     _maybe_save_index(index, path)
@@ -389,6 +398,12 @@ def _cli_main() -> None:
         metavar="N",
         help="Lines of source per result (default: full chunk). 10 = signature + body, 0 = no code.",
     )
+    search_p.add_argument(
+        "--reranker",
+        default=None,
+        metavar="SPEC",
+        help="Pairwise reranker over the top candidates: none (default), cross:<hf-model>, voyage:<model>.",
+    )
     _add_content_args(search_p)
     _add_embedder_arg(search_p)
     _add_daemon_arg(search_p)
@@ -480,6 +495,7 @@ def _cli_main() -> None:
             args.max_snippet_lines,
             args.embedder,
             args.no_daemon,
+            args.reranker,
         )
     elif args.command == "stats":
         _run_stats(args.path, _resolve_content(args.content, args.include_text_files), args.embedder, args.no_daemon)

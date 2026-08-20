@@ -24,6 +24,8 @@ from zemble.index.dense import SelectableBasicBackend
 from zemble.index.files import read_file_text
 from zemble.index.symbols import SymbolDefinitions, save_symbol_definitions
 from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath
+from zemble.rerank.base import Reranker
+from zemble.rerank.registry import RerankSettings, load_reranker, resolve_reranker_spec
 from zemble.search import _search_semantic, search
 from zemble.stats import save_search_stats
 from zemble.types import CallType, Chunk, ContentType, IndexStats, SearchResult
@@ -147,6 +149,20 @@ class ZembleIndex:
         self._manifest: dict[str, FileManifestEntry] = manifest or {}
         self._capsules: CapsuleOptions = CapsuleOptions.resolve(capsules)
         self._definitions: SymbolDefinitions | None = definitions
+        self._reranker_cache: tuple[str, Reranker | None] | None = None
+
+    def _resolve_reranker(self, override: Reranker | None) -> Reranker | None:
+        """Return the reranker to apply: an explicit one, else the environment's, built once per spec.
+
+        :param override: A reranker passed to the call, or None to read the environment.
+        :return: The reranker, or None when reranking is off.
+        """
+        if override is not None:
+            return override
+        spec = resolve_reranker_spec()
+        if self._reranker_cache is None or self._reranker_cache[0] != spec:
+            self._reranker_cache = (spec, load_reranker(spec))
+        return self._reranker_cache[1]
 
     def _populate_mapping(self) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
         """Build (file → chunk indices, language → chunk indices) mappings, in that order."""
@@ -347,6 +363,8 @@ class ZembleIndex:
         filter_paths: list[str] | None = None,
         rerank: bool | None = None,
         max_snippet_lines: int | None = None,
+        reranker: Reranker | None = None,
+        rerank_settings: RerankSettings | None = None,
     ) -> list[SearchResult]:
         """Search the index and return the top-k most relevant chunks.
 
@@ -361,6 +379,8 @@ class ZembleIndex:
         :param rerank: Apply code-tuned reranking (file boost, identifier boost, path penalties).
             Defaults to True when ContentType.CODE was indexed.
         :param max_snippet_lines: Lines of content to count for savings stats. None = full chunk.
+        :param reranker: Pairwise reranker for the head of the ranked list; None reads ``ZEMBLE_RERANKER``.
+        :param rerank_settings: Window, blend weight and passage shape; None reads the environment.
         :return: Ranked list of SearchResult objects, best match first.
         """
         if not self.chunks or not query.strip():
@@ -380,6 +400,8 @@ class ZembleIndex:
             selector=selector,
             rerank=resolved_rerank,
             definitions=self._definitions,
+            reranker=self._resolve_reranker(reranker),
+            rerank_settings=rerank_settings or RerankSettings.from_env(),
         )
         save_search_stats(results, CallType.SEARCH, self._file_sizes, max_snippet_lines)
         return results
