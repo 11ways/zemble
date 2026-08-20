@@ -34,6 +34,8 @@ class Chunk:
     start_line: int
     end_line: int
     language: str | None = None
+    #: Context capsule describing where the chunk lives; embedding text only, never search output.
+    context: str = ""
 
     @property
     def location(self) -> str:

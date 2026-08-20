@@ -32,15 +32,32 @@ def test_chunk_source_empty_string() -> None:
 
 
 def test_chunk_source_language() -> None:
-    """Check that chunking defaults to line splitting with non-existent and None languages."""
+    """Check that chunking defaults to line splitting with non-existent and None languages.
+
+    A line-chunked file still gets a capsule; with no parse tree it is the path alone.
+    """
     with patch("zemble.chunking.chunking.chunk_lines", wraps=chunk_lines) as chunk_line_spy:
         assert chunk_source("hello", "foo.loki", "loki") == [
-            Chunk(content="hello", file_path="foo.loki", start_line=1, end_line=1, language="loki")
+            Chunk(
+                content="hello",
+                file_path="foo.loki",
+                start_line=1,
+                end_line=1,
+                language="loki",
+                context="foo.loki foo loki",
+            )
         ]
         chunk_line_spy.assert_called_once()
     with patch("zemble.chunking.chunking.chunk_lines", wraps=chunk_lines) as chunk_line_spy:
         assert chunk_source("1+1=3", "foo.json", None) == [
-            Chunk(content="1+1=3", file_path="foo.json", start_line=1, end_line=1, language=None)
+            Chunk(
+                content="1+1=3",
+                file_path="foo.json",
+                start_line=1,
+                end_line=1,
+                language=None,
+                context="foo.json foo json",
+            )
         ]
         chunk_line_spy.assert_called_once()
 

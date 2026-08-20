@@ -134,10 +134,14 @@ def chunk_lines(text: str, desired_length: int) -> list[ChunkBoundary]:
     return _merge_adjacent_chunks(lines_as_groups, desired_length)
 
 
-def chunk(text: str, language: str, desired_length: int) -> list[ChunkBoundary] | None:
-    """Chunk source code."""
+def chunk_with_tree(text: str, language: str, desired_length: int) -> tuple[list[ChunkBoundary], Node | None] | None:
+    """Chunk source code, also handing back the parse tree the boundaries came from.
+
+    The root node is returned so a caller can describe where each chunk lives without
+    parsing the file a second time; it is None only for the empty-source case.
+    """
     if not text.strip():
-        return []
+        return [], None
 
     as_bytes = text.encode("utf-8")
     parser = _cached_get_parser(language)
@@ -151,4 +155,10 @@ def chunk(text: str, language: str, desired_length: int) -> list[ChunkBoundary] 
         end_char = len(as_bytes[: chunk_boundary.end].decode("utf-8"))
         chunks.append(ChunkBoundary(start=start_char, end=end_char))
 
-    return chunks
+    return chunks, root
+
+
+def chunk(text: str, language: str, desired_length: int) -> list[ChunkBoundary] | None:
+    """Chunk source code."""
+    result = chunk_with_tree(text, language, desired_length)
+    return None if result is None else result[0]
