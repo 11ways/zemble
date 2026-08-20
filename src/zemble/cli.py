@@ -14,6 +14,7 @@ from model2vec.utils import get_package_extras
 
 from zemble.cache import cache_key, resolve_cache_folder, save_index_to_cache
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
+from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.index import ZembleIndex
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
@@ -23,7 +24,20 @@ from zemble.utils import format_results, is_git_url, resolve_chunk
 from zemble.version import __version__
 
 _CLI_DISPATCH_ARGS = frozenset(
-    {"search", "find-related", "install", "uninstall", "savings", "stats", "-h", "--help", "clear", "--version", "-V"}
+    {
+        "search",
+        "find-related",
+        "install",
+        "uninstall",
+        "savings",
+        "stats",
+        "-h",
+        "--help",
+        "clear",
+        "--version",
+        "-V",
+        "graph",
+    }
 )
 _CLEAR_CHOICE = Literal["all", "index", "savings", "orphans"]
 
@@ -314,6 +328,8 @@ def _cli_main() -> None:
 
     sub.add_parser("savings", help="Show token savings and usage stats.")
 
+    add_graph_parser(sub)
+
     install_p = sub.add_parser("install", help="Configure zemble across coding agents.")
     uninstall_p = sub.add_parser("uninstall", help="Remove zemble configuration from coding agents.")
     for p, verb in ((install_p, "configure"), (uninstall_p, "remove configuration from")):
@@ -340,6 +356,8 @@ def _cli_main() -> None:
 
     args = parser.parse_args()
 
+    if args.command == "graph":
+        raise SystemExit(run_graph(args))
     if args.command == "savings":
         print(format_savings_report())
     elif args.command in ("install", "uninstall"):

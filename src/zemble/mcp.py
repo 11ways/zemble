@@ -15,6 +15,7 @@ from pydantic import Field
 from zemble.cache import get_validated_cache, save_index_to_cache
 from zemble.embedding.base import Embedder
 from zemble.embedding.registry import load_embedder
+from zemble.graph.mcp import register_graph_tools
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
 from zemble.utils import format_results, is_git_url, resolve_chunk
@@ -153,6 +154,7 @@ def create_server(cache: _IndexCache, default_content: Sequence[ContentType] = (
         label = f"Chunks related to {file_path}:{line}"
         return json.dumps(format_results(label, results, max_snippet_lines))
 
+    register_graph_tools(server)
     return server
 
 

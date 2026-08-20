@@ -88,6 +88,7 @@ target-version = "py310"
 "tests/**" = ["ANN"]
 "benchmarks/*.py" = ["T20"]
 "src/zemble/cli.py" = ["T20", "E501"]
+"src/zemble/graph/cli.py" = ["T20"]
 "src/zemble/installer/*.py" = ["T20", "E501"]
 
 [tool.ruff.lint]
