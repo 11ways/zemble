@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from typing import Any
 
 from zemble.daemon import client
@@ -116,7 +117,16 @@ def _stop() -> int:
     except DaemonError as exc:
         print(f"Failed to stop the daemon: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    print("zemble daemon stopping")
+    # Wait for the old process to actually go away, so `restart` (and a start right after a
+    # stop) does not find the socket still owned by the exiting daemon.
+    deadline = time.monotonic() + 10.0
+    while client.is_running() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if client.is_running():
+        print("zemble daemon did not exit within 10 s", file=sys.stderr)
+        return EXIT_ERROR
+    client.clear_stale()
+    print("zemble daemon stopped")
     return 0
 
 
