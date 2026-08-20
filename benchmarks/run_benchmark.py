@@ -2,6 +2,7 @@ import argparse
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
@@ -10,8 +11,10 @@ from benchmarks.data import (
     RepoSpec,
     Task,
     add_filter_args,
+    add_repo_source_args,
     grouped_tasks,
     load_filtered_tasks,
+    results_label,
     save_results,
 )
 from benchmarks.metrics import ndcg_at_k, target_rank
@@ -40,6 +43,7 @@ class RepoResult:
     p99_ms: float
     index_ms: float
     by_category: dict[str, float] = field(default_factory=dict)
+    by_kind: dict[str, float] = field(default_factory=dict)
 
 
 def evaluate(
@@ -49,12 +53,13 @@ def evaluate(
     verbose: bool = False,
     alpha: float | None = None,
     rerank: bool = True,
-) -> tuple[float, float, list[float], dict[str, float], int]:
-    """Return mean NDCG@5, NDCG@10, median query latency (ms), and per-category NDCG@10."""
+) -> tuple[float, float, list[float], dict[str, float], dict[str, float], int]:
+    """Return mean NDCG@5, NDCG@10, query latencies (ms), per-category and per-kind NDCG@10, and mean tokens."""
     ndcg5_sum = 0.0
     ndcg10_sum = 0.0
     latencies: list[float] = []
     category_ndcg10: dict[str, list[float]] = defaultdict(list)
+    kind_ndcg10: dict[str, list[float]] = defaultdict(list)
     tokens = 0
 
     for task in tasks:
@@ -74,6 +79,8 @@ def evaluate(
         ndcg5_sum += q_ndcg5
         ndcg10_sum += q_ndcg10
         category_ndcg10[task.category or "unknown"].append(q_ndcg10)
+        if task.kind:
+            kind_ndcg10[task.kind].append(q_ndcg10)
 
         if verbose:
             category = task.category or "?"
@@ -91,7 +98,8 @@ def evaluate(
 
     total = len(tasks)
     by_category = {cat: sum(vals) / len(vals) for cat, vals in sorted(category_ndcg10.items())}
-    return ndcg5_sum / total, ndcg10_sum / total, latencies, by_category, tokens // total
+    by_kind = {kind: sum(vals) / len(vals) for kind, vals in sorted(kind_ndcg10.items())}
+    return ndcg5_sum / total, ndcg10_sum / total, latencies, by_category, by_kind, tokens // total
 
 
 def _print_summary(results: list[RepoResult]) -> None:
@@ -176,14 +184,20 @@ def _print_summary(results: list[RepoResult]) -> None:
     print(f"  {'q-p99':<28}  " + "  ".join(p99_row), file=sys.stderr)
     print(f"  {'index':<28}  " + "  ".join(index_row), file=sys.stderr)
 
-    all_categories = sorted({cat for r in results for cat in r.by_category})
-    if all_categories:
-        print(file=sys.stderr)
-        print("By category (NDCG@10, mean over all repos)", file=sys.stderr)
-        for cat in all_categories:
-            vals = [r.by_category[cat] for r in results if cat in r.by_category]
-            mean_val = sum(vals) / len(vals) if vals else 0.0
-            print(f"  {cat:<16}  {mean_val:.3f}  (n={len(vals)} repos)", file=sys.stderr)
+    _print_group(results, "category", lambda r: r.by_category)
+    _print_group(results, "kind", lambda r: r.by_kind)
+
+
+def _print_group(results: list[RepoResult], label: str, pick: Callable[[RepoResult], dict[str, float]]) -> None:
+    """Print the mean NDCG@10 per group value, skipping groups no repo reported."""
+    names = sorted({name for r in results for name in pick(r)})
+    if not names:
+        return
+    print(file=sys.stderr)
+    print(f"By {label} (NDCG@10, mean over all repos)", file=sys.stderr)
+    for name in names:
+        vals = [pick(r)[name] for r in results if name in pick(r)]
+        print(f"  {name:<16}  {sum(vals) / len(vals):.3f}  (n={len(vals)} repos)", file=sys.stderr)
 
 
 def _bench_quality(
@@ -205,7 +219,7 @@ def _bench_quality(
         started = time.perf_counter()
         index = ZembleIndex.from_path(spec.benchmark_dir)
         index_ms = (time.perf_counter() - started) * 1000
-        ndcg5, ndcg10, latencies, by_category, tokens = evaluate(index, tasks, verbose=verbose)
+        ndcg5, ndcg10, latencies, by_category, by_kind, tokens = evaluate(index, tasks, verbose=verbose)
         p50, p90, p95, p99 = np.percentile(latencies, [50, 90, 95, 99]).tolist()
         result = RepoResult(
             repo=repo,
@@ -221,6 +235,7 @@ def _bench_quality(
             p99_ms=p99,
             index_ms=index_ms,
             by_category=by_category,
+            by_kind=by_kind,
         )
         results.append(result)
         print(
@@ -231,8 +246,17 @@ def _bench_quality(
     return results
 
 
-def _save_results(results: list[RepoResult]) -> None:
-    """Write results to benchmarks/results/zemble-hybrid-<sha12>.json."""
+def _group_means(results: list[RepoResult], pick: Callable[[RepoResult], dict[str, float]]) -> dict[str, float]:
+    """Return the mean NDCG@10 per group value across the repos that reported it."""
+    means: dict[str, float] = {}
+    for name in sorted({name for r in results for name in pick(r)}):
+        vals = [pick(r)[name] for r in results if name in pick(r)]
+        means[name] = round(sum(vals) / len(vals), 4)
+    return means
+
+
+def _save_results(results: list[RepoResult], label: str) -> None:
+    """Write results to benchmarks/results/<label>-<sha12>.json."""
     languages = sorted({r.language for r in results})
     by_language = {lang: [r for r in results if r.language == lang] for lang in languages}
 
@@ -248,17 +272,12 @@ def _save_results(results: list[RepoResult]) -> None:
         }
         for lang, grouped in by_language.items()
     }
-    all_categories: set[str] = set()
-    for r in results:
-        all_categories.update(r.by_category)
-    cat_means: dict[str, float] = {}
-    for cat in sorted(all_categories):
-        vals = [r.by_category[cat] for r in results if cat in r.by_category]
-        cat_means[cat] = round(sum(vals) / len(vals), 4) if vals else 0.0
+    cat_means = _group_means(results, lambda r: r.by_category)
+    kind_means = _group_means(results, lambda r: r.by_kind)
 
     n_repos = len(results)
     output = {
-        "tool": "zemble-hybrid",
+        "tool": label,
         "model": DEFAULT_MODEL_NAME,
         "summary": {
             "ndcg10": round(sum(r.ndcg10 for r in results) / n_repos, 4),
@@ -269,6 +288,7 @@ def _save_results(results: list[RepoResult]) -> None:
             "p99_ms": round(sum(r.p99_ms for r in results) / n_repos, 3),
             "index_ms": round(sum(r.index_ms for r in results) / n_repos, 1),
             "by_category": cat_means,
+            "by_kind": kind_means,
         },
         "by_language": {
             lang: {
@@ -286,7 +306,7 @@ def _save_results(results: list[RepoResult]) -> None:
         "repos": [asdict(r) for r in results],
     }
 
-    out_path = save_results("zemble-hybrid", output)
+    out_path = save_results(label, output)
     print(f"\nResults saved to {out_path}", file=sys.stderr)
 
 
@@ -294,8 +314,11 @@ def main() -> None:
     """Parse arguments and run the zemble hybrid benchmark."""
     parser = argparse.ArgumentParser(description="Benchmark hybrid zemble search across the pinned benchmark repos.")
     add_filter_args(parser, verbose=True)
+    add_repo_source_args(parser)
     args = parser.parse_args()
-    repo_specs, tasks = load_filtered_tasks(args.repo or None, args.language or None)
+    repo_specs, tasks = load_filtered_tasks(
+        args.repo or None, args.language or None, args.repos_file, args.annotations_dir
+    )
     print("Loading model...", file=sys.stderr)
     started = time.perf_counter()
     print(f"Loaded in {(time.perf_counter() - started) * 1000:.0f} ms", file=sys.stderr)
@@ -304,7 +327,7 @@ def main() -> None:
     results = _bench_quality(repo_tasks, repo_specs, verbose=args.verbose)
     _print_summary(results)
     if not args.repo and not args.language:
-        _save_results(results)
+        _save_results(results, results_label("zemble-hybrid", args.repos_file, list(repo_tasks)))
 
 
 if __name__ == "__main__":

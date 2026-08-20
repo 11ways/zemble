@@ -1,8 +1,9 @@
 import argparse
 import subprocess
 import sys
+from pathlib import Path
 
-from benchmarks.data import BENCH_ROOT, load_repo_specs
+from benchmarks.data import BENCH_ROOT, REPOS_PATH, RepoSpec, load_repo_specs
 
 
 def _run(*args: str) -> None:
@@ -21,8 +22,11 @@ def _sync_repo(name: str, url: str, revision: str) -> None:
     _run("git", "-C", str(repo_dir), "checkout", "--detach", revision)
 
 
-def _check_repo(name: str, revision: str) -> str | None:
+def _check_repo(spec: RepoSpec) -> str | None:
     """Return an error string if the local checkout is missing or at the wrong revision."""
+    if spec.is_local:
+        return None
+    name, revision = spec.name, spec.revision
     repo_dir = BENCH_ROOT / name
     if not (repo_dir / ".git").exists():
         return f"{name}: missing checkout at {repo_dir}"
@@ -37,15 +41,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Clone or update pinned benchmark repositories.")
     parser.add_argument("--repo", action="append", default=[], help="Restrict to one or more repo names.")
     parser.add_argument("--check", action="store_true", help="Only verify local checkouts against pinned revisions.")
+    parser.add_argument(
+        "--repos-file", type=Path, default=REPOS_PATH, help="Path to a repos.json (default: the upstream set)."
+    )
     args = parser.parse_args()
-    specs = load_repo_specs()
+    specs = load_repo_specs(args.repos_file)
     selected = {name: spec for name, spec in specs.items() if not args.repo or name in args.repo}
     BENCH_ROOT.mkdir(parents=True, exist_ok=True)
 
     if args.check:
-        problems = [
-            problem for name, spec in selected.items() if (problem := _check_repo(name, spec.revision)) is not None
-        ]
+        problems = [problem for spec in selected.values() if (problem := _check_repo(spec)) is not None]
         if problems:
             for problem in problems:
                 print(problem, file=sys.stderr)
@@ -53,10 +58,15 @@ def main() -> None:
         print(f"Verified {len(selected)} pinned repo(s).")
         return
 
+    synced = 0
     for name, spec in selected.items():
+        if spec.is_local:
+            print(f"skipping {name}: local tree at {spec.checkout_dir}")
+            continue
         _sync_repo(name, spec.url, spec.revision)
+        synced += 1
 
-    print(f"Synced {len(selected)} pinned repo(s).")
+    print(f"Synced {synced} pinned repo(s).")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ Quality and speed benchmarks for `zemble`.
 - [Methods](#methods)
 - [Excluded methods](#excluded-methods)
 - [Running the benchmarks](#running-the-benchmarks)
+- [Local workspace sets](#local-workspace-sets)
 
 ## Main results
 
@@ -345,3 +346,22 @@ uv run python -m benchmarks.plot
 Writes `speed_vs_ndcg_cold.png` and `speed_vs_ndcg_warm.png` to `assets/images/`.
 
 </details>
+
+## Local workspace sets
+
+An evaluation set can also target a tree that already exists on disk instead of
+a pinned clone. `benchmarks/local/` holds those sets: a `repos.json` whose entry
+carries `local_path` (which `sync_repos` skips and `RepoSpec.checkout_dir`
+returns as-is) and its own `annotations/` directory. Select one with:
+
+```bash
+uv run python -m benchmarks.run_benchmark \
+  --repos-file benchmarks/local/repos.json \
+  --annotations-dir benchmarks/local/annotations
+```
+
+Both flags default to the upstream set, so the numbers above are unaffected.
+Results land in `benchmarks/results/local-<repos>-zemble-hybrid-<sha12>.json`.
+Annotations in a local set may carry a `kind` field; when present it is reported
+as a `By kind` table alongside `By category`. See
+[benchmarks/local/README.md](local/README.md).

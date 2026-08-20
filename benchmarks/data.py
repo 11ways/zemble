@@ -31,11 +31,17 @@ class RepoSpec:
     url: str
     revision: str
     benchmark_root: str | None = None
+    local_path: str | None = None
+
+    @property
+    def is_local(self) -> bool:
+        """Return True if this repo is an existing local tree rather than a pinned clone."""
+        return self.local_path is not None
 
     @property
     def checkout_dir(self) -> Path:
         """Return the local checkout directory for this repo."""
-        return BENCH_ROOT / self.name
+        return Path(self.local_path) if self.local_path is not None else BENCH_ROOT / self.name
 
     @property
     def benchmark_dir(self) -> Path:
@@ -51,6 +57,7 @@ class Task:
     relevant: tuple[Target, ...]
     secondary: tuple[Target, ...]
     category: str
+    kind: str | None = None
 
     @property
     def all_relevant(self) -> tuple[Target, ...]:
@@ -96,20 +103,23 @@ def load_repo_specs(path: Path = REPOS_PATH) -> dict[str, RepoSpec]:
     return {item["name"]: RepoSpec(**item) for item in raw}
 
 
-def available_repo_specs() -> dict[str, RepoSpec]:
+def available_repo_specs(repos_path: Path = REPOS_PATH, annotations_dir: Path = ANNOTATIONS_DIR) -> dict[str, RepoSpec]:
     """Return only the repo specs that have a local checkout and annotation file."""
     return {
         name: spec
-        for name, spec in load_repo_specs().items()
-        if spec.checkout_dir.exists() and (ANNOTATIONS_DIR / f"{name}.json").exists()
+        for name, spec in load_repo_specs(repos_path).items()
+        if spec.checkout_dir.exists() and (annotations_dir / f"{name}.json").exists()
     }
 
 
-def load_tasks(repo_specs: dict[str, RepoSpec] | None = None) -> list[Task]:
+def load_tasks(
+    repo_specs: dict[str, RepoSpec] | None = None,
+    annotations_dir: Path = ANNOTATIONS_DIR,
+) -> list[Task]:
     """Load all benchmark tasks from annotation files, filtered to available repo specs."""
     specs = load_repo_specs() if repo_specs is None else repo_specs
     tasks: list[Task] = []
-    for annotation_file in sorted(ANNOTATIONS_DIR.glob("*.json")):
+    for annotation_file in sorted(annotations_dir.glob("*.json")):
         if annotation_file.stem not in specs:
             continue
         raw = json.loads(annotation_file.read_text(encoding="utf-8"))
@@ -120,6 +130,7 @@ def load_tasks(repo_specs: dict[str, RepoSpec] | None = None) -> list[Task]:
                 continue
             spec = specs[repo]
             category = item.get("category")
+            kind = item.get("kind")
             tasks.append(
                 Task(
                     repo=repo,
@@ -128,6 +139,7 @@ def load_tasks(repo_specs: dict[str, RepoSpec] | None = None) -> list[Task]:
                     relevant=tuple(_parse_target(t) for t in item.get("relevant", [])),
                     secondary=tuple(_parse_target(t) for t in item.get("secondary", [])),
                     category=category if isinstance(category, str) else infer_category(item["query"]),
+                    kind=kind if isinstance(kind, str) else None,
                 )
             )
     return tasks
@@ -151,12 +163,30 @@ def add_filter_args(parser: argparse.ArgumentParser, *, verbose: bool = False) -
         parser.add_argument("--verbose", action="store_true", help="Print per-query results.")
 
 
+def add_repo_source_args(parser: argparse.ArgumentParser) -> None:
+    """Add the arguments selecting which repos.json / annotations directory to benchmark."""
+    parser.add_argument(
+        "--repos-file", type=Path, default=REPOS_PATH, help="Path to a repos.json (default: the upstream set)."
+    )
+    parser.add_argument(
+        "--annotations-dir",
+        type=Path,
+        default=ANNOTATIONS_DIR,
+        help="Directory holding the annotation files (default: the upstream set).",
+    )
+
+
 def load_filtered_tasks(
-    repos: list[str] | None = None, languages: list[str] | None = None
+    repos: list[str] | None = None,
+    languages: list[str] | None = None,
+    repos_path: Path = REPOS_PATH,
+    annotations_dir: Path = ANNOTATIONS_DIR,
 ) -> tuple[dict[str, RepoSpec], list[Task]]:
     """Load available repo specs and matching tasks, exiting if the selection is empty."""
-    repo_specs = available_repo_specs()
-    tasks = apply_task_filters(load_tasks(repo_specs=repo_specs), repos=repos, languages=languages)
+    repo_specs = available_repo_specs(repos_path, annotations_dir)
+    tasks = apply_task_filters(
+        load_tasks(repo_specs=repo_specs, annotations_dir=annotations_dir), repos=repos, languages=languages
+    )
     if not tasks:
         raise SystemExit("No benchmark tasks matched the requested filters.")
     return repo_specs, tasks
@@ -206,6 +236,14 @@ def current_sha() -> str:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     except subprocess.CalledProcessError:
         return "unknown"
+
+
+def results_label(method: str, repos_path: Path, repo_names: Sequence[str]) -> str:
+    """Return the result label for a run, prefixed with the set name when it is not the upstream one."""
+    if repos_path.resolve() == REPOS_PATH.resolve():
+        return method
+    prefix = "-".join([repos_path.parent.name, *sorted(repo_names)])
+    return f"{prefix}-{method}"
 
 
 def results_path(method: str) -> Path:
