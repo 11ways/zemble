@@ -8,10 +8,11 @@ The interactive installer detects your installed agents and configures any combi
 - **[AGENTS.md](#instructions-agentsmd--claudemd)**: adds a Zemble usage guide to the agent's config file (`CLAUDE.md`, `AGENTS.md`, etc.).
 - **[Sub-agent](#sub-agent)**: installs a dedicated `zemble-search` sub-agent for harnesses that support it.
 
-Install the CLI with [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
+zemble is not published on PyPI. Install the CLI from a checkout with
+[uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
 
 ```bash
-uv tool install zemble
+uv tool install --editable "/path/to/zemble[mcp]"
 zemble install
 ```
 
@@ -41,7 +42,7 @@ zemble install --agent claude pi --type mcp subagent --yes
 
 ### Keeping installed configuration up to date
 
-The MCP server config, `AGENTS.md`/`CLAUDE.md` instructions, and sub-agent files that `zemble install` writes all pin `uvx` to the exact zemble version you have installed (`zemble[mcp]==X.Y.Z`), so agents keep calling the version the instructions were written for rather than whatever is newest on PyPI. After upgrading (`uv tool upgrade zemble` or `pip install --upgrade zemble`), rerun `zemble install`. This is idempotent and rewrites the pin (and anything else that changed) in place for every agent you select.
+The MCP server config, `AGENTS.md`/`CLAUDE.md` instructions, and sub-agent files that `zemble install` writes all pin `uvx` to the exact zemble you have installed: the local source path for an editable or directory install (`/path/to/zemble[mcp]`), the exact commit for a non-editable git install, and the version otherwise, so agents keep calling the code the instructions were written for. After upgrading (`uv tool upgrade zemble` or `pip install --upgrade zemble`), rerun `zemble install`. This is idempotent and rewrites the pin (and anything else that changed) in place for every agent you select.
 
 ---
 

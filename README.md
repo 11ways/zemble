@@ -1,191 +1,292 @@
-<h2 align="center">
-  zemble<br/>
-  Fast and Accurate Code Search for Agents<br/>
-  <sub>Uses ~99% fewer tokens than grep+read</sub>
-</h2>
+# zemble
 
-<div align="center">
+zemble is a fork of [Semble](https://github.com/MinishLab/semble) by MinishLab. Semble is
+fast local hybrid code search for coding agents: tree-sitter chunking, BM25 over
+identifiers and API names, static Model2Vec embeddings, fused with reciprocal rank fusion
+and reranked with code-aware heuristics, all on CPU with no API key and no external
+service. zemble keeps that core, and adds a workspace code-intelligence layer on top of
+it: a symbol graph carrying compiler-resolved facts, context capsules in the retrieval
+text, evidence bundles (`explain`, `outline`, `signatures`), duplication detection,
+`home` ("does this already exist, and which module should own it"), pluggable embedders
+and rerankers, a warm daemon, and a columnar index that loads in milliseconds.
 
-[Quickstart](#quickstart) •
-[CLI](#cli) •
-[MCP Server](#mcp-server) •
-[Installation](docs/installation.md) •
-[Benchmarks](#benchmarks)
+The retrieval core is Semble's work and the credit for it belongs upstream. The
+improvement that touches that core, the context capsule, also held on Semble's own
+63-repo benchmark (NDCG@10 0.852 to 0.864), so it is not only a private win on this
+fork's workspace.
 
+[What you get](#what-you-get) - [Benchmarks](#benchmarks) - [Suggested configuration](#suggested-configuration) - [Install](#install) - [CLI](#cli) - [MCP server](#mcp-server) - [How it works](#how-it-works)
 
-</div>
+## What you get
 
-zemble is a fork of [Semble](https://github.com/MinishLab/semble) by MinishLab, focused on workspace code intelligence: a symbol graph, evidence bundles packed to a token budget, duplication detection, and pluggable embedders. The upstream README follows below; see [docs/plan.md](docs/plan.md) for what this fork is building.
+**Search** (`zemble search`, MCP `search`). Natural-language or code queries against a
+local path or a git URL, answered from chunks rather than whole files. `--content` picks
+the `code` (default), `docs`, `config` or `all` lane. Every chunk is embedded and indexed
+together with a [context capsule](docs/capsules.md): its path, package, enclosing type
+chain, signature and the imports it actually uses. The capsule is retrieval text only,
+never output.
 
-On top of upstream's `search` and `find-related`, the fork adds `graph` (callers,
-implementations, tests-of and friends over a Java symbol graph), `explain`,
-`outline` and `signatures` ([evidence bundles](docs/evidence.md)), `dupes`
-(exact, alpha-renamed and logic clone classes), `daemon` (one warm process per
-user holding the indexes in RAM), and [`home`](docs/home.md) - "does this feature
-already exist, and which module should it live in?", answered from the module
-map, forbidden dependencies and declared-home tables a workspace states in
-`.zemble/home.toml`. Every one of them is a CLI subcommand and an MCP tool.
+**Find related** (`zemble find-related`, MCP `find_related`). Give it a file and a line
+and it returns the chunks nearest to the code living there.
 
-Zemble is a code search library built for agents. It returns the exact code snippets they need instantly, using ~99% fewer tokens than grep+read. Indexing and searching a full codebase end-to-end takes under a second, matching the retrieval quality of a code-specialized transformer while indexing ~220x faster and querying ~17x faster (see [benchmarks](#benchmarks)). Everything runs on CPU with no API keys, GPU, or external services. Use it as an MCP server, a CLI tool via AGENTS.md, or a dedicated sub-agent, and any coding agent (Claude Code, Cursor, Codex, OpenCode, etc.) gets instant access to any repo.
+**Symbol graph** (`zemble graph *`, MCP `graph_definition`, `graph_callers`,
+`graph_implementations`, `graph_tests_of`, `graph_neighbors`). Callers, callees,
+references, implementations, supertypes, overrides, tests-of and neighbour walks over a
+Java and Hawkeye workspace. Every answer carries the rung it landed on (exact, unique
+name, ambiguous, unresolved) and a one-line reason, because the extractor is tree-sitter
+plus a name resolver and not a compiler. Where a build emits
+[compiler facts](docs/graph-facts.md), those replace the guessed edges for the files they
+cover. See [docs/graph.md](docs/graph.md).
+
+**Evidence bundles** (`zemble explain`, `outline`, `signatures`). `explain` searches,
+follows the graph one hop out of what it found, and packs the result under a token budget
+with a reason per item and an explicit list of what did not fit. `outline` is a
+signature-only view of a file or a type (150 to 300 tokens for a whole class) and
+`signatures` prints a declaration plus the call sites the graph resolved exactly.
+[docs/evidence.md](docs/evidence.md) also carries the honest measurement: bundles do not
+beat plain search on hit rate, they buy structure.
+
+**Duplication** (`zemble dupes`, MCP `dupes`). Exact, alpha-renamed and logic clone
+classes over Java bodies and statement windows, ranked by weight. Logic clones are never
+reported on embedding similarity alone: a structural check has to agree, and the reason
+is printed. It is a report, never a gate. See [docs/dedup.md](docs/dedup.md).
+
+**Home** (`zemble home`, MCP `home`). "Does this feature already exist, and which module
+should it live in?" Answered from the existing mechanisms search and the graph find,
+plus the module map, forbidden dependencies and declared-home tables the workspace states
+about itself in `.zemble/home.toml`. See [docs/home.md](docs/home.md).
+
+**Warm daemon** (`zemble daemon`). One process per user holding the indexes and the graph
+in RAM, watching the roots it holds and reindexing incrementally. It starts on demand,
+never at login, and exits after 30 idle minutes. Every surface is daemon-first with an
+in-process fallback, so it is an accelerator and never a requirement. See
+[docs/daemon.md](docs/daemon.md).
+
+**Pluggable embedders and rerankers**. One spec string selects the embedder
+(`model2vec:`, `voyage:`, `openai:` for anything speaking the OpenAI embeddings shape)
+and one selects the reranker (`none`, `cross:<hf-model>`, `voyage:<model>`). Remote
+embeddings are cached by content hash. See [docs/embedders.md](docs/embedders.md) and
+[docs/rerank.md](docs/rerank.md).
+
+## Benchmarks
+
+Two sets are involved. The public one is Semble's: 63 repositories, 19 languages, about
+1,250 queries, run with the harness in [`benchmarks/`](benchmarks/README.md). The other
+one is ours and is local: 90 hand-written, hand-verified queries (80 answered by a Java
+file, 10 by a Hawkeye template) over one private 40-repo Java workspace.
+
+Seven configurations, one working tree, one run each, all 90 queries
+([docs/comparison.md](docs/comparison.md)):
+
+| configuration | NDCG@10 | hit@1 | hit@5 | hit@10 | p50 | cost per query |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A Semble-equivalent (capsules off) | 0.539 | 0.467 | 0.644 | 0.667 | 89 ms | $0 |
+| B zemble local defaults | 0.557 | 0.500 | 0.622 | 0.689 | 95 ms | $0 |
+| C `voyage-4-lite@1024` embedder | 0.680 | 0.589 | 0.811 | 0.856 | 350 ms | $0.0000002 |
+| D `voyage-code-4@1024` embedder | 0.623 | 0.489 | 0.767 | 0.811 | 354 ms | $0.0000013 |
+| E `rerank-2.5` on the default embedder | 0.691 | 0.622 | 0.767 | 0.822 | 578 ms | $0.00058 |
+| F `voyage-4-lite` + `rerank-2.5` | 0.753 | 0.656 | 0.867 | 0.911 | 802 ms | $0.00057 |
+| G `voyage-4-lite` + `rerank-2.5-lite` | 0.738 | 0.656 | 0.878 | 0.900 | 796 ms | $0.00023 |
+
+hit@5 is the fraction of queries where a correct file is in the top 5. NDCG@10 scores the
+whole ranked list of 10: bigger is better, and 1.0 means the right file came first on
+every query.
+
+In plain words, on this set: with the local defaults about 62% of queries have the answer
+in the top 5; with a hosted embedder that is about 81%; with a hosted embedder and a
+hosted reranker together it is about 87 to 88%. The two mechanisms fix different queries.
+The embedder gets the right file into the window (symptom-only bug reports go from 0.400
+to 0.800 hit@5), the reranker puts it at the top ("which layer consumes this" queries go
+from 0.273 to 0.818 hit@5).
+
+On Semble's own 63-repo benchmark the capsule moved NDCG@10 from 0.852 to 0.864, and a
+hosted embedder adds about +0.02 on top of that (measured over the 59 repos both runs
+covered). The headroom there is small because that set is largely short lexical queries
+BM25 already answers.
+
+Speed, same workspace: a cold CLI query went from 12.2 s to about 1.0 s and a warm symbol
+query from 379 ms to 17 ms once the index became columnar and mmap-backed
+([docs/profile-loadtime.md](docs/profile-loadtime.md)). Through the warm daemon a CLI
+invocation over a 74k-chunk workspace index is 0.58 s against 1.52 s in-process, and most
+of what is left is the client interpreter start that no daemon can remove.
+
+Read the numbers with these caveats:
+
+- The 90-query set is **our own**, hand-labelled by the same people who tuned the
+  retrieval, over one private Java workspace. It is not a public benchmark and it is not
+  neutral. The public benchmark is Semble's, and it is reproducible with the harness.
+- **n is small.** One query is 1.1 points of hit rate; per query-kind figures move 9
+  points per query. F and G are a tie.
+- **One run each.** Nothing here has an error bar. Retrieval is deterministic given the
+  index, so the quality numbers are stable; the latencies are not.
+- **Latencies come from one loaded machine**, sequentially, over a residential
+  connection, and every hosted row is dominated by network round trips. They rank the
+  configurations; they do not predict anyone else's wall clock.
+- **hit@k is coarse by design.** It cannot tell "the answer was at rank 1" from "the
+  answer and four distractors filled the top five", which is why NDCG is printed beside
+  it.
+
+## Suggested configuration
+
+**The defaults are local, offline and free**, and they need no key, no GPU and no
+account. That is the configuration everyone gets, and nothing below changes it.
+
+**The measured best value for money**, if you have a Voyage key and are willing to send
+code to it, is a hosted embedder plus the small hosted reranker:
+
+```bash
+export VOYAGE_API_KEY=pa-...
+export ZEMBLE_EMBEDDER=voyage:voyage-4-lite@1024
+export ZEMBLE_RERANKER=voyage:rerank-2.5-lite
+export ZEMBLE_RERANK_ALPHA=0.7
+export ZEMBLE_RERANK_K=50
+```
+
+That is row G above: about 88% hit@5, roughly $0.0002 and 0.8 s per query. Dropping the
+reranker (the embedder alone, row C) is about 81% hit@5 at roughly 0.35 s per query and a
+fifth of a millionth of a dollar. The reranker is worth its round trip on the queries
+fusion is worst at, and it slightly hurts bare-identifier lookups, which BM25 already
+answers perfectly.
+
+Be clear about what this turns on: with a hosted embedder, **the text of every chunk is
+sent to Voyage** when the index is built, and every query is sent on every search; with a
+hosted reranker, the top 50 candidate passages are sent too. That is why it is opt-in and
+why the default stays local.
+
+Embedding an index is a one-off. Remote embeddings are cached by content hash in
+`~/.cache/zemble/embeddings/`, so re-indexing pays only for chunks whose content changed,
+and a narrower width is sliced out of a wider cached vector rather than bought again.
+A full index of a 74k-chunk workspace measured 15.5M tokens, which is $0.31 with
+`voyage-4-lite`. See [docs/embedders.md](docs/embedders.md) and
+[docs/voyage.md](docs/voyage.md).
+
+## Install
+
+zemble is **not published on PyPI**. Install it from a checkout with
+[uv](https://docs.astral.sh/uv/getting-started/installation/):
+
+```bash
+git clone <this repository> /path/to/zemble
+uv tool install --editable "/path/to/zemble[mcp]"
+zemble --version
+```
+
+The `[mcp]` extra pulls in the MCP server dependencies. Use
+`"/path/to/zemble[mcp,rerank]"` if you also want to run a local cross-encoder
+(`cross:<hf-model>`); that extra drags in torch and transformers, and nothing imports
+them until a `cross:` reranker actually scores something.
+
+On first use zemble downloads the default embedding model from Hugging Face into the
+standard Hugging Face cache (`~/.cache/huggingface/`, or `$HF_HOME`). That is the only
+network access the defaults need, and it happens once.
+
+`zemble install` still works and configures whichever coding agents it detects (MCP
+server, AGENTS.md / CLAUDE.md instructions, a `zemble-search` sub-agent). It notices an
+editable install and points the generated configs at your checkout path rather than at a
+PyPI release, so they launch the code you have. `zemble uninstall` removes them again.
+For per-agent manual setup, see [the installation docs](docs/installation.md).
 
 ## Quickstart
 
-Your agent queries Zemble in natural language (e.g. `"How is authentication handled?"`) and gets back only the relevant code snippets, without grepping or reading full files.
-
-The fastest way to get started is the interactive installer. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
-
 ```bash
-uv tool install zemble
-zemble install
+zemble search "how is authentication handled" ./my-project
 ```
 
-`zemble install` detects installed coding agents such as Claude Code, Codex, and OpenCode, and then lets you choose which integrations to enable:
-
-- **MCP server**: lets the agent call Zemble directly as a tool.
-- **Instructions**: adds CLI usage guidance to AGENTS.md / CLAUDE.md.
-- **Sub-agent**: installs a dedicated `zemble-search` sub-agent.
-
-To undo the setup, run `zemble uninstall`.
-
-For manual setup instructions (MCP config per agent, AGENTS.md snippet, sub-agent files), see the [installation docs](docs/installation.md).
-
-<details>
-<summary>Updating Zemble</summary>
-
-```bash
-uv tool upgrade zemble   # upgrade
-uv cache clean zemble    # for MCP users (restart your MCP client after)
-```
-
-</details>
-
-<details>
-<summary>Unattended install</summary>
-
-For sandboxed or scripted environments, skip the prompts with `--agent` and, optionally, `--type`:
-
-```bash
-zemble install --agent claude --type mcp subagent --yes
-```
-
-`--agent` accepts one or more agent ids (e.g. `claude`, `codex`, `pi`); `--type` accepts `mcp`, `instructions`, `subagent`, or `all` (default: all); `--yes` skips the confirmation prompt (requires `--agent` for a fully non-interactive run).
-
-</details>
-
-## Main Features
-
-- **Fast**: indexes an average repo in ~500 ms and answers queries in ~1 ms, all on CPU.
-- **Accurate**: NDCG@10 of 0.854 on our [benchmarks](#benchmarks), on par with code-specialized transformer models, at a fraction of the size and cost.
-- **Token-efficient**: returns only the relevant chunks, using [~99% fewer tokens than grep+read](#benchmarks).
-- **Zero setup**: runs on CPU with no API keys, GPU, or external services required.
-- **MCP server**: works with Claude Code, Cursor, Codex, OpenCode, VS Code, and any other MCP-compatible agent.
-- **Local and remote**: pass a local path or a git URL.
+The index is built on first use and cached; later runs walk the tree, reindex only what
+changed, and answer from the cache. Point it at a local path or an https git URL.
 
 ## CLI
 
-Zemble also ships as a standalone CLI. This is useful in scripts or anywhere you want search results without an MCP session. Indexes are built and cached on first run, and invalidated automatically when files change.
-
 ```bash
-# Search a local repo (index is built and cached automatically)
+# Search a local repo (index built and cached automatically)
 zemble search "authentication flow" ./my-project
 
 # Search a remote repo (cloned on demand)
 zemble search "save model to disk" https://github.com/MinishLab/model2vec
 
-# Limit results
-zemble search "save model to disk" ./my-project --top-k 10
+# More results, shorter snippets (0 = path and line range only)
+zemble search "authentication flow" ./my-project --top-k 10 --max-snippet-lines 10
 
-# Search docs/config/everything instead of just code
+# Search docs or config instead of code
 zemble search "deployment guide" ./my-project --content docs   # or: config, all
 
 # Find code similar to a known location
 zemble find-related src/auth.py 42 ./my-project
 
-# Show only the first N lines of each result's snippet (0 = path/line range only)
-zemble search "authentication flow" ./my-project --max-snippet-lines 10
+# What does this index hold?
+zemble stats ./my-project
 ```
 
-`--content` accepts `code` (default), `docs`, `config`, or `all`. `path` defaults to the current directory when omitted; git URLs are accepted. If `zemble` is not on `$PATH`, use `uvx --from "zemble[mcp]" zemble` in its place. `zemble --version` (or `-V`) prints the installed version.
+Graph queries take a simple name (`PageWindow`), a qualified name or `Type.member`:
+
+```bash
+zemble graph callers ./my-project PageWindow.of
+zemble graph implementations ./my-project StorageAdapter
+zemble graph tests-of ./my-project PageWindow
+zemble graph neighbors ./my-project PageWindow --hops 2
+zemble graph build ./my-project --stats
+zemble graph facts status ./my-project
+```
+
+Evidence, duplication and placement:
+
+```bash
+zemble explain ./my-project "how is pagination computed" --budget 3000
+zemble outline ./my-project PageWindow --members page
+zemble signatures ./my-project PageWindow.of
+zemble dupes ./my-project --kind exact,renamed --limit 20
+zemble home ./my-project "cache a computed thumbnail on disk"
+```
+
+The daemon manages itself, but it can be driven by hand:
+
+```bash
+zemble daemon status
+zemble daemon start
+zemble daemon stop
+```
+
+`path` defaults to the current directory. The graph and evidence commands exit `0` when
+they answered, `1` when nothing matched and `2` when the name was ambiguous, with the
+candidates on stderr; `zemble home` exits `1` when nothing matched at all.
+`--no-daemon` (or `ZEMBLE_DAEMON=0`) answers in the calling process instead.
+`zemble savings` reports how many tokens searches saved against reading the matched
+files outright, and `zemble clear index|savings|orphans|all` empties the
+caches. If `zemble` is not on `$PATH`, use `uvx --from "/path/to/zemble[mcp]" zemble`.
 
 <details>
 <summary>Controlling which files are indexed</summary>
 
-Zemble reads `.gitignore` and `.zembleignore` files to determine which files to index. Both files use standard gitignore syntax and their patterns are merged. `.zembleignore` lets you add zemble-specific rules without touching `.gitignore`. Rules are applied recursively, so a `.zembleignore` in a subdirectory applies to that subtree.
-
-**Excluding files:** add patterns the same way you would in `.gitignore`:
-
-```
-# .zembleignore
-generated/     # exclude generated dir
-*.pb.go.       # exclude Go protobuf files
-```
-
-**Including non-default extensions:** prefix the extension pattern with `!` to force-include files that zemble wouldn't index by default:
+zemble reads `.gitignore` and `.zembleignore` to decide what to index. Both use gitignore
+syntax and their patterns are merged; a `.zembleignore` in a subdirectory applies to that
+subtree. It exists so zemble-specific rules do not have to go into `.gitignore`.
 
 ```
 # .zembleignore
-!*.proto       # include Protobuf files
-!*.cob         # include COBOL files
+generated/     # exclude a generated directory
+*.pb.go        # exclude Go protobuf files
+!*.proto       # include a non-default extension
+!*.cob
 ```
 
-Zemble also always skips a set of well-known non-source directories regardless of ignore files (e.g. `node_modules/`, `.venv/`, `dist/`, `build/`, `__pycache__/`, and similar).
-
-</details>
-
-<details>
-<summary>Savings</summary>
-
-`zemble savings` shows how many tokens zemble has saved across all your searches:
-
-```bash
-zemble savings
-```
-
-```
-  Zemble Token Savings
-  ════════════════════════════════════════════════════════════════════════
-
-  Total saved:  ~714.2M tokens  (94%)
-  Total calls:  14.3k
-  Efficiency:  ███████████████████████░  94%
-
-  By Period
-  ────────────────────────────────────────────────────────────────────────
-  Period             Calls           Saved  Ratio
-  ────────────────────────────────────────────────────────────────────────
-  Today                198    ~1.4M tokens  ███████████████████████░  95%
-  Last 7 days        13.1k  ~707.2M tokens  ███████████████████████░  94%
-  All time           14.3k  ~714.2M tokens  ███████████████████████░  94%
-
-  By Call Type
-  ────────────────────────────────────────────────────────────────────────
-  #     Call type            Calls  Share
-  ────────────────────────────────────────────────────────────────────────
-  1.    search               14.1k  ████████████████    99%
-  2.    find_related           205  █░░░░░░░░░░░░░░░     1%
-  ════════════════════════════════════════════════════════════════════════
-```
-
-
-Savings are calculated as follows: for each call, zemble records the total character count of the unique files containing returned chunks and the character count of the snippets returned. Estimated tokens saved is `(file chars − snippet chars) / 4` (4 chars per token). This is a conservative estimate: the baseline is reading matched files in full, which is how coding agents often explore unfamiliar code.
+A leading `!` on an extension pattern force-includes files zemble would not index by
+default. Well-known non-source directories (`node_modules/`, `.venv/`, `dist/`, `build/`,
+`__pycache__/` and friends) are always skipped regardless of ignore files.
 
 </details>
 
 <details>
 <summary>Storage</summary>
 
-By default, your Zemble savings statistics and any saved indexes are stored in the OS cache folder (`~/Library/Caches/zemble/` on macOS, `~/.cache/zemble/` on Linux, `%LOCALAPPDATA%\zemble\Cache\` on Windows). To override this location you can supply an environment variable `ZEMBLE_CACHE_LOCATION` which should be the full path to the target cache location e.g. `~/my-folder/my-caches/zemble`.
-
-On first use, Zemble also downloads the embedding model from Hugging Face and caches it in the standard Hugging Face cache (`~/.cache/huggingface/` by default, or `$HF_HOME` if set); this only happens once and requires network access.
-
-Use `zemble clear` to remove cached data: `zemble clear index` (saved indexes), `zemble clear savings` (usage stats), `zemble clear orphans` (indexes for repos no longer present on disk), or `zemble clear all` (everything).
+Indexes and usage stats live in the OS cache folder (`~/.cache/zemble/` on Linux,
+`~/Library/Caches/zemble/` on macOS, `%LOCALAPPDATA%\zemble\Cache\` on Windows), with
+`ZEMBLE_CACHE_LOCATION` overriding the whole location. The symbol graph is a sqlite file
+beside the index, and remote embeddings are cached under `embeddings/` in the same place.
 
 </details>
 
 <details>
-<summary>Library usage</summary>
-
-Zemble can also be used as a Python library for programmatic access, useful when building custom tooling or integrating search directly into your own code.
+<summary>Python API</summary>
 
 ```python
 from zemble import ContentType, ZembleIndex
@@ -193,119 +294,155 @@ from zemble import ContentType, ZembleIndex
 # Index a local directory (code only, the default)
 index = ZembleIndex.from_path("./my-project")
 
-# Index docs and prose (markdown, rst, etc.)
+# Index docs and prose, or several lanes at once
 index = ZembleIndex.from_path("./my-project", content=ContentType.DOCS)
-
-# Index everything (code, docs, and config)
-index = ZembleIndex.from_path("./my-project", content=[ContentType.CODE, ContentType.DOCS, ContentType.CONFIG])
-
-# Index code and docs together
 index = ZembleIndex.from_path("./my-project", content=[ContentType.CODE, ContentType.DOCS])
 
 # Index a remote git repository
 index = ZembleIndex.from_git("https://github.com/MinishLab/model2vec")
 
-# Search the index with a natural-language or code query
+# Search, then walk outwards from a result
 results = index.search("save model to disk", top_k=3)
-
-# Find code similar to a specific result
 related = index.find_related(results[0], top_k=3)
 
-# Each result exposes the matched chunk
 result = results[0]
 result.chunk.file_path   # "model2vec/model.py"
 result.chunk.start_line  # 127
 result.chunk.end_line    # 150
 result.chunk.content     # "def save_pretrained(self, path: PathLike, ..."
+result.chunk.context     # the capsule: path, package, enclosing chain, signature
 ```
 
 </details>
 
-## MCP Server
+## MCP server
 
-Zemble runs as an MCP server so agents can search any codebase directly as a native tool call. Repos are indexed on demand and cached; local paths are re-indexed automatically on file changes.
+Running `zemble` with no subcommand **is** the MCP server, so an agent config points at
+the `zemble` binary (or `uvx --from "/path/to/zemble[mcp]" zemble`) with no arguments.
+Repos are indexed on demand and cached, local paths are refreshed as files change, and
+the server asks the warm daemon first so several agent sessions share one copy of an
+index in RAM.
 
-| Tool | Description |
-|------|-------------|
-| `search` | Search a codebase with a natural-language or code query. Pass `repo` as a local path or an https:// git URL and `content` as `code`, `docs`, `config`, or `all` (default: `code`). |
-| `find_related` | Given a file path and line number, return chunks semantically similar to the code at that location. |
+| Tool | Answers |
+| --- | --- |
+| `search` | Natural-language or code query over a repo, in the `code`, `docs`, `config` or `all` lane. |
+| `find_related` | Chunks similar to a given file and line. |
+| `graph_definition` | Where a symbol is declared. |
+| `graph_callers` | Who calls it, with the resolution grade and a reason per hit. |
+| `graph_implementations` | Implementations and subclasses of a type. |
+| `graph_tests_of` | Tests naming or exercising a symbol. |
+| `graph_neighbors` | An n-hop walk around a symbol, filterable by edge kind. |
+| `explain` | A budgeted evidence bundle as markdown. |
+| `outline` | Signature-only view of a file or a type. |
+| `signatures` | A declaration plus its exactly resolved call sites. |
+| `dupes` | Clone classes over the workspace's Java code. |
+| `home` | Existing mechanisms, candidate homes, verdict and checklist. |
 
-For per-agent setup instructions, see the [installation docs](docs/installation.md#mcp-server).
-
-
-## Benchmarks
-
-We benchmark quality and speed across ~1,250 queries over 63 repositories in 19 languages (left), and token efficiency against grep+read at equivalent recall levels (right).
-
-<table>
-<tr>
-<td><img src="https://raw.githubusercontent.com/MinishLab/semble/main/assets/images/speed_vs_ndcg_cold.png" alt="Speed vs quality"></td>
-<td><img src="https://raw.githubusercontent.com/MinishLab/semble/main/assets/images/token_efficiency.png" alt="Token efficiency: recall vs. retrieved tokens"></td>
-</tr>
-</table>
-
-The quality benchmark (left) scores retrieval quality (NDCG@10) against total latency; zemble matches the quality of the 137M-parameter [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) while indexing 220x faster. The token efficiency benchmark (right) measures how many tokens each method needs to reach a given recall level; zemble uses 99% fewer tokens on average and hits 97% recall at only 2k tokens, while grep+read needs a full 100k context window to reach 85%. See [benchmarks](benchmarks/README.md) for per-language results, ablations, and full methodology.
+An ambiguous symbol comes back as an `error` payload with a `candidates` list rather than
+as a failure. Per-agent setup is in the [installation docs](docs/installation.md#mcp-server).
 
 ## How it works
 
-Zemble splits each file into code-aware chunks using [tree-sitter](https://github.com/tree-sitter/py-tree-sitter), then scores every query against the chunks with two complementary retrievers: static [Model2Vec](https://github.com/MinishLab/model2vec) embeddings using the code-specialized [potion-code-16M-v2](https://huggingface.co/minishlab/potion-code-16M-v2) model for semantic similarity, and BM25 for lexical matches on identifiers and API names. The two score lists are fused with Reciprocal Rank Fusion (RRF).
+Files are split into code-aware chunks with
+[tree-sitter](https://github.com/tree-sitter/py-tree-sitter). Every query is scored
+against those chunks by two retrievers: static [Model2Vec](https://github.com/MinishLab/model2vec)
+embeddings from the code-specialized
+[potion-code-16M-v2](https://huggingface.co/minishlab/potion-code-16M-v2) model for
+semantic similarity, and BM25 for lexical matches on identifiers and API names. The two
+ranked lists are fused with reciprocal rank fusion. Because the embedding model is static
+there is no transformer forward pass at query time, so all of it runs in milliseconds on
+CPU.
 
-After fusing, results are reranked with a set of code-aware signals:
+After fusion the list is reordered with code-aware signals:
 
 <details>
 <summary><b>Ranking signals</b></summary>
 
-- **Adaptive weighting.** Symbol-like queries (`Foo::bar`, `_private`, `getUserById`) get more lexical weight, while natural-language queries stay balanced between semantic and lexical retrievers.
-- **Definition boosts.** A chunk that defines the queried symbol (a `class`, `def`, `func`, etc.) is ranked above chunks that merely reference it.
-- **Identifier stems.** Query tokens are stemmed and matched against identifier stems in a chunk, giving an additional weight to chunks that contain them. For example, querying `parse config` boosts chunks containing `parseConfig`, `ConfigParser`, or `config_parser`.
-- **File coherence.** When multiple chunks from the same file match the query, the file is boosted so the top result reflects broad file-level relevance rather than a single out-of-context chunk.
-- **Noise penalties.** Test files, `compat/`/`legacy/` shims, example code, and `.d.ts` declaration stubs are down-ranked so canonical implementations surface first.
+- **Adaptive weighting.** Symbol-like queries (`Foo::bar`, `_private`, `getUserById`) get
+  more lexical weight; natural-language queries stay balanced.
+- **Definition boosts.** A chunk that defines the queried symbol outranks chunks that
+  merely reference it.
+- **Identifier stems.** Query tokens are stemmed against identifier stems, so `parse
+  config` boosts `parseConfig`, `ConfigParser` and `config_parser`.
+- **File coherence.** Several matching chunks in one file boost that file, so the top
+  result reflects file-level relevance rather than one out-of-context chunk.
+- **Noise penalties.** Test files, `compat/` and `legacy/` shims, example code and `.d.ts`
+  stubs are down-ranked so canonical implementations surface first.
 
 </details>
 
-Because the embedding model is static with no transformer forward pass at query time, all of this runs in milliseconds on CPU.
+Three things this fork adds to that pipeline. The **capsule** puts each chunk's path,
+package, enclosing type chain, signature and used imports into both the dense text and
+the BM25 document, which is what lets a mid-body chunk be found by the name of the class
+it lives in (and, on the reranker path, what a cross-encoder needs to tell a method body
+from prose). The **graph overlay** is a second index beside the search index, built by a
+tree-sitter extractor and a name resolver, whose edges are replaced by real compiler
+output for any file a build emitted fresh facts for. The **daemon** holds both in RAM for
+one user and reindexes incrementally on file changes, so the index load is paid once
+instead of once per invocation.
 
-Indexes are cached to disk automatically on the first search. On subsequent runs, Zemble walks the file tree and compares modification times; added, removed, or changed files are reindexed incrementally, without rebuilding the rest of the index. A full rebuild only happens if the indexing settings change (e.g., after a zemble upgrade that changes the model, chunking, or cache format). In MCP mode, the index is checked and refreshed automatically as files change, so results stay current across the session.
+Indexes are cached to disk on the first search. Later runs compare modification times and
+reindex only added, removed or changed files; a full rebuild happens only when the
+indexing settings change (a different model, chunker or cache format). The on-disk index
+is columnar: BM25 postings in CSR form, the vector matrix mmap-mapped, chunks as one blob
+plus offsets, and a precomputed symbol-definition table.
 
 ### Using a custom model
 
-If you would like to use another model, you can set your `ZEMBLE_MODEL_NAME` environment variable to a local path or Hugging Face repository. This path is read verbatim, and should contain a [`Model2Vec`](https://github.com/MinishLab/model2vec) compatible model. This is particularly useful if you can't access Hugging Face at runtime.
+Set `ZEMBLE_MODEL_NAME` to a local path or a Hugging Face repository holding a
+[Model2Vec](https://github.com/MinishLab/model2vec)-compatible model. The value is read
+verbatim, which is also how you run without Hugging Face access at query time.
 
 ### Using an API embedder
 
-Zemble can also embed through the Voyage API or any OpenAI-compatible
-`/v1/embeddings` endpoint (Ollama, LM Studio, vLLM, OpenAI), selected with a
-single spec string on `--embedder` or in `ZEMBLE_EMBEDDER`:
+One spec string on `--embedder` or in `ZEMBLE_EMBEDDER` picks the provider:
 
 ```bash
-zemble search "auth flow" ./my-project --embedder voyage:voyage-code-4@256
+zemble search "auth flow" ./my-project --embedder voyage:voyage-4-lite@1024
 zemble search "auth flow" ./my-project --embedder openai:http://localhost:11434/v1#nomic-embed-text
 ```
 
-Embeddings from API providers are cached by content hash, so unchanged code is
-never paid for twice. See [docs/embedders.md](docs/embedders.md) for the full
-spec grammar, environment variables, cache location and cost notes.
+Mixing embedders in one index is refused loudly, never silently blended. See
+[docs/embedders.md](docs/embedders.md) for the grammar, the environment variables, the
+cache and the cost notes.
 
 ### Java compiler facts
 
-For Java codebases, [`javac-facts/`](javac-facts/README.md) holds `zemble-javac-facts`, a small
-standalone javac plugin that emits what the compiler itself resolved -- declared symbols, calls with
-the exact overload javac selected, overrides, supertype edges and constant annotation arguments --
-as JSONL in zemble's graph-facts format. It plugs into any Gradle or Maven build (or plain `javac`),
-depends only on the documented `com.sun.source` API, and gives the graph precise Java edges without
-re-implementing name and overload resolution on top of tree-sitter.
+[`javac-facts/`](javac-facts/README.md) holds `zemble-javac-facts`, a standalone javac
+plugin that writes down what the compiler itself resolved: declared symbols, calls with
+the exact overload javac selected, overrides, supertype edges and constant annotation
+arguments. It depends only on the documented `com.sun.source` API and plugs into Gradle,
+Maven or plain javac.
+
+How the facts flow: the build emits one JSONL file per compile task, by convention at
+`build/zemble/facts-*.jsonl`. zemble finds those files under the indexed root, and every
+`file` line in them names the sha256 of the source it was derived from. When that hash
+still matches the file on disk, the facts are **fresh** and the `CALLS`, `OVERRIDES`,
+`EXTENDS` and `IMPLEMENTS` edges for that file come from the compiler instead of from
+tree-sitter; when it does not, the facts for that one file are ignored and the extracted
+edges stay. Freshness is per source file, so one edit does not invalidate the other 400
+facts in the same file. `zemble graph facts status` reports coverage and staleness, and
+every answer names the tool that produced the edge it is showing. The format is
+documented in [docs/graph-facts.md](docs/graph-facts.md) and any analyzer can write it.
 
 ## Acknowledgements
 
-Thanks to [Greptile](https://greptile.com) for providing free access to their AI code review platform.
+- [Semble](https://github.com/MinishLab/semble) by MinishLab, which this is a fork of and
+  which is the whole retrieval core.
+- [model2vec](https://github.com/MinishLab/model2vec) for the static embedding models and
+  [vicinity](https://github.com/MinishLab/vicinity) for the vector store.
+- [tree-sitter](https://github.com/tree-sitter/py-tree-sitter) for the grammars every
+  chunk boundary and every symbol comes from.
+- [Voyage AI](https://www.voyageai.com/) for the hosted embedding and reranking models
+  the optional configurations use.
 
 ## License
 
-MIT
+MIT, the same as upstream. See [LICENSE](LICENSE).
 
 ## Citing
 
-zemble is derived from Semble. If you use it in your research, please cite the upstream work:
+zemble is derived from Semble, and work using it should cite the upstream software:
 
 ```bibtex
 @software{minishlab2026semble,
