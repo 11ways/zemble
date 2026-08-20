@@ -45,11 +45,12 @@ def _load_phases(path: str, timer: Timer) -> ZembleIndex:
 
     from zemble.embedding.registry import load_embedder
     from zemble.index.bm25 import BM25
+    from zemble.index.chunk_store import load_chunks
     from zemble.index.dense import SelectableBasicBackend
+    from zemble.index.symbols import SymbolDefinitions
     from zemble.index.types import FileManifestEntry, PersistencePath
-    from zemble.types import Chunk
 
-    embedder_id = load_embedder().model_id
+    embedder_id = timer.time("load_model", lambda: load_embedder().model_id)
     cache_path = timer.time("cache_validate", lambda: get_validated_cache(path, embedder_id, (ContentType.CODE,)))
     if cache_path is None:
         raise SystemExit(f"No valid cached index for {path}; build one first.")
@@ -58,18 +59,23 @@ def _load_phases(path: str, timer: Timer) -> ZembleIndex:
     metadata = timer.time("load_metadata", lambda: orjson.loads(pp.metadata.read_bytes()))
     bm25_index = timer.time("load_bm25", lambda: BM25.load(pp.bm25_index))
     semantic_index = timer.time("load_dense", lambda: SelectableBasicBackend.load(pp.semantic_index))
-    chunks = timer.time("load_chunks", lambda: [Chunk.from_dict(item) for item in orjson.loads(pp.chunks.read_bytes())])
-    embedder = timer.time("load_model", lambda: load_embedder(metadata["embedder"]))
+    chunks = timer.time("load_chunks", lambda: load_chunks(pp.chunks))
+    definitions = timer.time("load_symbols", lambda: SymbolDefinitions.load(pp.symbols))
+    embedder = load_embedder(metadata["embedder"])
     manifest = {p: FileManifestEntry(**e) for p, e in metadata.get("files", {}).items()}
-    index = ZembleIndex(
-        embedder,
-        bm25_index,
-        semantic_index,
-        chunks,
-        root=Path(metadata["root_path"]) if metadata["root_path"] else None,
-        content=tuple(ContentType(s) for s in metadata.get("content_type", ["code"])),
-        loaded_from_disk=True,
-        manifest=manifest,
+    index = timer.time(
+        "build_index_object",
+        lambda: ZembleIndex(
+            embedder,
+            bm25_index,
+            semantic_index,
+            chunks,
+            root=Path(metadata["root_path"]) if metadata["root_path"] else None,
+            content=tuple(ContentType(s) for s in metadata.get("content_type", ["code"])),
+            loaded_from_disk=True,
+            manifest=manifest,
+            definitions=definitions,
+        ),
     )
     return index
 
@@ -97,7 +103,7 @@ def _query_phases(index: ZembleIndex, query: str, top_k: int, timer: Timer) -> l
         combined = {c: alpha * ns.get(c, 0.0) + (1.0 - alpha) * nb.get(c, 0.0) for c in candidates}
         combined = {c: s for c, s in combined.items() if s}
         boost_multi_chunk_files(combined)
-        combined = apply_query_boost(combined, query, chunks)
+        combined = apply_query_boost(combined, query, chunks, index._definitions)
         return rerank_topk(combined, top_k, penalise_paths=alpha < 1.0)
 
     ranked = timer.time("fuse_rank", _fuse)
