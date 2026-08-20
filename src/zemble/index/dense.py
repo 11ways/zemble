@@ -10,6 +10,7 @@ from vicinity.utils import normalize
 
 from zemble.chunking.capsule import embedding_text
 from zemble.embedding.base import Embedder
+from zemble.index.columnar import atomic_save
 from zemble.types import Chunk
 
 
@@ -73,9 +74,14 @@ class SelectableBasicBackend(CosineBasicBackend):
         return out
 
     def save(self, path: Path) -> None:
-        """Save the selectable basic backend; its vectors are already unit length."""
+        """Save the backend; its vectors are already unit length.
+
+        The matrix is replaced rather than truncated in place: another index generation may
+        still have this very file mapped read-only while this one is written.
+        """
         path.mkdir(parents=True, exist_ok=True)
-        super().save(path)
+        atomic_save(path / "vectors.npy", self.vectors)
+        self.arguments.dump(path / "arguments.json")
 
     @classmethod
     def load(cls, path: Path, writable: bool = False) -> "SelectableBasicBackend":

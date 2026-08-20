@@ -3,11 +3,39 @@
 from __future__ import annotations
 
 import mmap
+import os
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+
+
+def _temporary_suffix() -> str:
+    """Return a suffix no other writer of the same file can be using."""
+    return f"{os.getpid()}.{threading.get_ident()}"
+
+
+def atomic_bytes(path: Path, data: bytes) -> None:
+    """Write a file by replacing it, never by truncating the one that is there.
+
+    A warm process keeps the columns of the index it loaded memory-mapped, and those files
+    live in the directory a save writes into. Truncating one under a live mapping is a
+    SIGBUS on the next page touch, so every column is written beside its target and moved
+    onto it: the mapping keeps the inode it already had.
+    """
+    temporary = path.with_name(f"{path.name}.{_temporary_suffix()}.tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
+
+
+def atomic_save(path: Path, array: npt.NDArray) -> None:
+    """Write one .npy column the way :func:`atomic_bytes` writes a blob."""
+    temporary = path.with_name(f"{path.name}.{_temporary_suffix()}.tmp.npy")
+    with open(temporary, "wb") as handle:
+        np.save(handle, array)
+    os.replace(temporary, path)
 
 
 def map_blob(path: Path) -> bytes | mmap.mmap:
@@ -79,12 +107,18 @@ class StringTable:
         return f"{name}.bin", f"{name}_offsets.npy"
 
     @classmethod
-    def save(cls, path: Path, name: str, values: Sequence[str]) -> None:
-        """Write a string table; *values* must already be in the order lookups expect."""
+    def of(cls, values: Sequence[str]) -> "StringTable":
+        """Build an in-memory table; *values* must already be in the order lookups expect."""
         encoded = [value.encode("utf-8") for value in values]
+        return cls(b"".join(encoded), offsets_of(encoded))
+
+    @classmethod
+    def save(cls, path: Path, name: str, values: Sequence[str] | "StringTable") -> None:
+        """Write a string table; *values* must already be in the order lookups expect."""
+        table = values if isinstance(values, StringTable) else cls.of(values)
         blob_name, offsets_name = cls.file_names(name)
-        (path / blob_name).write_bytes(b"".join(encoded))
-        np.save(path / offsets_name, offsets_of(encoded))
+        atomic_bytes(path / blob_name, bytes(table._blob[:]))
+        atomic_save(path / offsets_name, np.asarray(table._offsets))
 
     @classmethod
     def load(cls, path: Path, name: str) -> "StringTable":
