@@ -107,6 +107,29 @@ changed is never paid for twice.
 Model2Vec is deliberately *not* wrapped: embedding locally is faster than a
 sqlite round trip.
 
+## The capsule path is repo-relative
+
+The cache is keyed by the text a chunk is embedded as, and that text starts with the
+chunk's context capsule, whose first segment is a path. That path is therefore **not**
+index-root-relative: for a file inside a git working tree it is
+`<git-root directory name>/<path inside that repo>`, resolved from the nearest ancestor
+holding a `.git` entry and cached per directory. Outside any git repository it falls back
+to the index-root-relative path.
+
+Without this, the same file embedded as part of a workspace
+(`zenit/src/.../PageWindow.java`) and as its own repo (`src/.../PageWindow.java`) is two
+different texts, and a sub-repo index misses the cache for every chunk it holds - which
+is exactly how a refusal to embed ~15,000 already-paid-for chunks happened.
+
+- `Chunk.file_path` is unchanged: it stays relative to the index root.
+- For a workspace whose root is not itself a repo (each sub-directory is), the text is
+  byte-identical to what it was before this rule existed: 88,592 of 88,592 javaweb
+  capsules unchanged, so no index rebuilds and `CACHE_FORMAT_VERSION` is not bumped.
+- An index built *for a sub-repo root* before this rule keeps serving with its old
+  capsules until a file changes (only re-chunked files pick up the new text). Clear it
+  with `zemble clear index` to move it over in one go; the embeddings then come from the
+  cache and cost nothing.
+
 ## Mixing embedders is refused
 
 An index records its `embedder` and `dimensions`. If a cached index was built
@@ -179,6 +202,12 @@ ZEMBLE_EMBED_CONFIRM=1) to embed anyway, or raise ZEMBLE_EMBED_BUDGET_TOKENS.
 - The daemon catches a refusal, logs one line, keeps the previous index serving (nothing
   is embedded and nothing is swapped) and shows it in `zemble daemon status` as the
   root's `last_error`.
+- A refusal for a path that sits inside an already-indexed tree names that tree and the
+  way out, because indexing a sub-repo of an indexed workspace is almost never what was
+  wanted: `/work/zenit is inside /work, which is already indexed: search /work instead,
+  or pass the workspace root; to index /work/zenit on its own anyway set
+  ZEMBLE_EMBED_CONFIRM=1.` (Normally the request never gets that far - see
+  "serving a sub-path from an ancestor index" in `docs/daemon.md`.)
 - Every paid embed logs one INFO line first:
   `embedding 812 uncached chunk(s), ~171000 tokens, ~$0.02 with voyage:voyage-4-lite@1024`.
 

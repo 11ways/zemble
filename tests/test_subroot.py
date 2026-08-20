@@ -9,7 +9,13 @@ from unittest.mock import patch
 
 import pytest
 
-from zemble.cache import find_ancestor_index_root, resolve_index_root, save_index_to_cache
+from tests.conftest import write_index_components
+from zemble.cache import (
+    find_ancestor_index_root,
+    indexed_ancestor_hint,
+    resolve_index_root,
+    save_index_to_cache,
+)
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
 
@@ -151,3 +157,23 @@ def test_resolve_index_root_finds_a_validated_on_disk_ancestor(
         str(workspace / "alpha"),
         None,
     ), "a deliberate sub-root index is not thrown away"
+
+
+def test_the_refusal_names_the_ancestor_that_is_already_indexed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused build inside an indexed tree says which root to search instead."""
+    monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(tmp_path / "cache"))
+    workspace = _workspace(tmp_path / "work")
+
+    assert indexed_ancestor_hint(str(workspace / "alpha")) is None, "no ancestor index, no advice"
+
+    from zemble.cache import find_index_from_cache_folder
+
+    index_folder = find_index_from_cache_folder(str(workspace))
+    write_index_components(index_folder)
+    (index_folder / "metadata.json").write_text("{}", encoding="utf-8")
+    hint = indexed_ancestor_hint(str(workspace / "alpha"))
+    assert hint is not None, "an indexed ancestor is named"
+    assert str(workspace) in hint and str(workspace / "alpha") in hint, "both paths are named"
+    assert "ZEMBLE_EMBED_CONFIRM=1" in hint, "and the way to index it anyway"

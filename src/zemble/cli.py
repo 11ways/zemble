@@ -10,7 +10,7 @@ from pathlib import Path
 from shutil import rmtree
 from typing import Literal
 
-from zemble.cache import cache_key, resolve_cache_folder, resolve_index_root, save_index_to_cache
+from zemble.cache import cache_key, indexed_ancestor_hint, resolve_cache_folder, resolve_index_root, save_index_to_cache
 from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser, run_embed_status
@@ -260,7 +260,11 @@ def _load_index(path: str, content: list[ContentType], embedder: str | None = No
     """
     try:
         return _build_index(path, content, embedder)
-    except (FileNotFoundError, EmbedderSpecError, EmbeddingBudgetExceeded) as e:
+    except EmbeddingBudgetExceeded as e:
+        hint = indexed_ancestor_hint(path, content)
+        print(f"{e} {hint}" if hint else str(e), file=sys.stderr)
+        sys.exit(1)
+    except (FileNotFoundError, EmbedderSpecError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 

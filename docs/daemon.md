@@ -50,6 +50,33 @@ cooldown scaled by build time. The daemon adds an eviction callback (so an evict
 root stops being watched), a resident-index limit, last-used timestamps, and
 `replace()` for the atomic swap a rebuild ends with.
 
+### Serving a sub-path from an ancestor index
+
+A request naming a directory *inside* a root that is already indexed is answered from
+that root, filtered to the sub-directory, instead of building a second index over the
+same files. `IndexCache.get_with_key` resolves the request first (`resolve_index_root`
+in `zemble/cache.py`), and the daemon's `index_for` returns the ANCESTOR's cache key
+together with a restricted view of its index.
+
+- Order of preference: an index of exactly the requested path (in memory or on disk)
+  keeps serving it; else the nearest ancestor that is loaded, or whose on-disk index
+  validates for the same content types; else the path is indexed on its own, as before.
+- The view is a `ZembleIndex` sharing the ancestor's chunks, vectors and postings, with a
+  path-prefix chunk selector (dense `selector`, BM25 `weight_mask`) applied to every
+  query - the same mechanism `find_related` already used to stay inside one language.
+  Ranking is the big index's ranking, restricted to the sub-tree.
+- **Result paths stay relative to the ancestor root** (`zenit/src/Foo.java`, not
+  `src/Foo.java`). That keeps one vocabulary across search, `find_related`, the symbol
+  graph, `explain` and `outline`, all of which are answered from the same root.
+- `stats` describes the sub-tree: its files, its chunks, its languages.
+- One INFO line is logged per resolution:
+  `serving /work/zenit from the /work index (subtree filter)`.
+- If the ancestor holds nothing under the sub-directory, the sub-directory is indexed on
+  its own instead of answering emptily.
+
+This is what a sub-repo request costs now: no build, no embedding, no second resident
+index. `zemble daemon status` keeps showing one index, the workspace.
+
 ### Watching
 
 Each loaded local root is watched recursively with `watchfiles`. Events are filtered

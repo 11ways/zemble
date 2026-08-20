@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import orjson
 
 from zemble.chunking.capsule import CapsuleOptions
+from zemble.embedding.pricing import CONFIRM_ENV
 from zemble.index.bm25 import BM25
 from zemble.index.chunk_store import load_chunks
 from zemble.index.dense import SelectableBasicBackend
@@ -263,6 +264,31 @@ def resolve_index_root(
     prefix = resolved.relative_to(ancestor).as_posix()
     logger.info("serving %s from the %s index (subtree filter)", resolved, ancestor)
     return ancestor, prefix
+
+
+def indexed_ancestor_hint(path: str, content: Sequence[ContentType] = (ContentType.CODE,)) -> str | None:
+    """Return the "you are inside an indexed tree" advice for a refused build, or None.
+
+    Staleness is deliberately not checked here: a stale ancestor index still means the answer
+    to a refused sub-tree build is to search the ancestor, not to pay for a second index.
+
+    :param path: The path whose build was refused.
+    :param content: The content types that were requested.
+    :return: One sentence naming the ancestor and the ways out, or None when there is no ancestor index.
+    """
+    if is_git_url(path):
+        return None
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:  # pragma: no cover - resolve() only raises on exotic filesystems
+        return None
+    for ancestor in _ancestor_directories(resolved):
+        if has_cached_index(str(ancestor), content):
+            return (
+                f"{resolved} is inside {ancestor}, which is already indexed: search {ancestor} instead, "
+                f"or pass the workspace root; to index {resolved} on its own anyway set {CONFIRM_ENV}=1."
+            )
+    return None
 
 
 def load_manifest_for_incremental(

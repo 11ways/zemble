@@ -13,8 +13,9 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from zemble.cache import get_validated_cache, resolve_index_root, save_index_to_cache
+from zemble.cache import get_validated_cache, indexed_ancestor_hint, resolve_index_root, save_index_to_cache
 from zemble.embedding.base import Embedder
+from zemble.embedding.pricing import EmbeddingBudgetExceeded
 from zemble.embedding.registry import load_embedder
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
@@ -98,11 +99,15 @@ class IndexCache:
     def _build_index(self, source: str, ref: str | None, embedder: Embedder, cache_key: CacheKey) -> ZembleIndex:
         """Build an index for the given source and cache it."""
         source_key, content = cache_key
-        index = (
-            ZembleIndex.from_git(source, ref=ref, embedder=embedder, content=content)
-            if is_git_url(source)
-            else ZembleIndex.from_path(source_key, embedder=embedder, content=content)
-        )
+        try:
+            index = (
+                ZembleIndex.from_git(source, ref=ref, embedder=embedder, content=content)
+                if is_git_url(source)
+                else ZembleIndex.from_path(source_key, embedder=embedder, content=content)
+            )
+        except EmbeddingBudgetExceeded as exc:
+            hint = indexed_ancestor_hint(source_key, content)
+            raise EmbeddingBudgetExceeded(f"{exc} {hint}" if hint else str(exc)) from exc
         try:
             save_index_to_cache(index, source_key)
         except Exception:

@@ -80,5 +80,8 @@ overwrite each other. Never tune on individual eval queries.
 - Caches: `~/.cache/zemble/` (indexes, `embeddings/*.sqlite`, `javac-facts/`,
   `daemon.log`); daemon socket `$XDG_RUNTIME_DIR/zemble/daemon.sock`. The embedding
   cache is keyed by chunk text + dims: changing capsule text means a full re-embed.
+- A path inside an already indexed root is served from that root's index, filtered to the
+  sub-tree (result paths stay ancestor-relative), and the capsule's path segment is
+  repo-relative (`<git-root name>/<inner path>`) so both roots embed the same text.
 - Upstream remote is `upstream` (MinishLab/semble); origin is `11ways/zemble`. Keep
   Semble's attribution in README, CITATION.cff and LICENSE.
