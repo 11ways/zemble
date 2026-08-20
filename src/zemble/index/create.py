@@ -6,7 +6,7 @@ import numpy as np
 from vicinity.backends.basic import BasicArgs
 
 from zemble.chunking import chunk_source
-from zemble.chunking.capsule import CapsuleOptions
+from zemble.chunking.capsule import CapsuleOptions, RepoRelativePaths
 from zemble.embedding.base import Embedder
 from zemble.index.bm25 import BM25
 from zemble.index.dense import SelectableBasicBackend, embed_chunks
@@ -94,6 +94,7 @@ def plan_files(
     """
     resolved_capsules = CapsuleOptions.resolve(capsules)
     normalized = (content,) if isinstance(content, ContentType) else content
+    repo_paths = RepoRelativePaths()
     for walked in walk_entries(path, get_extensions(normalized)):
         try:
             if get_file_status(walked.path, None, walked.stat) != FileStatus.VALID:
@@ -107,7 +108,11 @@ def plan_files(
                 planned = PlannedFile(indexed_path, mtime_ns, previous_entry, True, reused, previous_entry.count)
             else:
                 file_chunks = chunk_source(
-                    read_file_text(walked.path), indexed_path, detect_language(walked.path), resolved_capsules
+                    read_file_text(walked.path),
+                    indexed_path,
+                    detect_language(walked.path),
+                    resolved_capsules,
+                    repo_paths.path_for(walked.path, indexed_path),
                 )
                 planned = PlannedFile(indexed_path, mtime_ns, previous_entry, False, file_chunks, len(file_chunks))
         except OSError:
@@ -144,6 +149,7 @@ def plan_changed_files(
     resolved_capsules = CapsuleOptions.resolve(capsules)
     normalized = (content,) if isinstance(content, ContentType) else content
     extensions = {extension.lower() for extension in get_extensions(normalized)}
+    repo_paths = RepoRelativePaths()
     manifest = previous_manifest or {}
     root_for_paths = display_root if display_root is not None else path
 
@@ -164,12 +170,12 @@ def plan_changed_files(
             reused = list(previous_chunks[previous_entry.start : previous_entry.end]) if previous_chunks else []
             yield PlannedFile(indexed_path, previous_entry.mtime_ns, previous_entry, True, reused, previous_entry.count)
             continue
-        planned = _plan_one(candidate, indexed_path, previous_entry, previous_chunks, resolved_capsules)
+        planned = _plan_one(candidate, indexed_path, previous_entry, previous_chunks, resolved_capsules, repo_paths)
         if planned is not None:
             yield planned
 
     for indexed_path in sorted(touched):
-        planned = _plan_one(touched[indexed_path], indexed_path, None, None, resolved_capsules)
+        planned = _plan_one(touched[indexed_path], indexed_path, None, None, resolved_capsules, repo_paths)
         if planned is not None:
             yield planned
 
@@ -180,6 +186,7 @@ def _plan_one(
     previous_entry: FileManifestEntry | None,
     previous_chunks: Sequence[Chunk] | None,
     capsules: CapsuleOptions,
+    repo_paths: RepoRelativePaths,
 ) -> PlannedFile | None:
     """Plan one named file, reusing its chunks when its modification time did not move."""
     try:
@@ -190,7 +197,13 @@ def _plan_one(
         if previous_entry is not None and previous_entry.mtime_ns == mtime_ns:
             reused = list(previous_chunks[previous_entry.start : previous_entry.end]) if previous_chunks else []
             return PlannedFile(indexed_path, mtime_ns, previous_entry, True, reused, previous_entry.count)
-        file_chunks = chunk_source(read_file_text(file_path), indexed_path, detect_language(file_path), capsules)
+        file_chunks = chunk_source(
+            read_file_text(file_path),
+            indexed_path,
+            detect_language(file_path),
+            capsules,
+            repo_paths.path_for(file_path, indexed_path),
+        )
         return PlannedFile(indexed_path, mtime_ns, previous_entry, False, file_chunks, len(file_chunks))
     except OSError:
         return None

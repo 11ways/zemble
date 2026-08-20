@@ -313,3 +313,61 @@ def test_find_related_embeds_the_seed_with_its_capsule(tmp_path: Path, mock_embe
     index.find_related(seed, top_k=3)
     assert mock_embedder.query_calls == [[embedding_text(seed)]]
     assert seed.context and seed.context in mock_embedder.query_calls[0][0]
+
+
+def _repo_workspace(root: Path) -> Path:
+    """Write a workspace holding one git repo and one directory that is in no repo."""
+    (root / "zenit" / ".git").mkdir(parents=True)
+    (root / "zenit" / "src").mkdir()
+    (root / "zenit" / "src" / "Greeter.java").write_text(
+        textwrap.dedent(
+            """\
+            package be.example.greeting;
+
+            public class Greeter {
+                public String greet(String name) {
+                    return "hello " + name;
+                }
+            }
+            """
+        ),
+        encoding="utf-8",
+    )
+    (root / "loose").mkdir()
+    (root / "loose" / "notes.py").write_text("def note():\n    return 1\n", encoding="utf-8")
+    return root
+
+
+def test_the_capsule_path_is_repo_relative_not_index_root_relative(tmp_path: Path) -> None:
+    """A file in a git repo names itself the same way under every index root.
+
+    This is what makes the embedding cache hit when a sub-repo is indexed on its own: the
+    capsule is part of the embedded text, so a path that moves with the index root re-embeds
+    the whole sub-tree for nothing.
+    """
+    from zemble.index.create import plan_files
+
+    workspace = _repo_workspace(tmp_path / "work")
+
+    # 1. Indexed as part of the workspace, the Java file is named by its repo and its inner path.
+    from_workspace = {planned.indexed_path: planned.chunks for planned in plan_files(workspace, display_root=workspace)}
+    assert "zenit/src/Greeter.java" in from_workspace, "the workspace stores root-relative paths"
+    workspace_contexts = [chunk.context for chunk in from_workspace["zenit/src/Greeter.java"]]
+    assert workspace_contexts[0].startswith("zenit/src/Greeter.java "), "the capsule names the repo"
+
+    # 2. Indexed as its own root, the same file produces byte-identical capsules.
+    repo_root = workspace / "zenit"
+    from_repo = {planned.indexed_path: planned.chunks for planned in plan_files(repo_root, display_root=repo_root)}
+    assert "src/Greeter.java" in from_repo, "chunk file paths stay relative to the index root"
+    assert [chunk.context for chunk in from_repo["src/Greeter.java"]] == workspace_contexts, (
+        "the capsule text does not depend on which root the index was built from"
+    )
+
+    # 3. Outside any git repo the capsule falls back to the index-root-relative path.
+    loose_from_workspace = next(
+        planned for planned in plan_files(workspace, display_root=workspace) if planned.indexed_path.startswith("loose")
+    )
+    assert loose_from_workspace.chunks[0].context.startswith("loose/notes.py "), "no repo, no rewrite"
+    loose_root = workspace / "loose"
+    loose_from_itself = next(iter(plan_files(loose_root, display_root=loose_root)))
+    assert loose_from_itself.chunks[0].context.startswith("notes.py "), "and it stays root-relative there"

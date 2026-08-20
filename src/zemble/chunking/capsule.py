@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import cached_property
+from pathlib import Path
 
 from tree_sitter import Node
 
@@ -130,6 +131,58 @@ class CapsuleOptions:
         raw_bm25 = os.environ.get("ZEMBLE_CAPSULE_BM25")
         in_bm25 = DEFAULT_IN_BM25 if raw_bm25 is None else raw_bm25.strip().lower() in ("1", "true", "yes", "on")
         return cls(level=level, in_bm25=in_bm25)
+
+
+class RepoRelativePaths:
+    """Maps an indexed file to ``<repo directory name>/<path inside that repo>``.
+
+    The capsule's first segment is embedded text, so it must not depend on which root the
+    index was built from: the same file indexed as part of a workspace and as its own repo
+    has to produce the same bytes, or the content-hashed embedding cache misses for the
+    whole sub-tree. The nearest ancestor holding a ``.git`` entry is the anchor, and it is
+    cached per directory because a build asks about every file in the tree.
+    """
+
+    def __init__(self) -> None:
+        """Start with an empty per-directory git-root cache."""
+        self._roots: dict[Path, Path | None] = {}
+
+    def path_for(self, absolute: Path, fallback: str) -> str:
+        """Return the capsule path for a file, or *fallback* when it is in no git repository.
+
+        :param absolute: The file's absolute path.
+        :param fallback: The index-root-relative path to use outside any repository.
+        :return: The path the capsule names this file by.
+        """
+        root = self._git_root(absolute.parent)
+        if root is None or not root.name:
+            return fallback
+        try:
+            inside = absolute.relative_to(root).as_posix()
+        except ValueError:  # pragma: no cover - path_for is always called with a file under its own parent
+            return fallback
+        return f"{root.name}/{inside}"
+
+    def _git_root(self, directory: Path) -> Path | None:
+        """Return the nearest ancestor of *directory* (inclusive) holding a ``.git`` entry."""
+        unresolved: list[Path] = []
+        current = directory
+        while True:
+            if current in self._roots:
+                found = self._roots[current]
+                break
+            unresolved.append(current)
+            if (current / ".git").exists():
+                found = current
+                break
+            parent = current.parent
+            if parent == current:
+                found = None
+                break
+            current = parent
+        for pending in unresolved:
+            self._roots[pending] = found
+        return found
 
 
 def _text(node: Node | None) -> str:

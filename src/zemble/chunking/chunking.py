@@ -17,6 +17,7 @@ def chunk_source(
     file_path: str,
     language: str | None,
     capsules: CapsuleOptions | None = None,
+    capsule_path: str | None = None,
 ) -> list[Chunk]:
     """Chunk pre-read source text, stamping each chunk with its context capsule.
 
@@ -24,6 +25,8 @@ def chunk_source(
     :param file_path: The repo-relative path stored on every chunk.
     :param language: The detected language, or None for line chunking.
     :param capsules: Capsule knobs; None resolves the environment override, else the defaults.
+    :param capsule_path: The path the capsule names the file by; None uses *file_path*.
+        It is repo-relative, so the same file yields the same embedding text under any index root.
     :return: The file's chunks, in source order.
     """
     if not source.strip():
@@ -41,7 +44,7 @@ def chunk_source(
         chunk_boundaries = chunk_lines(source, _DESIRED_CHUNK_LENGTH_CHARS)
 
     file_context = (
-        FileContext(file_path=file_path, source=source, language=language, root=root)
+        FileContext(file_path=capsule_path or file_path, source=source, language=language, root=root)
         if level is not CapsuleLevel.OFF
         else None
     )
