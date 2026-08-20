@@ -16,6 +16,7 @@ from zemble.cache import get_validated_cache, save_index_to_cache
 from zemble.dedup.mcp import register_dupes_tool
 from zemble.embedding.base import Embedder
 from zemble.embedding.registry import load_embedder
+from zemble.evidence.mcp import register_evidence_tools
 from zemble.graph.mcp import register_graph_tools
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
@@ -157,6 +158,7 @@ def create_server(cache: _IndexCache, default_content: Sequence[ContentType] = (
 
     register_graph_tools(server)
     register_dupes_tool(server)
+    register_evidence_tools(server, lambda repo, selected: _get_index(repo, cache, selected), default_content)
     return server
 
 

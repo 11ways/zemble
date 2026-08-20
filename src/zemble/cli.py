@@ -12,6 +12,7 @@ from typing import Literal
 from zemble.cache import cache_key, resolve_cache_folder, save_index_to_cache
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
+from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.index import ZembleIndex
 from zemble.index.types import PersistencePath
@@ -36,12 +37,13 @@ _CLI_DISPATCH_ARGS = frozenset(
         "-V",
         "graph",
         "dupes",
+        *EVIDENCE_COMMANDS,
     }
 )
 _CLEAR_CHOICE = Literal["all", "index", "savings", "orphans"]
 
 #: Subcommands that own their own runner and return an exit code.
-_SUBCOMMAND_RUNNERS = {"graph": run_graph, "dupes": run_dupes}
+_SUBCOMMAND_RUNNERS = {"graph": run_graph, "dupes": run_dupes, **dict.fromkeys(EVIDENCE_COMMANDS, run_evidence)}
 
 _SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
 
@@ -336,6 +338,7 @@ def _cli_main() -> None:
 
     add_graph_parser(sub)
     add_dupes_parser(sub)
+    add_evidence_parser(sub)
 
     install_p = sub.add_parser("install", help="Configure zemble across coding agents.")
     uninstall_p = sub.add_parser("uninstall", help="Remove zemble configuration from coding agents.")
