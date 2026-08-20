@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from zemble.evidence.bundle import build_bundle
+from zemble.evidence.intent import Intent
 from zemble.evidence.outline import OutlineError, Signatures, outline, signatures
 from zemble.graph.cli import select_symbol
 from zemble.graph.model import Symbol
@@ -21,7 +22,12 @@ DEFAULT_TOP_K = 20
 
 
 def explain_payload(
-    index: ZembleIndex, graph: GraphProvider, query: str, budget_tokens: int, top_k: int
+    index: ZembleIndex,
+    graph: GraphProvider,
+    query: str,
+    budget_tokens: int,
+    top_k: int,
+    intent: Intent | None = None,
 ) -> dict[str, Any]:
     """Build an evidence bundle and carry both of its renderings.
 
@@ -30,9 +36,10 @@ def explain_payload(
     :param query: The question the bundle answers.
     :param budget_tokens: The maximum estimated tokens the packed items may cost.
     :param top_k: How many search results to consider.
+    :param intent: Override the detected query intent, which decides the tier order.
     :return: The bundle as data, plus its markdown rendering.
     """
-    bundle = build_bundle(index, graph, query, budget_tokens, top_k=top_k)
+    bundle = build_bundle(index, graph, query, budget_tokens, top_k=top_k, intent=intent)
     return {"bundle": bundle.to_dict(), "markdown": bundle.render()}
 
 

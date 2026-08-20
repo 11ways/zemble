@@ -89,6 +89,28 @@ def test_cli_journey(
     assert _run(monkeypatch, graph_fixture_root, "signatures", root, "NotHere") == EXIT_NOT_FOUND, "step 7: exit 1"
     assert "No symbol named" in capsys.readouterr().err, "step 7: and says so"
 
+    # 8. The bundle header states the intent it detected and the rule that decided it.
+    _run(monkeypatch, graph_fixture_root, "explain", root, "how is an area computed", "--budget", "1500")
+    assert "intent: architecture (rule: how-does; order: default)" in capsys.readouterr().out, (
+        "step 8: the detection is printed beside the order that packed"
+    )
+
+    # 9. `--intent` overrides that detection, and says it was overridden.
+    _run(
+        monkeypatch,
+        graph_fixture_root,
+        "explain",
+        root,
+        "how is an area computed",
+        "--budget",
+        "1500",
+        "--intent",
+        "consumer",
+    )
+    assert "intent: consumer (rule: override; order: consumer)" in capsys.readouterr().out, (
+        "step 9: the override is honest"
+    )
+
 
 @pytest.fixture()
 def cache(mock_embedder: FakeEmbedder) -> IndexCache:

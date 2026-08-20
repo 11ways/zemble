@@ -8,11 +8,13 @@ line before it will drop it, so the answer always says what exists.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from zemble.evidence.intent import Intent, IntentMatch, classify
 from zemble.evidence.outline import outline_of, symbol_label
 from zemble.evidence.tokens import estimate_tokens
 from zemble.graph.model import CALLABLE_KINDS, TYPE_KINDS, EdgeKind, Hit, Resolution, Symbol, SymbolKind
@@ -31,6 +33,15 @@ MIN_TRUNCATED_LINES = 3
 MAX_OMITTED = 25
 # Share of the budget a tier will hold back so later tiers can at least be named.
 RESERVE_FRACTION = 0.4
+#: How many named symbols a consumer query is seeded from.
+MAX_SEEDED_SYMBOLS = 2
+#: Seeds outrank expanded candidates of the same tier: they answer the question asked.
+_SEED_SCORE = 1.0
+# A word inside a query that is spelled like a Java name rather than English: a dotted
+# path, an interior capital, or a capitalised word that is not the sentence's first.
+_IDENTIFIER_WORD = re.compile(
+    r"\b[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z0-9_$]+)+\b|\b[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*\b|\b[A-Z][a-z0-9]{2,}\b"
+)
 
 _ANON_MARKER = "$anon@"
 _DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
@@ -59,8 +70,8 @@ class Presentation(str, Enum):
     LOCATION = "location"
 
 
-# The packing order. Tier 0 is what search found; every later tier is one graph hop
-# away from it, ordered by how often it turns out to be the thing you needed.
+# The default packing order. Tier 0 is what search found; every later tier is one
+# graph hop away from it, ordered by how often it turns out to be the thing you needed.
 TIERS: dict[ItemKind, int] = {
     ItemKind.CHUNK: 0,
     ItemKind.OUTLINE: 1,
@@ -72,6 +83,90 @@ TIERS: dict[ItemKind, int] = {
     ItemKind.CALLEE: 4,
     ItemKind.DOC: 4,
 }
+
+#: How hard a primary chunk is cut when the answer is expected to live elsewhere.
+CONSUMER_CHUNK_LINES = 20
+#: How many call sites, implementations or tests one anchor may contribute per tier.
+CONSUMER_PER_ANCHOR = 8
+#: How many types an architecture answer outlines before it starts on raw chunks.
+ARCHITECTURE_OUTLINES = 3
+
+
+@dataclass(frozen=True)
+class TierPlan:
+    """The packing order and the caps one intent uses.
+
+    One table, one place: every deviation from the default order is a tier number
+    in `tiers` and a cap beside it, never a branch inside the packer.
+    """
+
+    #: What the order is called in a bundle header.
+    name: str
+    tiers: dict[ItemKind, int]
+    #: Per-anchor cap overrides; every other kind uses `MAX_PER_TIER_PER_ANCHOR`.
+    per_anchor: dict[ItemKind, int] = field(default_factory=dict)
+    #: Cap on how many outlines the whole bundle offers, None for no cap.
+    max_outlines: int | None = None
+    #: Line cap applied to a primary chunk before packing, None for the chunk as found.
+    max_chunk_lines: int | None = None
+    #: Whether a named symbol's exact callers are seeded even when search missed them.
+    seed_callers: bool = False
+
+    def cap(self, kind: ItemKind) -> int:
+        """Return how many items of a kind one anchor may contribute."""
+        return self.per_anchor.get(kind, MAX_PER_TIER_PER_ANCHOR)
+
+
+def _plan(name: str, order: dict[ItemKind, int], **rest: object) -> TierPlan:
+    """Build a plan from the default order plus the kinds this intent moves."""
+    tiers = dict(TIERS)
+    tiers.update(order)
+    return TierPlan(name=name, tiers=tiers, **rest)  # type: ignore[arg-type]
+
+
+#: The tier order per intent. Unknown intents fail closed: this lookup raises.
+PLANS: dict[Intent, TierPlan] = {
+    # A named symbol, a behaviour description or an unreadable query: the code first.
+    Intent.SYMBOL: _plan("default", {}),
+    Intent.BEHAVIOUR: _plan("default", {}),
+    Intent.UNKNOWN: _plan("default", {}),
+    # "Who uses X": the uses ARE the answer, so they outrank the outline and the
+    # primary chunks are cut back to make room for more of them.
+    Intent.CONSUMER: _plan(
+        "consumer",
+        {
+            ItemKind.CALLER: 1,
+            ItemKind.IMPLEMENTATION: 1,
+            ItemKind.TEST: 1,
+            ItemKind.NOTE: 1,
+            ItemKind.OUTLINE: 2,
+            ItemKind.SUPERTYPE: 2,
+            ItemKind.CALLEE: 3,
+            ItemKind.DOC: 3,
+        },
+        per_anchor={
+            ItemKind.CALLER: CONSUMER_PER_ANCHOR,
+            ItemKind.IMPLEMENTATION: CONSUMER_PER_ANCHOR,
+            ItemKind.TEST: CONSUMER_PER_ANCHOR,
+        },
+        max_chunk_lines=CONSUMER_CHUNK_LINES,
+        seed_callers=True,
+    ),
+    # "How do these fit together": shapes before bodies - a few outlines and the
+    # type hierarchy say more about wiring than the same tokens spent on one method.
+    Intent.ARCHITECTURE: _plan(
+        "architecture",
+        {ItemKind.OUTLINE: 0, ItemKind.SUPERTYPE: 0, ItemKind.IMPLEMENTATION: 0, ItemKind.CHUNK: 1},
+        max_outlines=ARCHITECTURE_OUTLINES,
+    ),
+    # A symptom: the code, then the tests that name the behaviour it lost.
+    Intent.BUG: _plan("bug", {ItemKind.TEST: 1, ItemKind.OUTLINE: 2}),
+}
+
+#: The intent whose plan every bundle packs with unless one is named.
+# AIDEV-NOTE: measured 2026-08-21 - the intent orders did NOT beat this one on the
+# javaweb set (docs/evidence.md), so detection is REPORTED and only applied on request.
+DEFAULT_ORDER = Intent.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -135,6 +230,12 @@ class Bundle:
 
     query: str
     budget_tokens: int
+    intent: Intent = Intent.UNKNOWN
+    intent_rule: str = "empty"
+    #: The name of the tier order the bundle packed with.
+    order: str = "default"
+    #: How many candidates the consumer seed added that search had not found.
+    seeded: int = 0
     items: list[BundleItem] = field(default_factory=list)
     omitted: list[OmittedItem] = field(default_factory=list)
     # Omissions the budget could not even name. Counted rather than listed, because a
@@ -159,7 +260,13 @@ class Bundle:
         """Render the bundle as markdown, or nothing at all when no evidence survived the budget."""
         if not self.items:
             return ""
-        lines = [f"# Evidence for: {self.query}", "", f"{len(self.items)} item(s), ~{self.total_tokens} tokens.", ""]
+        lines = [
+            f"# Evidence for: {self.query}",
+            "",
+            f"intent: {self.intent.value} (rule: {self.intent_rule}; order: {self.order})",
+            f"{len(self.items)} item(s), ~{self.total_tokens} tokens.",
+            "",
+        ]
         for item in self.items:
             lines.append(_render_item(item))
         if self.omitted:
@@ -177,6 +284,10 @@ class Bundle:
         return {
             "query": self.query,
             "budget_tokens": self.budget_tokens,
+            "intent": self.intent.value,
+            "intent_rule": self.intent_rule,
+            "order": self.order,
+            "seeded": self.seeded,
             "total_tokens": self.total_tokens,
             "rendered_tokens": self.rendered_tokens,
             "unlisted_omissions": self.unlisted_omissions,
@@ -200,11 +311,10 @@ class _Candidate:
     # Identity for deduplication: the source region an item shows, so the same lines
     # never arrive twice under two different reasons.
     key: tuple[object, ...]
-
-    @property
-    def tier(self) -> int:
-        """The packing tier of this candidate's kind."""
-        return TIERS[self.kind]
+    #: Assigned once, by `pack`, from the plan of the intent being answered.
+    tier: int = 0
+    #: Whether the plan already cut this text, so its fullest form is a truncated one.
+    pre_truncated: bool = False
 
 
 def _language_of(file_path: str) -> str:
@@ -372,24 +482,28 @@ def _ordered_hits(hits: Sequence[Hit]) -> tuple[list[Hit], int]:
     return exact + unique, weak
 
 
-def _test_candidates(graph: GraphProvider, anchor: Symbol, sources: _Sources, score: float) -> list[_Candidate]:
-    """Build tier 2: the tests that name or exercise the anchor."""
+def _test_candidates(
+    graph: GraphProvider, anchor: Symbol, sources: _Sources, score: float, plan: TierPlan
+) -> list[_Candidate]:
+    """Build the test evidence: the tests that name or exercise the anchor."""
     hits = graph.tests_of(anchor.id)
     named = [hit for hit in hits if hit.edge_kind is EdgeKind.TESTS]
     exercising = [hit for hit in hits if hit.edge_kind is not EdgeKind.TESTS]
     candidates = []
-    for hit in (named + exercising)[:MAX_PER_TIER_PER_ANCHOR]:
+    for hit in (named + exercising)[: plan.cap(ItemKind.TEST)]:
         text = sources.span(hit.symbol.file_path, hit.symbol.start_line, hit.symbol.end_line, MAX_SYMBOL_LINES)
         reason = f"{hit.reason}; covers {display_name(anchor)}"
         candidates.append(_candidate_for_symbol(ItemKind.TEST, hit.symbol, reason, text, score))
     return candidates
 
 
-def _caller_candidates(graph: GraphProvider, anchor: Symbol, sources: _Sources, score: float) -> list[_Candidate]:
-    """Build tier 3: the call sites that reach the anchor, best resolution first."""
+def _caller_candidates(
+    graph: GraphProvider, anchor: Symbol, sources: _Sources, score: float, plan: TierPlan
+) -> list[_Candidate]:
+    """Build the call-site evidence that reaches the anchor, best resolution first."""
     ordered, weak = _ordered_hits(graph.callers(anchor.id))
     candidates = []
-    for hit in ordered[:MAX_PER_TIER_PER_ANCHOR]:
+    for hit in ordered[: plan.cap(ItemKind.CALLER)]:
         text = sources.span(hit.symbol.file_path, hit.symbol.start_line, hit.symbol.end_line, MAX_SYMBOL_LINES)
         candidates.append(_candidate_for_symbol(ItemKind.CALLER, hit.symbol, hit.reason, text, score))
     if weak:
@@ -409,8 +523,8 @@ def _caller_candidates(graph: GraphProvider, anchor: Symbol, sources: _Sources, 
     return candidates
 
 
-def _hierarchy_candidates(graph: GraphProvider, enclosing: Symbol, score: float) -> list[_Candidate]:
-    """Build tier 3 for an interface or abstract type: who implements it, what it extends."""
+def _hierarchy_candidates(graph: GraphProvider, enclosing: Symbol, score: float, plan: TierPlan) -> list[_Candidate]:
+    """Build the hierarchy evidence for an interface or abstract type: implementations and supertypes."""
     if enclosing.kind is not SymbolKind.INTERFACE and "abstract" not in enclosing.modifiers:
         return []
     candidates = []
@@ -418,18 +532,20 @@ def _hierarchy_candidates(graph: GraphProvider, enclosing: Symbol, score: float)
         (ItemKind.IMPLEMENTATION, graph.implementations(enclosing.id)),
         (ItemKind.SUPERTYPE, graph.supertypes(enclosing.id)),
     ):
-        for hit in hits[:MAX_PER_TIER_PER_ANCHOR]:
+        for hit in hits[: plan.cap(kind)]:
             candidates.append(
                 _candidate_for_symbol(kind, hit.symbol, hit.reason, _outline_text(graph, hit.symbol), score)
             )
     return candidates
 
 
-def _callee_candidates(graph: GraphProvider, anchor: Symbol, sources: _Sources, score: float) -> list[_Candidate]:
-    """Build tier 4: what the anchor itself calls."""
+def _callee_candidates(
+    graph: GraphProvider, anchor: Symbol, sources: _Sources, score: float, plan: TierPlan
+) -> list[_Candidate]:
+    """Build the callee evidence: what the anchor itself calls."""
     ordered, _ = _ordered_hits(graph.callees(anchor.id))
     candidates = []
-    for hit in ordered[:MAX_PER_TIER_PER_ANCHOR]:
+    for hit in ordered[: plan.cap(ItemKind.CALLEE)]:
         if hit.symbol.file_path == anchor.file_path:
             continue  # Already on screen: the anchor's own file is in the bundle.
         text = sources.span(hit.symbol.file_path, hit.symbol.start_line, hit.symbol.end_line, MAX_SYMBOL_LINES)
@@ -499,8 +615,23 @@ def _sibling_docs(primary: Sequence[str], sources: _Sources, score: float) -> li
     return candidates
 
 
+def _chunk_text(content: str, plan: TierPlan) -> tuple[str, bool]:
+    """Cut a primary chunk to the plan's line cap, so the tiers under it get the room.
+
+    :return: The text to show, and whether the cap actually cut it.
+    """
+    if plan.max_chunk_lines is None:
+        return content, False
+    cut = truncate_lines(content, plan.max_chunk_lines)
+    return cut, cut != content
+
+
 def _expand(
-    graph: GraphProvider, results: Sequence[SearchResult], primary: Sequence[str], sources: _Sources
+    graph: GraphProvider,
+    results: Sequence[SearchResult],
+    primary: Sequence[str],
+    sources: _Sources,
+    plan: TierPlan,
 ) -> list[_Candidate]:
     """Run one graph hop out of every primary chunk and collect the candidates."""
     candidates: list[_Candidate] = []
@@ -514,6 +645,7 @@ def _expand(
         chunk = result.chunk
         anchor, enclosing = _anchor_of(_overlapping(graph, path, chunk.start_line, chunk.end_line))
         inside = f" inside {display_name(anchor)}" if anchor is not None else ""
+        text, was_cut = _chunk_text(chunk.content, plan)
         candidates.append(
             _Candidate(
                 kind=ItemKind.CHUNK,
@@ -521,23 +653,27 @@ def _expand(
                 start_line=chunk.start_line,
                 end_line=chunk.end_line,
                 reason=f"search hit #{rank}{inside}",
-                text=chunk.content,
+                text=text,
                 location_text=f"{path} lines {chunk.start_line}-{chunk.end_line}",
                 score=result.score,
                 key=(path, chunk.start_line, chunk.end_line),
+                pre_truncated=was_cut,
             )
         )
         if anchor is not None and len(anchors) < MAX_ANCHORS:
             anchors.append((anchor, enclosing, result.score))
 
     seen_anchors: set[str] = set()
+    outlines = 0
     for anchor, enclosing, score in anchors:
         if anchor.id in seen_anchors:
             continue
         seen_anchors.add(anchor.id)
         if enclosing is not None:
-            text = _outline_text(graph, enclosing)
+            capped = plan.max_outlines is not None and outlines >= plan.max_outlines
+            text = "" if capped else _outline_text(graph, enclosing)
             if text:
+                outlines += 1
                 candidates.append(
                     _candidate_for_symbol(
                         ItemKind.OUTLINE,
@@ -547,11 +683,50 @@ def _expand(
                         score,
                     )
                 )
-            candidates += _hierarchy_candidates(graph, enclosing, score)
-        candidates += _test_candidates(graph, anchor, sources, score)
-        candidates += _caller_candidates(graph, anchor, sources, score)
-        candidates += _callee_candidates(graph, anchor, sources, score)
+            candidates += _hierarchy_candidates(graph, enclosing, score, plan)
+        candidates += _test_candidates(graph, anchor, sources, score, plan)
+        candidates += _caller_candidates(graph, anchor, sources, score, plan)
+        candidates += _callee_candidates(graph, anchor, sources, score, plan)
     candidates += _doc_candidates(results, primary, sources, 0.0)
+    return candidates
+
+
+def _identifier_words(query: str) -> list[str]:
+    """List the words in a query that are spelled like code names.
+
+    A plain capitalised word only counts away from the start: `Shape` mid-sentence is
+    a type, the same word opening a sentence is just English.
+    """
+    return [match.group(0) for match in _IDENTIFIER_WORD.finditer(query) if match.start() > 0 or "." in match.group(0)]
+
+
+def _named_symbols(graph: GraphProvider, query: str) -> list[Symbol]:
+    """Resolve the identifier-looking words in a query to declarations, best first."""
+    found: list[Symbol] = []
+    for word in _identifier_words(query):
+        for symbol in graph.definition(word)[:1]:
+            found.append(symbol)
+        if len(found) >= MAX_SEEDED_SYMBOLS:
+            break
+    return found
+
+
+def _seed_candidates(graph: GraphProvider, query: str, sources: _Sources, plan: TierPlan) -> list[_Candidate]:
+    """Seed the exact uses of a symbol the query names, whatever search returned.
+
+    AIDEV-NOTE: the one hop that can add a file search never retrieved. A consumer
+    question names its subject; the graph knows who reaches it, and nothing about
+    that answer has to appear in the subject's own text.
+    """
+    candidates: list[_Candidate] = []
+    for symbol in _named_symbols(graph, query):
+        hits = graph.implementations(symbol.id) if symbol.kind in TYPE_KINDS else graph.callers(symbol.id)
+        kind = ItemKind.IMPLEMENTATION if symbol.kind in TYPE_KINDS else ItemKind.CALLER
+        exact = [hit for hit in hits if hit.resolution is Resolution.EXACT]
+        for hit in (exact or hits)[: plan.cap(kind)]:
+            text = sources.span(hit.symbol.file_path, hit.symbol.start_line, hit.symbol.end_line, MAX_SYMBOL_LINES)
+            reason = f"{hit.reason}; names {display_name(symbol)}"
+            candidates.append(_candidate_for_symbol(kind, hit.symbol, reason, text, _SEED_SCORE))
     return candidates
 
 
@@ -560,6 +735,9 @@ def pack(
     candidates: Sequence[_Candidate],
     budget_tokens: int,
     omissions: Sequence[OmittedItem] = (),
+    match: IntentMatch | None = None,
+    plan: TierPlan | None = None,
+    seeded: int = 0,
 ) -> Bundle:
     """Pack candidates into a bundle under a token budget.
 
@@ -576,10 +754,24 @@ def pack(
     :param candidates: The candidates to pack.
     :param budget_tokens: The maximum estimated tokens the packed items may cost.
     :param omissions: Things the caller already knows it will not show, listed after the packed ones.
+    :param match: The intent the bundle answers, and the rule that decided it.
+    :param plan: The tier order and caps to pack with; the intent's plan when omitted.
+    :param seeded: How many candidates the consumer seed contributed.
     :return: The packed bundle.
     """
-    bundle = Bundle(query=query, budget_tokens=budget_tokens)
-    remaining = budget_tokens - _frame_cost(query)
+    decided = match or IntentMatch(Intent.UNKNOWN, "unset")
+    chosen = plan if plan is not None else PLANS[DEFAULT_ORDER]
+    bundle = Bundle(
+        query=query,
+        budget_tokens=budget_tokens,
+        intent=decided.intent,
+        intent_rule=decided.rule,
+        order=chosen.name,
+        seeded=seeded,
+    )
+    for candidate in candidates:
+        candidate.tier = chosen.tiers[candidate.kind]
+    remaining = budget_tokens - _frame_cost(query, decided, chosen.name)
     seen: set[tuple[object, ...]] = set()
     ordered = [candidate for _, candidate in sorted(enumerate(candidates), key=_pack_order)]
     floors = _tier_floors(ordered)
@@ -605,9 +797,12 @@ def pack(
     return bundle
 
 
-def _frame_cost(query: str) -> int:
-    """Estimate what the title and the footer heading cost before any item is packed."""
-    return estimate_tokens(f"# Evidence for: {query}\n\n0 item(s), ~0 tokens.\n\n## Not included (locations only)\n\n")
+def _frame_cost(query: str, match: IntentMatch, order: str) -> int:
+    """Estimate what the title, the intent line and the footer heading cost before any item is packed."""
+    return estimate_tokens(
+        f"# Evidence for: {query}\n\nintent: {match.intent.value} (rule: {match.rule}; order: {order})\n"
+        "0 item(s), ~0 tokens.\n\n## Not included (locations only)\n\n"
+    )
 
 
 def _trim_to_budget(bundle: Bundle) -> None:
@@ -677,7 +872,7 @@ def _forms(candidate: _Candidate, remaining: int) -> list[tuple[str, Presentatio
     """List the forms of a candidate, largest first: full, truncated, location."""
     forms: list[tuple[str, Presentation]] = []
     if candidate.text:
-        forms.append((candidate.text, Presentation.CONTENT))
+        forms.append((candidate.text, Presentation.TRUNCATED if candidate.pre_truncated else Presentation.CONTENT))
         if candidate.kind is ItemKind.CHUNK:
             forms += _truncations(candidate, remaining)
     forms.append((candidate.location_text, Presentation.LOCATION))
@@ -714,6 +909,7 @@ def build_bundle(
     budget_tokens: int,
     top_k: int = 20,
     primary_files: int = PRIMARY_FILES,
+    intent: Intent | None = None,
 ) -> Bundle:
     """Build an evidence bundle for a query under a token budget.
 
@@ -723,14 +919,27 @@ def build_bundle(
     :param budget_tokens: The maximum estimated tokens the packed items may cost.
     :param top_k: How many search results to consider.
     :param primary_files: How many of the best-scoring files count as primary.
+    :param intent: Pack in this intent's tier order instead of the default one.
     :return: The packed bundle.
     """
+    match = IntentMatch(intent, "override") if intent is not None else classify(query)
+    plan = PLANS[intent if intent is not None else DEFAULT_ORDER]
     results = index.search(query, top_k=top_k)
     bundle_sources = _Sources(_index_root(index))
     if not results:
-        return Bundle(query=query, budget_tokens=budget_tokens)
+        return Bundle(
+            query=query,
+            budget_tokens=budget_tokens,
+            intent=match.intent,
+            intent_rule=match.rule,
+            order=plan.name,
+        )
     primary = _primary_files(results, primary_files)
-    candidates = _expand(graph, results, primary, bundle_sources)
+    candidates = _expand(graph, results, primary, bundle_sources, plan)
+    seeds = _seed_candidates(graph, query, bundle_sources, plan) if plan.seed_callers else []
+    known = {candidate.key for candidate in candidates}
+    seeds = [seed for seed in seeds if seed.key not in known]
+    candidates += seeds
     elsewhere = [
         OmittedItem(
             kind=ItemKind.CHUNK,
@@ -742,15 +951,17 @@ def build_bundle(
         for result in results
         if _normalise(result.chunk.file_path) not in primary
     ]
-    return pack(query, candidates, budget_tokens, elsewhere)
+    return pack(query, candidates, budget_tokens, elsewhere, match, plan, len(seeds))
 
 
 __all__ = [
     "Bundle",
     "BundleItem",
+    "Intent",
     "ItemKind",
     "OmittedItem",
     "Presentation",
+    "TierPlan",
     "build_bundle",
     "pack",
     "truncate_lines",

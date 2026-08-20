@@ -18,12 +18,15 @@ from zemble.evidence.answers import (
     outline_payload,
     signatures_payload,
 )
+from zemble.evidence.intent import INTENT_NAMES, parse_intent
 from zemble.graph.cli import EXIT_AMBIGUOUS, EXIT_NOT_FOUND, ensure_graph
 from zemble.graph.provider import SqliteGraphProvider
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
 
 EVIDENCE_COMMANDS = ("explain", "outline", "signatures")
+#: `--intent` value meaning "classify the query", which is the default.
+AUTO_INTENT = "auto"
 
 
 def add_evidence_parser(sub: argparse._SubParsersAction) -> None:
@@ -36,6 +39,12 @@ def add_evidence_parser(sub: argparse._SubParsersAction) -> None:
     )
     explain_p.add_argument(
         "-k", "--top-k", type=int, default=DEFAULT_TOP_K, help=f"Search results to expand (default: {DEFAULT_TOP_K})."
+    )
+    explain_p.add_argument(
+        "--intent",
+        default=AUTO_INTENT,
+        choices=(AUTO_INTENT, *INTENT_NAMES),
+        help="Force the tier order of one intent instead of detecting it from the query.",
     )
     explain_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
     # Only `explain` reads the index, so it is the only one an embedder override concerns.
@@ -62,7 +71,14 @@ def run_evidence(args: argparse.Namespace) -> int:
     """Run one evidence subcommand, from the warm daemon where there is one, and return its exit code."""
     from zemble.cli import _via_daemon
 
-    payload = _via_daemon(args.command, _daemon_args(args), args.no_daemon, getattr(args, "embedder", None))
+    # AIDEV-NOTE: an explicit --intent answers here rather than over the daemon; the
+    # daemon protocol has no intent argument, so asking it would silently ignore the override.
+    forced = getattr(args, "intent", AUTO_INTENT) != AUTO_INTENT
+    payload = (
+        None
+        if forced
+        else _via_daemon(args.command, _daemon_args(args), args.no_daemon, getattr(args, "embedder", None))
+    )
     if payload is None:
         payload = _in_process(args)
     if args.command == "explain":
@@ -91,7 +107,10 @@ def _in_process(args: argparse.Namespace) -> dict[str, Any]:
     provider = SqliteGraphProvider(args.path)
     try:
         if args.command == "explain":
-            return explain_payload(_load_index(args.path, args.embedder), provider, args.query, args.budget, args.top_k)
+            intent = None if args.intent == AUTO_INTENT else parse_intent(args.intent)
+            return explain_payload(
+                _load_index(args.path, args.embedder), provider, args.query, args.budget, args.top_k, intent
+            )
         if args.command == "outline":
             return outline_payload(provider, args.target, args.members)
         return signatures_payload(provider, args.symbol)

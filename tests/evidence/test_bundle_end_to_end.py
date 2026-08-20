@@ -9,6 +9,7 @@ import pytest
 
 from tests.conftest import FakeEmbedder
 from zemble.evidence.bundle import ItemKind, build_bundle
+from zemble.evidence.intent import Intent
 from zemble.graph import SqliteGraphProvider, build_graph
 from zemble.index import ZembleIndex
 
@@ -132,3 +133,50 @@ def test_bundle_without_results_is_empty(java_workspace: Path) -> None:
     assert not bundle.items, "an empty query returns nothing"
     assert bundle.total_tokens == 0, "and costs nothing"
     graph.close()
+
+
+def test_intent_aware_bundle_journey(java_workspace: Path) -> None:
+    """Walk one subject through the default order, a named order, and the seed."""
+    build_graph(str(java_workspace))
+    graph = SqliteGraphProvider(str(java_workspace))
+    index = ZembleIndex.from_path(java_workspace, embedder=FakeEmbedder())
+
+    # 1. The detected intent is reported, and the default order is what packs.
+    behaviour = build_bundle(index, graph, "store a session against its token", 4000)
+    assert behaviour.intent is Intent.BEHAVIOUR, "step 1: the query is classified as a behaviour"
+    assert behaviour.render().splitlines()[2] == "intent: behaviour (rule: default; order: default)", (
+        "step 1: the header names the detection and the order it actually used"
+    )
+    assert _tier_of(behaviour, ItemKind.OUTLINE) < _tier_of(behaviour, ItemKind.CALLER), "step 1: the outline first"
+
+    # 2. Detection alone never reorders anything: a consumer question packs the same way.
+    detected = build_bundle(index, graph, "who calls SessionCache.store", 4000)
+    assert detected.intent is Intent.CONSUMER, "step 2: the query is classified as a consumer question"
+    assert detected.order == "default", "step 2: but the shipped order still packs it"
+    assert _tier_of(detected, ItemKind.OUTLINE) < _tier_of(detected, ItemKind.CALLER), "step 2: the outline first"
+
+    # 3. Asking for the consumer order moves the call sites in front of the outline.
+    consumer = build_bundle(index, graph, "who calls SessionCache.store", 4000, intent=Intent.CONSUMER)
+    assert consumer.render().splitlines()[2] == "intent: consumer (rule: override; order: consumer)", (
+        "step 3: the header says the order was asked for"
+    )
+    assert _tier_of(consumer, ItemKind.CALLER) < _tier_of(consumer, ItemKind.OUTLINE), "step 3: the callers first"
+    assert any("LoginHandler" in item.file_path for item in consumer.items), "step 3: the real caller is packed"
+
+    # 4. Every order still holds the budget exactly, header and footer included.
+    for order in (None, Intent.CONSUMER, Intent.ARCHITECTURE, Intent.BUG):
+        tight = build_bundle(index, graph, "who calls SessionCache.store", 700, intent=order)
+        assert tight.rendered_tokens <= 700, f"step 4: the {order} order holds its budget"
+        assert tight.items, f"step 4: the {order} order still answers"
+
+    # 5. Only the consumer order seeds, and the count is carried as data.
+    assert detected.seeded == 0, "step 5: the default order seeds nothing"
+    assert consumer.to_dict()["seeded"] == consumer.seeded, "step 5: the count is carried as data"
+    graph.close()
+
+
+def _tier_of(bundle: object, kind: ItemKind) -> int:
+    """Return the tier the bundle packed one item kind at, or a sentinel when absent."""
+    tiers = [item.tier for item in bundle.items if item.kind is kind]  # type: ignore[attr-defined]
+    assert tiers, f"the bundle carries at least one {kind.value} item"
+    return min(tiers)
