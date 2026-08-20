@@ -149,9 +149,111 @@ behavioural 0.653, bug-report 0.701, consumer 0.251, symbol 0.982 - the gain is 
 `bug-report` (+0.048) and `consumer` (+0.049), and `symbol` does not move at all.
 
 The shipped weights are **exactly right for the shipped embedder** - every increase
-makes it worse, monotonically - and **too low for a hosted one**, worth about +0.016.
-This is a per-embedder knob, not a global one, and no default is changed here: the
-weight that wins with Voyage is the weight that loses with the default.
+makes it worse, monotonically - and **too low for a hosted one**.
+
+That is where this document stopped in its first pass: the finding was real and there
+was no mechanism to act on it. There is one now, and the section below is the sweep that
+chose its number.
+
+## Part A2: the fusion profile
+
+An embedder now **declares** how much of the fusion its dense lane earns beyond the
+shipped weights (`semantic_weight_bonus`, beside `is_remote` on the embedder seam;
+`docs/embedders.md`). Model2Vec declares 0.0, every HTTP provider declares 0.15, an
+embedder that declares nothing gets 0.0, and `ZEMBLE_SEMANTIC_WEIGHT_BONUS` overrides
+all of them. Nothing else in ranking changed: at bonus 0 the fusion is bit-identical to
+what it was, which the first row of every table below reproduces exactly.
+
+All of the runs in this part are on the current tree and the **90-query** javaweb set
+(80 code + 10 template), so they are comparable with `docs/comparison.md` and not with
+Part A's 80-query numbers.
+
+### javaweb: choosing the bonus
+
+| bonus | embedder | NDCG@10 | hit@1 | hit@5 | hit@10 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 0.00 | `model2vec:potion-code-16M-v2` | **0.5569** | 0.500 | 0.622 | 0.689 |
+| +0.15 | `model2vec:potion-code-16M-v2` | 0.5533 | 0.489 | 0.600 | 0.689 |
+| 0.00 | `voyage:voyage-4-lite@1024` | 0.6803 | 0.589 | 0.811 | 0.856 |
+| +0.10 | `voyage:voyage-4-lite@1024` | 0.6986 | 0.600 | 0.822 | 0.856 |
+| **+0.15** | **`voyage:voyage-4-lite@1024`** | **0.7102** | **0.611** | **0.833** | 0.867 |
+| +0.20 | `voyage:voyage-4-lite@1024` | 0.7039 | 0.578 | 0.822 | **0.878** |
+| 0.00 | `voyage:voyage-code-4@1024` | 0.6208 | 0.489 | **0.767** | **0.811** |
+| +0.15 | `voyage:voyage-code-4@1024` | 0.6237 | 0.511 | 0.711 | 0.778 |
+
+`voyage-4-lite` peaks at +0.15 and turns back down at +0.20, so the choice is not a tie
+that has to be broken by preferring the smaller number; +0.15 wins outright by 0.012
+over +0.10. Per kind it is the same shape Part A found on `voyage-code-4`, only larger:
+
+| kind | 4-lite at 0 | 4-lite at +0.15 |
+| --- | ---: | ---: |
+| architecture | 0.527 | 0.543 |
+| behavioural | 0.702 | 0.737 |
+| bug-report | 0.572 | 0.626 |
+| consumer | 0.247 | 0.361 |
+| symbol | 1.000 | 0.985 |
+
+`consumer` - the kind nothing but a reranker had ever moved - gains **+0.114** from a
+fusion weight, and the whole cost is 0.015 of an already saturated `symbol`.
+
+`voyage-code-4` is the one to be careful about: NDCG@10 moves +0.003, but hit@5 drops
+0.767 -> 0.711 and hit@10 0.811 -> 0.778, i.e. five queries lose their answer from the
+visible list while the ones that remain are ordered better. On the previous tree and the
+80-query set the same setting was worth +0.016 NDCG (Part A above). So the bonus is not
+uniformly good for every hosted model; it is clearly good for the recommended one, and
+roughly neutral-to-mixed for the code-specialised one that is already not recommended.
+
+### Upstream 63 repos, and the number Part A never had
+
+`voyage-code-4` was measured upstream on 59 of 63 repos because a 15-hour single process
+degraded to nothing. `voyage-4-lite` had **no** upstream number at all. It has one now,
+over **all 63 repos**, because the paid pass was run as one short-lived process per repo
+instead of one long one: no run exceeded four minutes, nothing degraded, and the three
+repos the earlier attempt lost came back.
+
+| configuration | NDCG@10 | hit@1 | hit@5 | hit@10 | architecture | semantic | symbol | p50 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| _E0_ `model2vec:potion-code-16M-v2` | 0.8643 | 0.759 | 0.967 | 0.992 | 0.824 | 0.857 | 0.952 | 7 ms |
+| `voyage:voyage-4-lite@1024`, bonus 0 | 0.8878 | 0.795 | 0.983 | 0.996 | 0.849 | 0.880 | 0.970 | 267 ms |
+| **`voyage:voyage-4-lite@1024`, +0.15** | **0.8898** | **0.796** | **0.987** | 0.996 | 0.849 | **0.884** | **0.971** | 267 ms |
+
+E0 reproduces the recorded 0.8643 exactly, which is what makes the two rows above it
+trustworthy. `voyage-4-lite` is **+0.0235** over the default embedder here, against
+`voyage-code-4`'s +0.0186 over 59 repos - the same ordering the javaweb set found.
+
+The bonus **does not regress upstream at all**: +0.0020, in the same direction as
+javaweb. Per language it is within noise nearly everywhere, gaining on `bash` (+0.010),
+`lua` (+0.011), `rust` (+0.009) and `kotlin` (+0.013), giving back on `zig` (-0.012) and
+`csharp` (-0.010).
+
+### The decision
+
+The gate was: ship the bonus as the default for remote contextual embedders only if it
+improves javaweb **and** does not regress upstream by more than 0.003 for the same
+embedder.
+
+| bar | threshold | measured | verdict |
+| --- | --- | --- | --- |
+| javaweb improves | > 0 | +0.0299 | **pass** |
+| upstream regression | <= 0.003 | +0.0020 (an improvement) | **pass** |
+| default embedder untouched | bit-identical | 0.5569 and 0.8643 reproduced | **pass** |
+
+**Shipped: 0.15 for every HTTP-backed embedder, 0.0 for Model2Vec.** The default
+configuration does not move by a single digit; a Voyage user gets +0.030 NDCG@10 on the
+hard set for free, without a second request or a second index.
+
+### What this pass consumed
+
+| pass | tokens | list price |
+| --- | ---: | ---: |
+| upstream 63-repo `voyage-4-lite` document index (the paid one) | 28,859,496 | $0.58 |
+| upstream query embeddings, both bonus runs | 7,970 | $0.00 |
+| javaweb query embeddings, six runs | 95,156 | $0.00 |
+
+**~29.0M tokens, about $0.58 at list price**, inside the complimentary tier. The second
+upstream run cost nothing but its queries: the documents were already in the sqlite
+cache, which is exactly the property that made measuring two fusion weights on a paid
+index affordable.
 
 ## Part B: the hosted reranker
 
@@ -287,9 +389,9 @@ daemon's own environment is the way to rerank on the daemon path.
 
 ### Not changed
 
-- **The fusion weights.** +0.15 on the dense lane wins with Voyage (+0.016) and loses
-  with the default embedder (-0.008). It would have to be a per-embedder default, and
-  no mechanism for that exists; it is not worth inventing one for 0.016.
+- **The fusion weights** were left alone in this document's first pass, for want of a
+  per-embedder mechanism. Part A2 built one and shipped +0.15 for hosted embedders; the
+  default embedder's weights are unchanged, and were re-measured to prove it.
 - **The reranker default.** Still `none`.
 - **The embedder default.** Still Model2Vec.
 
@@ -305,6 +407,7 @@ Every figure below is Voyage's own `usage.total_tokens`, accumulated by the clie
 | javaweb index @1024 | 15,531,476 | voyage-4-lite | $0.31 |
 | upstream index @1024 (59 of 63 repos) | ~34,000,000 | voyage-code-4 | ~$4.08 |
 | query embeddings (~10,000 across every benchmark pass) | ~150,000 | both | $0.02 |
+| upstream index @1024 (63 of 63 repos, Part A2) | 28,859,496 | voyage-4-lite | $0.58 |
 | javaweb rerank sweeps (~560 queries) | ~6,000,000 | rerank-2.5 / -lite | ~$0.20 |
 | upstream rerank check (~1,250 queries) | ~15,000,000 | rerank-2.5 | ~$0.75 |
 

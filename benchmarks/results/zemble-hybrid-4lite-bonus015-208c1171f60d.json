@@ -1,0 +1,2941 @@
+{
+  "tool": "zemble-hybrid-4lite-bonus015",
+  "model": "voyage:voyage-4-lite@1024",
+  "summary": {
+    "ndcg10": 0.8898,
+    "tokens": 1591.0,
+    "p50_ms": 266.946,
+    "p90_ms": 292.224,
+    "p95_ms": 307.511,
+    "p99_ms": 350.325,
+    "index_ms": 715.9,
+    "by_category": {
+      "architecture": 0.8489,
+      "semantic": 0.884,
+      "symbol": 0.9709
+    },
+    "by_kind": {},
+    "hit1": 0.7962,
+    "hit5": 0.9865,
+    "hit10": 0.996,
+    "hits_by_category": {
+      "architecture": {
+        "hit1": 0.7564,
+        "hit5": 0.9875,
+        "hit10": 0.9977
+      },
+      "semantic": {
+        "hit1": 0.7694,
+        "hit5": 0.9851,
+        "hit10": 0.9946
+      },
+      "symbol": {
+        "hit1": 0.9447,
+        "hit5": 0.9933,
+        "hit10": 1.0
+      }
+    },
+    "hits_by_kind": {}
+  },
+  "reranker": "none",
+  "rerank_settings": {
+    "top_k": 50,
+    "alpha": 1.0,
+    "passage": "context"
+  },
+  "api_usage": {
+    "embedder": {
+      "model_id": "voyage:voyage-4-lite@1024",
+      "requests": 1251,
+      "tokens": 7970
+    }
+  },
+  "by_language": {
+    "bash": {
+      "repos": 3,
+      "tokens": 1408.0,
+      "ndcg10": 0.9003,
+      "p50_ms": 255.087,
+      "p90_ms": 268.889,
+      "p95_ms": 279.617,
+      "p99_ms": 393.83,
+      "index_ms": 150.8
+    },
+    "c": {
+      "repos": 3,
+      "tokens": 1602.0,
+      "ndcg10": 0.8218,
+      "p50_ms": 268.419,
+      "p90_ms": 293.613,
+      "p95_ms": 299.547,
+      "p99_ms": 302.076,
+      "index_ms": 2094.4
+    },
+    "cpp": {
+      "repos": 3,
+      "tokens": 1403.0,
+      "ndcg10": 0.9144,
+      "p50_ms": 280.684,
+      "p90_ms": 321.57,
+      "p95_ms": 330.591,
+      "p99_ms": 361.58,
+      "index_ms": 2088.6
+    },
+    "csharp": {
+      "repos": 3,
+      "tokens": 1371.0,
+      "ndcg10": 0.8897,
+      "p50_ms": 273.476,
+      "p90_ms": 298.775,
+      "p95_ms": 321.477,
+      "p99_ms": 441.27,
+      "index_ms": 652.7
+    },
+    "elixir": {
+      "repos": 3,
+      "tokens": 3153.0,
+      "ndcg10": 0.9254,
+      "p50_ms": 268.527,
+      "p90_ms": 283.79,
+      "p95_ms": 294.715,
+      "p99_ms": 326.604,
+      "index_ms": 271.5
+    },
+    "go": {
+      "repos": 3,
+      "tokens": 1818.0,
+      "ndcg10": 0.9204,
+      "p50_ms": 264.069,
+      "p90_ms": 284.151,
+      "p95_ms": 290.828,
+      "p99_ms": 295.072,
+      "index_ms": 220.0
+    },
+    "haskell": {
+      "repos": 3,
+      "tokens": 1535.0,
+      "ndcg10": 0.8529,
+      "p50_ms": 271.083,
+      "p90_ms": 309.236,
+      "p95_ms": 336.459,
+      "p99_ms": 390.673,
+      "index_ms": 662.7
+    },
+    "java": {
+      "repos": 3,
+      "tokens": 1556.0,
+      "ndcg10": 0.8669,
+      "p50_ms": 269.86,
+      "p90_ms": 313.586,
+      "p95_ms": 337.783,
+      "p99_ms": 374.188,
+      "index_ms": 1498.0
+    },
+    "javascript": {
+      "repos": 3,
+      "tokens": 1468.0,
+      "ndcg10": 0.9118,
+      "p50_ms": 248.803,
+      "p90_ms": 273.847,
+      "p95_ms": 332.463,
+      "p99_ms": 374.442,
+      "index_ms": 54.5
+    },
+    "kotlin": {
+      "repos": 3,
+      "tokens": 1856.0,
+      "ndcg10": 0.8648,
+      "p50_ms": 268.061,
+      "p90_ms": 305.707,
+      "p95_ms": 337.508,
+      "p99_ms": 398.321,
+      "index_ms": 315.2
+    },
+    "lua": {
+      "repos": 3,
+      "tokens": 1539.0,
+      "ndcg10": 0.8879,
+      "p50_ms": 269.761,
+      "p90_ms": 285.857,
+      "p95_ms": 293.26,
+      "p99_ms": 338.533,
+      "index_ms": 489.9
+    },
+    "php": {
+      "repos": 3,
+      "tokens": 1335.0,
+      "ndcg10": 0.8909,
+      "p50_ms": 264.211,
+      "p90_ms": 288.486,
+      "p95_ms": 296.17,
+      "p99_ms": 315.237,
+      "index_ms": 805.6
+    },
+    "python": {
+      "repos": 9,
+      "tokens": 1568.0,
+      "ndcg10": 0.8977,
+      "p50_ms": 261.907,
+      "p90_ms": 278.887,
+      "p95_ms": 285.177,
+      "p99_ms": 332.724,
+      "index_ms": 216.5
+    },
+    "ruby": {
+      "repos": 3,
+      "tokens": 1235.0,
+      "ndcg10": 0.9348,
+      "p50_ms": 258.603,
+      "p90_ms": 274.211,
+      "p95_ms": 292.912,
+      "p99_ms": 368.388,
+      "index_ms": 142.0
+    },
+    "rust": {
+      "repos": 3,
+      "tokens": 1553.0,
+      "ndcg10": 0.8844,
+      "p50_ms": 265.471,
+      "p90_ms": 294.65,
+      "p95_ms": 317.514,
+      "p99_ms": 363.639,
+      "index_ms": 617.5
+    },
+    "scala": {
+      "repos": 3,
+      "tokens": 1481.0,
+      "ndcg10": 0.9258,
+      "p50_ms": 265.211,
+      "p90_ms": 290.534,
+      "p95_ms": 297.055,
+      "p99_ms": 298.964,
+      "index_ms": 619.2
+    },
+    "swift": {
+      "repos": 3,
+      "tokens": 1459.0,
+      "ndcg10": 0.9096,
+      "p50_ms": 266.316,
+      "p90_ms": 284.044,
+      "p95_ms": 286.404,
+      "p99_ms": 292.038,
+      "index_ms": 257.0
+    },
+    "typescript": {
+      "repos": 3,
+      "tokens": 1456.0,
+      "ndcg10": 0.757,
+      "p50_ms": 284.548,
+      "p90_ms": 315.216,
+      "p95_ms": 339.125,
+      "p99_ms": 384.729,
+      "index_ms": 557.5
+    },
+    "zig": {
+      "repos": 3,
+      "tokens": 1488.0,
+      "ndcg10": 0.9348,
+      "p50_ms": 277.949,
+      "p90_ms": 313.878,
+      "p95_ms": 318.766,
+      "p99_ms": 339.075,
+      "index_ms": 2886.7
+    }
+  },
+  "repos": [
+    {
+      "repo": "abseil-cpp",
+      "language": "cpp",
+      "mode": "auto",
+      "chunks": 16813,
+      "tokens": 1401,
+      "ndcg5": 0.8916250613049119,
+      "ndcg10": 0.8916250613049119,
+      "p50_ms": 331.4306139945984,
+      "p90_ms": 409.4964324263856,
+      "p95_ms": 426.28333078464493,
+      "p99_ms": 448.96786867408076,
+      "index_ms": 5326.181562850252,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.8801047648351186,
+        "symbol": 0.8769765845238192
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.75,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7333333333333333,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "aeson",
+      "language": "haskell",
+      "mode": "auto",
+      "chunks": 788,
+      "tokens": 1595,
+      "ndcg5": 0.8087319972046482,
+      "ndcg10": 0.8189511170840724,
+      "p50_ms": 277.97284652478993,
+      "p90_ms": 324.092975538224,
+      "p95_ms": 325.2094365423545,
+      "p99_ms": 341.4130865735933,
+      "index_ms": 250.57963095605373,
+      "by_category": {
+        "architecture": 0.7035565121611999,
+        "semantic": 0.8574159853916966
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.6,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.4,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "aiohttp",
+      "language": "python",
+      "mode": "auto",
+      "chunks": 1469,
+      "tokens": 1435,
+      "ndcg5": 0.8675882873015608,
+      "ndcg10": 0.8867779603300241,
+      "p50_ms": 277.23879204131663,
+      "p90_ms": 292.7140879910439,
+      "p95_ms": 297.75963979773223,
+      "p99_ms": 298.3688503038138,
+      "index_ms": 320.18190901726484,
+      "by_category": {
+        "architecture": 0.9297350098442152,
+        "semantic": 0.7904657886690002,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.7619047619047619,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8571428571428571,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.5555555555555556,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "alamofire",
+      "language": "swift",
+      "mode": "auto",
+      "chunks": 1302,
+      "tokens": 1526,
+      "ndcg5": 0.9879581183722281,
+      "ndcg10": 0.9879581183722281,
+      "p50_ms": 270.4562059370801,
+      "p90_ms": 290.6871760264039,
+      "p95_ms": 293.260560836643,
+      "p99_ms": 297.7951464243233,
+      "index_ms": 321.5706320479512,
+      "by_category": {
+        "architecture": 0.9732402630493958,
+        "semantic": 0.9854037798451251,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 1.0,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "axios",
+      "language": "javascript",
+      "mode": "auto",
+      "chunks": 299,
+      "tokens": 1265,
+      "ndcg5": 0.863266697895724,
+      "ndcg10": 0.8790399417350103,
+      "p50_ms": 250.16272196080536,
+      "p90_ms": 261.8639314547181,
+      "p95_ms": 268.41841201530775,
+      "p99_ms": 315.6309951678849,
+      "index_ms": 85.9453568700701,
+      "by_category": {
+        "architecture": 0.7020314231489774,
+        "semantic": 0.8967379687728134,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.75,
+        "hit5": 0.95,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.4,
+          "hit5": 0.8,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7777777777777778,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "axum",
+      "language": "rust",
+      "mode": "auto",
+      "chunks": 1034,
+      "tokens": 1573,
+      "ndcg5": 0.8065464876785728,
+      "ndcg10": 0.8215979874617719,
+      "p50_ms": 258.85126600041986,
+      "p90_ms": 280.3676960989833,
+      "p95_ms": 290.1534948730841,
+      "p99_ms": 292.51339972484857,
+      "index_ms": 230.1007800269872,
+      "by_category": {
+        "architecture": 0.8,
+        "semantic": 0.8442441461309548,
+        "symbol": 0.7670099985546605
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.7,
+        "hit5": 0.9,
+        "hit10": 0.95
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.6,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.75,
+          "hit5": 0.9166666666666666,
+          "hit10": 0.9166666666666666
+        },
+        "symbol": {
+          "hit1": 0.6666666666666666,
+          "hit5": 0.6666666666666666,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "bash-it",
+      "language": "bash",
+      "mode": "auto",
+      "chunks": 1319,
+      "tokens": 1290,
+      "ndcg5": 0.7595521821114662,
+      "ndcg10": 0.7813929257932826,
+      "p50_ms": 263.6672389926389,
+      "p90_ms": 275.65185443963856,
+      "p95_ms": 276.6131325159222,
+      "p99_ms": 278.42820257879794,
+      "index_ms": 291.1315839737654,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.7743270926323693,
+        "symbol": 0.7123212623289701
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.65,
+        "hit5": 0.95,
+        "hit10": 0.95
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.6923076923076923,
+          "hit5": 0.9230769230769231,
+          "hit10": 0.9230769230769231
+        },
+        "symbol": {
+          "hit1": 0.4,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "bats-core",
+      "language": "bash",
+      "mode": "auto",
+      "chunks": 97,
+      "tokens": 1405,
+      "ndcg5": 0.9196394630357186,
+      "ndcg10": 0.9196394630357186,
+      "p50_ms": 248.65559244062752,
+      "p90_ms": 265.1055292459205,
+      "p95_ms": 285.3582514566372,
+      "p99_ms": 591.9407696300182,
+      "index_ms": 39.49470887891948,
+      "by_category": {
+        "architecture": 0.8231227867347022,
+        "semantic": 0.9716099810439582
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.5714285714285714,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.9230769230769231,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "cats",
+      "language": "scala",
+      "mode": "auto",
+      "chunks": 2393,
+      "tokens": 1494,
+      "ndcg5": 0.8928612069551187,
+      "ndcg10": 0.9025325271359822,
+      "p50_ms": 271.0124393925071,
+      "p90_ms": 295.77101105824113,
+      "p95_ms": 308.0593129969202,
+      "p99_ms": 309.93880660040304,
+      "index_ms": 1065.6584771350026,
+      "by_category": {
+        "architecture": 0.7626626356799113,
+        "semantic": 0.9,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9,
+        "hit5": 0.95,
+        "hit10": 0.95
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.75,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.9,
+          "hit5": 0.9,
+          "hit10": 0.9
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "chi",
+      "language": "go",
+      "mode": "auto",
+      "chunks": 508,
+      "tokens": 1389,
+      "ndcg5": 0.884829059887217,
+      "ndcg10": 0.884829059887217,
+      "p50_ms": 268.03123799618334,
+      "p90_ms": 286.6955241654068,
+      "p95_ms": 297.6245357654989,
+      "p99_ms": 300.5988679639995,
+      "index_ms": 137.62523885816336,
+      "by_category": {
+        "architecture": 0.7775105951378318,
+        "semantic": 0.9589921948412731,
+        "symbol": 0.8769765845238192
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.7222222222222222,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.5,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8888888888888888,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "circe",
+      "language": "scala",
+      "mode": "auto",
+      "chunks": 379,
+      "tokens": 1448,
+      "ndcg5": 0.9377647034372597,
+      "ndcg10": 0.9377647034372597,
+      "p50_ms": 249.6444641146809,
+      "p90_ms": 262.98780874349177,
+      "p95_ms": 268.61025581602007,
+      "p99_ms": 272.38835357595235,
+      "index_ms": 157.64899994246662,
+      "by_category": {
+        "architecture": 0.8773705614469083,
+        "semantic": 0.9482433234612176,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8947368421052632,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.9090909090909091,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "click",
+      "language": "python",
+      "mode": "auto",
+      "chunks": 610,
+      "tokens": 1837,
+      "ndcg5": 0.9815464876785729,
+      "ndcg10": 0.9815464876785729,
+      "p50_ms": 277.8808599105105,
+      "p90_ms": 295.5089429859072,
+      "p95_ms": 296.45731549244374,
+      "p99_ms": 305.0879861554131,
+      "index_ms": 154.0146640036255,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.9630929753571458,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.95,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.9,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "cobra",
+      "language": "go",
+      "mode": "auto",
+      "chunks": 780,
+      "tokens": 2596,
+      "ndcg5": 0.9590790148145552,
+      "ndcg10": 0.9590790148145552,
+      "p50_ms": 259.9214194342494,
+      "p90_ms": 279.2831848375499,
+      "p95_ms": 287.50603951048106,
+      "p99_ms": 290.31684385146946,
+      "index_ms": 208.4258960094303,
+      "by_category": {
+        "architecture": 0.9384882922619097,
+        "semantic": 0.9591500493381495,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8333333333333334,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.9090909090909091,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "commons-lang",
+      "language": "java",
+      "mode": "auto",
+      "chunks": 6049,
+      "tokens": 1471,
+      "ndcg5": 0.9288541168323731,
+      "ndcg10": 0.9288541168323731,
+      "p50_ms": 266.5063110180199,
+      "p90_ms": 320.8546459209174,
+      "p95_ms": 321.9959170091897,
+      "p99_ms": 339.46087383665144,
+      "index_ms": 1727.2845599800348,
+      "by_category": {
+        "architecture": 0.8710490642551528,
+        "semantic": 0.9209135186224552,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8571428571428571,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7857142857142857,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "curl",
+      "language": "c",
+      "mode": "auto",
+      "chunks": 8901,
+      "tokens": 1516,
+      "ndcg5": 0.7627459577472389,
+      "ndcg10": 0.7627459577472389,
+      "p50_ms": 265.1059901108965,
+      "p90_ms": 290.99565979558975,
+      "p95_ms": 293.50316979689524,
+      "p99_ms": 296.9120250805281,
+      "index_ms": 1795.7316820975393,
+      "by_category": {
+        "architecture": 0.719475231888429,
+        "semantic": 0.7981492789044468
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.5,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.4444444444444444,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.5454545454545454,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "dapper",
+      "language": "csharp",
+      "mode": "auto",
+      "chunks": 798,
+      "tokens": 1291,
+      "ndcg5": 0.8530803155822426,
+      "ndcg10": 0.8688535594215289,
+      "p50_ms": 266.442917403765,
+      "p90_ms": 289.03032015077775,
+      "p95_ms": 343.83206614293186,
+      "p99_ms": 664.0677060652519,
+      "index_ms": 277.24466216750443,
+      "by_category": {
+        "architecture": 0.6404015779112127,
+        "semantic": 0.9088819135989022,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.75,
+        "hit5": 0.95,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.25,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8461538461538461,
+          "hit5": 0.9230769230769231,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "ecto",
+      "language": "elixir",
+      "mode": "auto",
+      "chunks": 1431,
+      "tokens": 3369,
+      "ndcg5": 0.9094548456815218,
+      "ndcg10": 0.9094548456815218,
+      "p50_ms": 262.67285202629864,
+      "p90_ms": 278.920020442456,
+      "p95_ms": 284.5960381906479,
+      "p99_ms": 296.01365647278726,
+      "index_ms": 391.10588701441884,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.8676647744576088,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.7894736842105263,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.6923076923076923,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "exposed",
+      "language": "kotlin",
+      "mode": "auto",
+      "chunks": 1408,
+      "tokens": 1363,
+      "ndcg5": 0.7227171565336199,
+      "ndcg10": 0.7336375283745281,
+      "p50_ms": 273.9947640802711,
+      "p90_ms": 298.617412825115,
+      "p95_ms": 301.3603896717541,
+      "p99_ms": 316.7538492917083,
+      "index_ms": 353.1899058725685,
+      "by_category": {
+        "architecture": 0.6666666666666666,
+        "semantic": 0.6909107548207544,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.45,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.3333333333333333,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.35714285714285715,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "express",
+      "language": "javascript",
+      "mode": "auto",
+      "chunks": 102,
+      "tokens": 1549,
+      "ndcg5": 0.9425198673610791,
+      "ndcg10": 0.9425198673610791,
+      "p50_ms": 246.63531500846148,
+      "p90_ms": 262.15966001618654,
+      "p95_ms": 264.8652843781747,
+      "p99_ms": 290.44781617121765,
+      "index_ms": 39.80269422754645,
+      "by_category": {
+        "architecture": 0.9885315413068839,
+        "semantic": 0.8930676558073394,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "fastapi",
+      "language": "python",
+      "mode": "auto",
+      "chunks": 1188,
+      "tokens": 1490,
+      "ndcg5": 0.8535157360031599,
+      "ndcg10": 0.8813216634698728,
+      "p50_ms": 262.77664152439684,
+      "p90_ms": 279.1691750055179,
+      "p95_ms": 281.7392894998193,
+      "p99_ms": 283.35563477128744,
+      "index_ms": 324.85734997317195,
+      "by_category": {
+        "architecture": 0.8299441881388151,
+        "semantic": 0.8521029940532185,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.7142857142857143,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.75,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "flask",
+      "language": "python",
+      "mode": "auto",
+      "chunks": 558,
+      "tokens": 1647,
+      "ndcg5": 0.9098634851683363,
+      "ndcg10": 0.9098634851683363,
+      "p50_ms": 262.957913801074,
+      "p90_ms": 277.1172630600631,
+      "p95_ms": 278.95470312796533,
+      "p99_ms": 284.9274597596377,
+      "index_ms": 129.9972718115896,
+      "by_category": {
+        "architecture": 0.8291713588483536,
+        "semantic": 0.9717987712573755,
+        "symbol": 0.8710490642551528
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9523809523809523,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8571428571428571,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "fmtlib",
+      "language": "cpp",
+      "mode": "auto",
+      "chunks": 966,
+      "tokens": 1383,
+      "ndcg5": 0.925,
+      "ndcg10": 0.925,
+      "p50_ms": 259.6466594841331,
+      "p90_ms": 278.12124476768076,
+      "p95_ms": 279.3944819131866,
+      "p99_ms": 280.4360755952075,
+      "index_ms": 558.281279867515,
+      "by_category": {
+        "architecture": 0.8333333333333334,
+        "semantic": 0.9285714285714286,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.85,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8571428571428571,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "gin",
+      "language": "go",
+      "mode": "auto",
+      "chunks": 1171,
+      "tokens": 1470,
+      "ndcg5": 0.8912346061295772,
+      "ndcg10": 0.9172269698482879,
+      "p50_ms": 264.25395905971527,
+      "p90_ms": 286.47289290092885,
+      "p95_ms": 287.3542143381201,
+      "p99_ms": 294.3008652399294,
+      "index_ms": 313.9696491416544,
+      "by_category": {
+        "architecture": 0.9641662623071857,
+        "semantic": 0.8690492566475132,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9,
+        "hit5": 0.95,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8181818181818182,
+          "hit5": 0.9090909090909091,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "gson",
+      "language": "java",
+      "mode": "auto",
+      "chunks": 2881,
+      "tokens": 1817,
+      "ndcg5": 0.8600371126378168,
+      "ndcg10": 0.8785703971578827,
+      "p50_ms": 267.5549299456179,
+      "p90_ms": 306.9649753626437,
+      "p95_ms": 376.4087293646299,
+      "p99_ms": 444.4582834164611,
+      "index_ms": 741.0688458476216,
+      "by_category": {
+        "architecture": 0.5552526489840183,
+        "semantic": 0.9350397347221581,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.25,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.9,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "guzzle",
+      "language": "php",
+      "mode": "auto",
+      "chunks": 386,
+      "tokens": 1436,
+      "ndcg5": 0.9578459250958741,
+      "ndcg10": 0.9578459250958741,
+      "p50_ms": 253.58690845314413,
+      "p90_ms": 284.0855912072584,
+      "p95_ms": 304.13382692495367,
+      "p99_ms": 345.7252055522985,
+      "index_ms": 93.5244751162827,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.9351475770705757,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.95,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.9230769230769231,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "http4s",
+      "language": "scala",
+      "mode": "auto",
+      "chunks": 1849,
+      "tokens": 1501,
+      "ndcg5": 0.9371567083124563,
+      "ndcg10": 0.9371567083124563,
+      "p50_ms": 274.97698296792805,
+      "p90_ms": 312.84249217715114,
+      "p95_ms": 314.49641168583184,
+      "p99_ms": 314.56340862903744,
+      "index_ms": 634.3271809164435,
+      "by_category": {
+        "architecture": 0.9501149685115848,
+        "semantic": 0.9209135186224552,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.85,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7857142857142857,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "httpx",
+      "language": "python",
+      "mode": "auto",
+      "chunks": 488,
+      "tokens": 1488,
+      "ndcg5": 0.964955624884409,
+      "ndcg10": 0.964955624884409,
+      "p50_ms": 263.01882811822,
+      "p90_ms": 286.9767560623586,
+      "p95_ms": 291.14699992351234,
+      "p99_ms": 292.58631034754217,
+      "index_ms": 123.79697896540165,
+      "by_category": {
+        "architecture": 0.9447353132522084,
+        "semantic": 0.9612134366452368,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9523809523809523,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8888888888888888,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "jackson-databind",
+      "language": "java",
+      "mode": "auto",
+      "chunks": 8975,
+      "tokens": 1381,
+      "ndcg5": 0.7630929753571458,
+      "ndcg10": 0.7932025352968579,
+      "p50_ms": 275.51775285974145,
+      "p90_ms": 312.9376000026241,
+      "p95_ms": 314.9454159080051,
+      "p99_ms": 338.64612064091483,
+      "index_ms": 2025.5685318261385,
+      "by_category": {
+        "architecture": 0.6430676783119403,
+        "semantic": 0.7387458127086064,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.6,
+        "hit5": 0.95,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.4,
+          "hit5": 0.8,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.4444444444444444,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "kotlinx-coroutines",
+      "language": "kotlin",
+      "mode": "auto",
+      "chunks": 1569,
+      "tokens": 2443,
+      "ndcg5": 0.9346268032608155,
+      "ndcg10": 0.9346268032608155,
+      "p50_ms": 269.16422857902944,
+      "p90_ms": 323.11037345789384,
+      "p95_ms": 399.91715834476054,
+      "p99_ms": 407.0610860455781,
+      "index_ms": 389.293251093477,
+      "by_category": {
+        "architecture": 0.8769765845238192,
+        "semantic": 0.9329718794032036,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.85,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8571428571428571,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "ktor",
+      "language": "kotlin",
+      "mode": "auto",
+      "chunks": 761,
+      "tokens": 1761,
+      "ndcg5": 0.8959114183080601,
+      "ndcg10": 0.9261744305106955,
+      "p50_ms": 261.0236690379679,
+      "p90_ms": 295.39388285484165,
+      "p95_ms": 311.24610723927634,
+      "p99_ms": 471.1470270343122,
+      "index_ms": 203.1422678846866,
+      "by_category": {
+        "architecture": 0.9271946440147868,
+        "semantic": 0.861875157444343,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7142857142857143,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "laravel-framework",
+      "language": "php",
+      "mode": "auto",
+      "chunks": 11681,
+      "tokens": 1300,
+      "ndcg5": 0.809549560027125,
+      "ndcg10": 0.8246010598103239,
+      "p50_ms": 285.12252995278686,
+      "p90_ms": 310.0255491444841,
+      "p95_ms": 311.332174774725,
+      "p99_ms": 326.9327661418356,
+      "index_ms": 2157.8486040234566,
+      "by_category": {
+        "architecture": 0.7733192011916644,
+        "semantic": 0.8420874208738697,
+        "symbol": 0.875
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.65,
+        "hit5": 0.95,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.5714285714285714,
+          "hit5": 0.8571428571428571,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 0.75,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "lazy.nvim",
+      "language": "lua",
+      "mode": "auto",
+      "chunks": 596,
+      "tokens": 1497,
+      "ndcg5": 0.8347315560164319,
+      "ndcg10": 0.8449506758958563,
+      "p50_ms": 274.95129546150565,
+      "p90_ms": 284.44762595463544,
+      "p95_ms": 286.7974409367889,
+      "p99_ms": 302.89220257662237,
+      "index_ms": 147.2025248222053,
+      "by_category": {
+        "architecture": 0.8318036756630085,
+        "semantic": 0.8557073124500043
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.65,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.6363636363636364,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "libuv",
+      "language": "c",
+      "mode": "auto",
+      "chunks": 2638,
+      "tokens": 1613,
+      "ndcg5": 0.7166796457740924,
+      "ndcg10": 0.7361275504924951,
+      "p50_ms": 259.58290544804186,
+      "p90_ms": 280.3928620647639,
+      "p95_ms": 282.8362840344198,
+      "p99_ms": 286.2612401158549,
+      "index_ms": 540.4955029953271,
+      "by_category": {
+        "architecture": 0.43067655807339306,
+        "semantic": 0.7384374695431395,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.5,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.5,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "messagepack-csharp",
+      "language": "csharp",
+      "mode": "auto",
+      "chunks": 2179,
+      "tokens": 1488,
+      "ndcg5": 0.8861651225292417,
+      "ndcg10": 0.894523145277552,
+      "p50_ms": 276.69789001811296,
+      "p90_ms": 300.0785894924775,
+      "p95_ms": 303.6839915323072,
+      "p99_ms": 342.0162413245998,
+      "index_ms": 668.7038550153375,
+      "by_category": {
+        "architecture": 0.6052466561225187,
+        "semantic": 0.9410529201178848,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.85,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.5,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8888888888888888,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "mini.nvim",
+      "language": "lua",
+      "mode": "auto",
+      "chunks": 4381,
+      "tokens": 1618,
+      "ndcg5": 0.9815464876785729,
+      "ndcg10": 0.9815464876785729,
+      "p50_ms": 264.8780884919688,
+      "p90_ms": 278.91426540445536,
+      "p95_ms": 287.6262265373953,
+      "p99_ms": 322.82242702553043,
+      "index_ms": 1062.3469548299909,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.9769331095982161
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.95,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.9375,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "model2vec",
+      "language": "python",
+      "mode": "auto",
+      "chunks": 203,
+      "tokens": 1500,
+      "ndcg5": 0.7384286635847979,
+      "ndcg10": 0.7682491404455479,
+      "p50_ms": 248.0213245144114,
+      "p90_ms": 267.1382290078327,
+      "p95_ms": 280.1527933916079,
+      "p99_ms": 461.79839323740424,
+      "index_ms": 56.830053916200995,
+      "by_category": {
+        "architecture": 0.7805696229509371,
+        "semantic": 0.69009954482544,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.65,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.7142857142857143,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.5,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "monolog",
+      "language": "php",
+      "mode": "auto",
+      "chunks": 774,
+      "tokens": 1269,
+      "ndcg5": 0.8901466838298294,
+      "ndcg10": 0.8901466838298294,
+      "p50_ms": 253.92424850724638,
+      "p90_ms": 271.34698117151856,
+      "p95_ms": 273.0453179916367,
+      "p99_ms": 273.05407389532775,
+      "index_ms": 165.38682603277266,
+      "by_category": {
+        "architecture": 0.7379572967662259,
+        "semantic": 0.9113147192765458,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.95,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.9,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "newtonsoft-json",
+      "language": "csharp",
+      "mode": "auto",
+      "chunks": 4297,
+      "tokens": 1333,
+      "ndcg5": 0.9056128427182248,
+      "ndcg10": 0.9056128427182248,
+      "p50_ms": 277.28841197676957,
+      "p90_ms": 307.21497039776295,
+      "p95_ms": 316.91412740619853,
+      "p99_ms": 317.72736314916983,
+      "index_ms": 1012.2889608610421,
+      "by_category": {
+        "architecture": 0.9251084237866075,
+        "semantic": 0.869236937422259,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8333333333333334,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7272727272727273,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "nlohmann-json",
+      "language": "cpp",
+      "mode": "auto",
+      "chunks": 1599,
+      "tokens": 1426,
+      "ndcg5": 0.9264583471748493,
+      "ndcg10": 0.9264583471748493,
+      "p50_ms": 250.97547902259976,
+      "p90_ms": 277.0918664522469,
+      "p95_ms": 286.0946722561494,
+      "p99_ms": 355.3372720675542,
+      "index_ms": 381.42906315624714,
+      "by_category": {
+        "architecture": 0.8953296337648672,
+        "semantic": 0.9261859507142916,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.85,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8571428571428571,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "nvm",
+      "language": "bash",
+      "mode": "auto",
+      "chunks": 309,
+      "tokens": 1528,
+      "ndcg5": 1.0,
+      "ndcg10": 1.0,
+      "p50_ms": 252.93935497757047,
+      "p90_ms": 265.90934903360903,
+      "p95_ms": 276.87977273017174,
+      "p99_ms": 311.12106744199986,
+      "index_ms": 121.67971697635949,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 1.0,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "pandoc",
+      "language": "haskell",
+      "mode": "auto",
+      "chunks": 6178,
+      "tokens": 1395,
+      "ndcg5": 0.8455285910760185,
+      "ndcg10": 0.8455285910760185,
+      "p50_ms": 285.79014039132744,
+      "p90_ms": 329.52694420237094,
+      "p95_ms": 341.8509253882804,
+      "p99_ms": 442.55857787327824,
+      "index_ms": 1653.5175370518118,
+      "by_category": {
+        "architecture": 0.8288662191964322,
+        "semantic": 0.8566368389957429
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.65,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.625,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "phoenix",
+      "language": "elixir",
+      "mode": "auto",
+      "chunks": 1046,
+      "tokens": 3254,
+      "ndcg5": 0.9219885558318947,
+      "ndcg10": 0.9219885558318947,
+      "p50_ms": 272.1915259025991,
+      "p90_ms": 285.06141300313175,
+      "p95_ms": 297.4219953175634,
+      "p99_ms": 300.3889878746122,
+      "index_ms": 263.54747801087797,
+      "by_category": {
+        "architecture": 0.9444444444444444,
+        "semantic": 0.8596832229722856,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8421052631578947,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8888888888888888,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7142857142857143,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "plug",
+      "language": "elixir",
+      "mode": "auto",
+      "chunks": 507,
+      "tokens": 2836,
+      "ndcg5": 0.9446394630357187,
+      "ndcg10": 0.9446394630357187,
+      "p50_ms": 270.71812050417066,
+      "p90_ms": 287.38851696252823,
+      "p95_ms": 302.1272106096149,
+      "p99_ms": 383.41069411486376,
+      "index_ms": 159.74450600333512,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.9209135186224552,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.85,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7857142857142857,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "pydantic",
+      "language": "python",
+      "mode": "auto",
+      "chunks": 2868,
+      "tokens": 1657,
+      "ndcg5": 0.6980095832944107,
+      "ndcg10": 0.7280110393539456,
+      "p50_ms": 268.5815563891083,
+      "p90_ms": 286.2709291279316,
+      "p95_ms": 291.8631087522954,
+      "p99_ms": 299.70095376484096,
+      "index_ms": 647.724554175511,
+      "by_category": {
+        "architecture": 0.5222264884340531,
+        "semantic": 0.7380794210050676,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.5,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.14285714285714285,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.5,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "rack",
+      "language": "ruby",
+      "mode": "auto",
+      "chunks": 483,
+      "tokens": 1286,
+      "ndcg5": 0.9517183196428588,
+      "ndcg10": 0.9517183196428588,
+      "p50_ms": 258.7067954009399,
+      "p90_ms": 274.666675995104,
+      "p95_ms": 324.85720184631606,
+      "p99_ms": 520.820525931194,
+      "index_ms": 123.06393194012344,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.9130929753571457,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8888888888888888,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "rails",
+      "language": "ruby",
+      "mode": "auto",
+      "chunks": 870,
+      "tokens": 1240,
+      "ndcg5": 0.8297210925935836,
+      "ndcg10": 0.8710097409938028,
+      "p50_ms": 261.32859545759857,
+      "p90_ms": 281.68554683215916,
+      "p95_ms": 283.34566734265536,
+      "p99_ms": 287.85185118671507,
+      "index_ms": 206.72363694757223,
+      "by_category": {
+        "architecture": 0.8537783135835433,
+        "semantic": 0.8758471076530654,
+        "symbol": 0.9013150610131764
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8888888888888888,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7142857142857143,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 0.75,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "redis",
+      "language": "c",
+      "mode": "auto",
+      "chunks": 12306,
+      "tokens": 1676,
+      "ndcg5": 0.95,
+      "ndcg10": 0.9666666666666668,
+      "p50_ms": 280.5686565116048,
+      "p90_ms": 309.4498856924474,
+      "p95_ms": 322.301555541344,
+      "p99_ms": 323.05540873203427,
+      "index_ms": 3946.9211720861495,
+      "by_category": {
+        "architecture": 0.9333333333333333,
+        "semantic": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.95,
+        "hit5": 0.95,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.9,
+          "hit5": 0.9,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "redux",
+      "language": "javascript",
+      "mode": "auto",
+      "chunks": 87,
+      "tokens": 1590,
+      "ndcg5": 0.8863147192765458,
+      "ndcg10": 0.9137963988128106,
+      "p50_ms": 249.61203057318926,
+      "p90_ms": 297.51645179931097,
+      "p95_ms": 464.10409209784126,
+      "p99_ms": 517.2470782650634,
+      "index_ms": 37.795254960656166,
+      "by_category": {
+        "architecture": 0.9032867981913646,
+        "semantic": 0.872911909678669,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9,
+        "hit5": 0.95,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7777777777777778,
+          "hit5": 0.8888888888888888,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "requests",
+      "language": "python",
+      "mode": "auto",
+      "chunks": 316,
+      "tokens": 1667,
+      "ndcg5": 0.9938607657669024,
+      "ndcg10": 0.9938607657669024,
+      "p50_ms": 246.60548206884414,
+      "p90_ms": 270.585621194914,
+      "p95_ms": 286.60518402466573,
+      "p99_ms": 506.63404801161926,
+      "index_ms": 84.02377413585782,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.9846519144172562,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 1.0,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "serde",
+      "language": "rust",
+      "mode": "auto",
+      "chunks": 2187,
+      "tokens": 1420,
+      "ndcg5": 0.8564993486741834,
+      "ndcg10": 0.8564993486741834,
+      "p50_ms": 271.8323905719444,
+      "p90_ms": 316.61362485028803,
+      "p95_ms": 322.28485854575416,
+      "p99_ms": 369.8101436463184,
+      "index_ms": 535.0736319087446,
+      "by_category": {
+        "architecture": 0.8368127466340753,
+        "semantic": 0.793643251190486,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.7,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.7,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.5,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "sinatra",
+      "language": "ruby",
+      "mode": "auto",
+      "chunks": 134,
+      "tokens": 1178,
+      "ndcg5": 0.9815464876785729,
+      "ndcg10": 0.9815464876785729,
+      "p50_ms": 255.773518467322,
+      "p90_ms": 266.28221448045224,
+      "p95_ms": 270.5335820559412,
+      "p99_ms": 296.4921429473906,
+      "index_ms": 96.24727605842054,
+      "by_category": {
+        "architecture": 0.9261859507142916,
+        "semantic": 1.0,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.95,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "snapkit",
+      "language": "swift",
+      "mode": "auto",
+      "chunks": 201,
+      "tokens": 1616,
+      "ndcg5": 0.8541161308360743,
+      "ndcg10": 0.8541161308360743,
+      "p50_ms": 250.12557907029986,
+      "p90_ms": 267.8360852878541,
+      "p95_ms": 268.22581090964377,
+      "p99_ms": 268.3574422169477,
+      "index_ms": 67.98243406228721,
+      "by_category": {
+        "architecture": 0.8442893273045486,
+        "semantic": 0.7958059598507601,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8461538461538461,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7142857142857143,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "starlette",
+      "language": "python",
+      "mode": "auto",
+      "chunks": 419,
+      "tokens": 1388,
+      "ndcg5": 0.9455821018620179,
+      "ndcg10": 0.9645253781099111,
+      "p50_ms": 250.08545420132577,
+      "p90_ms": 254.49773203581572,
+      "p95_ms": 261.9141081813723,
+      "p99_ms": 262.05516406334937,
+      "index_ms": 106.89012613147497,
+      "by_category": {
+        "architecture": 0.9322757218461938,
+        "semantic": 1.0,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9523809523809523,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.9090909090909091,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "telescope.nvim",
+      "language": "lua",
+      "mode": "auto",
+      "chunks": 1053,
+      "tokens": 1502,
+      "ndcg5": 0.8372697611682816,
+      "ndcg10": 0.8372697611682816,
+      "p50_ms": 269.45394556969404,
+      "p90_ms": 294.20788143761456,
+      "p95_ms": 305.35713386489084,
+      "p99_ms": 389.88401328911993,
+      "index_ms": 260.123125044629,
+      "by_category": {
+        "architecture": 0.8119698445315399,
+        "semantic": 0.85089279320345
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.7,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.7142857142857143,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.6923076923076923,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "tokio",
+      "language": "rust",
+      "mode": "auto",
+      "chunks": 5338,
+      "tokens": 1666,
+      "ndcg5": 0.9653286798191365,
+      "ndcg10": 0.975,
+      "p50_ms": 265.7285949680954,
+      "p90_ms": 286.9682842632756,
+      "p95_ms": 340.10476164985454,
+      "p99_ms": 428.593530715443,
+      "index_ms": 1087.2508869506419,
+      "by_category": {
+        "architecture": 0.9166666666666666,
+        "semantic": 1.0,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.95,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8333333333333334,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "trpc",
+      "language": "typescript",
+      "mode": "auto",
+      "chunks": 690,
+      "tokens": 1492,
+      "ndcg5": 0.8555355994845343,
+      "ndcg10": 0.8846548243838004,
+      "p50_ms": 266.9212870532647,
+      "p90_ms": 280.3064287407324,
+      "p95_ms": 303.40382042340946,
+      "p99_ms": 394.8782769124953,
+      "index_ms": 155.46165988780558,
+      "by_category": {
+        "architecture": 0.8201126123453331,
+        "semantic": 0.876027941273335,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.75,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7142857142857143,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "vapor",
+      "language": "swift",
+      "mode": "auto",
+      "chunks": 1485,
+      "tokens": 1234,
+      "ndcg5": 0.8868127466340754,
+      "ndcg10": 0.8868127466340754,
+      "p50_ms": 278.36637559812516,
+      "p90_ms": 293.60968098044395,
+      "p95_ms": 297.7263479726389,
+      "p99_ms": 309.9623622233048,
+      "index_ms": 381.3335970044136,
+      "by_category": {
+        "architecture": 0.8333333333333334,
+        "semantic": 0.8740182094772505,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.75,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.7142857142857143,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "vitest",
+      "language": "typescript",
+      "mode": "auto",
+      "chunks": 2065,
+      "tokens": 1427,
+      "ndcg5": 0.7651680541117373,
+      "ndcg10": 0.7818347207784039,
+      "p50_ms": 282.34224300831556,
+      "p90_ms": 307.07449330948293,
+      "p95_ms": 319.4388137664646,
+      "p99_ms": 325.5718435253948,
+      "index_ms": 530.6631871499121,
+      "by_category": {
+        "architecture": 0.8154648767857288,
+        "semantic": 0.7039913777139731,
+        "symbol": 1.0
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.5,
+        "hit5": 0.95,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.5,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.36363636363636365,
+          "hit5": 0.9090909090909091,
+          "hit10": 1.0
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "xmonad",
+      "language": "haskell",
+      "mode": "auto",
+      "chunks": 241,
+      "tokens": 1615,
+      "ndcg5": 0.8941104494365046,
+      "ndcg10": 0.8941104494365046,
+      "p50_ms": 249.4856733828783,
+      "p90_ms": 274.087622947991,
+      "p95_ms": 342.31772822095087,
+      "p99_ms": 388.0466608121059,
+      "index_ms": 83.9479120913893,
+      "by_category": {
+        "architecture": 0.9198112468055327,
+        "semantic": 0.8769765845238192
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.75,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.875,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "zig-clap",
+      "language": "zig",
+      "mode": "auto",
+      "chunks": 195,
+      "tokens": 1432,
+      "ndcg5": 0.9630929753571458,
+      "ndcg10": 0.9630929753571458,
+      "p50_ms": 254.5670580584556,
+      "p90_ms": 261.73746823333204,
+      "p95_ms": 263.123744179029,
+      "p99_ms": 263.157871181611,
+      "index_ms": 62.28233897127211,
+      "by_category": {
+        "architecture": 1.0,
+        "semantic": 0.9589921948412731
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8888888888888888,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "zig",
+      "language": "zig",
+      "mode": "auto",
+      "chunks": 26017,
+      "tokens": 1473,
+      "ndcg5": 0.9096268032608155,
+      "ndcg10": 0.9096268032608155,
+      "p50_ms": 309.70824498217553,
+      "p90_ms": 393.1070315418765,
+      "p95_ms": 402.3442246951163,
+      "p99_ms": 424.3057121895253,
+      "index_ms": 7996.096514863893,
+      "by_category": {
+        "architecture": 0.8333333333333334,
+        "semantic": 0.9230903567774299
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.8,
+        "hit5": 1.0,
+        "hit10": 1.0
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.6666666666666666,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.8235294117647058,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "zls",
+      "language": "zig",
+      "mode": "auto",
+      "chunks": 2617,
+      "tokens": 1559,
+      "ndcg5": 0.9315464876785728,
+      "ndcg10": 0.9315464876785728,
+      "p50_ms": 269.57094098906964,
+      "p90_ms": 286.78958830423653,
+      "p95_ms": 290.83078536205,
+      "p99_ms": 329.7625066619366,
+      "index_ms": 601.6202978789806,
+      "by_category": {
+        "architecture": 0.8571428571428571,
+        "semantic": 0.9716099810439582
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.9,
+        "hit5": 0.95,
+        "hit10": 0.95
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.8571428571428571,
+          "hit5": 0.8571428571428571,
+          "hit10": 0.8571428571428571
+        },
+        "semantic": {
+          "hit1": 0.9230769230769231,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    },
+    {
+      "repo": "zod",
+      "language": "typescript",
+      "mode": "auto",
+      "chunks": 3576,
+      "tokens": 1450,
+      "ndcg5": 0.543408995401379,
+      "ndcg10": 0.6044033272689838,
+      "p50_ms": 304.37915155198425,
+      "p90_ms": 358.2681963220239,
+      "p95_ms": 394.53164545120677,
+      "p99_ms": 433.73642258578906,
+      "index_ms": 986.2699010409415,
+      "by_category": {
+        "architecture": 0.6376626356799113,
+        "semantic": 0.5798012309738485,
+        "symbol": 0.6666666666666666
+      },
+      "by_kind": {},
+      "hits": {
+        "hit1": 0.4,
+        "hit5": 0.8,
+        "hit10": 0.95
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.5,
+          "hit5": 1.0,
+          "hit10": 1.0
+        },
+        "semantic": {
+          "hit1": 0.38461538461538464,
+          "hit5": 0.6923076923076923,
+          "hit10": 0.9230769230769231
+        },
+        "symbol": {
+          "hit1": 0.3333333333333333,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {},
+      "queries": []
+    }
+  ]
+}

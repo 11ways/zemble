@@ -81,6 +81,39 @@ as `dimensions`.
 honouring `Retry-After`. Every other 4xx is raised immediately, carrying the
 provider's own message.
 
+## The fusion profile
+
+Search fuses a dense lane with BM25, and `zemble.ranking.weighting` decides how much of
+that fusion the dense lane gets: 0.30 for a query that looks like a symbol lookup, 0.50
+otherwise. Those two constants were tuned around the static default embedder, and they
+are measurably too low for a contextual one - the same weight that wins with Voyage
+loses with Model2Vec (`docs/voyage.md`).
+
+So the number is not global. Every embedder declares its own share:
+
+```python
+class Model2VecEmbedder:
+    semantic_weight_bonus = 0.0     # the weights were tuned on exactly this
+
+class HttpEmbedder:
+    semantic_weight_bonus = 0.15    # hosted contextual models, measured
+```
+
+- The bonus is **added to both** auto-detected weights (0.30 -> 0.45, 0.50 -> 0.65) and
+  the result is clamped to [0, 1].
+- An **explicit** `alpha` - `--alpha`, or the parameter on `search()` - is the caller's
+  number and is never adjusted.
+- An embedder that declares nothing gets **0.0**, which is exactly the shipped weights.
+  An unrecognised embedder never silently retunes ranking.
+- `ZEMBLE_SEMANTIC_WEIGHT_BONUS` overrides every declaration, which is how the sweep in
+  `docs/voyage.md` was run. A value that is not a number is ignored with one warning.
+- The caching wrapper forwards the wrapped provider's bonus: caching changes who pays,
+  not how good the vectors are.
+
+Measured on the javaweb set: `voyage-4-lite@1024` goes 0.6803 -> 0.7102 NDCG@10 with the
+bonus, `potion-code-16M-v2` goes 0.5569 -> 0.5533 without one, and upstream moves
++0.0020. The sweep, the per-kind breakdown and the decision are in `docs/voyage.md`.
+
 ## The embedding cache
 
 Remote providers are wrapped in a content-hash cache, so a chunk that has not

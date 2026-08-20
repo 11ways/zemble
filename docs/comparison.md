@@ -43,6 +43,36 @@ worktree, with the same `.zembleignore` and the same `.hwk` lane in effect.
 | F voyage-4-lite + rerank-2.5 | **0.7531** | **0.656** | 0.867 | **0.911** | 802 ms | $0.000574 |
 | G voyage-4-lite + rerank-2.5-lite | 0.7380 | **0.656** | **0.878** | 0.900 | 796 ms | $0.000230 |
 
+## What the fusion profile changed afterwards
+
+The seven runs above were measured before embedders declared a fusion weight bonus
+(`docs/embedders.md`). Hosted embedders now claim +0.15 of the RRF fusion by default, so
+**C, D, F and G are no longer what those configurations produce today**. C was re-run on
+the shipped default; the reranked rows were not.
+
+| run | NDCG@10 | hit@1 | hit@5 | hit@10 |
+| --- | ------: | ----: | ----: | -----: |
+| C as measured above (bonus forced to 0) | 0.6803 | 0.589 | 0.811 | 0.856 |
+| **C as shipped today (+0.15)** | **0.7102** | **0.611** | **0.833** | **0.867** |
+
+The whole gain is one kind: `consumer` hit@5 goes 0.455 -> 0.636 and every other kind is
+unchanged, which is the first time anything but a reranker has moved that column. On the
+80 code queries C becomes 0.6896 / hit@5 0.812 (from 0.6568 / 0.787); the ten template
+queries do not move (0.875 vs 0.868, hit@5 1.000 either way).
+
+Re-running the two reranked rows was not worth another 5M rerank tokens for a row that
+is already the recommendation; expect F and G to move less than C did, because the
+reranker reorders the same window either way.
+
+A and B are unaffected: the default embedder declares a bonus of 0.0, and B re-measured
+at exactly 0.5569 / 0.500 / 0.622 / 0.689 on the current tree.
+
+All the rows in this section were measured inside one 30-minute window, over a
+77,094-to-77,098-chunk index, which matters: the javaweb corpus is a **live worktree**
+that other work edits. Re-running B ninety minutes later, at 77,132 chunks, reads 0.5546
+- the same hit rates, 0.002 of NDCG of pure corpus drift. Compare runs from the same
+window; never a number here against one measured on another day.
+
 ## The 80 code queries only
 
 The ten template queries are the ones whose annotated answer is a `.hwk` file. Pulling
@@ -183,6 +213,8 @@ counts differ only in how the client batched them.
   at rank 1" from "the answer and four distractors filled the top five", and a query
   with six relevant files scores exactly like a query with one. It is reported *beside*
   NDCG, never instead of it.
+- **C, D, F and G predate the fusion profile.** Hosted embedders now weight the dense
+  lane +0.15 by default; the section above re-measures C on the shipped configuration.
 - **One run each.** No configuration was repeated, so nothing here has an error bar.
   Retrieval is deterministic given the index, so the quality numbers are stable; the
   latency numbers are not.

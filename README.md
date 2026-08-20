@@ -65,8 +65,9 @@ in-process fallback, so it is an accelerator and never a requirement. See
 **Pluggable embedders and rerankers**. One spec string selects the embedder
 (`model2vec:`, `voyage:`, `openai:` for anything speaking the OpenAI embeddings shape)
 and one selects the reranker (`none`, `cross:<hf-model>`, `voyage:<model>`). Remote
-embeddings are cached by content hash. See [docs/embedders.md](docs/embedders.md) and
-[docs/rerank.md](docs/rerank.md).
+embeddings are cached by content hash, and each embedder declares how much of the hybrid
+fusion its dense lane earns, so a stronger embedder is weighted for without a flag. See
+[docs/embedders.md](docs/embedders.md) and [docs/rerank.md](docs/rerank.md).
 
 ## Benchmarks
 
@@ -88,12 +89,16 @@ Seven configurations, one working tree, one run each, all 90 queries
 | F `voyage-4-lite` + `rerank-2.5` | 0.753 | 0.656 | 0.867 | 0.911 | 802 ms | $0.00057 |
 | G `voyage-4-lite` + `rerank-2.5-lite` | 0.738 | 0.656 | 0.878 | 0.900 | 796 ms | $0.00023 |
 
+Rows C to G were measured before hosted embedders started claiming a larger share of the
+fusion. On the shipped configuration C is now 0.710 NDCG@10 and 0.833 hit@5
+([docs/voyage.md](docs/voyage.md)); the reranked rows move less and were not re-measured.
+
 hit@5 is the fraction of queries where a correct file is in the top 5. NDCG@10 scores the
 whole ranked list of 10: bigger is better, and 1.0 means the right file came first on
 every query.
 
 In plain words, on this set: with the local defaults about 62% of queries have the answer
-in the top 5; with a hosted embedder that is about 81%; with a hosted embedder and a
+in the top 5; with a hosted embedder that is about 83%; with a hosted embedder and a
 hosted reranker together it is about 87 to 88%. The two mechanisms fix different queries.
 The embedder gets the right file into the window (symptom-only bug reports go from 0.400
 to 0.800 hit@5), the reranker puts it at the top ("which layer consumes this" queries go
@@ -155,7 +160,7 @@ an explicit environment variable always wins over the file, so nothing secret ha
 an agent's MCP config.
 
 That is row G above: about 88% hit@5, roughly $0.0002 and 0.8 s per query. Dropping the
-reranker (the embedder alone, row C) is about 81% hit@5 at roughly 0.35 s per query and a
+reranker (the embedder alone, row C) is about 83% hit@5 at roughly 0.35 s per query and a
 fifth of a millionth of a dollar. The reranker is worth its round trip on the queries
 fusion is worst at, and it slightly hurts bare-identifier lookups, which BM25 already
 answers perfectly.
