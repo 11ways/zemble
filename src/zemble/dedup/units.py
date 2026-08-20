@@ -157,11 +157,23 @@ def _hash(parts: list[str]) -> str:
 
 
 def _renamed_stream(tokens: list[tuple[str, str]], declared: frozenset[str]) -> list[str]:
-    """Replace declared identifiers by positional placeholders in first-seen order."""
+    """Replace declared identifiers by positional placeholders in first-seen order.
+
+    An identifier straight after a dot is a MEMBER name, never a local, whatever it is
+    spelled like: without that rule every `this.key = key;` run in every constructor
+    normalizes to the same stream and constructors become one giant clone class.
+
+    :param tokens: The unit's (node type, text) token stream.
+    :param declared: The names the unit declares.
+    :return: The normalized stream.
+    """
     placeholders: dict[str, str] = {}
     stream: list[str] = []
+    previous = ""
     for node_type, text in tokens:
-        if node_type == "identifier" and text in declared:
+        is_member = previous == "."
+        previous = text
+        if node_type == "identifier" and text in declared and not is_member:
             placeholder = placeholders.get(text)
             if placeholder is None:
                 placeholder = f"${len(placeholders)}"

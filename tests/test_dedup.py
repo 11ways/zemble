@@ -106,10 +106,15 @@ def test_exact_and_renamed_journey() -> None:
         "step 5: the one-field near miss is not a renamed clone"
     )
 
-    # 6. Pure exact duplication is reported once: no renamed class repeats it alone.
+    # 6. A constructor's `this.field = field` run does not collapse: a member name is not a local.
+    assert not any({"src/CtorA.java:13-20", "src/CtorB.java:13-20"} <= members for members in renamed), (
+        "step 6: two constructors with different FIELD names are not renamed clones"
+    )
+
+    # 7. Pure exact duplication is reported once: no renamed class repeats it alone.
     window_pair = {"src/WindowA.java:7-13", "src/WindowB.java:8-14"}
-    assert window_pair in exact, "step 6: the copied statement window is an exact class"
-    assert window_pair not in renamed, "step 6: and it is not repeated under renamed"
+    assert window_pair in exact, "step 7: the copied statement window is an exact class"
+    assert window_pair not in renamed, "step 7: and it is not repeated under renamed"
 
 
 def test_ranking_journey() -> None:
@@ -213,7 +218,7 @@ def test_report_and_cli_journey(tmp_path: Path) -> None:
 
     # 1. The text form leads with the counts and prints one section per kind.
     text = format_report(report)
-    assert text.startswith("Analyzed 10 file(s)"), "step 1: the header counts the files"
+    assert text.startswith("Analyzed 12 file(s)"), "step 1: the header counts the files"
     assert "== EXACT ==" in text and "copies x" in text, "step 1: the sections mirror zenit-dev duplication"
 
     # 2. The limit caps a section and says what it hid.
@@ -234,7 +239,7 @@ def test_report_and_cli_journey(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, f"step 4: a report never fails the build ({result.stderr[-400:]})"
     parsed = json.loads(result.stdout)
-    assert parsed["analyzed_files"] == 10, "step 4: the JSON names what was scanned"
+    assert parsed["analyzed_files"] == 12, "step 4: the JSON names what was scanned"
 
     # 5. An unknown kind is a usage error, not a silent empty report.
     bad = subprocess.run(
