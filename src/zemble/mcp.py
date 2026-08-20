@@ -3,22 +3,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
-from collections import OrderedDict
 from collections.abc import Sequence
-from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from zemble.cache import get_validated_cache, save_index_to_cache
+from zemble.daemon import client as daemon_client
+from zemble.daemon.protocol import DaemonError
 from zemble.dedup.mcp import register_dupes_tool
-from zemble.embedding.base import Embedder
-from zemble.embedding.registry import load_embedder
 from zemble.evidence.mcp import register_evidence_tools
 from zemble.graph.mcp import register_graph_tools
 from zemble.index import ZembleIndex
+from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.types import ContentType
 from zemble.utils import format_results, is_git_url, resolve_chunk
 
@@ -29,16 +26,60 @@ _REPO_DESCRIPTION = (
     "search. The index is cached after the first call, so repeat queries are fast."
 )
 
-_CACHE_MAX_SIZE = 10  # Max number of cached indexes to keep in memory
-_MIN_REVALIDATE_FACTOR = 3  # Don't recheck staleness sooner than this many times the last build's duration
 ContentSelection = Literal["code", "docs", "config", "all"]
-_CacheKey = tuple[str, tuple[ContentType, ...]]
+
+#: Re-exported so `zemble.mcp` keeps naming the cache size it serves with.
+_CACHE_MAX_SIZE = CACHE_MAX_SIZE
 
 
-async def _get_index(repo: str, cache: _IndexCache, content: Sequence[ContentType]) -> ZembleIndex:
-    """Return a cached index for a repo, rejecting unsafe git transport schemes."""
+async def _daemon_call(cmd: str, args: dict[str, Any]) -> Any | None:
+    """Try to answer one tool call from the warm daemon.
+
+    Several agent sessions then share one RAM copy of a workspace index instead of
+    each holding its own.
+
+    :param cmd: Daemon command name.
+    :param args: Command arguments.
+    :return: The daemon's result, or None if this process must answer in-process.
+    """
+    try:
+        return await asyncio.to_thread(daemon_client.call, cmd, args)
+    except DaemonError as exc:
+        logger.info("daemon unavailable (%s); answering in-process", exc)
+        return None
+
+
+def unsafe_repo_reason(repo: str) -> str | None:
+    """Return why a repo argument is refused, or None when it is acceptable.
+
+    Checked before the daemon is contacted as well: a rejected transport scheme must
+    never become a clone inside another process.
+    """
     if is_git_url(repo) and not repo.startswith(("https://", "http://")):
-        raise ValueError(f"Only https://, http://, or local directory paths are accepted as `repo`. Got: {repo!r}")
+        return f"Only https://, http://, or local directory paths are accepted as `repo`. Got: {repo!r}"
+    return None
+
+
+async def _answer_remotely(cmd: str, repo: str, args: dict[str, Any]) -> str | None:
+    """Refuse an unacceptable repo, or answer one tool call from the warm daemon.
+
+    :param cmd: Daemon command name.
+    :param repo: The repo argument as the caller wrote it.
+    :param args: The rest of the command arguments.
+    :return: The text to return from the tool, or None when this process must answer.
+    """
+    refusal = unsafe_repo_reason(repo)
+    if refusal is not None:
+        return refusal
+    remote = await _daemon_call(cmd, {"path": repo, **args})
+    return None if remote is None else json.dumps(remote)
+
+
+async def _get_index(repo: str, cache: IndexCache, content: Sequence[ContentType]) -> ZembleIndex:
+    """Return a cached index for a repo, rejecting unsafe git transport schemes."""
+    reason = unsafe_repo_reason(repo)
+    if reason is not None:
+        raise ValueError(reason)
     try:
         return await cache.get(repo, content=content)
     except Exception as exc:
@@ -56,7 +97,7 @@ def _resolve_content_selection(
     return (ContentType(content),)
 
 
-def create_server(cache: _IndexCache, default_content: Sequence[ContentType] = (ContentType.CODE,)) -> FastMCP:
+def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (ContentType.CODE,)) -> FastMCP:
     """Build and return a configured FastMCP server backed by the given cache."""
     server = FastMCP(
         "zemble",
@@ -100,6 +141,18 @@ def create_server(cache: _IndexCache, default_content: Sequence[ContentType] = (
         Pass a git URL or local path as `repo`; indexes are cached for the session.
         """
         selected_content = _resolve_content_selection(content, default_content)
+        remote = await _answer_remotely(
+            "search",
+            repo,
+            {
+                "query": query,
+                "top_k": top_k,
+                "max_snippet_lines": max_snippet_lines,
+                "content": [item.value for item in selected_content],
+            },
+        )
+        if remote is not None:
+            return remote
         try:
             index = await _get_index(repo, cache, selected_content)
         except ValueError as exc:
@@ -140,6 +193,19 @@ def create_server(cache: _IndexCache, default_content: Sequence[ContentType] = (
         Pass `file_path` and `line` from a prior search result.
         """
         selected_content = _resolve_content_selection(content, default_content)
+        remote = await _answer_remotely(
+            "find_related",
+            repo,
+            {
+                "file_path": file_path,
+                "line": line,
+                "top_k": top_k,
+                "max_snippet_lines": max_snippet_lines,
+                "content": [item.value for item in selected_content],
+            },
+        )
+        if remote is not None:
+            return remote
         try:
             index = await _get_index(repo, cache, selected_content)
         except ValueError as exc:
@@ -166,152 +232,11 @@ async def serve(
     content: Sequence[ContentType] = (ContentType.CODE,),
 ) -> None:
     """Start an MCP stdio server."""
-    cache = _IndexCache()
-
-    async def _load_and_prewarm() -> None:
-        """Pre-load the embedding model in parallel with starting the server."""
-        try:
-            embedder = await asyncio.to_thread(load_embedder)
-            # Touch dimensions so the model is really loaded, not merely constructed.
-            await asyncio.to_thread(lambda: embedder.dimensions)
-            cache._embedder = embedder
-        except Exception as exc:
-            logger.exception("Failed to load embedding model")
-            cache._model_error = exc
-            return
-        finally:
-            cache._model_ready.set()
-
-    init_task = asyncio.create_task(_load_and_prewarm())
+    cache = IndexCache()
+    init_task = asyncio.create_task(cache.load_embedder_once())
     server = create_server(cache, default_content=content)
     try:
         await server.run_stdio_async()
     finally:
         if not init_task.done():
             init_task.cancel()
-
-
-class _IndexCache:
-    """Cache of indexed repos and local paths for the lifetime of the MCP server process."""
-
-    def __init__(self) -> None:
-        """Initialise an empty cache."""
-        self._embedder: Embedder | None = None
-        self._model_error: BaseException | None = None
-        self._model_ready = asyncio.Event()
-        self._tasks: OrderedDict[_CacheKey, asyncio.Task[ZembleIndex]] = OrderedDict()  # ordered for LRU eviction
-        self._revalidate_after: dict[_CacheKey, float] = {}
-
-    async def _await_model(self) -> Embedder:
-        """Block until the embedder is installed; re-raise the load error if it failed."""
-        await self._model_ready.wait()
-        if self._model_error is not None:
-            raise self._model_error
-        assert self._embedder is not None
-        return self._embedder
-
-    def _compute_cache_key(
-        self,
-        source: str,
-        ref: str | None = None,
-        content: Sequence[ContentType] = (ContentType.CODE,),
-    ) -> _CacheKey:
-        """Compute the canonical key for an exact index variant."""
-        is_git = is_git_url(source)
-        source_key = (f"{source}@{ref}" if ref else source) if is_git else str(Path(source).resolve())
-        normalized = tuple(content_type for content_type in ContentType if content_type in content)
-        return source_key, normalized
-
-    def _build_index(self, source: str, ref: str | None, embedder: Embedder, cache_key: _CacheKey) -> ZembleIndex:
-        """Build an index for the given source and cache it."""
-        source_key, content = cache_key
-        index = (
-            ZembleIndex.from_git(source, ref=ref, embedder=embedder, content=content)
-            if is_git_url(source)
-            else ZembleIndex.from_path(source_key, embedder=embedder, content=content)
-        )
-        try:
-            save_index_to_cache(index, source_key)
-        except Exception:
-            logger.warning("Failed to save index cache for %r", source_key, exc_info=True)
-        return index
-
-    async def _build_tracked(
-        self, source: str, ref: str | None, embedder: Embedder, cache_key: _CacheKey
-    ) -> ZembleIndex:
-        """Build an index and, for local paths, record when its staleness cooldown ends.
-
-        The cooldown write happens after the await, i.e. back on the event loop thread,
-        regardless of which thread `_build_index` itself ran on.
-        """
-        start = time.monotonic()
-        index = await asyncio.to_thread(self._build_index, source, ref, embedder, cache_key)
-        if not is_git_url(source):
-            finished = time.monotonic()
-            self._revalidate_after[cache_key] = finished + (finished - start) * _MIN_REVALIDATE_FACTOR
-        return index
-
-    def evict(self, cache_key: _CacheKey) -> None:
-        """Evict one exact index variant from memory."""
-        self._tasks.pop(cache_key, None)
-        self._revalidate_after.pop(cache_key, None)
-
-    async def _evict_if_stale(self, cache_key: _CacheKey) -> None:
-        """Evict a cached local-path entry whose on-disk cache no longer matches its files.
-
-        Skipped while inside the cooldown window so repos that are slow to build aren't
-        rebuilt faster than they can be served.
-        """
-        cached = self._tasks.get(cache_key)
-        if (
-            cached is None
-            or is_git_url(cache_key[0])
-            or not cached.done()
-            or cached.cancelled()
-            or cached.exception() is not None
-        ):
-            return
-        if time.monotonic() < self._revalidate_after.get(cache_key, 0.0):
-            return
-        if self._embedder is None:
-            return
-        validated = await asyncio.to_thread(get_validated_cache, cache_key[0], self._embedder.model_id, cache_key[1])
-        # Only evict if this entry hasn't already been replaced by a concurrent caller.
-        if validated is None and self._tasks.get(cache_key) is cached:
-            self.evict(cache_key)
-
-    async def get(
-        self,
-        source: str,
-        ref: str | None = None,
-        content: Sequence[ContentType] = (ContentType.CODE,),
-    ) -> ZembleIndex:
-        """Return an index for the requested source, building and caching it on first access.
-
-        Local paths are revalidated against the on-disk cache on every call (subject to a
-        cooldown scaled by build time), so an entry is rebuilt once its files change.
-        """
-        cache_key = self._compute_cache_key(source, ref, content)
-        await self._evict_if_stale(cache_key)
-
-        if cache_key not in self._tasks:
-            embedder = await self._await_model()
-            # Re-check after the await: another caller may have populated the entry.
-            if cache_key not in self._tasks:
-                if len(self._tasks) >= _CACHE_MAX_SIZE:
-                    evicted_key, _ = self._tasks.popitem(last=False)
-                    self._revalidate_after.pop(evicted_key, None)
-                self._tasks[cache_key] = asyncio.create_task(self._build_tracked(source, ref, embedder, cache_key))
-        self._tasks.move_to_end(cache_key)
-        task = self._tasks[cache_key]
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:  # pragma: no cover
-            if task.done():
-                self.evict(cache_key)
-            raise
-        except Exception:
-            # Only evict if this task hasn't already been replaced by evict()+get().
-            if self._tasks.get(cache_key) is task:
-                self.evict(cache_key)
-            raise

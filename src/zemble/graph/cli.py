@@ -55,12 +55,14 @@ def add_graph_parser(sub: argparse._SubParsersAction) -> None:
     build_p.add_argument("--stats", action="store_true", help="Print the full build statistics.")
     build_p.add_argument("--force", action="store_true", help="Re-extract every file instead of only changed ones.")
     build_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
+    build_p.add_argument("--no-daemon", action="store_true", help="Do not use the warm daemon.")
 
     for command in QUERY_COMMANDS:
         query_p = graph_sub.add_parser(command, help=f"Graph query: {command}.")
         query_p.add_argument("path", help="Workspace directory the graph was built for.")
         query_p.add_argument("symbol", help="Simple name, qualified name, or Type.member.")
         query_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
+        query_p.add_argument("--no-daemon", action="store_true", help="Do not use the warm daemon.")
         if command == "neighbors":
             query_p.add_argument("--hops", type=int, default=1, help="How far to walk (default: 1).")
             query_p.add_argument(
@@ -74,6 +76,10 @@ def add_graph_parser(sub: argparse._SubParsersAction) -> None:
 
 def run_graph(args: argparse.Namespace) -> int:
     """Run a `zemble graph ...` subcommand and return its exit code."""
+    if getattr(args, "no_daemon", False):
+        from zemble.daemon import client
+
+        client.disable_for_this_process("--no-daemon")
     if args.graph_command == "build":
         return _run_build(args)
     return _run_query(args)
@@ -99,14 +105,36 @@ def _run_build(args: argparse.Namespace) -> int:
 
 
 def ensure_graph(path: str, *, refresh: bool = True) -> None:
-    """Build the graph if it is missing, and refresh it once per process."""
+    """Build the graph if it is missing, and refresh it once per process.
+
+    A warm daemon does both instead where one is reachable: it keeps the graph fresh with
+    its watcher, so the client skips the workspace scan a refresh costs.
+    """
     if not graph_exists(path):
-        build_graph(path)
         _refreshed.add(path)
+        if not _ensure_via_daemon(path):
+            build_graph(path)
         return
     if refresh and path not in _refreshed:
         _refreshed.add(path)
-        build_graph(path)
+        if not _ensure_via_daemon(path):
+            build_graph(path)
+
+
+def _ensure_via_daemon(path: str) -> bool:
+    """Ask the daemon to guarantee a fresh graph for a path.
+
+    :param path: The workspace directory.
+    :return: Whether the daemon answered; False means do it in this process.
+    """
+    from zemble.daemon import client
+    from zemble.daemon.protocol import DaemonError
+
+    try:
+        client.call("graph", {"path": path, "command": "ensure"})
+    except DaemonError:
+        return False
+    return True
 
 
 def select_symbol(symbols: Sequence[Symbol], name: str) -> tuple[Symbol | None, list[Symbol]]:

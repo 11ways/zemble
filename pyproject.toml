@@ -33,6 +33,7 @@ dependencies = [
     "orjson",
     "questionary>=2.0,<3.0",
     "semble-grammars>=0.1.2",
+    "watchfiles>=0.21",
 ]
 
 [project.optional-dependencies]
@@ -91,6 +92,7 @@ target-version = "py310"
 "src/zemble/graph/cli.py" = ["T20"]
 "src/zemble/dedup/cli.py" = ["T20"]
 "src/zemble/evidence/cli.py" = ["T20"]
+"src/zemble/daemon/cli.py" = ["T20"]
 "src/zemble/installer/*.py" = ["T20", "E501"]
 
 [tool.ruff.lint]

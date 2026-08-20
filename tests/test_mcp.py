@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.conftest import FakeEmbedder, make_chunk
-from zemble.mcp import _CACHE_MAX_SIZE, _IndexCache, create_server, serve
+from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
+from zemble.mcp import create_server, serve
 from zemble.types import Chunk, ContentType, SearchResult
 from zemble.utils import format_results, is_git_url, resolve_chunk
 
@@ -20,7 +21,7 @@ def _tool_text(result: Any) -> str:
 
 
 async def _call_tool(
-    cache: _IndexCache,
+    cache: IndexCache,
     tool: str,
     args: dict[str, Any],
     *,
@@ -40,9 +41,9 @@ async def _call_tool(
 
 
 @pytest.fixture()
-def cache(mock_embedder: FakeEmbedder) -> _IndexCache:
-    """An _IndexCache backed by a stub embedder."""
-    c = _IndexCache()
+def cache(mock_embedder: FakeEmbedder) -> IndexCache:
+    """An IndexCache backed by a stub embedder."""
+    c = IndexCache()
     c._embedder = mock_embedder
     c._model_ready.set()
     return c
@@ -131,16 +132,14 @@ def test_format_results(max_snippet_lines: int | None, has_content: bool, conten
     ],
     ids=["local_path", "git_url"],
 )
-async def test_index_cache_builds_and_caches(
-    cache: _IndexCache, tmp_path: Path, source: str, patch_target: str
-) -> None:
-    """_IndexCache.get() builds via the correct ZembleIndex.* entrypoint and caches subsequent calls."""
+async def test_index_cache_builds_and_caches(cache: IndexCache, tmp_path: Path, source: str, patch_target: str) -> None:
+    """IndexCache.get() builds via the correct ZembleIndex.* entrypoint and caches subsequent calls."""
     resolved_source = str(tmp_path) if source == "local_tmp_path" else source
     fake_index = MagicMock()
     with (
         patch(f"zemble.mcp.ZembleIndex.{patch_target}", return_value=fake_index) as mock_build,
-        patch("zemble.mcp.save_index_to_cache") as mock_save,
-        patch("zemble.mcp.get_validated_cache", return_value=Path("/fake/cache")),
+        patch("zemble.index_cache.save_index_to_cache") as mock_save,
+        patch("zemble.index_cache.get_validated_cache", return_value=Path("/fake/cache")),
     ):
         first = await cache.get(resolved_source)
         second = await cache.get(resolved_source)
@@ -167,7 +166,7 @@ async def test_index_cache_builds_and_caches(
     ids=["local_path_rebuilds_when_stale", "git_url_skips_revalidation"],
 )
 async def test_index_cache_staleness_check_scope(
-    cache: _IndexCache,
+    cache: IndexCache,
     tmp_path: Path,
     source: str,
     patch_target: str,
@@ -178,11 +177,11 @@ async def test_index_cache_staleness_check_scope(
     resolved_source = str(tmp_path) if source == "local_tmp_path" else source
     with (
         patch(f"zemble.mcp.ZembleIndex.{patch_target}", return_value=MagicMock()) as mock_build,
-        patch("zemble.mcp.save_index_to_cache"),
-        patch("zemble.mcp.get_validated_cache", return_value=None) as mock_validate,
+        patch("zemble.index_cache.save_index_to_cache"),
+        patch("zemble.index_cache.get_validated_cache", return_value=None) as mock_validate,
         # Disable the cooldown: real build duration (here, just thread-dispatch overhead) would
         # otherwise sometimes exceed the gap between the two get() calls below, flaking the test.
-        patch("zemble.mcp._MIN_REVALIDATE_FACTOR", 0),
+        patch("zemble.index_cache.MIN_REVALIDATE_FACTOR", 0),
     ):
         await cache.get(resolved_source)
         await cache.get(resolved_source)
@@ -191,13 +190,13 @@ async def test_index_cache_staleness_check_scope(
 
 
 @pytest.mark.anyio
-async def test_index_cache_skips_staleness_check_during_cooldown(cache: _IndexCache, tmp_path: Path) -> None:
+async def test_index_cache_skips_staleness_check_during_cooldown(cache: IndexCache, tmp_path: Path) -> None:
     """A slow-to-build local path is not revalidated again until its cooldown elapses."""
     cache_key = cache._compute_cache_key(str(tmp_path))
     cache._tasks[cache_key] = asyncio.create_task(_succeed())
     await asyncio.sleep(0)  # let the task finish
     cache._revalidate_after[cache_key] = time.monotonic() + 30.0  # a build that took 10s, just finished
-    with patch("zemble.mcp.get_validated_cache") as mock_validate:
+    with patch("zemble.index_cache.get_validated_cache") as mock_validate:
         await cache._evict_if_stale(cache_key)
     mock_validate.assert_not_called()
 
@@ -207,7 +206,7 @@ async def _succeed() -> MagicMock:
 
 
 @pytest.mark.anyio
-async def test_index_cache_skips_staleness_check_for_failed_task(cache: _IndexCache, tmp_path: Path) -> None:
+async def test_index_cache_skips_staleness_check_for_failed_task(cache: IndexCache, tmp_path: Path) -> None:
     """A cached entry that finished with an exception is not revalidated; it is left for the normal retry path."""
 
     async def _raise() -> MagicMock:
@@ -216,13 +215,13 @@ async def test_index_cache_skips_staleness_check_for_failed_task(cache: _IndexCa
     cache_key = cache._compute_cache_key(str(tmp_path))
     cache._tasks[cache_key] = asyncio.create_task(_raise())
     await asyncio.sleep(0)  # let the task finish
-    with patch("zemble.mcp.get_validated_cache") as mock_validate:
+    with patch("zemble.index_cache.get_validated_cache") as mock_validate:
         await cache._evict_if_stale(cache_key)
     mock_validate.assert_not_called()
 
 
 @pytest.mark.anyio
-async def test_index_cache_does_not_evict_entry_replaced_during_validation(cache: _IndexCache, tmp_path: Path) -> None:
+async def test_index_cache_does_not_evict_entry_replaced_during_validation(cache: IndexCache, tmp_path: Path) -> None:
     """If a concurrent caller already replaced a stale entry, _evict_if_stale must not evict the new one."""
     cache_key = cache._compute_cache_key(str(tmp_path))
     cache._tasks[cache_key] = asyncio.create_task(_succeed())
@@ -236,13 +235,13 @@ async def test_index_cache_does_not_evict_entry_replaced_during_validation(cache
         cache._tasks[cache_key] = replacement_task  # type: ignore[assignment]
         return None
 
-    with patch("zemble.mcp.get_validated_cache", side_effect=_replace_entry_then_report_stale):
+    with patch("zemble.index_cache.get_validated_cache", side_effect=_replace_entry_then_report_stale):
         await cache._evict_if_stale(cache_key)
     assert cache._tasks.get(cache_key) is replacement_task
 
 
 @pytest.mark.anyio
-async def test_index_cache_evicts_on_failure(cache: _IndexCache, tmp_path: Path) -> None:
+async def test_index_cache_evicts_on_failure(cache: IndexCache, tmp_path: Path) -> None:
     """A failed build evicts the entry so the next call can retry."""
     call_count = 0
 
@@ -262,12 +261,12 @@ async def test_index_cache_evicts_on_failure(cache: _IndexCache, tmp_path: Path)
 
 
 @pytest.mark.anyio
-async def test_index_cache_ignores_cache_save_failure(cache: _IndexCache, tmp_path: Path) -> None:
+async def test_index_cache_ignores_cache_save_failure(cache: IndexCache, tmp_path: Path) -> None:
     """A cache save failure must not fail the MCP request."""
     fake_index = MagicMock()
     with (
         patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index),
-        patch("zemble.mcp.save_index_to_cache", side_effect=RuntimeError("save failed")),
+        patch("zemble.index_cache.save_index_to_cache", side_effect=RuntimeError("save failed")),
     ):
         assert await cache.get(str(tmp_path)) is fake_index
 
@@ -280,7 +279,7 @@ async def test_index_cache_ignores_cache_save_failure(cache: _IndexCache, tmp_pa
         ("find_related", {"file_path": "src/foo.py", "line": 1, "repo": "https://github.com/x/y"}),
     ],
 )
-async def test_tool_index_failure(cache: _IndexCache, tool: str, args: dict[str, object]) -> None:
+async def test_tool_index_failure(cache: IndexCache, tool: str, args: dict[str, object]) -> None:
     """Both tools return a friendly error message when indexing fails."""
     with patch("zemble.mcp.ZembleIndex.from_git", side_effect=RuntimeError("clone failed")):
         server = create_server(cache)
@@ -342,7 +341,7 @@ async def test_tool_index_failure(cache: _IndexCache, tool: str, args: dict[str,
     ],
 )
 async def test_tool_output(
-    cache: _IndexCache,
+    cache: IndexCache,
     tool: str,
     args: dict[str, Any],
     method: str,
@@ -358,7 +357,7 @@ async def test_tool_output(
 
 @pytest.mark.anyio
 async def test_search_builds_exact_content_indexes(
-    cache: _IndexCache,
+    cache: IndexCache,
     mock_embedder: FakeEmbedder,
     tmp_project: Path,
 ) -> None:
@@ -373,7 +372,7 @@ async def test_search_builds_exact_content_indexes(
 
     with (
         patch("zemble.index.index.load_embedder", return_value=mock_embedder),
-        patch("zemble.mcp.save_index_to_cache"),
+        patch("zemble.index_cache.save_index_to_cache"),
     ):
         server = create_server(cache)
         for content, expected_suffixes in expected:
@@ -407,7 +406,7 @@ async def test_serve_runs_stdio(
 
     load_kwargs = {"side_effect": load_err} if load_err else {"return_value": FakeEmbedder()}
     with (
-        patch("zemble.mcp.load_embedder", **load_kwargs),
+        patch("zemble.index_cache.load_embedder", **load_kwargs),
         patch("mcp.server.fastmcp.FastMCP.run_stdio_async", side_effect=fake_stdio) as mock_run,
     ):
         await serve()
@@ -429,7 +428,7 @@ async def test_serve_opens_stdio_before_model_loads() -> None:
         await asyncio.sleep(0.05)
 
     with (
-        patch("zemble.mcp.load_embedder", side_effect=blocking_load_model),
+        patch("zemble.index_cache.load_embedder", side_effect=blocking_load_model),
         patch("mcp.server.fastmcp.FastMCP.run_stdio_async", side_effect=fake_run_stdio),
     ):
         await serve()
@@ -438,7 +437,7 @@ async def test_serve_opens_stdio_before_model_loads() -> None:
 @pytest.mark.anyio
 async def test_index_cache_awaits_model(tmp_path: Path) -> None:
     """get() blocks until the model is installed, then proceeds."""
-    cache = _IndexCache()  # no model yet
+    cache = IndexCache()  # no model yet
     fake_index = MagicMock()
     with patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index):
         get_task = asyncio.create_task(cache.get(str(tmp_path)))
@@ -453,7 +452,7 @@ async def test_index_cache_awaits_model(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_index_cache_propagates_model_error(tmp_path: Path) -> None:
     """If model load fails, awaiting tool calls re-raise the original exception."""
-    cache = _IndexCache()
+    cache = IndexCache()
     get_task = asyncio.create_task(cache.get(str(tmp_path)))
     await asyncio.sleep(0.01)
     assert not get_task.done()
@@ -475,9 +474,7 @@ async def test_index_cache_propagates_model_error(tmp_path: Path) -> None:
     ],
     ids=["file_search", "ssh_search", "scp_search", "file_find_related", "ssh_find_related"],
 )
-async def test_tool_rejects_unsafe_repo(
-    cache: _IndexCache, repo: str, tool: str, extra_args: dict[str, object]
-) -> None:
+async def test_tool_rejects_unsafe_repo(cache: IndexCache, repo: str, tool: str, extra_args: dict[str, object]) -> None:
     """Both tools reject unsafe git transport schemes (ssh://, file://, SCP-form) supplied as repo."""
     server = create_server(cache)
     result = await server.call_tool(tool, {**extra_args, "repo": repo})
@@ -485,22 +482,22 @@ async def test_tool_rejects_unsafe_repo(
 
 
 @pytest.mark.anyio
-async def test_index_cache_lru_eviction(cache: _IndexCache, tmp_path: Path) -> None:
-    """_IndexCache evicts the least-recently-used entry when the cache is full."""
-    dirs = [tmp_path / str(i) for i in range(_CACHE_MAX_SIZE + 1)]
+async def test_index_cache_lru_eviction(cache: IndexCache, tmp_path: Path) -> None:
+    """IndexCache evicts the least-recently-used entry when the cache is full."""
+    dirs = [tmp_path / str(i) for i in range(CACHE_MAX_SIZE + 1)]
     for d in dirs:
         d.mkdir()
     with patch("zemble.mcp.ZembleIndex.from_path", return_value=MagicMock()):
-        for d in dirs[:_CACHE_MAX_SIZE]:
+        for d in dirs[:CACHE_MAX_SIZE]:
             await cache.get(str(d))
         first_key = cache._compute_cache_key(str(dirs[0]))
         assert first_key in cache._tasks
-        await cache.get(str(dirs[_CACHE_MAX_SIZE]))
+        await cache.get(str(dirs[CACHE_MAX_SIZE]))
     assert first_key not in cache._tasks
-    assert len(cache._tasks) == _CACHE_MAX_SIZE
+    assert len(cache._tasks) == CACHE_MAX_SIZE
 
 
-def test_cache_evict(cache: _IndexCache, tmp_path: Path) -> None:
+def test_cache_evict(cache: IndexCache, tmp_path: Path) -> None:
     """evict() removes an existing exact cache entry."""
     key = cache._compute_cache_key(str(tmp_path))
     cache._tasks[key] = MagicMock()
@@ -508,6 +505,6 @@ def test_cache_evict(cache: _IndexCache, tmp_path: Path) -> None:
     assert key not in cache._tasks
 
 
-def test_cache_evict_missing(cache: _IndexCache, tmp_path: Path) -> None:
+def test_cache_evict_missing(cache: IndexCache, tmp_path: Path) -> None:
     """evict() on an unknown key is a no-op."""
     cache.evict(cache._compute_cache_key(str(tmp_path)))  # should not raise

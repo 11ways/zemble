@@ -13,7 +13,8 @@ import pytest
 from tests.conftest import FakeEmbedder
 from zemble.cli import _cli_main
 from zemble.graph.cli import EXIT_AMBIGUOUS, EXIT_NOT_FOUND
-from zemble.mcp import _IndexCache, create_server
+from zemble.index_cache import IndexCache
+from zemble.mcp import create_server
 from zemble.types import Chunk, SearchResult
 
 _CIRCLE = "src/main/java/com/example/core/Circle.java"
@@ -90,15 +91,15 @@ def test_cli_journey(
 
 
 @pytest.fixture()
-def cache(mock_embedder: FakeEmbedder) -> _IndexCache:
+def cache(mock_embedder: FakeEmbedder) -> IndexCache:
     """An index cache backed by the deterministic test embedder."""
-    prepared = _IndexCache()
+    prepared = IndexCache()
     prepared._embedder = mock_embedder
     prepared._model_ready.set()
     return prepared
 
 
-async def _call(cache: _IndexCache, root: Path, tool: str, args: dict[str, Any]) -> str:
+async def _call(cache: IndexCache, root: Path, tool: str, args: dict[str, Any]) -> str:
     """Invoke one MCP tool with a fake index in place and return its text result."""
     with patch("zemble.mcp.ZembleIndex.from_path", return_value=_fake_index(root)):
         server = create_server(cache)
@@ -106,7 +107,7 @@ async def _call(cache: _IndexCache, root: Path, tool: str, args: dict[str, Any])
     return result[0][0].text
 
 
-def test_mcp_tools(graph_fixture_root: Path, graph_cache: Path, cache: _IndexCache) -> None:
+def test_mcp_tools(graph_fixture_root: Path, graph_cache: Path, cache: IndexCache) -> None:
     """The three tools are registered and answer over the fixture workspace."""
     import asyncio
 

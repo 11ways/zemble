@@ -260,9 +260,10 @@ def test_mcp_server_registers_the_dupes_tool() -> None:
     """The duplication tool joins the existing MCP server without replacing anything."""
     import asyncio
 
-    from zemble.mcp import _IndexCache, create_server
+    from zemble.index_cache import IndexCache
+    from zemble.mcp import create_server
 
-    server = create_server(_IndexCache())
+    server = create_server(IndexCache())
     tools = {tool.name for tool in asyncio.run(server.list_tools())}
 
     # 1. The tool is registered.

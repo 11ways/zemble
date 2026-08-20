@@ -28,6 +28,15 @@ def make_chunk(content: str, file_path: str = "src/module.py") -> Chunk:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_real_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the suite off the user's real daemon: a test must never spawn or reuse one.
+
+    The daemon's own tests point the socket at a temporary directory and re-enable it there.
+    """
+    monkeypatch.setenv("ZEMBLE_DAEMON", "0")
+
+
 @pytest.fixture
 def tmp_py_file(tmp_path: Path) -> Path:
     """A simple Python file with two functions."""

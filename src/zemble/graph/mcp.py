@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
@@ -14,6 +15,8 @@ from zemble.graph.provider import SqliteGraphProvider, display_name
 
 if TYPE_CHECKING:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP
+
+logger = logging.getLogger(__name__)
 
 _REPO_DESCRIPTION = (
     "Local directory path of the workspace to query. The Java symbol graph is built on first use "
@@ -55,7 +58,7 @@ def _open(repo: str) -> SqliteGraphProvider:
     return SqliteGraphProvider(repo)
 
 
-def _answer(repo: str, symbol: str, method: str, **kwargs: Any) -> str:
+def answer(repo: str, symbol: str, method: str, **kwargs: Any) -> str:
     """Resolve a written name and run one provider query, as JSON."""
     provider = _open(repo)
     try:
@@ -87,6 +90,27 @@ def _answer(repo: str, symbol: str, method: str, **kwargs: Any) -> str:
         provider.close()
 
 
+async def _dispatch(repo: str, symbol: str, method: str, **kwargs: Any) -> str:
+    """Answer through the warm daemon when there is one, else in this process.
+
+    The daemon holds a graph it keeps fresh with its watcher, so the workspace scan
+    `ensure_graph` would do here is skipped entirely.
+    """
+    from zemble.daemon import client
+    from zemble.daemon.protocol import DaemonError
+
+    args: dict[str, Any] = {"path": repo, "symbol": symbol, "command": method}
+    if "hops" in kwargs:
+        args["hops"] = kwargs["hops"]
+        kinds = kwargs.get("kinds")
+        args["kinds"] = [kind.value for kind in kinds] if kinds else None
+    try:
+        return str(await asyncio.to_thread(client.call, "graph", args))
+    except DaemonError:
+        logger.debug("Falling back to an in-process graph query for %s", repo, exc_info=True)
+    return await asyncio.to_thread(answer, repo, symbol, method, **kwargs)
+
+
 def register_graph_tools(server: FastMCP) -> None:
     """Register the symbol-graph tools on a FastMCP server."""
 
@@ -99,7 +123,7 @@ def register_graph_tools(server: FastMCP) -> None:
 
         Use this instead of grepping for `class Foo` or `void bar(`.
         """
-        return await asyncio.to_thread(_answer, repo, symbol, "definition")
+        return await _dispatch(repo, symbol, "definition")
 
     @server.tool()
     async def graph_callers(
@@ -112,7 +136,7 @@ def register_graph_tools(server: FastMCP) -> None:
         type was pinned down, `unique_name` means only one symbol in the workspace
         carries that name, `ambiguous` means several did.
         """
-        return await asyncio.to_thread(_answer, repo, symbol, "callers")
+        return await _dispatch(repo, symbol, "callers")
 
     @server.tool()
     async def graph_implementations(
@@ -120,7 +144,7 @@ def register_graph_tools(server: FastMCP) -> None:
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
     ) -> str:
         """List the direct and transitive subtypes of a Java class or interface, with their depth."""
-        return await asyncio.to_thread(_answer, repo, symbol, "implementations")
+        return await _dispatch(repo, symbol, "implementations")
 
     @server.tool()
     async def graph_tests_of(
@@ -128,7 +152,7 @@ def register_graph_tools(server: FastMCP) -> None:
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
     ) -> str:
         """Find the tests covering a Java symbol: naming matches (FooTest) first, then tests that use it."""
-        return await asyncio.to_thread(_answer, repo, symbol, "tests_of")
+        return await _dispatch(repo, symbol, "tests_of")
 
     @server.tool()
     async def graph_neighbors(
@@ -142,4 +166,4 @@ def register_graph_tools(server: FastMCP) -> None:
     ) -> str:
         """Walk the graph outward from a symbol in both directions, to see what it is wired to."""
         selected = [EdgeKind(value) for value in kinds] if kinds else None
-        return await asyncio.to_thread(_answer, repo, symbol, "neighbors", hops=hops, kinds=selected)
+        return await _dispatch(repo, symbol, "neighbors", hops=hops, kinds=selected)

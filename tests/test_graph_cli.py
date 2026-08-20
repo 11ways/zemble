@@ -77,7 +77,7 @@ def test_cli_builds_the_graph_on_first_query(
 
 def test_mcp_tools_journey(graph_fixture_root: Path, graph_cache: Path) -> None:
     """The MCP tools answer the same questions as the CLI, as JSON."""
-    from zemble.graph.mcp import _answer
+    from zemble.graph.mcp import answer as _answer
 
     root = str(graph_fixture_root)
 
@@ -109,8 +109,9 @@ def test_mcp_tools_journey(graph_fixture_root: Path, graph_cache: Path) -> None:
 
 def test_mcp_server_registers_the_graph_tools() -> None:
     """The graph tools are added to the existing MCP server without replacing it."""
-    from zemble.mcp import _IndexCache, create_server
+    from zemble.index_cache import IndexCache
+    from zemble.mcp import create_server
 
-    tools = {tool.name for tool in asyncio.run(create_server(_IndexCache()).list_tools())}
+    tools = {tool.name for tool in asyncio.run(create_server(IndexCache()).list_tools())}
     assert {"graph_definition", "graph_callers", "graph_implementations", "graph_tests_of", "graph_neighbors"} <= tools
     assert {"search", "find_related"} <= tools, "the existing tools are untouched"
