@@ -17,6 +17,15 @@
 
 zemble is a fork of [Semble](https://github.com/MinishLab/semble) by MinishLab, focused on workspace code intelligence: a symbol graph, evidence bundles packed to a token budget, duplication detection, and pluggable embedders. The upstream README follows below; see [docs/plan.md](docs/plan.md) for what this fork is building.
 
+On top of upstream's `search` and `find-related`, the fork adds `graph` (callers,
+implementations, tests-of and friends over a Java symbol graph), `explain`,
+`outline` and `signatures` ([evidence bundles](docs/evidence.md)), `dupes`
+(exact, alpha-renamed and logic clone classes), `daemon` (one warm process per
+user holding the indexes in RAM), and [`home`](docs/home.md) - "does this feature
+already exist, and which module should it live in?", answered from the module
+map, forbidden dependencies and declared-home tables a workspace states in
+`.zemble/home.toml`. Every one of them is a CLI subcommand and an MCP tool.
+
 Zemble is a code search library built for agents. It returns the exact code snippets they need instantly, using ~99% fewer tokens than grep+read. Indexing and searching a full codebase end-to-end takes under a second, matching the retrieval quality of a code-specialized transformer while indexing ~220x faster and querying ~17x faster (see [benchmarks](#benchmarks)). Everything runs on CPU with no API keys, GPU, or external services. Use it as an MCP server, a CLI tool via AGENTS.md, or a dedicated sub-agent, and any coding agent (Claude Code, Cursor, Codex, OpenCode, etc.) gets instant access to any repo.
 
 ## Quickstart

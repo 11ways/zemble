@@ -162,8 +162,14 @@ def _usable(symbols: Sequence[Symbol]) -> list[Symbol]:
 
 
 def _describe(graph: GraphProvider, config: HomeConfig, symbol: Symbol, score: float) -> Mechanism:
-    """Build one mechanism, asking the graph who consumes it."""
-    callers = [hit for hit in graph.callers(symbol.id) if hit.resolution in (Resolution.EXACT, Resolution.UNIQUE_NAME)]
+    """Build one mechanism, asking the graph who consumes it.
+
+    A TYPE is consumed by every edge pointing at it - an import, a field declaration,
+    a `new`, a subclass - and almost never by a call to the type itself, so asking
+    `callers` about a class under-reports its consumers to nearly zero.
+    """
+    incoming = graph.references(symbol.id) if symbol.kind in TYPE_KINDS else graph.callers(symbol.id)
+    callers = [hit for hit in incoming if hit.resolution in (Resolution.EXACT, Resolution.UNIQUE_NAME)]
     implementations = graph.implementations(symbol.id) if symbol.kind in TYPE_KINDS else []
     own = config.module_of(symbol.file_path)
     consumers: list[str] = []

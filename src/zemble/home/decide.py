@@ -24,7 +24,9 @@ STRONG_SCORE_RATIO = 0.85
 # the modules that were hit and so tops out near 1.0: a declared home has to be able
 # to outweigh a module that holds most of the matching code, and a forbidden
 # placement has to lose outright rather than merely slip.
-#: A module a matched declared row names as the home gets this added to its score.
+#: A module a matched declared row names as the home gets up to this much added,
+#: scaled by how well the row matched: a row the description barely resembles must
+#: not outweigh every hit in the workspace.
 DECLARED_BONUS = 0.8
 #: A module already holding this family and sitting closer to the core gets this.
 CORE_BONUS = 0.35
@@ -315,11 +317,15 @@ def candidates_of(
     if not grouped:
         return []
     total = sum(entry.mass for entry in grouped) or 1.0
-    declared_homes = {module for match in row_matches for module in match.row.home_modules}
-    declared_titles = {
-        module: match.row.title for match in reversed(list(row_matches)) for module in match.row.home_modules
-    }
+    declared: dict[str, RowMatch] = {}
+    for match in row_matches:
+        for module in match.row.home_modules:
+            if match.score > declared.get(module, match).score or module not in declared:
+                declared[module] = match
     strongest = grouped[0]
+    # Only DECLARED modules can be "below" a candidate: an undeclared one has no known
+    # position, and ranking it last would make every candidate closer to the core than it.
+    declared_modules = set(config.modules)
     candidates = []
     for entry in grouped:
         share = entry.mass / total
@@ -328,10 +334,15 @@ def candidates_of(
             f"{entry.hits} of {sum(g.hits for g in grouped)} hits live here"
             f" ({share:.0%} of the relevance){'' if entry is not strongest else ', the largest share'}"
         ]
-        if entry.module in declared_homes:
-            score += DECLARED_BONUS
-            reasons.append(f"declared home for '{declared_titles[entry.module]}'")
-        below = [other.module for other in grouped if config.rank(other.module) > config.rank(entry.module)]
+        match = declared.get(entry.module)
+        if match is not None:
+            score += DECLARED_BONUS * min(match.score, 1.0)
+            reasons.append(f"declared home for '{match.row.title}' (row match {match.score:.0%})")
+        below = [
+            other.module
+            for other in grouped
+            if other.module in declared_modules and config.rank(other.module) > config.rank(entry.module)
+        ]
         if below and not config.generic:
             score += CORE_BONUS
             reasons.append(

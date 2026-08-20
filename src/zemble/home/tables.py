@@ -9,7 +9,9 @@ documentation first and a machine input second.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+from math import log
 from typing import Any
 
 from zemble.home.config import HomeConfig, TableSpec
@@ -33,8 +35,8 @@ _STOPWORDS = frozenset(
 
 #: A row must share at least this many meaningful words with the description to match.
 MIN_SHARED_WORDS = 2
-#: ... and this share of the description's own words.
-MIN_MATCH_SCORE = 0.15
+#: ... and this share of the description's matchable weight.
+MIN_MATCH_SCORE = 0.2
 
 
 @dataclass(frozen=True)
@@ -109,21 +111,40 @@ def match_rows(rows: list[DeclaredRow], description: str, limit: int = 3) -> lis
 
     Deliberately a token overlap and not an embedding: the rows are already in the
     index, and a second scoring model here would be a second thing to keep honest.
+    Words are weighted by how many rows use them, because a table of capabilities is
+    full of "record", "user" and "page" - sharing those says nothing, and without the
+    weighting the longest row in the table matches every description.
     """
     query = words(description)
-    if not query:
+    if not query or not rows:
+        return []
+    weights = _weights(rows)
+    # Words no row could ever match are left out of the denominator: a description
+    # that happens to use rare vocabulary must not be scored as a worse match.
+    total = sum(weights[word] for word in query if word in weights)
+    if not total:
         return []
     matches = []
     for row in rows:
         shared = query & words(row.capability)
         if len(shared) < MIN_SHARED_WORDS:
             continue
-        score = len(shared) / len(query)
+        score = sum(weights[word] for word in shared) / total
         if score < MIN_MATCH_SCORE:
             continue
         matches.append(RowMatch(row=row, score=score, shared=tuple(sorted(shared))))
     matches.sort(key=lambda match: (-match.score, match.row.line))
     return matches[:limit]
+
+
+def _weights(rows: Sequence[DeclaredRow]) -> dict[str, float]:
+    """Weight every word in the table by how few of its rows use it."""
+    count = len(rows)
+    frequency: dict[str, int] = {}
+    for row in rows:
+        for word in words(row.capability):
+            frequency[word] = frequency.get(word, 0) + 1
+    return {word: log(1 + count / (1 + seen)) for word, seen in frequency.items()}
 
 
 def _rows_of(text: str, spec: TableSpec, config: HomeConfig) -> list[DeclaredRow]:

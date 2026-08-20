@@ -426,9 +426,7 @@ def test_evidence_commands_answer_over_a_real_socket(graph_fixture_root: Path, n
         assert "No symbol named" in unknown["error"] and not unknown["candidates"], "7: nothing to disambiguate"
 
 
-def test_home_answers_over_a_real_socket(
-    graph_fixture_root: Path, tmp_path: Path, no_embedder_load: None
-) -> None:
+def test_home_answers_over_a_real_socket(graph_fixture_root: Path, tmp_path: Path, no_embedder_load: None) -> None:
     """`home` answers from the daemon's warm index, its graph and the workspace's own config."""
     import shutil
 
