@@ -93,6 +93,12 @@ changed is never paid for twice.
 - Matryoshka fallback: a request at 256 dimensions is served by slicing a stored
   1024-dimension vector of the same text and renormalizing. The slice is not
   stored, because it is derivable.
+- Misses are handed to the provider 512 texts at a time and every slice is written
+  before the next is asked for. A cold workspace index is one `embed_documents` call
+  of tens of thousands of texts and half an hour of paid requests; without that
+  boundary a single failure at the end throws away every vector already bought, and
+  the response rows pile up in memory (6.5 GB peak on javaweb at 2048 dimensions,
+  0.75 GB with the boundary).
 - Only documents are cached. Queries always reach the provider: for an
   asymmetric model a query vector must never be served where a document vector
   was asked for.
@@ -121,6 +127,7 @@ whose content changed, because everything else comes out of the sqlite cache.
 ### Cost
 
 `voyage-code-4` is $0.12 per million tokens, and the first 200M tokens are free.
-The javaweb workspace measures roughly 31M tokens across 63 repositories, so a
-full index of it is comfortably inside the free tier, and a re-index after the
-cache is warm costs only the changed files.
+A full index of the javaweb workspace measured 15.5M tokens over 73,957 chunks and
+578 requests, i.e. $1.86 of paid-equivalent inside the free tier, and a re-index
+after the cache is warm costs only the changed files. See `docs/voyage.md` for what
+that buys in retrieval quality.

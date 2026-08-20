@@ -179,8 +179,12 @@ environment is the way to rerank on the daemon path.
 
 The realistic path to an on-by-default pass is a **hosted reranker** (`voyage:<model>`),
 where the model runs on someone else's accelerator and the cost is one network round trip
-rather than seconds of local CPU. That client is implemented and tested against a fake
-server, but it is unmeasured here: no `VOYAGE_API_KEY` was available on this machine.
+rather than seconds of local CPU. That has now been measured - see **`docs/voyage.md`**.
+Short version: `voyage:rerank-2.5` at capsule/0.7/50 is javaweb **+0.1135** (0.567 ->
+0.680) with the upstream set unmoved (-0.0006), so it passes both quality bars by a wide
+margin, at p50 570 ms. It still misses the 300 ms latency bar, and no hosted model can
+pass it - one 50-passage round trip is 309 ms on its own - so the default stays `none`,
+but a hosted reranker is now the configuration to reach for when quality matters.
 
 ### What it wins and what it costs, per query kind
 
