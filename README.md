@@ -142,6 +142,11 @@ export ZEMBLE_RERANK_ALPHA=0.7
 export ZEMBLE_RERANK_K=50
 ```
 
+Put those lines in `~/.config/zemble/env` (mode 600; or point `ZEMBLE_ENV_FILE` at another
+file) and zemble loads them itself at startup for the CLI, the MCP server and the daemon;
+an explicit environment variable always wins over the file, so nothing secret has to live in
+an agent's MCP config.
+
 That is row G above: about 88% hit@5, roughly $0.0002 and 0.8 s per query. Dropping the
 reranker (the embedder alone, row C) is about 81% hit@5 at roughly 0.35 s per query and a
 fifth of a millionth of a dollar. The reranker is worth its round trip on the queries

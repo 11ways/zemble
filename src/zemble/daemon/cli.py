@@ -21,6 +21,7 @@ from zemble.daemon.protocol import (
     read_pid,
     socket_path,
 )
+from zemble.userenv import load_user_env
 
 EXIT_ERROR = 1
 
@@ -156,6 +157,7 @@ def _status(as_json: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the daemon CLI standalone, as `python -m zemble.daemon`."""
+    load_user_env()
     parser = argparse.ArgumentParser(prog="zemble daemon")
     sub = parser.add_subparsers(dest="command")
     add_daemon_parser(sub)

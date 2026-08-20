@@ -29,12 +29,14 @@ def make_chunk(content: str, file_path: str = "src/module.py") -> Chunk:
 
 
 @pytest.fixture(autouse=True)
-def no_real_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+def no_real_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
     """Keep the suite off the user's real daemon: a test must never spawn or reuse one.
 
     The daemon's own tests point the socket at a temporary directory and re-enable it there.
     """
     monkeypatch.setenv("ZEMBLE_DAEMON", "0")
+    # Never read the developer's real ~/.config/zemble/env (keys, hosted providers) in a test.
+    monkeypatch.setenv("ZEMBLE_ENV_FILE", str(tmp_path_factory.mktemp("userenv") / "absent"))
 
 
 @pytest.fixture

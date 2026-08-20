@@ -131,3 +131,12 @@ A full index of the javaweb workspace measured 15.5M tokens over 73,957 chunks a
 578 requests, i.e. $1.86 of paid-equivalent inside the free tier, and a re-index
 after the cache is warm costs only the changed files. See `docs/voyage.md` for what
 that buys in retrieval quality.
+
+## The user env file
+
+All `ZEMBLE_*` settings and provider keys can live in `~/.config/zemble/env`
+(`KEY=VALUE` lines, `#` comments, optional `export`; `ZEMBLE_ENV_FILE` overrides the
+location). `zemble.userenv.load_user_env` applies it at every entry point (CLI, MCP
+server, `python -m zemble.daemon`) for keys not already set, so the process environment
+always wins. Tests pin `ZEMBLE_ENV_FILE` to a missing path so a developer's real file is
+never read by the suite.

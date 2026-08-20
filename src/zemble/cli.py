@@ -22,6 +22,7 @@ from zemble.installer.agents import AGENTS, IntegrationType
 from zemble.rerank.registry import RerankerSpecError, load_reranker
 from zemble.stats import format_savings_report
 from zemble.types import ContentType
+from zemble.userenv import load_user_env
 from zemble.utils import format_results, is_git_url, resolve_chunk
 from zemble.version import __version__
 
@@ -138,6 +139,7 @@ def _add_content_args(p: argparse.ArgumentParser) -> None:
 
 def main() -> None:
     """Entry point for the zemble command-line tool."""
+    load_user_env()
     # Non-UTF-8 Windows consoles can't encode glyphs like "✓" and would otherwise crash.
     for stream in (sys.stdout, sys.stderr):
         if isinstance(stream, io.TextIOWrapper):
