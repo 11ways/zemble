@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from zemble.index.file_walker import walk_files
+from zemble.index.file_walker import walk_entries, walk_files
 
 
 def _touch(path: Path, content: str = "x = 1\n") -> None:
@@ -103,46 +103,82 @@ def test_walk_files_prunes_ignored_dirs(tmp_path: Path) -> None:
     assert not any("node_modules" in str(v) for v in visited), visited
 
 
-def test_is_ignored_skips_spec_with_unrelated_base(tmp_path: Path) -> None:
-    """An IgnoreSpec whose base is not an ancestor of the path is silently skipped.
-
-    When the first spec has an unrelated base, the ValueError is caught and the
-    spec is skipped without crashing. A second spec with the correct base can
-    still ignore the file.
-    """
+def _reference_walk(root: Path, extensions: list[str], ignore: list[str] | None = None) -> list[Path]:  # noqa: C901
+    """The pre-scandir walker, kept verbatim as the oracle for the fast one."""
     from pathspec import GitIgnoreSpec
 
-    from zemble.index.file_walker import IgnoreSpec, _is_ignored
+    from zemble.index.file_walker import _DEFAULT_IGNORED_DIRS, _load_ignore_for_dir
 
-    # Create two unrelated directory trees
-    project_a = tmp_path / "project_a"
-    project_b = tmp_path / "project_b"
-    project_a.mkdir()
-    project_b.mkdir()
+    def is_ignored(path: Path, specs: list[tuple[Path, GitIgnoreSpec]]) -> tuple[bool, bool]:
+        is_dir = path.is_dir()
+        ignored = False
+        found = False
+        for base, spec in specs:
+            try:
+                relative = path.relative_to(base)
+            except ValueError:
+                continue
+            relative_str = relative.as_posix() + ("/" if is_dir else "")
+            for pattern in spec.patterns:
+                if pattern.include is None:
+                    continue
+                if pattern.match_file(relative_str) is not None:
+                    ignored = pattern.include
+                    raw = pattern.pattern
+                    found = not ignored and isinstance(raw, str) and bool(Path(raw.rstrip("/")).suffix)
+        return ignored, found
 
-    target_file = project_a / "keep.py"
-    target_file.write_text("x = 1\n")
+    def walk(directory: Path, specs: list[tuple[Path, GitIgnoreSpec]]) -> list[Path]:
+        loaded = _load_ignore_for_dir(str(directory))
+        if loaded is not None:
+            specs = [*specs, (directory, loaded[0])]
+        out: list[Path] = []
+        for item in sorted(directory.iterdir()):
+            if item.is_symlink():
+                continue
+            ignored, found = is_ignored(item, specs)
+            if ignored:
+                continue
+            if item.is_dir():
+                out.extend(walk(item, specs))
+            elif item.is_file() and (found or item.suffix.lower() in set(extensions)):
+                out.append(item)
+        return out
 
-    # Spec rooted at project_b — unrelated to target_file
-    unrelated_spec = IgnoreSpec(
-        base=project_b,
-        spec=GitIgnoreSpec.from_lines(["*.py"]),
-    )
+    base = GitIgnoreSpec.from_lines(sorted(_DEFAULT_IGNORED_DIRS) + list(ignore or []), backend="simple")
+    return walk(root, [(root, base)])
 
-    # With only the unrelated spec the file is not ignored (spec is skipped),
-    # and, crucially, no exception is raised.
-    ignored, _ = _is_ignored(target_file, [unrelated_spec])
-    assert ignored is False
 
-    # Spec rooted at project_a that ignores .py files
-    matching_spec = IgnoreSpec(
-        base=project_a,
-        spec=GitIgnoreSpec.from_lines(["*.py"]),
-    )
+def test_walk_matches_the_reference_walker(tmp_path: Path) -> None:
+    """The scandir walker yields exactly the files, in the order, the path-based one did."""
+    # 1. A tree with nested ignore files, negations, default-ignored dirs and a symlink.
+    for rel in [
+        "src/main.py",
+        "src/nested/deep/keep.py",
+        "src/nested/deep/skip.py",
+        "src/nested/vendor/lib.py",
+        "docs/readme.md",
+        "build/out.py",
+        "node_modules/pkg/index.js",
+        "tools/special.kjs",
+        "tools/other.kjs",
+        "tools/run.py",
+    ]:
+        _touch(tmp_path / rel)
+    (tmp_path / ".gitignore").write_text("*.md\ndocs/\n")
+    (tmp_path / "src" / "nested" / ".gitignore").write_text("deep/skip.py\nvendor/\n")
+    (tmp_path / "tools" / ".zembleignore").write_text("*.kjs\n!special.kjs\n")
+    (tmp_path / "linked.py").symlink_to(tmp_path / "src" / "main.py")
 
-    # The unrelated spec is safely skipped; the matching spec ignores the file.
-    ignored, _ = _is_ignored(target_file, [unrelated_spec, matching_spec])
-    assert ignored is True
+    # 2. Both walkers must agree exactly, order included: the chunk order depends on it.
+    fast = list(walk_files(tmp_path, [".py", ".md"]))
+    reference = _reference_walk(tmp_path, [".py", ".md"])
+    assert fast == reference, "the walkers disagree about which files exist or in what order"
+    assert {p.name for p in fast} == {"main.py", "keep.py", "special.kjs", "run.py"}
+
+    # 3. The relative paths handed out alongside are the ones a manual relative_to would give.
+    entries = list(walk_entries(tmp_path, [".py", ".md"]))
+    assert [entry.relative_path for entry in entries] == [str(p.relative_to(tmp_path)) for p in reference]
 
 
 def test_walk_files_skips_symlinks(tmp_path: Path) -> None:
