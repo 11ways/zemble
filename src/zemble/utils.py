@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any
 
+from zemble.index.chunk_store import file_paths_of
 from zemble.types import Chunk, SearchResult
 
 _GIT_URL_SCHEMES = ("https://", "http://", "ssh://", "git://", "git+ssh://", "file://")
@@ -15,17 +17,21 @@ def is_git_url(path: str) -> bool:
     return path.startswith(_GIT_URL_SCHEMES) or _SCP_GIT_URL_RE.match(path) is not None
 
 
-def resolve_chunk(chunks: list[Chunk], file_path: str, line: int) -> Chunk | None:
+def resolve_chunk(chunks: Sequence[Chunk], file_path: str, line: int) -> Chunk | None:
     """Return the chunk containing *line* in *file_path*, or None.
 
     Reconstructs a Chunk from its JSON-primitive MCP tool arguments (file_path + line)
-    before calling into the library.
+    before calling into the library. The path column is read first so a persisted index
+    only builds Chunk objects for the file that was asked about.
     """
     # Normalize separators: file_path is stored with the platform's native separator.
     file_path = file_path.replace("\\", "/")
     fallback = None
-    for chunk in chunks:
-        if chunk.file_path.replace("\\", "/") == file_path and chunk.start_line <= line <= chunk.end_line:
+    for index, stored_path in enumerate(file_paths_of(chunks)):
+        if stored_path.replace("\\", "/") != file_path:
+            continue
+        chunk = chunks[index]
+        if chunk.start_line <= line <= chunk.end_line:
             if line < chunk.end_line:
                 return chunk
             if fallback is None:  # line == end_line: boundary; keep as fallback for end-of-file chunks
