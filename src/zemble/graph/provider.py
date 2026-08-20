@@ -90,6 +90,14 @@ class GraphProvider(Protocol):
         """Find the tests covering a symbol, naming matches before incidental use."""
         ...
 
+    def symbols_in_file(self, file_path: str) -> list[Symbol]:
+        """List every symbol declared in one file, outermost and earliest first."""
+        ...
+
+    def symbols_at(self, file_path: str, start_line: int, end_line: int) -> list[Symbol]:
+        """List the symbols whose line span contains a region, innermost first."""
+        ...
+
     def neighbors(self, symbol_id: str, hops: int = 1, kinds: Sequence[EdgeKind] | None = None) -> list[Hit]:
         """Walk outward from a symbol in both directions."""
         ...
@@ -144,6 +152,26 @@ class SqliteGraphProvider:
             for row in self.connection.execute(query, chunk):
                 found[row["id"]] = symbol_from_row(row)
         return found
+
+    def symbols_in_file(self, file_path: str) -> list[Symbol]:
+        """List every symbol declared in one file, outermost and earliest first."""
+        rows = self.connection.execute(
+            "SELECT * FROM symbols WHERE file_path = ? ORDER BY start_line, end_line DESC", (file_path,)
+        ).fetchall()
+        return [symbol_from_row(row) for row in rows]
+
+    def symbols_at(self, file_path: str, start_line: int, end_line: int) -> list[Symbol]:
+        """List the symbols whose line span contains a region, innermost first.
+
+        A chunk rarely lines up with a declaration, so containment is the anchor test:
+        every symbol whose span covers the whole region, narrowest span first.
+        """
+        rows = self.connection.execute(
+            "SELECT * FROM symbols WHERE file_path = ? AND start_line <= ? AND end_line >= ?",
+            (file_path, start_line, end_line),
+        ).fetchall()
+        symbols = [symbol_from_row(row) for row in rows]
+        return sorted(symbols, key=lambda symbol: (symbol.end_line - symbol.start_line, symbol.start_line, symbol.id))
 
     def definition(self, name: str) -> list[Symbol]:
         """Find declarations matching a simple name, a qualified name or `Type.member`."""
