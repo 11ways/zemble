@@ -73,6 +73,7 @@ overwrite each other. Never tune on individual eval queries.
 - Secrets: `VOYAGE_API_KEY` lives in `~/.config/zemble/env` (mode 600) on the dev
   machine; load with `set -a; . ~/.config/zemble/env; set +a`. Never print it, never
   put it on a command line, never write it into the repo, logs, or docs.
+- Paid embedders are budget-guarded (`ZEMBLE_EMBED_BUDGET_TOKENS`, refusal before any request); `zemble embed-status <path>` reports what a build would embed and cost, embedding nothing.
 - Caches: `~/.cache/zemble/` (indexes, `embeddings/*.sqlite`, `javac-facts/`,
   `daemon.log`); daemon socket `$XDG_RUNTIME_DIR/zemble/daemon.sock`. The embedding
   cache is keyed by chunk text + dims: changing capsule text means a full re-embed.

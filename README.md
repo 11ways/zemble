@@ -142,6 +142,13 @@ export ZEMBLE_RERANK_ALPHA=0.7
 export ZEMBLE_RERANK_K=50
 ```
 
+**Before a first paid index, run `zemble embed-status <path>`.** It chunks the tree the
+way a build would and reports how many chunks are already cached, how many would be
+embedded, and what those cost at the model's list price - without embedding anything or
+needing a key. A build that would spend more than `ZEMBLE_EMBED_BUDGET_TOKENS`
+(default 2,000,000) is refused before a single request, naming the estimate and how to
+proceed; see [docs/embedders.md](docs/embedders.md#cost-visibility-and-the-budget-guard).
+
 Put those lines in `~/.config/zemble/env` (mode 600; or point `ZEMBLE_ENV_FILE` at another
 file) and zemble loads them itself at startup for the CLI, the MCP server and the daemon;
 an explicit environment variable always wins over the file, so nothing secret has to live in
@@ -220,6 +227,9 @@ zemble find-related src/auth.py 42 ./my-project
 
 # What does this index hold?
 zemble stats ./my-project
+
+# What would indexing this cost with a paid embedder? (embeds nothing)
+zemble embed-status ./my-project --embedder voyage:voyage-4-lite@1024
 ```
 
 Graph queries take a simple name (`PageWindow`), a qualified name or `Type.member`:

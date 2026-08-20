@@ -132,6 +132,73 @@ A full index of the javaweb workspace measured 15.5M tokens over 73,957 chunks a
 after the cache is warm costs only the changed files. See `docs/voyage.md` for what
 that buys in retrieval quality.
 
+## Cost visibility and the budget guard
+
+A hosted embedder bills per token, and the only moment that matters is *before* a
+build starts. Two things make that visible.
+
+### `zemble embed-status`
+
+```bash
+zemble embed-status /path/to/workspace --embedder voyage:voyage-4-lite@1024
+zemble embed-status . --content all --json
+```
+
+It chunks the tree exactly as a build would - same walker, same capsules, same
+mtime-based reuse of a previous index - then asks the sqlite cache which of the
+would-be-embedded texts are already paid for. It **never embeds anything**, never
+contacts a provider (not even to learn a model's vector width) and needs no API key.
+
+It reports chunks total / reusable from the previous index / cached / uncached, the
+estimated tokens and cost for the uncached ones, the cache file, the embedder, and
+whether the budget below would refuse the build.
+
+On the javaweb workspace (77,092 chunks) a cold pass costs about 11 s of chunking plus
+0.3 s of cache lookup; when the previous index covers every file the walk alone answers
+in well under a second.
+
+### The budget
+
+Before a **remote** embedder embeds a batch of uncached documents, the whole pending
+set is estimated and compared with `ZEMBLE_EMBED_BUDGET_TOKENS` (default 2,000,000,
+roughly one full javaweb index). Over budget is a loud `EmbeddingBudgetExceeded` naming
+the estimate, the price, the budget and the two ways out, and **nothing is sent**:
+
+```
+Refusing to embed 61,000 uncached chunk(s) with voyage:voyage-4-lite@1024: ~15,500,000
+estimated tokens (~$0.31) exceeds the budget of 2,000,000 tokens. Pass --yes (or set
+ZEMBLE_EMBED_CONFIRM=1) to embed anyway, or raise ZEMBLE_EMBED_BUDGET_TOKENS.
+```
+
+- The check sits in the caching embedder, at the one point where the uncached set for a
+  whole build is known, so the CLI, the MCP server and the daemon all inherit it. It is
+  never per 512-text slice.
+- Local embedders are never gated, with or without a confirmation.
+- `zemble search`, `zemble stats` and `zemble find-related` take `-y/--yes`; in-process
+  they print the refusal and exit non-zero.
+- The daemon catches a refusal, logs one line, keeps the previous index serving (nothing
+  is embedded and nothing is swapped) and shows it in `zemble daemon status` as the
+  root's `last_error`.
+- Every paid embed logs one INFO line first:
+  `embedding 812 uncached chunk(s), ~171000 tokens, ~$0.02 with voyage:voyage-4-lite@1024`.
+
+### Prices
+
+Per million tokens, from each provider's price list. A model that is not in the table is
+reported as "unknown price" rather than guessed, and an unknown price never becomes free.
+
+| model | $/M tokens | | model | $/M tokens |
+| --- | --- | - | --- | --- |
+| `voyage-code-4` | 0.12 | | `voyage-3.5` | 0.06 |
+| `voyage-4` | 0.06 | | `voyage-3.5-lite` | 0.02 |
+| `voyage-4-lite` | 0.02 | | `text-embedding-3-small` | 0.02 |
+| `model2vec:*` | free (local) | | `text-embedding-3-large` | 0.13 |
+
+**The estimate is an estimate.** Tokens are counted as characters / 3.6, the density
+measured on javaweb (15,526,808 provider-reported tokens for 73,957 chunks); a tree of
+minified or non-Latin text will differ. The provider's own `usage.total_tokens` is what
+is billed.
+
 ## The user env file
 
 All `ZEMBLE_*` settings and provider keys can live in `~/.config/zemble/env`
