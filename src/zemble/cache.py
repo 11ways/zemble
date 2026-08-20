@@ -196,6 +196,27 @@ def has_cached_index(path: str, content: Sequence[ContentType] = (ContentType.CO
     return not PersistencePath.from_path(find_index_from_cache_folder(path, content)).non_existing()
 
 
+def cached_index_compatible(
+    path: str, embedder_id: str, content: Sequence[ContentType], capsules: CapsuleOptions | None = None
+) -> bool:
+    """Return whether a complete on-disk index for *path* was built with these parameters.
+
+    Freshness is deliberately NOT checked: a stale ancestor index is still the right index to
+    load and refresh incrementally, which is far cheaper than building a second one over a
+    sub-tree it already covers.
+    """
+    index_path = find_index_from_cache_folder(path, content)
+    persistence_path = PersistencePath.from_path(index_path)
+    if persistence_path.non_existing():
+        return False
+    try:
+        with open(persistence_path.metadata, encoding="utf-8") as f:
+            metadata = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return _metadata_matches(metadata, embedder_id, content, CapsuleOptions.resolve(capsules).key)
+
+
 def _ancestor_directories(path: Path) -> list[Path]:
     """Return the strict ancestors of a directory, nearest first."""
     return list(path.parents)
@@ -211,26 +232,23 @@ def find_ancestor_index_root(
 ) -> str | None:
     """Return the nearest ancestor of *path* that already has a usable index of the same content.
 
-    An ancestor held in memory counts without a disk check; one on disk has to validate the
-    way any cache hit does, so a stale ancestor is never served.
+    An ancestor held in memory counts without a disk check; one on disk only has to be
+    COMPATIBLE (same embedder, content types and capsules): a stale ancestor is loaded and
+    refreshed incrementally by the normal load path, never rebuilt as a second index.
 
     :param path: The requested directory.
     :param embedder_id: The normalized spec of the embedder that would answer the request.
     :param content: The requested content types.
     :param capsules: The requested context-capsule configuration.
     :param loaded_roots: Roots a caller already holds in memory for exactly this content.
-    :param on_disk: Whether an ancestor that is only on disk (validated) may be returned.
+    :param on_disk: Whether an ancestor that is only on disk (compatible, possibly stale) may be returned.
     :return: The ancestor root, or None when the sub-path needs its own index.
     """
     for ancestor in _ancestor_directories(Path(path)):
         candidate = str(ancestor)
         if candidate in loaded_roots:
             return candidate
-        if (
-            on_disk
-            and has_cached_index(candidate, content)
-            and get_validated_cache(candidate, embedder_id, content, capsules)
-        ):
+        if on_disk and cached_index_compatible(candidate, embedder_id, content, capsules):
             return candidate
     return None
 
