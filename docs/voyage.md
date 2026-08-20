@@ -93,10 +93,11 @@ requests, which the protoblast smoke run confirmed against the live API (7,565 c
 (0.8643, which reproduces the recorded capsule-era baseline exactly).
 
 **59 of the 63 repos completed.** The four that did not - `zig`, `zig-clap`, `zls`,
-`zod` - are not a result about those repos: the run degraded to under one embedded
-chunk per second part-way through `zig` (26k chunks), while a fresh request from the
-same machine to the same endpoint still returned 128 vectors in 2.4 s. Something in a
-15-hour single process on this workstation, not the API, is the cause. The comparison
+`zod` - are not a result about those repos. Part-way through `zig` (26k chunks) the
+process degraded from ~40 embedded chunks per second to under one, then stopped
+progressing entirely, while a fresh request from the same machine to the same endpoint
+still returned 128 vectors in 2.4 s throughout. Something in a 15-hour single process
+on this workstation, not the API, is the cause, and the run was stopped. The comparison
 below is therefore restricted to the 59 repos both runs cover, with E0 recomputed over
 exactly those repos, so it is like-for-like.
 
@@ -287,3 +288,46 @@ daemon's own environment is the way to rerank on the daemon path.
   no mechanism for that exists; it is not worth inventing one for 0.016.
 - **The reranker default.** Still `none`.
 - **The embedder default.** Still Model2Vec.
+
+## What the whole programme consumed
+
+Every figure below is Voyage's own `usage.total_tokens`, accumulated by the clients.
+
+| pass | tokens | model | list price |
+| --- | --- | --- | --- |
+| protoblast smoke index | 1,475,301 | voyage-code-4 | $0.18 |
+| javaweb index @2048 | 15,526,808 | voyage-code-4 | $1.86 |
+| javaweb drift re-embed @1024 | 1,448 | voyage-code-4 | $0.00 |
+| javaweb index @1024 | 15,531,476 | voyage-4-lite | $0.31 |
+| upstream index @1024 (59 of 63 repos) | ~34,000,000 | voyage-code-4 | ~$4.08 |
+| query embeddings (~10,000 across every benchmark pass) | ~150,000 | both | $0.02 |
+| javaweb rerank sweeps (~560 queries) | ~6,000,000 | rerank-2.5 / -lite | ~$0.20 |
+| upstream rerank check (~1,250 queries) | ~15,000,000 | rerank-2.5 | ~$0.75 |
+
+Roughly **87M tokens**, comfortably inside the 200M complimentary tier, so nothing was
+billed. At list price the whole programme would have been about **$7.40**, and the
+single most expensive thing in it - a full javaweb index with the recommended
+`voyage-4-lite` - is 31 cents.
+
+Derived-width indexes are the free lunch: 1024, 512 and 256 all came out of the sqlite
+cache by slicing the 2048-dimension vectors, at zero requests and zero tokens.
+
+## Surprises worth keeping
+
+1. **The code-specialised model lost to the general cheap one.** `voyage-4-lite` beat
+   `voyage-code-4` on javaweb at every width, at a sixth of the price. "code" in a
+   model name is not evidence.
+2. **The reranker is a bigger lever than the embedder** on the hard set: +0.11 against
+   +0.10, while leaving the index and its cost completely alone. Both together were not
+   measured - the reranker sweep ran on the default embedder deliberately, to isolate it.
+3. **256 dimensions is nearly free quality.** Slicing to 256 keeps 0.636 of the 0.667
+   at 2048 - still +0.069 over the default embedder - at a quarter of the vector
+   storage and the shortest query round trip of the four widths.
+4. **`consumer` queries are a reranker problem, not an embedder problem.** The best
+   embedder moved them 0.147 -> 0.247; the reranker moved them 0.147 -> 0.500.
+5. **Paying for a big index in one `embed_documents` call was a real hazard.** Before
+   this step the whole workspace was embedded in one call that wrote to the cache once,
+   at the end: a failure or an OOM anywhere in a 24-minute paid run threw away every
+   vector bought. It also accumulated the JSON response rows in memory - 6.5 GB peak at
+   2048 dimensions. Both are fixed by flushing every 512 texts (0.75 GB peak, and a
+   retry only pays for the unflushed tail).
