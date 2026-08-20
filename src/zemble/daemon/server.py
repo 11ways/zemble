@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -75,19 +76,23 @@ def _content_types(raw: Sequence[str] | None) -> tuple[ContentType, ...]:
     return tuple(ContentType(value) for value in raw)
 
 
-def rebuild_index(previous_index: ZembleIndex, cache_key: CacheKey) -> tuple[ZembleIndex, dict[str, int]]:
+def rebuild_index(
+    previous_index: ZembleIndex, cache_key: CacheKey, changed_paths: Sequence[Path] | None = None
+) -> tuple[ZembleIndex, dict[str, int]]:
     """Reindex a root incrementally from an in-memory index, returning the new index and what moved.
 
     :param previous_index: The index currently serving this root.
     :param cache_key: The root and content types being rebuilt.
+    :param changed_paths: The paths a watcher saw move; None re-walks the whole tree.
     :return: The replacement index, and counts of added, changed and removed files.
     """
     root = Path(cache_key[0])
     content = cache_key[1]
-    # AIDEV-NOTE: create_index_from_path consumes the PreviousIndex - it mutates the BM25
-    # index in place and may write into `vectors`. The BM25 index is the live one (copying a
-    # multi-hundred-thousand document index costs more than the rebuild), so the caller must
-    # hold this root's lock across the rebuild AND the swap.
+    # AIDEV-NOTE: nothing here may write into the index that is being served. The vector
+    # matrix is copied because the reused-layout case writes fresh rows straight into it, and
+    # the BM25 index is derived (`for_update`), which shares the previous index's immutable
+    # postings and puts the changes in a delta beside them. That is what lets a query keep
+    # hitting the old index while this runs, with the lock held only for the swap.
     previous = PreviousIndex(
         chunks=previous_index.chunks,
         vectors=previous_index._semantic_index.vectors.copy(),
@@ -102,6 +107,7 @@ def rebuild_index(previous_index: ZembleIndex, cache_key: CacheKey) -> tuple[Zem
         display_root=root,
         previous=previous,
         capsules=previous_index._capsules,
+        changed_paths=changed_paths,
     )
     counts = {
         "added": len(manifest.keys() - before.keys()),
@@ -161,8 +167,12 @@ class Daemon:
 
     # -- index access -------------------------------------------------------
 
-    def lock_for(self, cache_key: CacheKey) -> asyncio.Lock:
-        """Return the per-root lock serialising rebuilds against queries."""
+    def rebuild_lock_for(self, cache_key: CacheKey) -> asyncio.Lock:
+        """Return the per-root lock serialising one rebuild against the next.
+
+        Queries deliberately do not take it: a rebuild builds a new index beside the one
+        being served and swaps it in, so nothing a query can reach is ever half-updated.
+        """
         return self.locks.setdefault(cache_key, asyncio.Lock())
 
     async def index_for(self, args: dict[str, Any]) -> tuple[CacheKey, ZembleIndex]:
@@ -218,18 +228,21 @@ class Daemon:
         # A changed facts file moves graph edges without moving a single .java byte.
         java_changed = any(path.suffix == ".java" or matches_facts_glob(root, path) for path in paths)
         try:
-            await self.rebuild(cache_key, java_changed=java_changed)
+            await self.rebuild(cache_key, java_changed=java_changed, changed_paths=sorted(paths))
         finally:
             self.pending.discard(cache_key)
 
-    async def rebuild(self, cache_key: CacheKey, *, java_changed: bool = True) -> dict[str, Any]:
-        """Reindex one root in place and swap the result in atomically.
+    async def rebuild(
+        self, cache_key: CacheKey, *, java_changed: bool = True, changed_paths: Sequence[Path] | None = None
+    ) -> dict[str, Any]:
+        """Reindex one root beside the index serving it and swap the result in atomically.
 
         :param cache_key: The root and content types to rebuild.
         :param java_changed: Whether the symbol graph should be refreshed too.
+        :param changed_paths: The paths a watcher saw move; None re-walks the whole tree.
         :return: What the rebuild did.
         """
-        lock = self.lock_for(cache_key)
+        lock = self.rebuild_lock_for(cache_key)
         self.rebuilding.add(cache_key)
         started = time.monotonic()
         try:
@@ -240,7 +253,7 @@ class Daemon:
                 if current is None:
                     return {"skipped": "not loaded"}
                 try:
-                    index, counts = await asyncio.to_thread(rebuild_index, current, cache_key)
+                    index, counts = await asyncio.to_thread(rebuild_index, current, cache_key, changed_paths)
                 except EmbeddingBudgetExceeded as exc:
                     # Nothing was embedded and nothing was swapped, so the index that was
                     # serving this root before is still the one serving it now.
@@ -249,6 +262,8 @@ class Daemon:
                     self.last_error[cache_key] = refusal
                     return refusal
                 elapsed = time.monotonic() - started
+                # The swap is the only step a query could observe, and it is one dict write
+                # on this event loop: an in-flight search keeps answering from the old index.
                 self.cache.replace(cache_key, index, cooldown_seconds=elapsed * 3)
         finally:
             self.rebuilding.discard(cache_key)
@@ -265,7 +280,7 @@ class Daemon:
         if await self._persist(cache_key, index):
             await self._reload_definitions(cache_key, index)
         if java_changed:
-            result["graph_ms"] = await self._refresh_graph(cache_key[0])
+            result["graph_ms"] = await self._refresh_graph(cache_key[0], changed_paths)
         self.last_rebuild[cache_key] = result
         self.last_error.pop(cache_key, None)
         return result
@@ -300,15 +315,19 @@ class Daemon:
         except Exception:
             logger.debug("No symbol definitions to re-attach for %s", cache_key[0], exc_info=True)
 
-    async def _refresh_graph(self, root: str) -> int | None:
-        """Incrementally refresh the symbol graph for a root that already has one."""
+    async def _refresh_graph(self, root: str, changed_paths: Sequence[Path] | None = None) -> int | None:
+        """Incrementally refresh the symbol graph for a root that already has one.
+
+        The watcher's change set is handed straight to the graph build, which then stats the
+        named files instead of walking the workspace for them.
+        """
         from zemble.graph.store import build_graph, graph_exists
 
         if not await asyncio.to_thread(graph_exists, root):
             return None
         started = time.monotonic()
         try:
-            await asyncio.to_thread(build_graph, root)
+            await asyncio.to_thread(partial(build_graph, root, changed_paths=changed_paths))
         except Exception:
             logger.warning("Failed to refresh the symbol graph for %s", root, exc_info=True)
             return None
@@ -432,16 +451,15 @@ async def _cmd_status(daemon: Daemon, args: dict[str, Any]) -> Any:
 
 async def _cmd_search(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Search one root, returning the same payload shape the CLI and MCP print."""
-    cache_key, index = await daemon.index_for(args)
+    _cache_key, index = await daemon.index_for(args)
     query = str(args.get("query", ""))
     max_snippet_lines = args.get("max_snippet_lines")
-    async with daemon.lock_for(cache_key):
-        results = await asyncio.to_thread(
-            index.search,
-            query,
-            top_k=int(args.get("top_k", 5)),
-            max_snippet_lines=max_snippet_lines,
-        )
+    results = await asyncio.to_thread(
+        index.search,
+        query,
+        top_k=int(args.get("top_k", 5)),
+        max_snippet_lines=max_snippet_lines,
+    )
     if not results:
         return {"error": "No results found."}
     return format_results(query, results, max_snippet_lines)
@@ -449,20 +467,19 @@ async def _cmd_search(daemon: Daemon, args: dict[str, Any]) -> Any:
 
 async def _cmd_find_related(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Find chunks similar to a location, or report that the location is not indexed."""
-    cache_key, index = await daemon.index_for(args)
+    _cache_key, index = await daemon.index_for(args)
     file_path = str(args.get("file_path", ""))
     line = int(args.get("line", 0))
     max_snippet_lines = args.get("max_snippet_lines")
     chunk = resolve_chunk(index.chunks, file_path, line)
     if chunk is None:
         return {"error": f"No chunk found at {file_path}:{line}.", "chunk_missing": True}
-    async with daemon.lock_for(cache_key):
-        results = await asyncio.to_thread(
-            index.find_related,
-            chunk,
-            top_k=int(args.get("top_k", 5)),
-            max_snippet_lines=max_snippet_lines,
-        )
+    results = await asyncio.to_thread(
+        index.find_related,
+        chunk,
+        top_k=int(args.get("top_k", 5)),
+        max_snippet_lines=max_snippet_lines,
+    )
     if not results:
         return {"error": f"No related chunks found for {file_path}:{line}."}
     return format_results(f"Chunks related to {file_path}:{line}", results, max_snippet_lines)
@@ -545,12 +562,11 @@ async def _cmd_explain(daemon: Daemon, args: dict[str, Any]) -> Any:
     query = str(args.get("query", ""))
     budget = int(args.get("budget", DEFAULT_BUDGET))
     top_k = int(args.get("top_k", DEFAULT_TOP_K))
-    async with daemon.lock_for(cache_key):
-        return await asyncio.to_thread(
-            _with_graph,
-            cache_key[0],
-            lambda graph: explain_payload(index, graph, query, budget, top_k),
-        )
+    return await asyncio.to_thread(
+        _with_graph,
+        cache_key[0],
+        lambda graph: explain_payload(index, graph, query, budget, top_k),
+    )
 
 
 async def _cmd_outline(daemon: Daemon, args: dict[str, Any]) -> Any:
@@ -581,12 +597,11 @@ async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
     description = str(args.get("description", ""))
     top_k = int(args.get("top_k", DEFAULT_TOP_K))
     config = await asyncio.to_thread(HomeConfig.load, cache_key[0])
-    async with daemon.lock_for(cache_key):
-        return await asyncio.to_thread(
-            _with_graph,
-            cache_key[0],
-            lambda graph: home_payload(index, graph, config, description, top_k),
-        )
+    return await asyncio.to_thread(
+        _with_graph,
+        cache_key[0],
+        lambda graph: home_payload(index, graph, config, description, top_k),
+    )
 
 
 async def _cmd_refresh(daemon: Daemon, args: dict[str, Any]) -> Any:

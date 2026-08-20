@@ -127,3 +127,45 @@ def test_non_java_files_are_counted_not_extracted(graph_cache: Path, tmp_path: P
     stats = build_graph(str(workspace))
     assert stats.extracted_files == 1, "only the Java file is extracted"
     assert stats.skipped_by_language == {"typescript": 1, "python": 1}, "the rest is counted per language"
+
+
+def test_change_set_refresh_journey(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path) -> None:
+    """A refresh driven by a change set updates the named files and looks at nothing else."""
+    workspace = _copy_workspace(graph_fixture_root, tmp_path / "ws")
+    path = str(workspace)
+    build_graph(path)
+    circle = workspace / "src/main/java/com/example/core/Circle.java"
+
+    # 1. A named edit is picked up, and re-resolves the users of the name it moved.
+    circle.write_text(circle.read_text().replace("double area()", "double surface()"), encoding="utf-8")
+    named = build_graph(path, changed_paths=[circle])
+    assert named.extracted_files == 1, "step 1: the named file was re-extracted"
+    assert named.reresolved_files > 1, "step 1: and its dependents were re-resolved"
+    connection = connect(path)
+    renamed = connection.execute("SELECT 1 FROM symbols WHERE name = 'surface'").fetchone()
+    connection.close()
+    assert renamed is not None, "step 1: the new declaration is in the graph"
+
+    # 2. An edit the change set does not name is not discovered: nothing walks the tree.
+    other = workspace / "src/main/java/com/example/core/Point.java"
+    other.write_text(other.read_text().replace("class Point", "class Point /* edited */"), encoding="utf-8")
+    unnamed = build_graph(path, changed_paths=[circle])
+    assert unnamed.extracted_files == 0, "step 2: only named paths are looked at"
+
+    # 3. The same edit named explicitly is picked up, and a full walk agrees with the result.
+    named_again = build_graph(path, changed_paths=[other])
+    assert named_again.extracted_files == 1, "step 3: naming it re-extracts it"
+    walked = build_graph(path)
+    assert walked.extracted_files == 0, "step 3: a walk finds nothing left to do"
+    assert (walked.symbols, walked.edges) == (named_again.symbols, named_again.edges), "step 3: same graph either way"
+
+    # 4. A named file that was deleted is removed from the graph.
+    other.unlink()
+    removed = build_graph(path, changed_paths=[other])
+    assert removed.removed_files == 1, "step 4: the deleted file left the graph"
+    connection = connect(path)
+    remaining = connection.execute(
+        "SELECT 1 FROM symbols WHERE file_path = ?", ("src/main/java/com/example/core/Point.java",)
+    ).fetchone()
+    connection.close()
+    assert remaining is None, "step 4: and so did its symbols"

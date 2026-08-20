@@ -605,3 +605,77 @@ def test_project_with_a_gitignore(tmp_path: Path) -> None:
     rules = IgnoreRules(tmp_path, get_extensions([ContentType.CODE]))
     assert rules.matches(tmp_path / "keep.py"), "source is watched"
     assert not rules.matches(tmp_path / "build" / "generated.py"), "a default-ignored dir is not"
+
+
+@pytest.mark.anyio
+async def test_a_rebuild_never_blocks_the_root_it_rebuilds(tmp_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One watched edit: the old index answers throughout, the new one answers after the swap.
+
+    The rebuild is held open in its worker thread so the interleaving is a fact of the test
+    rather than a race: whatever a query does while it runs, it must not wait for it.
+    """
+    daemon = _daemon_with_fake_embedder(watch=False)
+    cache_key, index = await daemon.index_for({"path": str(tmp_project)})
+    graph_calls: list[Any] = []
+    monkeypatch.setattr("zemble.graph.store.graph_exists", lambda root: True)
+    monkeypatch.setattr("zemble.graph.store.build_graph", lambda root, **kwargs: graph_calls.append((root, kwargs)))
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_rebuild = server.rebuild_index
+
+    def _held(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        assert release.wait(20), "the test must release the rebuild"
+        return real_rebuild(*args, **kwargs)
+
+    monkeypatch.setattr(server, "rebuild_index", _held)
+
+    # 1. A change set arrives for a new file; the rebuild starts and is held mid-flight.
+    (tmp_project / "extra.java").write_text("class Extra { int brandNewHelper() { return 7; } }\n", encoding="utf-8")
+    (tmp_project / "extra.py").write_text("def brand_new_helper():\n    return 7\n", encoding="utf-8")
+    changing = asyncio.create_task(daemon._on_change(cache_key, {tmp_project / "extra.py", tmp_project / "extra.java"}))
+    await asyncio.to_thread(entered.wait, 20)
+    assert cache_key in daemon.rebuilding, "1: the rebuild is in flight"
+
+    # 2. A query lands during the rebuild: it is answered, promptly, by the index from before.
+    started = time.monotonic()
+    response = await asyncio.wait_for(
+        daemon.handle({"id": 1, "cmd": "search", "args": {"path": str(tmp_project), "query": "brand_new_helper"}}),
+        timeout=5,
+    )
+    served_ms = (time.monotonic() - started) * 1000
+    assert response["ok"], f"2: the query was answered while rebuilding: {response.get('error')}"
+    assert "extra.py" not in str(response["result"]), "2: and answered from the index that was already there"
+    assert served_ms < 5_000, "2: without waiting for the rebuild"
+
+    # 3. Once the rebuild finishes, the swapped-in index carries the edit.
+    release.set()
+    await asyncio.wait_for(changing, timeout=30)
+    swapped = (await daemon.cache.get(str(tmp_project))).search("brand_new_helper")
+    assert swapped and swapped[0].chunk.file_path == "extra.py", "3: the new file is the best match"
+    assert daemon.last_rebuild[cache_key]["added"] == 2, "3: the rebuild reports both new files"
+
+    # 4. The graph was refreshed for the .java file, and told exactly which paths moved.
+    assert graph_calls, "4: a .java change refreshes the graph"
+    _root, kwargs = graph_calls[0]
+    assert {path.name for path in kwargs["changed_paths"]} == {"extra.java", "extra.py"}, "4: the change set rode along"
+    daemon.shutdown()
+
+
+@pytest.mark.anyio
+async def test_a_watched_edit_is_searchable_almost_at_once(tmp_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole path from change set to a searchable result stays well under a second."""
+    monkeypatch.setattr("zemble.graph.store.graph_exists", lambda root: False)
+    daemon = _daemon_with_fake_embedder(watch=False)
+    cache_key, _index = await daemon.index_for({"path": str(tmp_project)})
+
+    (tmp_project / "extra.py").write_text("def brand_new_helper():\n    return 7\n", encoding="utf-8")
+    started = time.monotonic()
+    await daemon._on_change(cache_key, {tmp_project / "extra.py"})
+    elapsed = time.monotonic() - started
+
+    results = (await daemon.cache.get(str(tmp_project))).search("brand_new_helper")
+    assert results and results[0].chunk.file_path == "extra.py", "the edit is searchable"
+    assert elapsed < 1.0, f"visible in under a second, took {elapsed:.2f}s"
+    daemon.shutdown()

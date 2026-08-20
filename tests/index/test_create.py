@@ -161,3 +161,100 @@ def test_load_previous_for_incremental_happy_path(mock_embedder: Any, tmp_path: 
     assert previous is not None
     assert len(previous.chunks) == previous.vectors.shape[0] == len(previous.bm25_index.doc_order)
     assert "a.py" in previous.manifest
+
+
+def test_change_set_build_matches_a_full_walk(mock_embedder: Any, tmp_path: Path) -> None:
+    """A build driven by a change set indexes exactly what a re-walk would, without walking."""
+    _write_files(
+        tmp_path,
+        {
+            "a.py": "def stable_anchor():\n    return 1\n",
+            "b.py": "def changed_value():\n    return 2\n",
+            "gone.py": "def disappearing_helper():\n    return 3\n",
+        },
+    )
+    bm25, semantic, chunks, manifest = create_index_from_path(tmp_path, mock_embedder, display_root=tmp_path)
+    previous = PreviousIndex(chunks=chunks, vectors=semantic.vectors, manifest=manifest, bm25_index=bm25)
+
+    # 1. One file is edited, one deleted and one added: the watcher names all three.
+    (tmp_path / "b.py").write_text("def changed_value():\n    return 999\n")
+    (tmp_path / "gone.py").unlink()
+    _write_files(tmp_path, {"new.py": "def freshly_arrived_symbol():\n    return 4\n"})
+    changed = [tmp_path / "b.py", tmp_path / "gone.py", tmp_path / "new.py"]
+
+    with patch("zemble.index.create.walk_entries", side_effect=AssertionError("the tree must not be walked")):
+        bm25_after, semantic_after, chunks_after, manifest_after = create_index_from_path(
+            tmp_path, mock_embedder, display_root=tmp_path, previous=previous, changed_paths=changed
+        )
+
+    assert "gone.py" not in manifest_after, "1: a deleted file leaves the manifest"
+    assert "new.py" in manifest_after and "a.py" in manifest_after, "1: the new file arrived, the old one stayed"
+    assert bm25_after.get_scores(["disappearing_helper"]).sum() == 0, "1: and its postings are gone"
+    assert bm25_after.get_scores(["freshly", "arrived", "symbol"]).sum() > 0, "1: the new file is searchable"
+
+    # 2. A full walk over the same tree produces the same index, chunk for chunk.
+    walked_bm25, walked_semantic, walked_chunks, walked_manifest = create_index_from_path(
+        tmp_path, mock_embedder, display_root=tmp_path
+    )
+    assert {path: entry.count for path, entry in manifest_after.items()} == {
+        path: entry.count for path, entry in walked_manifest.items()
+    }, "2: the same files with the same chunk counts"
+    assert sorted(chunk.content for chunk in chunks_after) == sorted(chunk.content for chunk in walked_chunks), (
+        "2: and the same chunk content"
+    )
+    assert sorted(bm25_after.doc_order) == sorted(walked_bm25.doc_order), "2: over the same documents"
+    for query in (["stable_anchor"], ["changed_value"], ["freshly", "arrived", "symbol"]):
+        np.testing.assert_allclose(
+            np.sort(bm25_after.get_scores(query))[-3:], np.sort(walked_bm25.get_scores(query))[-3:], atol=1e-6
+        )
+    assert semantic_after.vectors.shape == walked_semantic.vectors.shape, "2: and the same vector matrix shape"
+
+
+def test_change_set_ignores_paths_the_walk_would_never_reach(mock_embedder: Any, tmp_path: Path) -> None:
+    """A named path that is ignored, foreign or not a source file is refused, not indexed."""
+    _write_files(tmp_path, {"a.py": "def stable_anchor():\n    return 1\n", ".gitignore": "secret.py\n"})
+    _write_files(
+        tmp_path,
+        {
+            "secret.py": "def ignored_helper():\n    return 1\n",
+            "build/generated.py": "def generated_helper():\n    return 1\n",
+            "notes.txt": "not code\n",
+        },
+    )
+    bm25, semantic, chunks, manifest = create_index_from_path(tmp_path, mock_embedder, display_root=tmp_path)
+    previous = PreviousIndex(chunks=chunks, vectors=semantic.vectors, manifest=manifest, bm25_index=bm25)
+
+    _, _, _, manifest_after = create_index_from_path(
+        tmp_path,
+        mock_embedder,
+        display_root=tmp_path,
+        previous=previous,
+        changed_paths=[
+            tmp_path / "secret.py",
+            tmp_path / "build" / "generated.py",
+            tmp_path / "notes.txt",
+            Path("/elsewhere/other.py"),
+        ],
+    )
+    assert set(manifest_after) == set(manifest), "nothing the walk skips is let in through the change set"
+
+
+def test_a_rebuild_leaves_the_previous_bm25_index_untouched(mock_embedder: Any, tmp_path: Path) -> None:
+    """The index a rebuild starts from keeps answering exactly as it did: nothing mutates it."""
+    _write_files(tmp_path, {"a.py": "def stable_anchor():\n    return 1\n"})
+    bm25, semantic, chunks, manifest = create_index_from_path(tmp_path, mock_embedder, display_root=tmp_path)
+    bm25.save(tmp_path / "postings")
+    served = BM25.load(tmp_path / "postings")
+    previous = PreviousIndex(chunks=chunks, vectors=semantic.vectors, manifest=manifest, bm25_index=served)
+    before = served.get_scores(["stable_anchor"]).copy()
+
+    _write_files(tmp_path, {"b.py": "def brand_new_term():\n    return 2\n"})
+    bm25_after, _semantic, _chunks, _manifest = create_index_from_path(
+        tmp_path, mock_embedder, display_root=tmp_path, previous=previous, changed_paths=[tmp_path / "b.py"]
+    )
+
+    assert bm25_after is not served, "the rebuild produced a new index"
+    np.testing.assert_array_equal(served.get_scores(["stable_anchor"]), before)
+    assert served.get_scores(["brand", "new", "term"]).sum() == 0, "the old index never saw the new file"
+    assert bm25_after.get_scores(["brand", "new", "term"]).sum() > 0, "the new one did"
+    assert served.document_count == len(chunks), "and the old one still holds exactly its own documents"

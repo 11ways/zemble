@@ -1,4 +1,4 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +10,7 @@ from zemble.chunking.capsule import CapsuleOptions
 from zemble.embedding.base import Embedder
 from zemble.index.bm25 import BM25
 from zemble.index.dense import SelectableBasicBackend, embed_chunks
-from zemble.index.file_walker import WalkedFile, walk_entries
+from zemble.index.file_walker import WalkedFile, ignored_prefix, walk_entries
 from zemble.index.files import (
     FileStatus,
     detect_language,
@@ -115,6 +115,87 @@ def plan_files(
         yield planned
 
 
+def plan_changed_files(
+    path: Path,
+    changed: Iterable[Path],
+    content: ContentType | Sequence[ContentType] = (ContentType.CODE,),
+    display_root: Path | None = None,
+    previous_manifest: dict[str, FileManifestEntry] | None = None,
+    capsules: CapsuleOptions | None = None,
+    previous_chunks: Sequence[Chunk] | None = None,
+) -> Iterator[PlannedFile]:
+    """Plan a build from a known set of changed paths, without walking the tree.
+
+    Every file the previous build indexed is planned as reused unless the change set names
+    it; a named path is re-chunked, or dropped when it is gone, ignored, or not something
+    the walk would have reached. The caller therefore has to name every path that moved -
+    this is the watcher's answer, not a discovery pass - and the order is the previous
+    build's order with new files appended, which is what keeps reused vector rows in place.
+
+    :param path: Resolved absolute path the index covers.
+    :param changed: The paths that were added, edited or removed.
+    :param content: Content types to index.
+    :param display_root: If set, chunk file paths are stored relative to this root.
+    :param previous_manifest: The previous build's manifest; every entry not named as changed is reused.
+    :param capsules: Context-capsule knobs; None resolves the environment override.
+    :param previous_chunks: The previous build's chunk list, when reused chunks are wanted back.
+    :return: One :class:`PlannedFile` per file the new index holds.
+    """
+    resolved_capsules = CapsuleOptions.resolve(capsules)
+    normalized = (content,) if isinstance(content, ContentType) else content
+    extensions = {extension.lower() for extension in get_extensions(normalized)}
+    manifest = previous_manifest or {}
+    root_for_paths = display_root if display_root is not None else path
+
+    touched: dict[str, Path] = {}
+    for candidate in changed:
+        try:
+            indexed_path = str(candidate.relative_to(root_for_paths).as_posix())
+            relative = candidate.relative_to(path).as_posix()
+        except ValueError:
+            continue
+        if candidate.suffix.lower() not in extensions or ignored_prefix(path, relative) is not None:
+            continue
+        touched[indexed_path] = candidate
+
+    for indexed_path, previous_entry in manifest.items():
+        candidate = touched.pop(indexed_path, None)
+        if candidate is None:
+            reused = list(previous_chunks[previous_entry.start : previous_entry.end]) if previous_chunks else []
+            yield PlannedFile(indexed_path, previous_entry.mtime_ns, previous_entry, True, reused, previous_entry.count)
+            continue
+        planned = _plan_one(candidate, indexed_path, previous_entry, previous_chunks, resolved_capsules)
+        if planned is not None:
+            yield planned
+
+    for indexed_path in sorted(touched):
+        planned = _plan_one(touched[indexed_path], indexed_path, None, None, resolved_capsules)
+        if planned is not None:
+            yield planned
+
+
+def _plan_one(
+    file_path: Path,
+    indexed_path: str,
+    previous_entry: FileManifestEntry | None,
+    previous_chunks: Sequence[Chunk] | None,
+    capsules: CapsuleOptions,
+) -> PlannedFile | None:
+    """Plan one named file, reusing its chunks when its modification time did not move."""
+    try:
+        stat = file_path.stat()
+        if get_file_status(file_path, None, stat) != FileStatus.VALID:
+            return None
+        mtime_ns = stat.st_mtime_ns
+        if previous_entry is not None and previous_entry.mtime_ns == mtime_ns:
+            reused = list(previous_chunks[previous_entry.start : previous_entry.end]) if previous_chunks else []
+            return PlannedFile(indexed_path, mtime_ns, previous_entry, True, reused, previous_entry.count)
+        file_chunks = chunk_source(read_file_text(file_path), indexed_path, detect_language(file_path), capsules)
+        return PlannedFile(indexed_path, mtime_ns, previous_entry, False, file_chunks, len(file_chunks))
+    except OSError:
+        return None
+
+
 def _assemble_vectors(
     total: int,
     placements: list[tuple[int, PlannedFile]],
@@ -156,6 +237,7 @@ def create_index_from_path(
     display_root: Path | None = None,
     previous: PreviousIndex | None = None,
     capsules: CapsuleOptions | None = None,
+    changed_paths: Iterable[Path] | None = None,
 ) -> tuple[BM25, SelectableBasicBackend, list[Chunk], dict[str, FileManifestEntry]]:
     """Create an index from a resolved directory, optionally reusing a previous index's unchanged files.
 
@@ -165,24 +247,40 @@ def create_index_from_path(
     :param display_root: If set, chunk file paths are stored relative to this root.
     :param previous: A previously built index to reuse unchanged files' chunks/embeddings/postings from.
     :param capsules: Context-capsule knobs; None resolves the environment override, else the defaults.
+    :param changed_paths: The exact paths that moved, from a watcher; None walks the whole tree.
+        Only honoured together with `previous`, which is what the unnamed files are reused from.
     :raises ValueError: if no items were found, no index can be created.
     :return: A BM25 index, semantic index, list of chunks, and file manifest.
     """
-    # PreviousIndex is consumed; mutate BM25 in place to avoid a copy.
-    bm25_index = previous.bm25_index if previous is not None else BM25()
+    # The previous index keeps serving: for_update hands back an index sharing its immutable
+    # postings, so nothing here writes into the BM25 object a warm daemon is querying.
+    bm25_index = previous.bm25_index.for_update() if previous is not None else BM25()
     previous_manifest = previous.manifest if previous is not None else {}
     resolved_capsules = CapsuleOptions.resolve(capsules)
 
-    plan = list(
-        plan_files(
-            path,
-            content,
-            display_root=display_root,
-            previous_manifest=previous_manifest if previous is not None else None,
-            capsules=resolved_capsules,
-            previous_chunks=previous.chunks if previous is not None else None,
+    if previous is not None and changed_paths is not None:
+        plan = list(
+            plan_changed_files(
+                path,
+                changed_paths,
+                content,
+                display_root=display_root,
+                previous_manifest=previous_manifest,
+                capsules=resolved_capsules,
+                previous_chunks=previous.chunks,
+            )
         )
-    )
+    else:
+        plan = list(
+            plan_files(
+                path,
+                content,
+                display_root=display_root,
+                previous_manifest=previous_manifest if previous is not None else None,
+                capsules=resolved_capsules,
+                previous_chunks=previous.chunks if previous is not None else None,
+            )
+        )
 
     chunks: list[Chunk] = []
     chunk_ids: list[str] = []

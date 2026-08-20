@@ -24,7 +24,7 @@ from zemble.graph.hwk import extract_hwk_file
 from zemble.graph.java import FileExtraction, FileImports, extract_java_file
 from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol, SymbolKind
 from zemble.graph.resolve import FileContext, Resolver
-from zemble.index.file_walker import walk_files
+from zemble.index.file_walker import ignored_prefix, walk_files
 from zemble.index.files import detect_language, get_extensions
 from zemble.parallel import pool_context
 from zemble.types import ContentType
@@ -343,15 +343,65 @@ def _scan(root: Path) -> _Scan:
     return scan
 
 
+def _scan_changed(root: Path, changed: Iterable[Path], stored: dict[str, tuple[int, int]]) -> _Scan:
+    """Build the scan a walk would have produced, from a change set plus the stored file stamps.
+
+    Every file the graph already holds keeps the stamp it was extracted with, so the build
+    sees it as unchanged without stat-ing it; only the named paths are looked at. A named
+    path that is gone stays out of the stamps, which is what makes the build delete it.
+    """
+    scan = _Scan()
+    named: dict[str, Path] = {}
+    for candidate in changed:
+        try:
+            relative = candidate.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if candidate.suffix.lower() in _EXTRACTORS and ignored_prefix(root, relative) is None:
+            named[relative] = candidate
+
+    for relative, stamp in stored.items():
+        if relative in named:
+            continue
+        scan.jobs.append((str(root / relative), relative))
+        scan.stamps[relative] = stamp
+
+    for relative, candidate in named.items():
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        if stat.st_size > _MAX_FILE_BYTES:
+            scan.skipped[f"{candidate.suffix.lower()} (too large)"] += 1
+            continue
+        scan.jobs.append((str(candidate), relative))
+        scan.stamps[relative] = (stat.st_mtime_ns, stat.st_size)
+    scan.scanned = len(scan.stamps)
+    return scan
+
+
+def _stored_stamps(connection: sqlite3.Connection) -> dict[str, tuple[int, int]]:
+    """Return the modification stamp of every file the graph currently holds."""
+    return {row["path"]: (row["mtime_ns"], row["size"]) for row in connection.execute("SELECT * FROM files")}
+
+
 # ---- build ---------------------------------------------------------------
 
 
-def build_graph(path: str, *, force: bool = False, workers: int | None = None) -> GraphStats:
+def build_graph(
+    path: str,
+    *,
+    force: bool = False,
+    workers: int | None = None,
+    changed_paths: Iterable[Path] | None = None,
+) -> GraphStats:
     """Build or incrementally refresh the symbol graph for a workspace.
 
     :param path: Local directory to index.
     :param force: Re-extract every file instead of only changed ones.
     :param workers: Extraction process count; defaults to the CPU count.
+    :param changed_paths: The exact paths that moved, from a watcher; None walks the tree.
+        The caller must name every path that moved, since nothing else is looked at.
     :return: Statistics describing the build.
     :raises ValueError: If the path is not a local directory.
     """
@@ -361,12 +411,16 @@ def build_graph(path: str, *, force: bool = False, workers: int | None = None) -
     started = time.perf_counter()
     workers = workers if workers is not None else min(10, (os.cpu_count() or 2))
 
-    scan = _scan(root)
+    connection = connect(str(root))
+    scan = (
+        _scan(root)
+        if changed_paths is None or force
+        else _scan_changed(root, changed_paths, _stored_stamps(connection))
+    )
     stats = GraphStats(root=str(root), files_scanned=scan.scanned, skipped_by_language=dict(scan.skipped))
     for language, count in sorted(scan.skipped.items(), key=lambda item: -item[1]):
         logger.info("graph: skipping %d %s file(s): no graph extractor for %s", count, language, language)
 
-    connection = connect(str(root))
     try:
         _run_build(connection, root, scan, stats, force=force, workers=workers)
     finally:
@@ -382,7 +436,7 @@ def _run_build(
     """Do the two-pass build inside an open connection."""
     connection.execute("PRAGMA synchronous=OFF")
     connection.execute("PRAGMA journal_mode=MEMORY")
-    known = {row["path"]: (row["mtime_ns"], row["size"]) for row in connection.execute("SELECT * FROM files")}
+    known = _stored_stamps(connection)
     changed = [job for job in scan.jobs if force or known.get(job[1]) != scan.stamps[job[1]]]
     removed = sorted(set(known) - set(scan.stamps))
     stats.extracted_files = len(changed)
