@@ -10,6 +10,13 @@ import pytest
 from zemble.types import Chunk
 
 
+def write_index_components(path: Path) -> None:
+    """Create empty stand-ins for every component PersistencePath checks for."""
+    path.mkdir(parents=True, exist_ok=True)
+    for component in ("chunks", "bm25_index", "semantic_index", "symbols"):
+        (path / component).write_text("")
+
+
 def make_chunk(content: str, file_path: str = "src/module.py") -> Chunk:
     """Create a minimal Chunk for use in tests."""
     return Chunk(

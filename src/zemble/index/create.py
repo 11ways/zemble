@@ -10,7 +10,7 @@ from zemble.chunking.capsule import CapsuleOptions
 from zemble.embedding.base import Embedder
 from zemble.index.bm25 import BM25
 from zemble.index.dense import SelectableBasicBackend, embed_chunks
-from zemble.index.file_walker import walk_files
+from zemble.index.file_walker import WalkedFile, walk_entries
 from zemble.index.files import (
     FileStatus,
     detect_language,
@@ -37,6 +37,13 @@ def _reindex_file(
             bm25_index.remove_document(make_chunk_id(indexed_path, slot))
     for slot, chunk in enumerate(file_chunks):
         bm25_index.add_document(make_chunk_id(indexed_path, slot), tokenize(enrich_for_bm25(chunk, capsules.in_bm25)))
+
+
+def _indexed_path(walked: WalkedFile, root: Path, display_root: Path | None) -> str:
+    """Return the path a chunk is stored under, reusing the walker's own relative path."""
+    if display_root == root:
+        return walked.relative_path
+    return str(walked.path.relative_to(display_root) if display_root else walked.path)
 
 
 def _has_same_vector_layout(
@@ -84,15 +91,16 @@ def create_index_from_path(
     manifest: dict[str, FileManifestEntry] = {}
     embedding_parts: list[tuple[int, int, int]] = []
 
-    for file_path in walk_files(path, resolved_extensions):
+    for walked in walk_entries(path, resolved_extensions):
+        file_path = walked.path
         language = detect_language(file_path)
         with contextlib.suppress(OSError):
-            file_status = get_file_status(file_path, None)
+            file_status = get_file_status(file_path, None, walked.stat)
             if file_status != FileStatus.VALID:
                 continue
 
-            indexed_path = str(file_path.relative_to(display_root) if display_root else file_path)
-            mtime_ns = file_path.stat().st_mtime_ns
+            indexed_path = _indexed_path(walked, path, display_root)
+            mtime_ns = walked.stat.st_mtime_ns
             previous_entry = previous_manifest.get(indexed_path)
 
             if previous is not None and previous_entry is not None and previous_entry.mtime_ns == mtime_ns:

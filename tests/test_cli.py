@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import make_chunk
+from tests.conftest import make_chunk, write_index_components
 from zemble.cli import _cli_main, _maybe_save_index, _run_clear, main
 from zemble.types import ContentType, SearchResult
 from zemble.version import __version__
@@ -245,11 +245,8 @@ def _make_valid_index_dir(
 ) -> Path:
     """Create a fake valid index directory with the expected structure."""
     index_dir = cache_folder / sha / index_name
-    index_dir.mkdir(parents=True)
     # Create the files that PersistencePath.non_existing checks
-    (index_dir / "chunks.json").write_text("[]")
-    (index_dir / "bm25_index").write_text("")
-    (index_dir / "semantic_index").write_text("")
+    write_index_components(index_dir)
     (index_dir / "metadata.json").write_text(metadata)
     return index_dir
 
@@ -272,10 +269,7 @@ def test_run_clear_index(
         _make_valid_index_dir(tmp_path, "b" * 64, index_name="index-docs")
     elif scenario == "non_sha":
         bad_dir = tmp_path / "not-a-sha" / "index"
-        bad_dir.mkdir(parents=True)
-        (bad_dir / "chunks.json").write_text("[]")
-        (bad_dir / "bm25_index").write_text("")
-        (bad_dir / "semantic_index").write_text("")
+        write_index_components(bad_dir)
         (bad_dir / "metadata.json").write_text("{}")
     elif scenario == "incomplete":
         index_dir = tmp_path / ("c" * 64) / "index"

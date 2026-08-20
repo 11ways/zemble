@@ -12,11 +12,12 @@ import orjson
 
 from zemble.chunking.capsule import CapsuleOptions
 from zemble.index.bm25 import BM25
+from zemble.index.chunk_store import load_chunks
 from zemble.index.dense import SelectableBasicBackend
-from zemble.index.file_walker import walk_files
+from zemble.index.file_walker import walk_entries
 from zemble.index.files import FileStatus, get_extensions, get_file_status
 from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath, PreviousIndex, make_chunk_id
-from zemble.types import Chunk, ContentType
+from zemble.types import ContentType
 from zemble.utils import is_git_url
 
 logger = logging.getLogger(__name__)
@@ -174,16 +175,16 @@ def get_validated_cache(
 
     path_as_path = Path(path).resolve()
     stored_files = metadata.get("files", {})
-    current_files = []
-    for file_path in walk_files(path_as_path, extensions=extensions):
-        file_status = get_file_status(file_path, write_time)
+    current_files = set()
+    for walked in walk_entries(path_as_path, extensions=extensions):
+        file_status = get_file_status(walked.path, write_time, walked.stat)
         if file_status == FileStatus.NEWER:
             return None
         if file_status != FileStatus.VALID:
             continue
-        current_files.append(str(file_path.relative_to(path_as_path)))
+        current_files.add(walked.relative_path)
 
-    if set(current_files) != set(stored_files):
+    if current_files != set(stored_files):
         return None
 
     return index_path
@@ -216,10 +217,10 @@ def load_previous_for_incremental(
             return None
         manifest = {indexed_path: FileManifestEntry(**entry) for indexed_path, entry in raw_manifest.items()}
 
-        with open(persistence_path.chunks, "rb") as f:
-            chunks = [Chunk.from_dict(item) for item in orjson.loads(f.read())]
+        chunks = list(load_chunks(persistence_path.chunks))
 
-        vectors = SelectableBasicBackend.load(persistence_path.semantic_index).vectors
+        # Incremental reindexing writes new rows into this matrix, so it cannot be a mapped view.
+        vectors = SelectableBasicBackend.load(persistence_path.semantic_index, writable=True).vectors
         bm25_index = BM25.load(persistence_path.bm25_index)
         chunk_count = len(chunks)
         if not (chunk_count == vectors.shape[0] == len(bm25_index.doc_order)):

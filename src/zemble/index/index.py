@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import warnings
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -18,9 +18,11 @@ from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.embedding.base import Embedder
 from zemble.embedding.registry import load_embedder
 from zemble.index.bm25 import BM25
+from zemble.index.chunk_store import file_paths_of, languages_of, load_chunks, save_chunks
 from zemble.index.create import create_index_from_path
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.files import read_file_text
+from zemble.index.symbols import SymbolDefinitions, save_symbol_definitions
 from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath
 from zemble.search import _search_semantic, search
 from zemble.stats import save_search_stats
@@ -63,6 +65,47 @@ def resolve_embedder(embedder: Embedder | str | None, model_path: str | None = N
     return load_embedder(embedder)
 
 
+class LazyFileSizes(dict):
+    """File path -> character count, read on first use.
+
+    Reading every indexed file up front costs more than a whole query at repository scale, and
+    only the handful of paths a result set mentions is ever asked for. Membership answers the
+    same question the eager dict did: an indexed path whose file could be read.
+    """
+
+    def __init__(self, root: Path, indexed_paths: Collection[str]) -> None:
+        """Remember where to read from; read nothing yet."""
+        super().__init__()
+        self._root = root
+        self._indexed_paths = indexed_paths
+
+    def __missing__(self, key: str) -> int:
+        """Read the file behind *key* and remember its size.
+
+        :param key: Repo-relative file path.
+        :return: The file's character count.
+        :raises KeyError: If the path is not indexed or cannot be read.
+        """
+        if key not in self._indexed_paths:
+            raise KeyError(key)
+        try:
+            size = len(read_file_text(self._root / key))
+        except OSError:
+            raise KeyError(key) from None
+        super().__setitem__(key, size)
+        return size
+
+    def __contains__(self, key: object) -> bool:
+        """Return whether *key* names an indexed, readable file."""
+        if super().__contains__(key):
+            return True
+        try:
+            self[key]
+        except (KeyError, TypeError):
+            return False
+        return True
+
+
 class ZembleIndex:
     """Fast local code index with hybrid search."""
 
@@ -71,12 +114,13 @@ class ZembleIndex:
         embedder: Embedder,
         bm25_index: BM25,
         semantic_index: SelectableBasicBackend,
-        chunks: list[Chunk],
+        chunks: Sequence[Chunk],
         root: Path | None = None,
         content: ContentType | Sequence[ContentType] = _DEFAULT_CONTENT,
         loaded_from_disk: bool = False,
         manifest: dict[str, FileManifestEntry] | None = None,
         capsules: CapsuleOptions | None = None,
+        definitions: SymbolDefinitions | None = None,
     ) -> None:
         """Initialize a ZembleIndex. Should be created with from_path or from_git.
 
@@ -89,50 +133,39 @@ class ZembleIndex:
         :param loaded_from_disk: Whether the index was loaded from disk (cache hit); controls CLI messaging.
         :param manifest: File modification times and chunk ranges used for incremental reindexing.
         :param capsules: The context-capsule configuration this index's chunks were built with.
+        :param definitions: Persisted symbol-definition lookup used by the rerank pass.
         """
         self.embedder = embedder
-        self.chunks: list[Chunk] = chunks
+        self.chunks: Sequence[Chunk] = chunks
         self._bm25_index: BM25 = bm25_index
         self._semantic_index: SelectableBasicBackend = semantic_index
         self._root: Path | None = root
         self._content: tuple[ContentType, ...] = (content,) if isinstance(content, ContentType) else tuple(content)
-        self._file_sizes: dict[str, int] = self._compute_file_sizes(root) if root else {}
         self._file_mapping, self._language_mapping = self._populate_mapping()
+        self._file_sizes: dict[str, int] = LazyFileSizes(root, self._file_mapping) if root else {}
         self.loaded_from_disk: bool = loaded_from_disk
         self._manifest: dict[str, FileManifestEntry] = manifest or {}
         self._capsules: CapsuleOptions = CapsuleOptions.resolve(capsules)
+        self._definitions: SymbolDefinitions | None = definitions
 
     def _populate_mapping(self) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
         """Build (file → chunk indices, language → chunk indices) mappings, in that order."""
         language_to_id = defaultdict(list)
         file_to_id = defaultdict(list)
-        for i, chunk in enumerate(self.chunks):
-            language = chunk.language
+        for i, (file_path, language) in enumerate(zip(file_paths_of(self.chunks), languages_of(self.chunks))):
             if language:
                 language_to_id[language].append(i)
-            file_to_id[chunk.file_path].append(i)
+            file_to_id[file_path].append(i)
 
         return dict(file_to_id), dict(language_to_id)
-
-    def _compute_file_sizes(self, root: Path) -> dict[str, int]:
-        """Return a mapping of repo-relative file path to total character count."""
-        sizes: dict[str, int] = {}
-        for chunk in self.chunks:
-            if chunk.file_path in sizes:
-                continue
-            try:
-                sizes[chunk.file_path] = len(read_file_text(root / chunk.file_path))
-            except OSError:
-                pass
-        return sizes
 
     @property
     def stats(self) -> IndexStats:
         """Stats of an index."""
         language_counts: dict[str, int] = defaultdict(int)
-        for chunk in self.chunks:
-            if chunk.language:
-                language_counts[chunk.language] += 1
+        for language in languages_of(self.chunks):
+            if language:
+                language_counts[language] += 1
 
         return IndexStats(
             indexed_files=len(self._file_mapping),
@@ -346,6 +379,7 @@ class ZembleIndex:
             alpha=alpha,
             selector=selector,
             rerank=resolved_rerank,
+            definitions=self._definitions,
         )
         save_search_stats(results, CallType.SEARCH, self._file_sizes, max_snippet_lines)
         return results
@@ -380,13 +414,9 @@ class ZembleIndex:
 
         bm25_index = BM25.load(persistence_paths.bm25_index)
         semantic_index = SelectableBasicBackend.load(persistence_paths.semantic_index)
-        with open(persistence_paths.chunks, "rb") as f:
-            chunk_data = orjson.loads(f.read())
-
-        chunks = []
-        for chunk_item in chunk_data:
-            chunks.append(Chunk.from_dict(chunk_item))
-        if not (len(chunks) == len(bm25_index.doc_order) == semantic_index.vectors.shape[0]):
+        chunks = load_chunks(persistence_paths.chunks)
+        definitions = SymbolDefinitions.load(persistence_paths.symbols)
+        if not (len(chunks) == bm25_index.document_count == semantic_index.vectors.shape[0]):
             raise ValueError("Persisted index components have inconsistent document counts")
         root_path = metadata["root_path"]
         stored_embedder = metadata["embedder"]
@@ -409,6 +439,7 @@ class ZembleIndex:
             loaded_from_disk=True,
             manifest=manifest,
             capsules=CapsuleOptions.from_key(metadata.get("capsules", "")),
+            definitions=definitions,
         )
 
     def save(self, path: Path | str) -> None:
@@ -420,9 +451,8 @@ class ZembleIndex:
 
         self._bm25_index.save(persistence_paths.bm25_index)
         self._semantic_index.save(persistence_paths.semantic_index)
-        with open(persistence_paths.chunks, "wb") as f:
-            data = orjson.dumps(self.chunks)
-            f.write(data)
+        save_chunks(persistence_paths.chunks, self.chunks)
+        save_symbol_definitions(persistence_paths.symbols, self.chunks)
         from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS  # avoid circular import at module level
 
         root_str = None if self._root is None else str(self._root)

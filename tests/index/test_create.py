@@ -7,6 +7,8 @@ import orjson
 import pytest
 
 from zemble.cache import load_previous_for_incremental
+from zemble.index.bm25 import BM25
+from zemble.index.chunk_store import load_chunks, save_chunks
 from zemble.index.create import create_index_from_path
 from zemble.index.index import ZembleIndex
 from zemble.index.types import PreviousIndex, make_chunk_id
@@ -123,18 +125,17 @@ def test_load_previous_for_incremental_fails_closed(corrupt: str, tmp_path: Path
         elif corrupt == "metadata_mismatch":
             metadata["embedder"] = "model2vec:other/model"
         elif corrupt == "component_length_mismatch":
-            chunks_path = index_path / "chunks.json"
-            chunks = orjson.loads(chunks_path.read_bytes())
-            chunks_path.write_bytes(orjson.dumps(chunks[:-1]))
+            chunks_path = index_path / "chunks"
+            save_chunks(chunks_path, list(load_chunks(chunks_path))[:-1])
         elif corrupt == "length_mismatch":
             metadata["files"]["a.py"]["count"] += 5
         elif corrupt == "overlapping_entries":
             metadata["files"]["b.py"]["start"] = metadata["files"]["a.py"]["start"]
         elif corrupt == "bm25_order_mismatch":
-            bm25_path = index_path / "bm25_index" / "index.json"
-            bm25 = orjson.loads(bm25_path.read_bytes())
-            bm25["doc_order"].reverse()
-            bm25_path.write_bytes(orjson.dumps(bm25))
+            bm25_path = index_path / "bm25_index"
+            bm25 = BM25.load(bm25_path)
+            bm25.set_doc_order(list(reversed(bm25.doc_order)))
+            bm25.save(bm25_path)
         elif corrupt == "corrupt_json":
             (index_path / "metadata.json").write_bytes(b"{not json")
             with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):

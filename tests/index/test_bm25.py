@@ -1,4 +1,5 @@
 import math
+import random
 from pathlib import Path
 
 import numpy as np
@@ -78,13 +79,62 @@ def test_save_load_preserves_scores_and_doc_order(tmp_path: Path) -> None:
 
 
 def test_load_rejects_inconsistent_document_order(tmp_path: Path) -> None:
-    """Persisted document order must describe the same documents as the postings."""
+    """Persisted columns that disagree about how many documents they hold are refused."""
     index = _build({"a": ["authenticate"]})
     index.save(tmp_path)
-    index_path = tmp_path / "index.json"
-    data = orjson.loads(index_path.read_bytes())
-    data["doc_order"] = ["other"]
-    index_path.write_bytes(orjson.dumps(data))
+    meta_path = tmp_path / "postings.json"
+    meta = orjson.loads(meta_path.read_bytes())
+    meta["n_docs"] += 1
+    meta_path.write_bytes(orjson.dumps(meta))
 
     with pytest.raises(ValueError, match="document state"):
         BM25.load(tmp_path)
+
+
+def test_save_refuses_a_document_set_that_the_order_does_not_describe(tmp_path: Path) -> None:
+    """A mutable index whose documents and order disagree cannot be persisted."""
+    index = _build({"a": ["authenticate"]})
+    index.set_doc_order(["a", "b"])
+
+    with pytest.raises(ValueError, match="inconsistent"):
+        index.save(tmp_path)
+
+
+def test_frozen_scores_match_the_mutable_implementation(tmp_path: Path) -> None:
+    """A loaded index scores a random corpus exactly like the in-memory one it was saved from.
+
+    The columnar postings replace a per-document dict walk, so this walks one corpus through
+    build, save and load and asserts the scores never move.
+    """
+    rng = random.Random(20260820)
+    vocabulary = [f"term{i}" for i in range(60)]
+    corpus = {f"file{doc}.py:{doc}": [rng.choice(vocabulary) for _ in range(rng.randint(0, 40))] for doc in range(120)}
+
+    # 1. The mutable index is the implementation the columnar one has to reproduce.
+    built = _build(corpus)
+    queries = [[rng.choice(vocabulary) for _ in range(rng.randint(1, 5))] for _ in range(40)]
+    expected = [built.get_scores(query) for query in queries]
+
+    # 2. Saving and loading must not move a single score.
+    built.save(tmp_path)
+    loaded = BM25.load(tmp_path)
+    assert loaded.doc_order == built.doc_order, "the document order survives the roundtrip"
+    for query, want in zip(queries, expected):
+        np.testing.assert_allclose(loaded.get_scores(query), want, atol=1e-6)
+        np.testing.assert_array_equal(loaded.get_scores(query), want)
+
+    # 3. Every term's postings name each document once, which is what makes the vectorized
+    #    accumulate in the frozen scorer a true sum rather than a last-write-wins scatter.
+    frozen = loaded._frozen
+    assert frozen is not None
+    offsets = np.asarray(frozen.posting_offsets)
+    for row in range(frozen.n_terms):
+        documents = np.asarray(frozen.posting_docs[offsets[row] : offsets[row + 1]])
+        assert len(np.unique(documents)) == len(documents), "postings hold each document once"
+
+    # 4. A mutation thaws the columns back into the dictionaries, and scoring still agrees.
+    loaded.remove_document(built.doc_order[0])
+    assert loaded._frozen is None
+    reference = _build({key: tokens for key, tokens in corpus.items() if key != built.doc_order[0]})
+    reference.set_doc_order(built.doc_order)
+    np.testing.assert_array_equal(loaded.get_scores(queries[0]), reference.get_scores(queries[0]))

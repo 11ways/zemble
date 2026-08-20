@@ -6,7 +6,7 @@ from pathlib import Path
 from zemble.index.bm25 import BM25
 from zemble.types import Chunk, EmbeddingMatrix
 
-CACHE_FORMAT_VERSION = 12  # Bump when the persisted index schema changes.
+CACHE_FORMAT_VERSION = 13  # Bump when the persisted index schema changes.
 
 
 def make_chunk_id(indexed_path: str, slot: int) -> str:
@@ -21,21 +21,25 @@ class PersistencePath:
     chunks: Path
     bm25_index: Path
     semantic_index: Path
+    symbols: Path
     metadata: Path
 
     def non_existing(self) -> list[Path]:
         """Return all resolved that do not exist."""
         return [
-            path for path in [self.chunks, self.bm25_index, self.semantic_index, self.metadata] if not path.exists()
+            path
+            for path in [self.chunks, self.bm25_index, self.semantic_index, self.symbols, self.metadata]
+            if not path.exists()
         ]
 
     @classmethod
     def from_path(cls: type[PersistencePath], path: Path) -> PersistencePath:
         """Create a PersistencePath from a base path."""
         return PersistencePath(
-            chunks=path / "chunks.json",
+            chunks=path / "chunks",
             bm25_index=path / "bm25_index",
             semantic_index=path / "semantic_index",
+            symbols=path / "symbols",
             metadata=path / "metadata.json",
         )
 

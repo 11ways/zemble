@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conftest import write_index_components
 from zemble.cache import (
     _get_valid_user_cache_dir,
     _linux_cache_dir,
@@ -21,6 +22,7 @@ from zemble.cache import (
 )
 from zemble.chunking.capsule import CapsuleOptions
 from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
+from zemble.index.file_walker import WalkedFile
 from zemble.index.types import CACHE_FORMAT_VERSION
 from zemble.types import ContentType
 
@@ -138,6 +140,11 @@ def test_clear_cache(tmp_path: Path) -> None:
     assert not docs_path.exists()
 
 
+def _walked(path: Path, root: Path) -> WalkedFile:
+    """Build the walker's result shape for a file that really exists."""
+    return WalkedFile(path=path, relative_path=str(path.relative_to(root)), stat=path.stat())
+
+
 def _write_metadata(
     path: Path,
     embedder: str,
@@ -148,10 +155,7 @@ def _write_metadata(
     cache_version: int | None = None,
     capsules: str | None = None,
 ) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    (path / "chunks.json").write_text("[]")
-    (path / "bm25_index").write_text("")
-    (path / "semantic_index").write_text("")
+    write_index_components(path)
     (path / "metadata.json").write_text(
         json.dumps(
             {
@@ -203,10 +207,7 @@ def test_get_validated_cache_metadata_mismatch(
 def test_get_validated_cache_reads_utf8_metadata_with_non_ascii_file_paths(tmp_path: Path) -> None:
     """Cache metadata is always UTF-8, even when the system default encoding is not."""
     index_path = tmp_path / "index"
-    index_path.mkdir(parents=True)
-    (index_path / "chunks.json").write_text("[]")
-    (index_path / "bm25_index").write_text("")
-    (index_path / "semantic_index").write_text("")
+    write_index_components(index_path)
 
     non_ascii_path = "docs\\测试检查清单.md"
     with pytest.raises(UnicodeDecodeError):
@@ -273,10 +274,7 @@ def test_get_validated_cache_format_mismatch_returns_none(field: str, value: obj
 def test_get_validated_cache_legacy_metadata_returns_none(tmp_path: Path) -> None:
     """Old cache metadata missing content_type returns None instead of crashing."""
     index_path = tmp_path / "index"
-    index_path.mkdir(parents=True)
-    (index_path / "chunks.json").write_text("[]")
-    (index_path / "bm25_index").write_text("")
-    (index_path / "semantic_index").write_text("")
+    write_index_components(index_path)
     (index_path / "metadata.json").write_text(json.dumps({"embedder": "model2vec:my/model", "time": 0.0}))
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         assert get_validated_cache("/path", "model2vec:my/model", [ContentType.CODE]) is None
@@ -318,14 +316,14 @@ def test_get_validated_cache_mtime(
     index_path = tmp_path / "index"
     stale_file = tmp_path / "src.py"
     stale_file.write_text("x = 1" if write else "")
-    files = [stale_file] if walk_result == "stale" else walk_result
+    files = [_walked(stale_file, tmp_path)] if walk_result == "stale" else walk_result
     # Include the file in stored manifest so manifest check passes and mtime check fires.
     stored_files = ["src.py"] if walk_result == "stale" else []
     _write_metadata(index_path, "model2vec:my/model", ["code"], write_time, file_paths=stored_files)
 
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         with patch("zemble.cache.get_extensions", return_value={".py"}):
-            with patch("zemble.cache.walk_files", return_value=files):
+            with patch("zemble.cache.walk_entries", return_value=files):
                 result = get_validated_cache(str(tmp_path), "model2vec:my/model", [ContentType.CODE])
     assert result == (index_path if expected == "index" else None)
 
@@ -347,9 +345,9 @@ def test_get_validated_cache_manifest_mismatch(
         p = tmp_path / f
         # Make sure file is not empty
         p.write_text("a")
-        walk_return.append(p)
+        walk_return.append(_walked(p, tmp_path))
     _write_metadata(index_path, "model2vec:my/model", ["code"], float("inf"), file_paths=stored_files)
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
-        with patch("zemble.cache.walk_files", return_value=walk_return):
+        with patch("zemble.cache.walk_entries", return_value=walk_return):
             result = get_validated_cache(str(tmp_path), "model2vec:my/model", [ContentType.CODE])
     assert result is None

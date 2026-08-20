@@ -1,10 +1,14 @@
 import functools
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from zemble.tokens import split_identifier
 from zemble.types import Chunk
+
+if TYPE_CHECKING:
+    from zemble.index.symbols import SymbolDefinitions
 
 # Symbol-lookup queries: namespace-qualified, leading-underscore, or containing
 # uppercase/underscore. Plain lowercase words (e.g. "session") are NL, not symbols.
@@ -89,8 +93,17 @@ def apply_query_boost(
     combined_scores: dict[Chunk, float],
     query: str,
     all_chunks: list[Chunk],
+    definitions: "SymbolDefinitions | None" = None,
 ) -> dict[Chunk, float]:
-    """Apply query-type boosts to candidate scores."""
+    """Apply query-type boosts to candidate scores.
+
+    :param combined_scores: The fused candidate scores.
+    :param query: The search query.
+    :param all_chunks: Every chunk in the index.
+    :param definitions: Persisted definition lookup; without one the non-candidate chunks are
+        scanned with the definition patterns instead, which is the same answer at a higher price.
+    :return: The boosted scores.
+    """
     if not combined_scores:
         return combined_scores
 
@@ -98,10 +111,10 @@ def apply_query_boost(
     boosted = dict(combined_scores)
 
     if is_symbol_query(query):
-        _boost_symbol_definitions(boosted, query, max_score, all_chunks)
+        _boost_symbol_definitions(boosted, query, max_score, all_chunks, definitions)
     else:
         _boost_stem_matches(boosted, query, max_score)
-        _boost_embedded_symbols(boosted, query, max_score, all_chunks)
+        _boost_embedded_symbols(boosted, query, max_score, all_chunks, definitions)
 
     return boosted
 
@@ -145,15 +158,92 @@ def _extract_symbol_name(query: str) -> str:
     return query.strip()
 
 
+_NAMESPACE_PREFIX = r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\.|::))*"
+
+# The same keyword positions the definition patterns anchor on, matched without consuming the
+# name that follows, so a keyword used as a name ("class def Foo") still yields the next match.
+_KEYWORD_SCAN_RE = re.compile(_KEYWORD_PREFIX + _DEFINITION_KEYWORD_BODY + r")(?=\s)", re.MULTILINE)
+_SQL_KEYWORD_SCAN_RE = re.compile(_KEYWORD_PREFIX + _SQL_KEYWORD_BODY + r")(?=\s)", re.MULTILINE | re.IGNORECASE)
+
+# The namespace-qualified name that follows a definition keyword, as one chain.
+_DEFINED_CHAIN_RE = re.compile(r"\s+(" + _NAMESPACE_PREFIX + r"[A-Za-z_][A-Za-z0-9_]*)")
+_CHAIN_SEGMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: A plain identifier or namespace chain: the only shape a stored definition name can take.
+NAMESPACE_CHAIN_RE = re.compile(_NAMESPACE_PREFIX + r"[A-Za-z_][A-Za-z0-9_]*")
+
+# The characters a definition pattern accepts directly after the name it matched.
+_NAME_BOUNDARY_RE = re.compile(r"[\s<({:\[;]")
+
+
 @functools.lru_cache(maxsize=256)
 def _definition_pattern(symbol_name: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
     escaped = re.escape(symbol_name)
-    ns_prefix = r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\.|::))*"
-    suffix = r")\s+" + ns_prefix + escaped + r"(?:\s|[<({:\[;]|$)"
+    suffix = r")\s+" + _NAMESPACE_PREFIX + escaped + r"(?:\s|[<({:\[;]|$)"
     return (
         re.compile(_KEYWORD_PREFIX + _DEFINITION_KEYWORD_BODY + suffix, re.MULTILINE),
         re.compile(_KEYWORD_PREFIX + _SQL_KEYWORD_BODY + suffix, re.MULTILINE | re.IGNORECASE),
     )
+
+
+def _names_in_chain(chain: str, tail_is_boundary: bool) -> list[str]:
+    """Return every name a definition pattern could match inside one namespace chain.
+
+    A name must start at a segment boundary, and end either where the chain ends (only if the
+    character after it is a boundary) or right before a ``::`` - whose leading colon is itself
+    one of the boundary characters, which is why ``class a::b`` also defines ``a``.
+
+    :param chain: The namespace-qualified name that followed a definition keyword.
+    :param tail_is_boundary: Whether the character after the chain ends a definition match.
+    :return: The names this chain defines.
+    """
+    segments: list[tuple[int, int, str]] = []
+    position = 0
+    while True:
+        match = _CHAIN_SEGMENT_RE.match(chain, position)
+        if match is None:  # pragma: no cover - the chain regex guarantees a segment here
+            break
+        start, end = match.span()
+        separator = "::" if chain.startswith("::", end) else ("." if chain.startswith(".", end) else "")
+        segments.append((start, end, separator))
+        if not separator:
+            break
+        position = end + len(separator)
+
+    names = []
+    for first, (start, _, _) in enumerate(segments):
+        for last in range(first, len(segments)):
+            _, end, separator = segments[last]
+            if separator == "::" or (separator == "" and tail_is_boundary):
+                names.append(chain[start:end])
+    return names
+
+
+def _defined_names(content: str, keyword_re: re.Pattern[str]) -> set[str]:
+    """Return every name defined in *content* according to one keyword vocabulary."""
+    names: set[str] = set()
+    for keyword in keyword_re.finditer(content):
+        chain_match = _DEFINED_CHAIN_RE.match(content, keyword.end())
+        if chain_match is None:
+            continue
+        end = chain_match.end(1)
+        tail_is_boundary = end == len(content) or _NAME_BOUNDARY_RE.match(content, end) is not None
+        names.update(_names_in_chain(chain_match.group(1), tail_is_boundary))
+    return names
+
+
+def defined_symbol_names(content: str) -> tuple[set[str], set[str]]:
+    """Return the names *content* defines: general (case-sensitive) and SQL (lowercased).
+
+    The SQL half is lowercased because its definition pattern is case-insensitive, so a lookup
+    must compare a queried name against it in lowercase too.
+
+    :param content: Chunk content to scan.
+    :return: The general names and the lowercased SQL names.
+    """
+    general = _defined_names(content, _KEYWORD_SCAN_RE)
+    sql = {name.lower() for name in _defined_names(content, _SQL_KEYWORD_SCAN_RE)}
+    return general, sql
 
 
 def _chunk_defines_symbol(chunk: Chunk, symbol_name: str) -> bool:
@@ -180,15 +270,40 @@ def _definition_tier(chunk: Chunk, names: set[str], boost_unit: float) -> float:
     return boost_unit * (1.5 if any(_stem_matches(stem, name.lower()) for name in names) else 1.0)
 
 
+def _definition_scan_order(
+    all_chunks: list[Chunk],
+    names: Iterable[str],
+    definitions: "SymbolDefinitions | None",
+) -> Iterator[Chunk]:
+    """Yield, in index order, the chunks that can define one of *names*.
+
+    With a persisted lookup that is exactly the chunks defining a name; without one it is every
+    chunk, which is what the definition patterns then have to be run over.
+
+    :param all_chunks: Every chunk in the index.
+    :param names: The queried names.
+    :param definitions: Persisted definition lookup, if the index has one.
+    :yield: Chunks to test, in ascending index order.
+    :ytype: Chunk
+    """
+    indices = definitions.chunks_defining(names) if definitions is not None else None
+    if indices is None:
+        yield from all_chunks
+        return
+    for index in indices.tolist():
+        yield all_chunks[index]
+
+
 def _scan_non_candidates(
     boosted: dict[Chunk, float],
     names: set[str],
     boost_unit: float,
     all_chunks: list[Chunk],
     stem_ok: Callable[[str], bool],
+    definitions: "SymbolDefinitions | None" = None,
 ) -> None:
     """Boost non-candidate chunks whose lowercased file stem satisfies stem_ok (in-place)."""
-    for chunk in all_chunks:
+    for chunk in _definition_scan_order(all_chunks, names, definitions):
         if chunk in boosted:
             continue
         if not stem_ok(Path(chunk.file_path).stem.lower()):
@@ -202,6 +317,7 @@ def _boost_symbol_definitions(
     query: str,
     max_score: float,
     all_chunks: list[Chunk],
+    definitions: "SymbolDefinitions | None" = None,
 ) -> None:
     """Boost chunks that define the queried symbol, scanning candidates and stem-matched non-candidates (in-place)."""
     symbol_name = _extract_symbol_name(query)
@@ -221,6 +337,7 @@ def _boost_symbol_definitions(
         boost_unit,
         all_chunks,
         lambda stem: _stem_matches(stem, symbol_name.lower()),
+        definitions,
     )
 
 
@@ -229,6 +346,7 @@ def _boost_embedded_symbols(
     query: str,
     max_score: float,
     all_chunks: list[Chunk],
+    definitions: "SymbolDefinitions | None" = None,
 ) -> None:
     """Boost chunks defining CamelCase/camelCase symbols embedded in NL queries (in-place).
 
@@ -246,7 +364,7 @@ def _boost_embedded_symbols(
             boosted[chunk] += tier
 
     symbols_lower = frozenset(s.lower() for s in names)
-    for chunk in all_chunks:
+    for chunk in _definition_scan_order(all_chunks, names, definitions):
         if chunk in boosted:
             continue
         stem = Path(chunk.file_path).stem.lower()

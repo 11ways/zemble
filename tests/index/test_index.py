@@ -7,8 +7,10 @@ import pytest
 
 from tests.conftest import make_chunk
 from zemble import ZembleIndex
+from zemble.index.chunk_store import save_chunks
 from zemble.index.create import create_index_from_path
 from zemble.index.files import _MAX_FILE_BYTES, FileStatus, get_file_status
+from zemble.index.index import LazyFileSizes
 from zemble.types import ContentType
 
 
@@ -162,12 +164,12 @@ def test_search_empty_query_returns_empty(indexed_index: ZembleIndex, query: str
 def test_compute_file_sizes(
     tmp_path: Path, disk_files: dict[str, str], chunk_paths: list[str], expected: dict[str, int]
 ) -> None:
-    """_compute_file_sizes deduplicates paths and silently skips missing files."""
+    """File sizes are read on demand, deduplicated, and missing files stay absent."""
     for name, content in disk_files.items():
         (tmp_path / name).write_text(content)
-    index = ZembleIndex.__new__(ZembleIndex)
-    index.chunks = [make_chunk("c", p) for p in chunk_paths]
-    assert index._compute_file_sizes(tmp_path) == expected
+    sizes = LazyFileSizes(tmp_path, set(chunk_paths))
+    assert {path: sizes[path] for path in chunk_paths if path in sizes} == expected
+    assert dict(sizes) == expected, "only the paths that were asked for and readable are cached"
 
 
 def test_find_related(indexed_index: ZembleIndex) -> None:
@@ -189,7 +191,6 @@ def test_roundtrip(tmp_path: Path, indexed_index: ZembleIndex) -> None:
     """Test that saving and loading a folder leads to the same data."""
     assert indexed_index.chunks[0].to_dict()["location"] == indexed_index.chunks[0].location
     indexed_index.save(tmp_path)
-    assert "location" not in orjson.loads((tmp_path / "chunks.json").read_bytes())[0]
     index_2 = ZembleIndex.load_from_disk(tmp_path, embedder=indexed_index.embedder)
     assert index_2.chunks == indexed_index.chunks
     assert index_2._root == indexed_index._root
@@ -220,8 +221,8 @@ def test_load_from_disk_missing_files_reports_them(tmp_path: Path) -> None:
     """When the directory exists but required index files are missing, the error lists them."""
     index_dir = tmp_path / "incomplete_index"
     index_dir.mkdir()
-    # Create only one of the four expected files so the rest are reported as missing.
-    (index_dir / "chunks.json").write_text("[]")
+    # Create only one of the expected components so the rest are reported as missing.
+    (index_dir / "chunks").write_text("")
 
     with pytest.raises(FileNotFoundError, match="Missing:") as exc_info:
         ZembleIndex.load_from_disk(index_dir)
@@ -231,8 +232,9 @@ def test_load_from_disk_missing_files_reports_them(tmp_path: Path) -> None:
     assert "bm25_index" in error_msg
     assert "semantic_index" in error_msg
     assert "metadata.json" in error_msg
-    # The file we did create should NOT be listed as missing.
-    assert "chunks.json" not in error_msg
+    assert "symbols" in error_msg
+    # The component we did create should NOT be listed as missing.
+    assert str(index_dir / "chunks") not in error_msg
 
 
 @pytest.mark.parametrize(
@@ -248,10 +250,9 @@ def test_load_from_disk_rejects_incompatible_state(
         path = tmp_path / "metadata.json"
         data = orjson.loads(path.read_bytes())
         del data["cache_version"]
+        path.write_bytes(orjson.dumps(data))
     else:
-        path = tmp_path / "chunks.json"
-        data = orjson.loads(path.read_bytes())[:-1]
-    path.write_bytes(orjson.dumps(data))
+        save_chunks(tmp_path / "chunks", list(indexed_index.chunks)[:-1])
 
     with pytest.raises(ValueError, match=message):
         ZembleIndex.load_from_disk(tmp_path)

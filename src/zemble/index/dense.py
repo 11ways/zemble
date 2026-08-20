@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
-from vicinity.backends.basic import CosineBasicBackend
+from vicinity.backends.basic import BasicArgs, BasicBackend, CosineBasicBackend
 from vicinity.datatypes import QueryResult
 from vicinity.utils import normalize
 
@@ -73,12 +73,26 @@ class SelectableBasicBackend(CosineBasicBackend):
         return out
 
     def save(self, path: Path) -> None:
-        """Save the selectable basic backend."""
+        """Save the selectable basic backend; its vectors are already unit length."""
         path.mkdir(parents=True, exist_ok=True)
         super().save(path)
 
     @classmethod
-    def load(cls, path: Path) -> "SelectableBasicBackend":
-        """Load a selectable basic backend."""
-        loaded = super().load(path)
-        return SelectableBasicBackend(loaded.vectors, loaded.arguments)
+    def load(cls, path: Path, writable: bool = False) -> "SelectableBasicBackend":
+        """Load a selectable basic backend, mapping the vectors instead of reading them.
+
+        Vicinity's own loader reads the whole matrix and then re-normalizes it; the constructor
+        normalizes before saving, so the stored rows are already unit length and both passes are
+        pure cost. The mapped matrix is read-only, so any caller that writes into ``vectors``
+        (incremental reindexing) must ask for a writable copy.
+
+        :param path: Directory the backend was saved to.
+        :param writable: Read the vectors into memory instead of mapping them read-only.
+        :return: The loaded backend.
+        """
+        arguments = BasicArgs.load(path / "arguments.json")
+        vectors = np.load(path / "vectors.npy", mmap_mode=None if writable else "r")
+        backend = cls.__new__(cls)
+        # Skips CosineBasicBackend.__init__, whose only extra work is the normalization pass.
+        BasicBackend.__init__(backend, vectors, arguments)
+        return backend

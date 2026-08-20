@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import numpy as np
 import numpy.typing as npt
 
@@ -8,6 +10,9 @@ from zemble.index.sparse import selector_to_mask
 from zemble.ranking import apply_query_boost, boost_multi_chunk_files, rerank_topk, resolve_alpha
 from zemble.tokens import tokenize
 from zemble.types import Chunk, SearchResult
+
+if TYPE_CHECKING:
+    from zemble.index.symbols import SymbolDefinitions
 
 _RRF_K = 60
 
@@ -73,6 +78,7 @@ def search(
     alpha: float | None = None,
     selector: npt.NDArray[np.int_] | None = None,
     rerank: bool = True,
+    definitions: "SymbolDefinitions | None" = None,
 ) -> list[SearchResult]:
     """Hybrid search: alpha-weighted combination of semantic and BM25 scores.
 
@@ -88,6 +94,7 @@ def search(
     :param alpha: Weight for semantic score (1-alpha goes to BM25). None = auto-detect based on query type.
     :param selector: Optional array of chunk indices to filter results by.
     :param rerank: Whether to perform code-tuned reranking. On by default for code search, off for docs search.
+    :param definitions: Persisted symbol-definition lookup used by the rerank pass, when the index has one.
     :return: List of search results sorted by combined score descending.
     """
     alpha_weight = resolve_alpha(query, alpha)
@@ -123,7 +130,7 @@ def search(
         # Boost files with multiple relevant chunks.
         boost_multi_chunk_files(combined_scores)
         # Boost queries with specific identifiers in them.
-        combined_scores = apply_query_boost(combined_scores, query, chunks)
+        combined_scores = apply_query_boost(combined_scores, query, chunks, definitions)
         # Rerank the top-k results by applying path-based penalties.
         ranked = rerank_topk(combined_scores, top_k, penalise_paths=alpha_weight < 1.0)
     else:
