@@ -6,6 +6,10 @@ machine. There is one now. This document is what the two hosted models actually 
 inside zemble's hybrid pipeline, on the same two evaluation sets every other step was
 measured on, and what it costs.
 
+AIDEV-NOTE: every figure here predates the `.hwk` template lane. For one table of the
+same configurations re-measured on the current tree, with hit@1/5/10 beside NDCG, see
+[docs/comparison.md](comparison.md).
+
 Two questions were being asked:
 
 1. **Does a stronger embedder matter inside a hybrid pipeline?** zemble fuses BM25

@@ -1,0 +1,1511 @@
+{
+  "tool": "local-javaweb-zemble-hybrid-C-voyage-4-lite-1024",
+  "model": "voyage:voyage-4-lite@1024",
+  "summary": {
+    "ndcg10": 0.6803,
+    "tokens": 1700.0,
+    "p50_ms": 349.928,
+    "p90_ms": 528.377,
+    "p95_ms": 540.114,
+    "p99_ms": 544.044,
+    "index_ms": 241977.9,
+    "by_category": {
+      "architecture": 0.5267,
+      "semantic": 0.5759,
+      "symbol": 1.0
+    },
+    "by_kind": {
+      "architecture": 0.5267,
+      "behavioural": 0.702,
+      "bug-report": 0.5719,
+      "consumer": 0.2472,
+      "symbol": 1.0
+    },
+    "hit1": 0.5889,
+    "hit5": 0.8111,
+    "hit10": 0.8556,
+    "hits_by_category": {
+      "architecture": {
+        "hit1": 0.5625,
+        "hit5": 0.6875,
+        "hit10": 0.6875
+      },
+      "semantic": {
+        "hit1": 0.4,
+        "hit5": 0.76,
+        "hit10": 0.84
+      },
+      "symbol": {
+        "hit1": 1.0,
+        "hit5": 1.0,
+        "hit10": 1.0
+      }
+    },
+    "hits_by_kind": {
+      "architecture": {
+        "hit1": 0.5625,
+        "hit5": 0.6875,
+        "hit10": 0.6875
+      },
+      "behavioural": {
+        "hit1": 0.5172,
+        "hit5": 0.8621,
+        "hit10": 0.931
+      },
+      "bug-report": {
+        "hit1": 0.4,
+        "hit5": 0.8,
+        "hit10": 0.8
+      },
+      "consumer": {
+        "hit1": 0.0909,
+        "hit5": 0.4545,
+        "hit10": 0.6364
+      },
+      "symbol": {
+        "hit1": 1.0,
+        "hit5": 1.0,
+        "hit10": 1.0
+      }
+    }
+  },
+  "reranker": "none",
+  "rerank_settings": {
+    "top_k": 50,
+    "alpha": 1.0,
+    "passage": "context"
+  },
+  "api_usage": {
+    "embedder": {
+      "model_id": "voyage:voyage-4-lite@1024",
+      "requests": 1069,
+      "tokens": 563135
+    }
+  },
+  "by_language": {
+    "java": {
+      "repos": 1,
+      "tokens": 1700.0,
+      "ndcg10": 0.6803,
+      "p50_ms": 349.928,
+      "p90_ms": 528.377,
+      "p95_ms": 540.114,
+      "p99_ms": 544.044,
+      "index_ms": 241977.9
+    }
+  },
+  "repos": [
+    {
+      "repo": "javaweb",
+      "language": "java",
+      "mode": "auto",
+      "chunks": 77092,
+      "tokens": 1700,
+      "ndcg5": 0.6655748079528774,
+      "ndcg10": 0.6802654074712028,
+      "p50_ms": 349.9282920965925,
+      "p90_ms": 528.3767543965951,
+      "p95_ms": 540.1135381893255,
+      "p99_ms": 544.0443958644755,
+      "index_ms": 241977.89372201078,
+      "by_category": {
+        "architecture": 0.5266897898929532,
+        "semantic": 0.5759370006824203,
+        "symbol": 1.0
+      },
+      "by_kind": {
+        "architecture": 0.5266897898929532,
+        "behavioural": 0.702020412886283,
+        "bug-report": 0.5718524813562335,
+        "consumer": 0.24724847698695163,
+        "symbol": 1.0
+      },
+      "hits": {
+        "hit1": 0.5888888888888889,
+        "hit5": 0.8111111111111111,
+        "hit10": 0.8555555555555555
+      },
+      "hits_by_category": {
+        "architecture": {
+          "hit1": 0.5625,
+          "hit5": 0.6875,
+          "hit10": 0.6875
+        },
+        "semantic": {
+          "hit1": 0.4,
+          "hit5": 0.76,
+          "hit10": 0.84
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "hits_by_kind": {
+        "architecture": {
+          "hit1": 0.5625,
+          "hit5": 0.6875,
+          "hit10": 0.6875
+        },
+        "behavioural": {
+          "hit1": 0.5172413793103449,
+          "hit5": 0.8620689655172413,
+          "hit10": 0.9310344827586207
+        },
+        "bug-report": {
+          "hit1": 0.4,
+          "hit5": 0.8,
+          "hit10": 0.8
+        },
+        "consumer": {
+          "hit1": 0.09090909090909091,
+          "hit5": 0.45454545454545453,
+          "hit10": 0.6363636363636364
+        },
+        "symbol": {
+          "hit1": 1.0,
+          "hit5": 1.0,
+          "hit10": 1.0
+        }
+      },
+      "queries": [
+        {
+          "query": "EventDelegationPlanner",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "hawkeye/hawkeye-core/src/server/java/be/elevenways/hawkeye/server/compiler/EventDelegationPlanner.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "PageWindow.of",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/data/PageWindow.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "SessionIds.forToken",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/security/SessionIds.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "EntityTags.matchesIfNoneMatch",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/http/EntityTags.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "PasswordAdministration",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/PasswordAdministration.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "SyncedRefs",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/channel/SyncedRefs.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "MutableSetRef",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "protoblast/src/main/java/be/elevenways/protoblast/common/holder/MutableSetRef.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "KeyedListenerTable",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "protoblast/src/main/java/be/elevenways/protoblast/common/holder/KeyedListenerTable.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "PlatformSeam.withDefault",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "protoblast/src/main/java/be/elevenways/protoblast/common/platform/PlatformSeam.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "SnapshottableRegistry",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "protoblast/src/main/java/be/elevenways/protoblast/common/registry/SnapshottableRegistry.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "SelectionFunctions.claimScope",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "plumage/src/common/java/be/elevenways/plumage/component/SelectionFunctions.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "TableAvailability.forTable",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/orm/TableAvailability.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "WidgetMigrations",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit-widget/src/common/java/be/elevenways/zenit/widget/common/WidgetMigrations.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "CommsDispatcher.backoffSeconds",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit-comms/src/server/java/be/elevenways/zenit/comms/server/CommsDispatcher.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "MediaIngestion.ingestDeduplicated",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit-media/src/server/java/be/elevenways/zenit/media/server/MediaIngestion.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "RecordSourceRegistry.override",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/data/RecordSourceRegistry.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "AdministratorGuard.enforce",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/AdministratorGuard.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "FormActionSubmission.optimistic",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/form/FormActionSubmission.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "ChartFunctions.layout",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "plumage/src/common/java/be/elevenways/plumage/chart/ChartFunctions.java"
+          ],
+          "relevant_ranks": [
+            1,
+            2
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "StreamWindow",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/devtunnel/StreamWindow.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "where the compiler decides to attach one handler on the enclosing container instead of one per repeated row",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "hawkeye/hawkeye-core/src/server/java/be/elevenways/hawkeye/server/compiler/EventDelegationPlanner.java"
+          ],
+          "relevant_ranks": [
+            2,
+            5
+          ],
+          "ndcg10": 0.6241,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "the single place a credential is assigned to somebody who did not pick it themselves",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/PasswordAdministration.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "comparison used to decide whether a conditional GET may answer not modified",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/http/EntityTags.java"
+          ],
+          "relevant_ranks": [
+            1,
+            2
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "deriving the storage key of a session from the secret the browser presented",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/security/SessionIds.java"
+          ],
+          "relevant_ranks": [
+            5
+          ],
+          "ndcg10": 0.3869,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "clamp a requested page number against the row total and compute the query offset",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/data/PageWindow.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "degrade quietly with one warning and a cooldown when a feature's table has not been created yet",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/orm/TableAvailability.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "checking that a submitted redirect destination stays inside this application",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/http/ReturnTarget.java"
+          ],
+          "relevant_ranks": [
+            5
+          ],
+          "ndcg10": 0.3869,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "random url-safe secret generation plus timing-safe string comparison",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/security/SecureTokens.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "walk the forwarded address chain from the right while each hop is a configured proxy",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/http/TrustedProxies.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "persist a configuration value but drop it again when it equals the shipped default",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/setting/SettingsEditor.java"
+          ],
+          "relevant_ranks": [
+            2
+          ],
+          "ndcg10": 0.6309,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "convert an untyped submitted value into a number or date so that refusal and absence stay distinguishable",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/coerce/PrimitiveCoercion.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "reuse the existing stored asset when identical bytes were already uploaded",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-media/src/server/java/be/elevenways/zenit/media/server/MediaIngestion.java"
+          ],
+          "relevant_ranks": [
+            2
+          ],
+          "ndcg10": 0.6309,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how long to wait before the next attempt at a queued outbound message that failed",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-comms/src/server/java/be/elevenways/zenit/comms/server/CommsDispatcher.java"
+          ],
+          "relevant_ranks": [
+            7
+          ],
+          "ndcg10": 0.3333,
+          "hit1": false,
+          "hit5": false,
+          "hit10": true
+        },
+        {
+          "query": "serve stored bytes from a caller's own endpoint once that caller has authorized the read",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-media/src/server/java/be/elevenways/zenit/media/server/MediaStreams.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "one cookie shape for remembering a visitor's chosen theme or time zone",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/ui/PreferenceCookie.java"
+          ],
+          "relevant_ranks": [
+            1,
+            3
+          ],
+          "ndcg10": 0.9197,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "reverse lookup of which active accounts really end up allowed to do something",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/PermissionHolders.java"
+          ],
+          "relevant_ranks": [
+            2
+          ],
+          "ndcg10": 0.6309,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "refuse a write that would leave nobody able to administer the system",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/AdministratorGuard.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "block the sender until the far side acknowledges bytes for this stream",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/devtunnel/StreamWindow.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "retry connecting to the front proxy with a delay that doubles up to a ceiling",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/devtunnel/DevTunnelClient.java"
+          ],
+          "relevant_ranks": [
+            5
+          ],
+          "ndcg10": 0.3869,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "reader-written text hanging off a record, kept exactly as typed and never translated",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/orm/comment/RecordComments.java"
+          ],
+          "relevant_ranks": [
+            10
+          ],
+          "ndcg10": 0.2891,
+          "hit1": false,
+          "hit5": false,
+          "hit10": true
+        },
+        {
+          "query": "per-row permission entries where a deny entry beats an allow entry",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/RecordGrants.java"
+          ],
+          "relevant_ranks": [
+            2
+          ],
+          "ndcg10": 0.6309,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "issue a token to a caller while only its digest is kept in the database",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/ApiKeyService.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "detect that a requested glyph is not part of the bundled set",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "plumage/src/common/java/be/elevenways/plumage/icon/IconRegistry.java"
+          ],
+          "relevant_ranks": [
+            2
+          ],
+          "ndcg10": 0.3869,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "carry the iteration variables on the rendered element so a shared handler can tell which item was hit",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/api/EventDelegation.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 0.6131,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "undo a speculative client-side value change once the submission comes back rejected",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/form/FormActionSubmission.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how is a value owned by the server pushed into a reactive holder inside the browser",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/channel/SyncedRefs.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "how are several independent typed message streams multiplexed over one socket",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/channel/ChannelGateway.java"
+          ],
+          "relevant_ranks": [
+            5
+          ],
+          "ndcg10": 0.2372,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how does shared code call an implementation that only exists on one platform",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "protoblast/src/main/java/be/elevenways/protoblast/common/platform/PlatformSeam.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how does a process-wide registry get captured and put back so tests do not leak into each other",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "protoblast/src/main/java/be/elevenways/protoblast/common/registry/SnapshottableRegistry.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how do an accordion, a tab strip and a multi-select table share one active-item engine",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "plumage/src/common/java/be/elevenways/plumage/component/SelectionFunctions.java"
+          ],
+          "relevant_ranks": [
+            4
+          ],
+          "ndcg10": 0.4307,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how does an attribute written in a template expand into generated render and listener code",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "hawkeye/hawkeye-core/src/server/java/be/elevenways/hawkeye/server/compiler/DirectiveTranspiler.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "how does a button rendered inside a generated component tree get its click back to the page that hosts it",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit-widget/src/server/java/be/elevenways/zenit/widget/server/surface/WidgetSurfaces.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "how is a listing narrowed to the rows the signed-in identity is allowed to see",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/data/RecordSource.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 0.6131,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how does a stored automation chain re-check the saved user's authority at every step it runs",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/task/record/RecordSchedules.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 0.6131,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how does the framework make sure only one worker keeps acting on a claimed row",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/orm/lease/Leases.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "how can an operator run recovery commands on the host without starting the web server",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/cli/OfflineCommands.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how are the translations for a language fallback chain assembled and cached for delivery to the browser",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit-microcopy/src/server/java/be/elevenways/zenit/microcopy/server/TranslationBundles.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how does a module write files without knowing where or how they are stored",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/storage/Storages.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "how are forbidden code patterns defined once and enabled per repository",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "protoblast/protoblast-source-guard/src/main/java/be/elevenways/protoblast/guard/BuiltInRules.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 0.6131,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how is cleanup of a dropped socket guaranteed to happen once and only once whichever side closed it",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/http/WebSocketTeardown.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "asking for a page beyond the last one gives back an empty list instead of the final page",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/common/java/be/elevenways/zenit/common/data/PageWindow.java"
+          ],
+          "relevant_ranks": [
+            2
+          ],
+          "ndcg10": 0.6309,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "pressing the button in one table row runs the action for a different row",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/api/EventDelegation.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "uploading the same picture a second time creates a duplicate entry in the library",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "zenit-media/src/server/java/be/elevenways/zenit/media/server/MediaIngestion.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "every visitor is logged with the same loopback address once the app sits behind a reverse proxy",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/http/TrustedProxies.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "the configuration file keeps filling up with entries that are the same as the built-in values",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/setting/SettingsEditor.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "a message that could not be delivered is retried in a tight loop instead of slowing down",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "zenit-comms/src/server/java/be/elevenways/zenit/comms/server/CommsDispatcher.java"
+          ],
+          "relevant_ranks": [
+            4
+          ],
+          "ndcg10": 0.4307,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "blocks vanish from a saved dashboard after their type was renamed in code",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "zenit-widget/src/common/java/be/elevenways/zenit/widget/common/WidgetMigrations.java"
+          ],
+          "relevant_ranks": [
+            3
+          ],
+          "ndcg10": 0.5,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "an empty outlined square shows up where a small pictogram should be",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "plumage/src/common/java/be/elevenways/plumage/icon/IconRegistry.java"
+          ],
+          "relevant_ranks": [
+            3
+          ],
+          "ndcg10": 0.3066,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "a password handed out by an administrator keeps working forever instead of forcing the user to pick their own",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/AuthorizationMiddleware.java"
+          ],
+          "relevant_ranks": [
+            1,
+            5
+          ],
+          "ndcg10": 0.8503,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "disabling the last remaining administrator account locks everyone out of the panel",
+          "kind": "bug-report",
+          "category": "semantic",
+          "relevant": [
+            "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/AdministratorGuard.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "tests pinning session expiry against a deterministic clock",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/test/java/be/elevenways/zenit/common/session/InMemorySessionStoreTest.java"
+          ],
+          "relevant_ranks": [
+            9
+          ],
+          "ndcg10": 0.301,
+          "hit1": false,
+          "hit5": false,
+          "hit10": true
+        },
+        {
+          "query": "test proving a credential secret never leaks through its string form or hash code",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/test/java/be/elevenways/zenit/common/session/SessionTokenTest.java"
+          ],
+          "relevant_ranks": [
+            8
+          ],
+          "ndcg10": 0.3155,
+          "hit1": false,
+          "hit5": false,
+          "hit10": true
+        },
+        {
+          "query": "tests covering a single shared listener over a keyed repeated block",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "hawkeye/hawkeye-core/src/test/java/be/elevenways/hawkeye/EventDelegationTest.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "test asserting that a renamed stored block type revives as its successor",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "zenit-widget/src/test/java/be/elevenways/zenit/widget/common/WidgetMigrationsTest.java"
+          ],
+          "relevant_ranks": [
+            4
+          ],
+          "ndcg10": 0.4307,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "admin list pages that consume the paging window helper",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "zenit-cms/src/server/java/be/elevenways/zenit/cms/server/page/Paging.java"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 0.6131,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "the request-handling layer that answers not modified using the entity tag helper",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/server/java/be/elevenways/zenit/server/http/ConditionalRequest.java"
+          ],
+          "relevant_ranks": [
+            3
+          ],
+          "ndcg10": 0.3066,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "tests for the outbound delivery retry schedule and its failover",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "zenit-comms/src/test/java/be/elevenways/zenit/comms/server/CommsPipelineTest.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "tests rejecting an off-site destination in the after-action navigation parameter",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/test/java/be/elevenways/zenit/server/http/ReturnTargetTest.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "application code that alerts earlier participants when somebody leaves a new remark on an item",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "orcono/mvp-v01/src/server/java/be/elevenways/orcono/server/comment/CommentService.java"
+          ],
+          "relevant_ranks": [
+            3
+          ],
+          "ndcg10": 0.5,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "tests for who may edit and who may remove somebody else's remark on a record",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "zenit/src/test/java/be/elevenways/zenit/orm/RecordCommentsTest.java"
+          ],
+          "relevant_ranks": [],
+          "ndcg10": 0.0,
+          "hit1": false,
+          "hit5": false,
+          "hit10": false
+        },
+        {
+          "query": "zc-inbox",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit-comms/src/common/templates/zc-inbox.hwk"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "zfm-media-field",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit-media/src/common/templates/form/zfm-media-field.hwk"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "PlTabsTrigger",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "plumage/src/common/templates/components/tabs.hwk"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "ZfQueryBuilder",
+          "kind": "symbol",
+          "category": "symbol",
+          "relevant": [
+            "zenit-forms/src/common/templates/form/zf-query-builder.hwk"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "the markup listing a recipient's in-app messages with a button that marks them all seen",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-comms/src/common/templates/zc-inbox.hwk"
+          ],
+          "relevant_ranks": [
+            2
+          ],
+          "ndcg10": 0.6309,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "the chrome drawn around every administration page: brand header, navigation sections, theme attribute",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "zenit-cms/src/common/templates/shell.hwk"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "the pop-up month grid a date field opens for pointer entry",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "plumage/src/common/templates/components/date-picker.hwk"
+          ],
+          "relevant_ranks": [
+            1,
+            4
+          ],
+          "ndcg10": 0.8772,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "the control a page shows to begin and end tracking time against a project",
+          "kind": "behavioural",
+          "category": "semantic",
+          "relevant": [
+            "orcono/mvp-v01/src/common/templates/orcono/time/components.hwk"
+          ],
+          "relevant_ranks": [
+            1
+          ],
+          "ndcg10": 1.0,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "how a generated administration listing lays out its toolbar, its filter row, its records and its pager",
+          "kind": "architecture",
+          "category": "architecture",
+          "relevant": [
+            "zenit-cms/src/common/templates/pages/resource-list.hwk"
+          ],
+          "relevant_ranks": [
+            1,
+            3
+          ],
+          "ndcg10": 0.9197,
+          "hit1": true,
+          "hit5": true,
+          "hit10": true
+        },
+        {
+          "query": "templates that hand a picker a data provider instead of a fixed option list",
+          "kind": "consumer",
+          "category": "semantic",
+          "relevant": [
+            "zenit-forms/src/common/templates/form/zf-provider-field.hwk",
+            "zenit-forms/src/common/templates/form/zf-relation-field.hwk",
+            "zenit-forms/src/common/templates/form/zf-relation-multi-field.hwk"
+          ],
+          "relevant_ranks": [
+            3,
+            7,
+            8
+          ],
+          "ndcg10": 0.2528,
+          "hit1": false,
+          "hit5": true,
+          "hit10": true
+        }
+      ]
+    }
+  ]
+}
