@@ -13,6 +13,7 @@ from typing import Literal
 from model2vec.utils import get_package_extras
 
 from zemble.cache import cache_key, resolve_cache_folder, save_index_to_cache
+from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.index import ZembleIndex
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
@@ -22,19 +23,25 @@ from zemble.utils import format_results, is_git_url, resolve_chunk
 from zemble.version import __version__
 
 _CLI_DISPATCH_ARGS = frozenset(
-    {"search", "find-related", "install", "uninstall", "savings", "-h", "--help", "clear", "--version", "-V"}
+    {"search", "find-related", "install", "uninstall", "savings", "stats", "-h", "--help", "clear", "--version", "-V"}
 )
 _CLEAR_CHOICE = Literal["all", "index", "savings", "orphans"]
 
 _SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
 
 
-def _build_index(path: str, content: list[ContentType]) -> ZembleIndex:
-    """Build an index from a local path or git URL."""
+def _build_index(path: str, content: list[ContentType], embedder: str | None = None) -> ZembleIndex:
+    """Build an index from a local path or git URL.
+
+    :param path: Local path or git URL.
+    :param content: Content types to index.
+    :param embedder: Embedder spec, or None for the environment default.
+    :return: The index.
+    """
     return (
-        ZembleIndex.from_git(path, content=content)
+        ZembleIndex.from_git(path, content=content, embedder=embedder)
         if is_git_url(path)
-        else ZembleIndex.from_path(path, content=content)
+        else ZembleIndex.from_path(path, content=content, embedder=embedder)
     )
 
 
@@ -44,6 +51,39 @@ def _maybe_save_index(index: ZembleIndex, path: str) -> None:
         save_index_to_cache(index, path)
     except Exception as e:
         print(f"Error saving index: {e}", file=sys.stderr)
+
+
+def _add_embedder_arg(p: argparse.ArgumentParser) -> None:
+    """Add --embedder to a subparser."""
+    p.add_argument(
+        "--embedder",
+        default=None,
+        metavar="SPEC",
+        help=(
+            "Embedder spec: model2vec:<hf-model>, voyage:<model>[@<dims>], or openai:<base_url>#<model>[@<dims>]. "
+            f"Default: $ZEMBLE_EMBEDDER, else {resolve_embedder_spec()}."
+        ),
+    )
+
+
+def _run_stats(path: str, content: list[ContentType], embedder: str | None = None) -> None:
+    """Handle the `stats` subcommand: report what an index holds and which embedder built it."""
+    index = _load_index(path, content, embedder)
+    stats = index.stats
+    print(
+        json.dumps(
+            {
+                "path": path,
+                "embedder": stats.embedder,
+                "dimensions": stats.dimensions,
+                "indexed_files": stats.indexed_files,
+                "total_chunks": stats.total_chunks,
+                "content": [c.value for c in index.content],
+                "languages": stats.languages,
+            }
+        )
+    )
+    _maybe_save_index(index, path)
 
 
 def _add_content_args(p: argparse.ArgumentParser) -> None:
@@ -104,18 +144,31 @@ def _resolve_content(content: list[str], include_text_files: bool) -> list[Conte
     return [ContentType(c) for c in content]
 
 
-def _load_index(path: str, content: list[ContentType]) -> ZembleIndex:
-    """Build an index from a local path or git URL, exiting on FileNotFoundError."""
+def _load_index(path: str, content: list[ContentType], embedder: str | None = None) -> ZembleIndex:
+    """Build an index from a local path or git URL, exiting on FileNotFoundError or a bad embedder spec.
+
+    :param path: Local path or git URL.
+    :param content: Content types to index.
+    :param embedder: Embedder spec, or None for the environment default.
+    :return: The index.
+    """
     try:
-        return _build_index(path, content)
-    except FileNotFoundError as e:
+        return _build_index(path, content, embedder)
+    except (FileNotFoundError, EmbedderSpecError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
 
-def _run_search(path: str, query: str, top_k: int, content: list[ContentType], max_snippet_lines: int | None) -> None:
+def _run_search(
+    path: str,
+    query: str,
+    top_k: int,
+    content: list[ContentType],
+    max_snippet_lines: int | None,
+    embedder: str | None = None,
+) -> None:
     """Handle the `search` subcommand."""
-    index = _load_index(path, content)
+    index = _load_index(path, content, embedder)
     results = index.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines)
     out = format_results(query, results, max_snippet_lines) if results else {"error": "No results found."}
     print(json.dumps(out))
@@ -123,10 +176,16 @@ def _run_search(path: str, query: str, top_k: int, content: list[ContentType], m
 
 
 def _run_find_related(
-    path: str, file_path: str, line: int, top_k: int, content: list[ContentType], max_snippet_lines: int | None
+    path: str,
+    file_path: str,
+    line: int,
+    top_k: int,
+    content: list[ContentType],
+    max_snippet_lines: int | None,
+    embedder: str | None = None,
 ) -> None:
     """Handle the `find-related` subcommand."""
-    index = _load_index(path, content)
+    index = _load_index(path, content, embedder)
     chunk = resolve_chunk(index.chunks, file_path, line)
     if chunk is None:
         print(f"No chunk found at {file_path}:{line}.", file=sys.stderr)
@@ -224,6 +283,12 @@ def _cli_main() -> None:
         help="Lines of source per result (default: full chunk). 10 = signature + body, 0 = no code.",
     )
     _add_content_args(search_p)
+    _add_embedder_arg(search_p)
+
+    stats_p = sub.add_parser("stats", help="Show what an index contains, including its embedder and dimensions.")
+    stats_p.add_argument("path", nargs="?", default=".", help="Local path or git URL (default: current directory).")
+    _add_content_args(stats_p)
+    _add_embedder_arg(stats_p)
 
     clear_p = sub.add_parser("clear", help="Clear the index cache.")
     clear_p.add_argument(
@@ -245,6 +310,7 @@ def _cli_main() -> None:
         help="Lines of source per result (default: full chunk). 10 = signature + body, 0 = no code.",
     )
     _add_content_args(related_p)
+    _add_embedder_arg(related_p)
 
     sub.add_parser("savings", help="Show token savings and usage stats.")
 
@@ -293,7 +359,10 @@ def _cli_main() -> None:
             args.top_k,
             _resolve_content(args.content, args.include_text_files),
             args.max_snippet_lines,
+            args.embedder,
         )
+    elif args.command == "stats":
+        _run_stats(args.path, _resolve_content(args.content, args.include_text_files), args.embedder)
     elif args.command == "find-related":
         _run_find_related(
             args.path,
@@ -302,4 +371,5 @@ def _cli_main() -> None:
             args.top_k,
             _resolve_content(args.content, args.include_text_files),
             args.max_snippet_lines,
+            args.embedder,
         )

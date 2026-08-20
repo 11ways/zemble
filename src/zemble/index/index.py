@@ -12,12 +12,13 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 import orjson
-from model2vec.model import StaticModel
 
 from zemble.cache import get_validated_cache, load_previous_for_incremental
+from zemble.embedding.base import Embedder
+from zemble.embedding.registry import load_embedder
 from zemble.index.bm25 import BM25
 from zemble.index.create import create_index_from_path
-from zemble.index.dense import SelectableBasicBackend, load_model
+from zemble.index.dense import SelectableBasicBackend
 from zemble.index.files import read_file_text
 from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath
 from zemble.search import _search_semantic, search
@@ -47,16 +48,29 @@ def _apply_include_text_files(
     return _ALL_CONTENT if include_text_files else _DEFAULT_CONTENT
 
 
+def resolve_embedder(embedder: Embedder | str | None, model_path: str | None = None) -> Embedder:
+    """Resolve the embedder to use from an embedder, a spec string, or the legacy model path.
+
+    :param embedder: An embedder instance, a spec string, or None.
+    :param model_path: Legacy bare Model2Vec model name; used only when `embedder` is None.
+    :return: The embedder to index or search with.
+    """
+    if embedder is not None and not isinstance(embedder, str):
+        return embedder
+    if embedder is None and model_path is not None:
+        return load_embedder(f"model2vec:{model_path}" if ":" not in model_path else model_path)
+    return load_embedder(embedder)
+
+
 class ZembleIndex:
     """Fast local code index with hybrid search."""
 
     def __init__(
         self,
-        model: StaticModel,
+        embedder: Embedder,
         bm25_index: BM25,
         semantic_index: SelectableBasicBackend,
         chunks: list[Chunk],
-        model_path: str,
         root: Path | None = None,
         content: ContentType | Sequence[ContentType] = _DEFAULT_CONTENT,
         loaded_from_disk: bool = False,
@@ -64,21 +78,19 @@ class ZembleIndex:
     ) -> None:
         """Initialize a ZembleIndex. Should be created with from_path or from_git.
 
-        :param model: Embedding model to use.
+        :param embedder: Embedder used to build and query this index.
         :param bm25_index: The bm25 index.
         :param semantic_index: The semantic index.
         :param chunks: The found chunks.
-        :param model_path: Path to the model file.
         :param root: Root directory used to read file sizes for token-savings stats.
         :param content: Content type used when indexing; controls the search pipeline.
         :param loaded_from_disk: Whether the index was loaded from disk (cache hit); controls CLI messaging.
         :param manifest: File modification times and chunk ranges used for incremental reindexing.
         """
-        self.model = model
+        self.embedder = embedder
         self.chunks: list[Chunk] = chunks
         self._bm25_index: BM25 = bm25_index
         self._semantic_index: SelectableBasicBackend = semantic_index
-        self._model_path: str = model_path
         self._root: Path | None = root
         self._content: tuple[ContentType, ...] = (content,) if isinstance(content, ContentType) else tuple(content)
         self._file_sizes: dict[str, int] = self._compute_file_sizes(root) if root else {}
@@ -122,6 +134,8 @@ class ZembleIndex:
             indexed_files=len(self._file_mapping),
             total_chunks=len(self.chunks),
             languages=dict(language_counts),
+            embedder=self.embedder.model_id,
+            dimensions=self.embedder.dimensions,
         )
 
     @property
@@ -136,13 +150,15 @@ class ZembleIndex:
         content: ContentType | Sequence[ContentType] = _DEFAULT_CONTENT,
         include_text_files: bool | None = None,
         model_path: str | None = None,
+        embedder: Embedder | str | None = None,
     ) -> ZembleIndex:
         """Create and index a ZembleIndex from a directory.
 
         :param path: Root directory to index.
         :param content: Content types to index, e.g. ContentType.CODE or [ContentType.CODE, ContentType.DOCS].
         :param include_text_files: Deprecated. Pass a content sequence directly instead.
-        :param model_path: Path to the model to use. If None, the default model will be used.
+        :param model_path: Legacy alias for ``embedder="model2vec:<name>"``.
+        :param embedder: An embedder or spec string. If None, the environment default is used.
         :return: An indexed ZembleIndex. Chunk file paths are relative to ``path``.
         :raises FileNotFoundError: If `path` does not exist.
         :raises NotADirectoryError: If `path` exists but is not a directory.
@@ -154,23 +170,23 @@ class ZembleIndex:
             raise NotADirectoryError(f"Path is not a directory: {path}")
 
         normalized = _apply_include_text_files(content, include_text_files)
-        cache_path = get_validated_cache(str(path), model_path, normalized)
+        resolved = resolve_embedder(embedder, model_path)
+        cache_path = get_validated_cache(str(path), resolved.model_id, normalized)
         if cache_path:
-            return cls.load_from_disk(cache_path)
-        model, model_path = load_model(model_path)
+            return cls.load_from_disk(cache_path, embedder=resolved)
 
         path = path.resolve()
-        previous = load_previous_for_incremental(str(path), model_path, normalized)
+        previous = load_previous_for_incremental(str(path), resolved.model_id, normalized)
         bm25_index, semantic_index, chunks, manifest = create_index_from_path(
             path,
-            model=model,
+            embedder=resolved,
             content=normalized,
             display_root=path,
             previous=previous,
         )
 
         return ZembleIndex(
-            model, bm25_index, semantic_index, chunks, model_path, root=path, content=normalized, manifest=manifest
+            resolved, bm25_index, semantic_index, chunks, root=path, content=normalized, manifest=manifest
         )
 
     @classmethod
@@ -181,6 +197,7 @@ class ZembleIndex:
         model_path: str | None = None,
         content: ContentType | Sequence[ContentType] = _DEFAULT_CONTENT,
         include_text_files: bool | None = None,
+        embedder: Embedder | str | None = None,
     ) -> ZembleIndex:
         """Clone a git repository and index it.
 
@@ -191,17 +208,19 @@ class ZembleIndex:
 
         :param url: URL of the git repository to clone (any git provider).
         :param ref: Branch or tag to check out. Defaults to the remote HEAD.
-        :param model_path: Path to the model to use. If None, the default model will be used.
+        :param model_path: Legacy alias for ``embedder="model2vec:<name>"``.
         :param content: Content types to index, e.g. (ContentType.CODE,) or (ContentType.CODE, ContentType.DOCS).
         :param include_text_files: Deprecated. Pass content=(ContentType.CODE, ContentType.DOCS, ...) instead.
+        :param embedder: An embedder or spec string. If None, the environment default is used.
         :return: An indexed ZembleIndex. Chunk file paths are repo-relative (e.g. ``src/foo.py``).
         :raises RuntimeError: If git is not on PATH, the clone fails, or times out.
         """
         normalized = _apply_include_text_files(content, include_text_files)
+        resolved = resolve_embedder(embedder, model_path)
         cache_key = f"{url}@{ref}" if ref else url
-        cache_path = get_validated_cache(cache_key, model_path, normalized)
+        cache_path = get_validated_cache(cache_key, resolved.model_id, normalized)
         if cache_path:
-            return cls.load_from_disk(cache_path)
+            return cls.load_from_disk(cache_path, embedder=resolved)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             # `--` prevents `url` from being interpreted as a git option (e.g. `--upload-pack=...`).
@@ -217,21 +236,19 @@ class ZembleIndex:
             if result.returncode != 0:
                 raise RuntimeError(f"git clone failed for {url!r}:\n{result.stderr.strip()}")
 
-            model, model_path = load_model(model_path)
             resolved_path = Path(tmp_dir).resolve()
             bm25_index, semantic_index, chunks, manifest = create_index_from_path(
                 resolved_path,
-                model=model,
+                embedder=resolved,
                 content=normalized,
                 display_root=resolved_path,
             )
 
             return ZembleIndex(
-                model,
+                resolved,
                 bm25_index,
                 semantic_index,
                 chunks,
-                model_path,
                 root=resolved_path,
                 content=normalized,
                 manifest=manifest,
@@ -249,7 +266,9 @@ class ZembleIndex:
         """
         target = source.chunk if isinstance(source, SearchResult) else source
         selector = self._get_selector_vector(filter_languages=[target.language]) if target.language else None
-        results = _search_semantic(target.content, self.model, self._semantic_index, self.chunks, top_k + 1, selector)
+        results = _search_semantic(
+            target.content, self.embedder, self._semantic_index, self.chunks, top_k + 1, selector
+        )
         results = [r for r in results if r.chunk != target][:top_k]
         save_search_stats(results, CallType.FIND_RELATED, self._file_sizes, max_snippet_lines)
         return results
@@ -299,7 +318,7 @@ class ZembleIndex:
         selector = self._get_selector_vector(filter_languages, filter_paths)
         results = search(
             query,
-            self.model,
+            self.embedder,
             self._semantic_index,
             self._bm25_index,
             self.chunks,
@@ -312,8 +331,15 @@ class ZembleIndex:
         return results
 
     @classmethod
-    def load_from_disk(cls: type[ZembleIndex], path: Path | str) -> ZembleIndex:
-        """Load the index from disk."""
+    def load_from_disk(cls: type[ZembleIndex], path: Path | str, embedder: Embedder | str | None = None) -> ZembleIndex:
+        """Load the index from disk.
+
+        :param path: Directory holding the persisted index.
+        :param embedder: An already-built embedder or spec; None rebuilds it from the stored ``embedder`` id.
+        :return: The loaded index.
+        :raises FileNotFoundError: If the index or one of its files is missing.
+        :raises ValueError: If the stored format is not the current one or the components disagree.
+        """
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Index not found at {path}")
@@ -343,7 +369,7 @@ class ZembleIndex:
         if not (len(chunks) == len(bm25_index.doc_order) == semantic_index.vectors.shape[0]):
             raise ValueError("Persisted index components have inconsistent document counts")
         root_path = metadata["root_path"]
-        model_path = metadata["model_path"]
+        stored_embedder = metadata["embedder"]
         content = tuple(ContentType(s) for s in metadata.get("content_type", ["code"]))
         manifest = {
             indexed_path: FileManifestEntry(**entry) for indexed_path, entry in metadata.get("files", {}).items()
@@ -351,14 +377,13 @@ class ZembleIndex:
         if root_path:
             root_path = Path(root_path)
 
-        model, model_path = load_model(model_path)
+        resolved = resolve_embedder(embedder if embedder is not None else stored_embedder)
 
         return cls(
-            model,
+            resolved,
             bm25_index,
             semantic_index,
             chunks,
-            model_path,
             root=root_path,
             content=content,
             loaded_from_disk=True,
@@ -383,7 +408,8 @@ class ZembleIndex:
         metadata = {
             "root_path": root_str,
             "time": datetime.now().timestamp(),
-            "model_path": self._model_path,
+            "embedder": self.embedder.model_id,
+            "dimensions": self.embedder.dimensions,
             "content_type": list(x.value for x in self._content),
             "chunk_size": _DESIRED_CHUNK_LENGTH_CHARS,
             "cache_version": CACHE_FORMAT_VERSION,

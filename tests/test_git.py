@@ -37,9 +37,9 @@ def git_repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_from_git_indexes_local_repo_with_relative_paths(mock_model: Any, git_repo: Path) -> None:
+def test_from_git_indexes_local_repo_with_relative_paths(mock_embedder: Any, git_repo: Path) -> None:
     """from_git clones a local repo, indexes it, and keeps chunk paths repo-relative."""
-    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
+    with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
         idx = ZembleIndex.from_git(str(git_repo))
     assert idx.stats.indexed_files >= 1
     assert idx.stats.total_chunks > 0
@@ -47,7 +47,7 @@ def test_from_git_indexes_local_repo_with_relative_paths(mock_model: Any, git_re
     assert all(not Path(c.file_path).is_absolute() for c in idx.chunks)
 
 
-def test_from_git_with_branch(mock_model: Any, tmp_path: Path) -> None:
+def test_from_git_with_branch(mock_embedder: Any, tmp_path: Path) -> None:
     """from_git with ref= checks out the specified branch."""
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -55,7 +55,7 @@ def test_from_git_with_branch(mock_model: Any, tmp_path: Path) -> None:
     _commit_file(repo, "main.py", "def on_main(): pass\n", "main")
     subprocess.run(["git", "-C", str(repo), "checkout", "-b", "feature"], check=True, capture_output=True)
     _commit_file(repo, "feature.py", "def on_feature(): pass\n", "feature")
-    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
+    with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
         idx = ZembleIndex.from_git(str(repo), ref="feature")
     file_names = {Path(c.file_path).name for c in idx.chunks}
     assert "feature.py" in file_names
@@ -66,7 +66,7 @@ def test_from_git_with_branch(mock_model: Any, tmp_path: Path) -> None:
     [("missing", FileNotFoundError), ("file", NotADirectoryError)],
 )
 def test_from_path_rejects_invalid_paths(
-    mock_model: Any, tmp_path: Path, kind: str, expected_exc: type[Exception]
+    mock_embedder: Any, tmp_path: Path, kind: str, expected_exc: type[Exception]
 ) -> None:
     """from_path raises FileNotFoundError for missing paths and NotADirectoryError for files."""
     if kind == "missing":
@@ -74,14 +74,14 @@ def test_from_path_rejects_invalid_paths(
     else:
         target = tmp_path / "not_a_dir.py"
         target.write_text("x = 1\n")
-    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
+    with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
         with pytest.raises(expected_exc):
             ZembleIndex.from_path(target)
 
 
-def test_from_git_raises_on_failure(mock_model: Any) -> None:
+def test_from_git_raises_on_failure(mock_embedder: Any) -> None:
     """from_git raises RuntimeError when the clone fails, git is not installed, or times out."""
-    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
+    with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
         with pytest.raises(RuntimeError, match="git clone failed"):
             ZembleIndex.from_git("/nonexistent/path/that/does/not/exist")
 

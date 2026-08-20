@@ -7,9 +7,8 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from model2vec import StaticModel
 
-from tests.conftest import make_chunk
+from tests.conftest import FakeEmbedder, make_chunk
 from zemble.mcp import _CACHE_MAX_SIZE, _IndexCache, create_server, serve
 from zemble.types import Chunk, ContentType, SearchResult
 from zemble.utils import format_results, is_git_url, resolve_chunk
@@ -41,10 +40,10 @@ async def _call_tool(
 
 
 @pytest.fixture()
-def cache() -> _IndexCache:
-    """An _IndexCache backed by a stub model."""
+def cache(mock_embedder: FakeEmbedder) -> _IndexCache:
+    """An _IndexCache backed by a stub embedder."""
     c = _IndexCache()
-    c._model_path = "/fake/model"
+    c._embedder = mock_embedder
     c._model_ready.set()
     return c
 
@@ -360,7 +359,7 @@ async def test_tool_output(
 @pytest.mark.anyio
 async def test_search_builds_exact_content_indexes(
     cache: _IndexCache,
-    mock_model: StaticModel,
+    mock_embedder: FakeEmbedder,
     tmp_project: Path,
 ) -> None:
     """MCP search lazily builds the exact requested content index."""
@@ -373,7 +372,7 @@ async def test_search_builds_exact_content_indexes(
     ]
 
     with (
-        patch("zemble.index.index.load_model", return_value=(mock_model, "/fake/model")),
+        patch("zemble.index.index.load_embedder", return_value=mock_embedder),
         patch("zemble.mcp.save_index_to_cache"),
     ):
         server = create_server(cache)
@@ -406,11 +405,9 @@ async def test_serve_runs_stdio(
         if stdio_yields:
             await asyncio.sleep(0.05)  # let the background init task run
 
-    load_kwargs = (
-        {"side_effect": load_err} if load_err else {"return_value": (MagicMock(spec=StaticModel), "/fake/model")}
-    )
+    load_kwargs = {"side_effect": load_err} if load_err else {"return_value": FakeEmbedder()}
     with (
-        patch("zemble.mcp.load_model", **load_kwargs),
+        patch("zemble.mcp.load_embedder", **load_kwargs),
         patch("mcp.server.fastmcp.FastMCP.run_stdio_async", side_effect=fake_stdio) as mock_run,
     ):
         await serve()
@@ -420,19 +417,19 @@ async def test_serve_runs_stdio(
 
 @pytest.mark.anyio
 async def test_serve_opens_stdio_before_model_loads() -> None:
-    """Stdio must open before load_model() finishes."""
+    """Stdio must open before load_embedder() finishes."""
     stdio_opened = threading.Event()
 
-    def blocking_load_model() -> StaticModel:
+    def blocking_load_model() -> FakeEmbedder:
         assert stdio_opened.wait(timeout=1.0), "stdio did not open"
-        return MagicMock(spec=StaticModel)
+        return FakeEmbedder()
 
     async def fake_run_stdio() -> None:
         stdio_opened.set()
         await asyncio.sleep(0.05)
 
     with (
-        patch("zemble.mcp.load_model", side_effect=blocking_load_model),
+        patch("zemble.mcp.load_embedder", side_effect=blocking_load_model),
         patch("mcp.server.fastmcp.FastMCP.run_stdio_async", side_effect=fake_run_stdio),
     ):
         await serve()
@@ -447,7 +444,7 @@ async def test_index_cache_awaits_model(tmp_path: Path) -> None:
         get_task = asyncio.create_task(cache.get(str(tmp_path)))
         await asyncio.sleep(0.01)
         assert not get_task.done(), "get() must block until the model is installed"
-        cache._model_path = "/fake/model"
+        cache._embedder = FakeEmbedder()
         cache._model_ready.set()
         result = await asyncio.wait_for(get_task, timeout=1.0)
     assert result is fake_index

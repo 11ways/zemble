@@ -23,7 +23,7 @@ from benchmarks.data import (
     target_matches_location,
 )
 from zemble import ZembleIndex
-from zemble.index.dense import load_model
+from zemble.embedding.model2vec import load_static_model
 from zemble.index.file_walker import _DEFAULT_IGNORED_DIRS as DEFAULT_IGNORED_DIRS
 from zemble.index.files import get_extensions
 from zemble.ranking.boosting import _STOPWORDS as _ZEMBLE_STOPWORDS
@@ -377,7 +377,7 @@ def run_recall(args: argparse.Namespace) -> None:
 
     print("Loading tokenizer + model...", file=sys.stderr)
     enc = tiktoken.get_encoding(_TOKENIZER_NAME)
-    load_model(DEFAULT_MODEL_NAME)  # warms zemble's internal model cache
+    load_static_model(DEFAULT_MODEL_NAME)  # warms zemble's internal model cache
 
     method_curves: dict[str, MethodCurves] = defaultdict(list)
     print(f"\n{'Repo':<22} {'Language':<12} {'Tasks':>6} {'Time':>8}", file=sys.stderr)

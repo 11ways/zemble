@@ -43,12 +43,14 @@ def _load_phases(path: str, timer: Timer) -> ZembleIndex:
     """Load a cached index, timing each persisted component separately."""
     import orjson
 
+    from zemble.embedding.registry import load_embedder
     from zemble.index.bm25 import BM25
-    from zemble.index.dense import SelectableBasicBackend, load_model
+    from zemble.index.dense import SelectableBasicBackend
     from zemble.index.types import FileManifestEntry, PersistencePath
     from zemble.types import Chunk
 
-    cache_path = timer.time("cache_validate", lambda: get_validated_cache(path, None, (ContentType.CODE,)))
+    embedder_id = load_embedder().model_id
+    cache_path = timer.time("cache_validate", lambda: get_validated_cache(path, embedder_id, (ContentType.CODE,)))
     if cache_path is None:
         raise SystemExit(f"No valid cached index for {path}; build one first.")
     pp = PersistencePath.from_path(cache_path)
@@ -57,14 +59,13 @@ def _load_phases(path: str, timer: Timer) -> ZembleIndex:
     bm25_index = timer.time("load_bm25", lambda: BM25.load(pp.bm25_index))
     semantic_index = timer.time("load_dense", lambda: SelectableBasicBackend.load(pp.semantic_index))
     chunks = timer.time("load_chunks", lambda: [Chunk.from_dict(item) for item in orjson.loads(pp.chunks.read_bytes())])
-    model, model_path = timer.time("load_model", lambda: load_model(metadata["model_path"]))
+    embedder = timer.time("load_model", lambda: load_embedder(metadata["embedder"]))
     manifest = {p: FileManifestEntry(**e) for p, e in metadata.get("files", {}).items()}
     index = ZembleIndex(
-        model,
+        embedder,
         bm25_index,
         semantic_index,
         chunks,
-        model_path,
         root=Path(metadata["root_path"]) if metadata["root_path"] else None,
         content=tuple(ContentType(s) for s in metadata.get("content_type", ["code"])),
         loaded_from_disk=True,
@@ -79,7 +80,7 @@ def _query_phases(index: ZembleIndex, query: str, top_k: int, timer: Timer) -> l
     candidate_count = top_k * 5
     chunks = index.chunks
 
-    embedding = timer.time("embed_query", lambda: index.model.encode([query]))
+    embedding = timer.time("embed_query", lambda: index.embedder.embed_queries([query]))
     dense_hits = timer.time(
         "dense_search",
         lambda: index._semantic_index.query(embedding, k=candidate_count, selector=None)[0],

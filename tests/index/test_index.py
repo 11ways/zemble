@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import orjson
 import pytest
-from model2vec import StaticModel
 
 from tests.conftest import make_chunk
 from zemble import ZembleIndex
@@ -14,9 +13,9 @@ from zemble.types import ContentType
 
 
 @pytest.fixture
-def indexed_index(mock_model: Any, tmp_project: Path) -> ZembleIndex:
+def indexed_index(mock_embedder: Any, tmp_project: Path) -> ZembleIndex:
     """ZembleIndex built from tmp_project."""
-    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
+    with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
         return ZembleIndex.from_path(tmp_project)
 
 
@@ -29,19 +28,19 @@ def indexed_index(mock_model: Any, tmp_project: Path) -> ZembleIndex:
     ],
 )
 def test_index_markdown_inclusion(
-    mock_model: StaticModel, tmp_project: Path, content: list[ContentType], md_in_results: bool
+    mock_embedder: Any, tmp_project: Path, content: list[ContentType], md_in_results: bool
 ) -> None:
     """Markdown files are excluded for code-only and included when docs is requested."""
-    _, _, chunks, _ = create_index_from_path(tmp_project, mock_model, content=content)
+    _, _, chunks, _ = create_index_from_path(tmp_project, mock_embedder, content=content)
     has_md = ".md" in {Path(c.file_path).suffix for c in chunks}
     assert has_md is md_in_results
 
 
-def test_include_text_files_deprecated(mock_model: Any, tmp_project: Path) -> None:
+def test_include_text_files_deprecated(mock_embedder: Any, tmp_project: Path) -> None:
     """include_text_files=True warns and expands to all content types; False warns and resets to code-only."""
     from zemble.index.index import _ALL_CONTENT, _DEFAULT_CONTENT
 
-    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
+    with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
         with pytest.warns(DeprecationWarning, match="include_text_files is deprecated"):
             idx = ZembleIndex.from_path(tmp_project, include_text_files=True)
         assert idx._content == _ALL_CONTENT
@@ -51,11 +50,11 @@ def test_include_text_files_deprecated(mock_model: Any, tmp_project: Path) -> No
         assert idx._content == _DEFAULT_CONTENT
 
 
-def test_from_git_include_text_files_deprecated(mock_model: Any, tmp_project: Path) -> None:
+def test_from_git_include_text_files_deprecated(mock_embedder: Any, tmp_project: Path) -> None:
     """from_git raises DeprecationWarning when include_text_files is passed."""
     fake_result = MagicMock()
     fake_result.returncode = 0
-    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
+    with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
         with patch("subprocess.run", return_value=fake_result):
             with patch("zemble.index.index.create_index_from_path") as mock_create:
                 mock_create.return_value = (MagicMock(), MagicMock(), [make_chunk("x = 1", "f.py")], {})
@@ -63,17 +62,17 @@ def test_from_git_include_text_files_deprecated(mock_model: Any, tmp_project: Pa
                     ZembleIndex.from_git("https://example.com/repo", include_text_files=True)
 
 
-def test_index_empty_returns_zero_chunks(mock_model: StaticModel, tmp_path: Path) -> None:
+def test_index_empty_returns_zero_chunks(mock_embedder: Any, tmp_path: Path) -> None:
     """Indexing an empty directory yields zero files and chunks."""
     with pytest.raises(ValueError):
-        create_index_from_path(tmp_path, mock_model)
+        create_index_from_path(tmp_path, mock_embedder)
 
 
-def test_oversized_file_is_skipped(mock_model: StaticModel, tmp_path: Path) -> None:
+def test_oversized_file_is_skipped(mock_embedder: Any, tmp_path: Path) -> None:
     """Files exceeding _MAX_FILE_BYTES are silently skipped during indexing."""
     (tmp_path / "big.py").write_bytes(b"x" * (_MAX_FILE_BYTES + 1))
     with pytest.raises(ValueError):  # no indexable content remains
-        create_index_from_path(tmp_path, mock_model)
+        create_index_from_path(tmp_path, mock_embedder)
 
 
 def test_tiny_invalid_utf8_file_status_does_not_crash(tmp_path: Path) -> None:
@@ -137,10 +136,10 @@ def test_search_without_reranking(indexed_index: ZembleIndex) -> None:
     ],
 )
 def test_search_rerank_default_by_content_type(
-    mock_model: Any, content: list[ContentType], expect_rerank: bool
+    mock_embedder: Any, content: list[ContentType], expect_rerank: bool
 ) -> None:
     """Reranking is on by default when code is indexed, off for non-code-only content."""
-    index = ZembleIndex(mock_model, MagicMock(), MagicMock(), [make_chunk("x = 1", "f.py")], "", content=content)
+    index = ZembleIndex(mock_embedder, MagicMock(), MagicMock(), [make_chunk("x = 1", "f.py")], content=content)
     with patch("zemble.index.index.search", return_value=[]) as mock_search:
         index.search("function", top_k=3)
     assert mock_search.call_args.kwargs["rerank"] == expect_rerank
@@ -191,8 +190,7 @@ def test_roundtrip(tmp_path: Path, indexed_index: ZembleIndex) -> None:
     assert indexed_index.chunks[0].to_dict()["location"] == indexed_index.chunks[0].location
     indexed_index.save(tmp_path)
     assert "location" not in orjson.loads((tmp_path / "chunks.json").read_bytes())[0]
-    with patch.object(StaticModel, "from_pretrained"):
-        index_2 = ZembleIndex.load_from_disk(tmp_path)
+    index_2 = ZembleIndex.load_from_disk(tmp_path, embedder=indexed_index.embedder)
     assert index_2.chunks == indexed_index.chunks
     assert index_2._root == indexed_index._root
 
@@ -202,8 +200,7 @@ def test_load_save_roundtrip_preserves_manifest(tmp_path: Path, indexed_index: Z
     save_a = tmp_path / "a"
     save_b = tmp_path / "b"
     indexed_index.save(save_a)
-    with patch.object(StaticModel, "from_pretrained"):
-        loaded = ZembleIndex.load_from_disk(save_a)
+    loaded = ZembleIndex.load_from_disk(save_a, embedder=indexed_index.embedder)
     loaded.save(save_b)
     import json
 

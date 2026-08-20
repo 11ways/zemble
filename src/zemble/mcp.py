@@ -13,8 +13,9 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from zemble.cache import get_validated_cache, save_index_to_cache
+from zemble.embedding.base import Embedder
+from zemble.embedding.registry import load_embedder
 from zemble.index import ZembleIndex
-from zemble.index.dense import load_model
 from zemble.types import ContentType
 from zemble.utils import format_results, is_git_url, resolve_chunk
 
@@ -164,7 +165,10 @@ async def serve(
     async def _load_and_prewarm() -> None:
         """Pre-load the embedding model in parallel with starting the server."""
         try:
-            _, cache._model_path = await asyncio.to_thread(load_model)
+            embedder = await asyncio.to_thread(load_embedder)
+            # Touch dimensions so the model is really loaded, not merely constructed.
+            await asyncio.to_thread(lambda: embedder.dimensions)
+            cache._embedder = embedder
         except Exception as exc:
             logger.exception("Failed to load embedding model")
             cache._model_error = exc
@@ -186,19 +190,19 @@ class _IndexCache:
 
     def __init__(self) -> None:
         """Initialise an empty cache."""
-        self._model_path: str | None = None
+        self._embedder: Embedder | None = None
         self._model_error: BaseException | None = None
         self._model_ready = asyncio.Event()
         self._tasks: OrderedDict[_CacheKey, asyncio.Task[ZembleIndex]] = OrderedDict()  # ordered for LRU eviction
         self._revalidate_after: dict[_CacheKey, float] = {}
 
-    async def _await_model(self) -> str:
-        """Block until the model is installed; re-raise the load error if it failed."""
+    async def _await_model(self) -> Embedder:
+        """Block until the embedder is installed; re-raise the load error if it failed."""
         await self._model_ready.wait()
         if self._model_error is not None:
             raise self._model_error
-        assert self._model_path is not None
-        return self._model_path
+        assert self._embedder is not None
+        return self._embedder
 
     def _compute_cache_key(
         self,
@@ -212,13 +216,13 @@ class _IndexCache:
         normalized = tuple(content_type for content_type in ContentType if content_type in content)
         return source_key, normalized
 
-    def _build_index(self, source: str, ref: str | None, model_path: str, cache_key: _CacheKey) -> ZembleIndex:
+    def _build_index(self, source: str, ref: str | None, embedder: Embedder, cache_key: _CacheKey) -> ZembleIndex:
         """Build an index for the given source and cache it."""
         source_key, content = cache_key
         index = (
-            ZembleIndex.from_git(source, ref=ref, model_path=model_path, content=content)
+            ZembleIndex.from_git(source, ref=ref, embedder=embedder, content=content)
             if is_git_url(source)
-            else ZembleIndex.from_path(source_key, model_path=model_path, content=content)
+            else ZembleIndex.from_path(source_key, embedder=embedder, content=content)
         )
         try:
             save_index_to_cache(index, source_key)
@@ -226,14 +230,16 @@ class _IndexCache:
             logger.warning("Failed to save index cache for %r", source_key, exc_info=True)
         return index
 
-    async def _build_tracked(self, source: str, ref: str | None, model_path: str, cache_key: _CacheKey) -> ZembleIndex:
+    async def _build_tracked(
+        self, source: str, ref: str | None, embedder: Embedder, cache_key: _CacheKey
+    ) -> ZembleIndex:
         """Build an index and, for local paths, record when its staleness cooldown ends.
 
         The cooldown write happens after the await, i.e. back on the event loop thread,
         regardless of which thread `_build_index` itself ran on.
         """
         start = time.monotonic()
-        index = await asyncio.to_thread(self._build_index, source, ref, model_path, cache_key)
+        index = await asyncio.to_thread(self._build_index, source, ref, embedder, cache_key)
         if not is_git_url(source):
             finished = time.monotonic()
             self._revalidate_after[cache_key] = finished + (finished - start) * _MIN_REVALIDATE_FACTOR
@@ -261,7 +267,9 @@ class _IndexCache:
             return
         if time.monotonic() < self._revalidate_after.get(cache_key, 0.0):
             return
-        validated = await asyncio.to_thread(get_validated_cache, cache_key[0], self._model_path, cache_key[1])
+        if self._embedder is None:
+            return
+        validated = await asyncio.to_thread(get_validated_cache, cache_key[0], self._embedder.model_id, cache_key[1])
         # Only evict if this entry hasn't already been replaced by a concurrent caller.
         if validated is None and self._tasks.get(cache_key) is cached:
             self.evict(cache_key)
@@ -281,13 +289,13 @@ class _IndexCache:
         await self._evict_if_stale(cache_key)
 
         if cache_key not in self._tasks:
-            model_path = await self._await_model()
+            embedder = await self._await_model()
             # Re-check after the await: another caller may have populated the entry.
             if cache_key not in self._tasks:
                 if len(self._tasks) >= _CACHE_MAX_SIZE:
                     evicted_key, _ = self._tasks.popitem(last=False)
                     self._revalidate_after.pop(evicted_key, None)
-                self._tasks[cache_key] = asyncio.create_task(self._build_tracked(source, ref, model_path, cache_key))
+                self._tasks[cache_key] = asyncio.create_task(self._build_tracked(source, ref, embedder, cache_key))
         self._tasks.move_to_end(cache_key)
         task = self._tasks[cache_key]
         try:

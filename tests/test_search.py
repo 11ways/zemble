@@ -8,8 +8,9 @@ from model2vec import StaticModel
 from vicinity.backends.basic import BasicArgs
 
 from tests.conftest import make_chunk
+from zemble.embedding.model2vec import Model2VecEmbedder, load_static_model
 from zemble.index.bm25 import BM25
-from zemble.index.dense import SelectableBasicBackend, embed_chunks, load_model
+from zemble.index.dense import SelectableBasicBackend, embed_chunks
 from zemble.search import _search_bm25, _search_semantic, _sort_top_k, search
 from zemble.tokens import tokenize
 from zemble.types import Chunk
@@ -75,16 +76,16 @@ def test_bm25_returns_empty_for_no_match(bm25: BM25, chunks: list[Chunk], query:
     assert _search_bm25(query, bm25, chunks, top_k=3, selector=None) == []
 
 
-def test_semantic_search(semantic: SelectableBasicBackend, chunks: list[Chunk], mock_model: Any) -> None:
+def test_semantic_search(semantic: SelectableBasicBackend, chunks: list[Chunk], mock_embedder: Any) -> None:
     """Semantic search returns results with scores in [-1, 1]."""
-    results = _search_semantic("login", mock_model, semantic, chunks, top_k=3, selector=None)
+    results = _search_semantic("login", mock_embedder, semantic, chunks, top_k=3, selector=None)
     assert len(results) > 0
     assert all(-1.0 <= r.score <= 1.0 for r in results)
 
 
-def test_search_hybrid(chunks: list[Chunk], semantic: SelectableBasicBackend, bm25: BM25, mock_model: Any) -> None:
+def test_search_hybrid(chunks: list[Chunk], semantic: SelectableBasicBackend, bm25: BM25, mock_embedder: Any) -> None:
     """search_hybrid: returns combined results; identical content in different files produces separate results."""
-    results = search("authenticate token", mock_model, semantic, bm25, chunks, top_k=3)
+    results = search("authenticate token", mock_embedder, semantic, bm25, chunks, top_k=3)
     assert len(results) > 0
 
     shared_content = "def helper():\n    pass"
@@ -99,7 +100,7 @@ def test_search_hybrid(chunks: list[Chunk], semantic: SelectableBasicBackend, bm
     sem_index = SelectableBasicBackend(embs, BasicArgs())
     bm25_index = _build_bm25(all_chunks)
 
-    deduped = search("helper", mock_model, sem_index, bm25_index, all_chunks, top_k=5)
+    deduped = search("helper", mock_embedder, sem_index, bm25_index, all_chunks, top_k=5)
     result_locations = {r.chunk.file_path for r in deduped}
     assert "module_a.py" in result_locations
     assert "module_b.py" in result_locations
@@ -120,10 +121,10 @@ def test_search_source_labels(
     chunks: list[Chunk],
     semantic: SelectableBasicBackend,
     bm25: BM25,
-    mock_model: Any,
+    mock_embedder: Any,
 ) -> None:
     """Each result carries a source label matching the search mode used."""
-    results = search_fn(query, mock_model, semantic, bm25, chunks, top_k)
+    results = search_fn(query, mock_embedder, semantic, bm25, chunks, top_k)
     assert len(results) > 0
 
 
@@ -137,31 +138,33 @@ def test_sort_top_k() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model_path", "expected_call_arg", "incomplete_cache"),
+    ("model_name", "incomplete_cache"),
     [
-        (None, "minishlab/potion-code-16M-v2", False),  # default model
-        ("some/custom/model", "some/custom/model", False),  # explicit path forwarded
-        ("broken/model", "broken/model", True),  # incomplete cache retries through the Hub
+        ("some/custom/model", False),  # explicit path forwarded
+        ("broken/model", True),  # incomplete cache retries through the Hub
     ],
 )
-def test_load_model(model_path: str | None, expected_call_arg: str, incomplete_cache: bool) -> None:
-    """load_model calls from_pretrained with default or custom model path."""
+def test_model2vec_embedder_loads_lazily(model_name: str, incomplete_cache: bool) -> None:
+    """Model2VecEmbedder loads through from_pretrained on first use, retrying a broken local cache."""
+    load_static_model.cache_clear()
     fake_model = MagicMock(spec=StaticModel)
     side_effect = [ValueError("Could not find expected model files"), fake_model] if incomplete_cache else None
+    embedder = Model2VecEmbedder(model_name)
+    assert embedder.model_id == f"model2vec:{model_name}"
     with patch(
-        "zemble.index.dense.StaticModel.from_pretrained", return_value=fake_model, side_effect=side_effect
+        "zemble.embedding.model2vec.StaticModel.from_pretrained", return_value=fake_model, side_effect=side_effect
     ) as mock_fp:
-        result, _ = load_model(model_path)
-    assert result is fake_model
-    expected_calls = [call(expected_call_arg, force_download=False)]
+        assert embedder.model is fake_model
+    expected_calls = [call(model_name, force_download=False)]
     if incomplete_cache:
-        expected_calls.append(call(expected_call_arg, force_download=True))
+        expected_calls.append(call(model_name, force_download=True))
     assert mock_fp.call_args_list == expected_calls
+    load_static_model.cache_clear()
 
 
-def test_embed_chunks_empty_returns_empty_array(mock_model: Any) -> None:
-    """embed_chunks with an empty list returns a (0, 256) float32 array."""
-    result = embed_chunks(mock_model, [])
+def test_embed_chunks_empty_returns_empty_array(mock_embedder: Any) -> None:
+    """embed_chunks with an empty list returns an empty float32 array of the embedder's width."""
+    result = embed_chunks(mock_embedder, [])
     assert result.shape == (0, 256)
     assert result.dtype == np.float32
 

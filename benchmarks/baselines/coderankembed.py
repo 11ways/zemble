@@ -29,42 +29,45 @@ _TOP_K = 10
 _LATENCY_RUNS = 3  # transformer inference is slow; keep runs low
 _ALPHA = 1.0  # ZembleIndex.search()'s alpha: 1.0 = full semantic weight
 
-_UNSET = object()
-
 
 class _AsymmetricWrapper:
-    """Wrap SentenceTransformer with asymmetric query/document prompts.
-
-    zemble only passes use_multiprocessing during index-time calls, never at query time, so its
-    presence is a reliable query/document discriminator (batch size is not: single-chunk files are
-    real one-element document batches).
-    """
+    """A zemble Embedder over SentenceTransformer, using the model's asymmetric query prompt."""
 
     def __init__(self, model: SentenceTransformer, max_seq_length: int = 512) -> None:
         self._model = model
         self._model.max_seq_length = max_seq_length
 
-    def encode(self, texts: Sequence[str], use_multiprocessing: object = _UNSET) -> np.ndarray:
-        """Encode with the query prompt only when use_multiprocessing wasn't passed."""
-        text_list = list(texts)
-        if use_multiprocessing is _UNSET:
-            return self._model.encode(text_list, prompt_name="query", batch_size=1)  # type: ignore[return-value]
-        return self._model.encode(text_list, batch_size=1)  # type: ignore[return-value]
+    @property
+    def model_id(self) -> str:
+        """The spec string recorded in index metadata."""
+        return f"sentence-transformers:{_MODEL_NAME}@{self.dimensions}"
+
+    @property
+    def dimensions(self) -> int:
+        """The model's vector width."""
+        return int(self._model.get_sentence_embedding_dimension())
+
+    def embed_documents(self, texts: Sequence[str]) -> np.ndarray:
+        """Encode documents without the query prompt."""
+        return self._model.encode(list(texts), batch_size=1)  # type: ignore[return-value]
+
+    def embed_queries(self, texts: Sequence[str]) -> np.ndarray:
+        """Encode queries with the model's query prompt."""
+        return self._model.encode(list(texts), prompt_name="query", batch_size=1)  # type: ignore[return-value]
 
 
 def _build_index(benchmark_dir: Path, model: _AsymmetricWrapper) -> ZembleIndex:
     """Build a ZembleIndex using CodeRankEmbed embeddings for both BM25 enrichment and dense search."""
     bm25_index, semantic_index, chunks, _manifest = create_index_from_path(
         benchmark_dir,
-        model=model,  # type: ignore[arg-type]
+        embedder=model,  # type: ignore[arg-type]
         content=(ContentType.CODE,),  # type: ignore[arg-type]
     )
     return ZembleIndex(
-        model=model,  # type: ignore[arg-type]
+        embedder=model,  # type: ignore[arg-type]
         bm25_index=bm25_index,
         semantic_index=semantic_index,
         chunks=chunks,
-        model_path=_MODEL_NAME,
         root=benchmark_dir,
     )
 

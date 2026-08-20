@@ -68,3 +68,5 @@ class IndexStats:
     indexed_files: int = 0
     total_chunks: int = 0
     languages: dict[str, int] = field(default_factory=dict)
+    embedder: str = ""
+    dimensions: int = 0

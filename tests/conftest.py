@@ -1,7 +1,6 @@
+import hashlib
 import textwrap
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
 
 import numpy as np
 import numpy.typing as npt
@@ -72,19 +71,57 @@ def tmp_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
+class FakeEmbedder:
+    """A deterministic embedder for tests: same text in, same unit vector out.
+
+    Vectors are derived from a hash of the text, so a chunk keeps its vector across
+    processes and the dimension is free to be anything (256 is not special).
+    """
+
+    def __init__(self, dimensions: int = 256, model_id: str = "fake:test") -> None:
+        """Initialise the fake.
+
+        :param dimensions: The vector width to produce.
+        :param model_id: The spec string the index will record.
+        """
+        self._dimensions = dimensions
+        self._model_id = f"{model_id}@{dimensions}"
+        self.document_calls: list[list[str]] = []
+        self.query_calls: list[list[str]] = []
+
+    @property
+    def model_id(self) -> str:
+        """The normalized spec string."""
+        return self._model_id
+
+    @property
+    def dimensions(self) -> int:
+        """The vector width."""
+        return self._dimensions
+
+    def _vectors(self, texts: list[str]) -> npt.NDArray[np.float32]:
+        """Return one deterministic unit vector per text."""
+        if not texts:
+            return np.empty((0, self._dimensions), dtype=np.float32)
+        rows = []
+        for text in texts:
+            seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+            vector = np.random.default_rng(seed).standard_normal(self._dimensions).astype(np.float32)
+            rows.append(vector / np.linalg.norm(vector))
+        return np.asarray(rows, dtype=np.float32)
+
+    def embed_documents(self, texts: list[str]) -> npt.NDArray[np.float32]:
+        """Embed documents."""
+        self.document_calls.append(list(texts))
+        return self._vectors(texts)
+
+    def embed_queries(self, texts: list[str]) -> npt.NDArray[np.float32]:
+        """Embed queries."""
+        self.query_calls.append(list(texts))
+        return self._vectors(texts)
+
+
 @pytest.fixture
-def mock_model() -> MagicMock:
-    """A model stub that returns deterministic random embeddings."""
-    model = MagicMock()
-    rng = np.random.default_rng(42)
-    _dim = 256
-
-    def _encode(texts: list[str], **kwargs: Any) -> npt.NDArray[np.float32]:
-        embs = rng.standard_normal((len(texts), _dim)).astype(np.float32)
-        norms = np.linalg.norm(embs, axis=1, keepdims=True)
-        normalized: npt.NDArray[np.float32] = embs / (norms + 1e-8)
-        return normalized
-
-    model.encode.side_effect = _encode
-    model.dim = _dim
-    return model
+def mock_embedder() -> FakeEmbedder:
+    """A deterministic 256-dimensional embedder."""
+    return FakeEmbedder()

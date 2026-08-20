@@ -1,7 +1,7 @@
 import numpy as np
 import numpy.typing as npt
-from model2vec import StaticModel
 
+from zemble.embedding.base import Embedder
 from zemble.index.bm25 import BM25
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.sparse import selector_to_mask
@@ -22,14 +22,14 @@ def _rrf_scores(scores: dict[Chunk, float]) -> dict[Chunk, float]:
 
 def _search_semantic(
     query: str,
-    model: StaticModel,
+    embedder: Embedder,
     semantic_index: SelectableBasicBackend,
     chunks: list[Chunk],
     top_k: int,
     selector: npt.NDArray[np.int_] | None,
 ) -> list[SearchResult]:
     """Run semantic search for a query."""
-    query_embedding = model.encode([query])
+    query_embedding = embedder.embed_queries([query])
     indices, scores = semantic_index.query(query_embedding, k=top_k, selector=selector)[0]
     # Vicinity returns cosine distance; convert to similarity so higher = better.
     return [SearchResult(chunk=chunks[index], score=1.0 - float(distance)) for index, distance in zip(indices, scores)]
@@ -65,7 +65,7 @@ def _search_bm25(
 
 def search(
     query: str,
-    model: StaticModel,
+    embedder: Embedder,
     semantic_index: SelectableBasicBackend,
     bm25_index: BM25,
     chunks: list[Chunk],
@@ -80,7 +80,7 @@ def search(
     a consistent meaning regardless of raw score magnitude.
 
     :param query: Search query string.
-    :param model: Embedding model for semantic search.
+    :param embedder: Embedder used for the query vector.
     :param semantic_index: Pre-built semantic (vector) index.
     :param bm25_index: Pre-built BM25 index.
     :param chunks: All indexed chunks (parallel to BM25 index).
@@ -95,7 +95,7 @@ def search(
     # Over-fetch candidates so the merged pool is large enough after union and re-ranking.
     candidate_count = top_k * 5
 
-    semantic = _search_semantic(query, model, semantic_index, chunks, candidate_count, selector)
+    semantic = _search_semantic(query, embedder, semantic_index, chunks, candidate_count, selector)
     semantic_scores: dict[Chunk, float] = {result.chunk: result.score for result in semantic}
     bm25_scores = {}
     for result in _search_bm25(query, bm25_index, chunks, candidate_count, selector):

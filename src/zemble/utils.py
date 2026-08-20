@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from typing import Any
 
@@ -8,7 +7,7 @@ from zemble.types import Chunk, SearchResult
 
 _GIT_URL_SCHEMES = ("https://", "http://", "ssh://", "git://", "git+ssh://", "file://")
 _SCP_GIT_URL_RE = re.compile(r"^[\w.-]+@[\w.-]+:(?!/)")
-DEFAULT_MODEL_NAME = "minishlab/potion-code-16M-v2"
+DEFAULT_MODEL_NAME = "minishlab/potion-code-16M-v2"  # default Model2Vec model; specs live in zemble.embedding.registry
 
 
 def is_git_url(path: str) -> bool:
@@ -56,8 +55,3 @@ def format_results(query: str, results: list[SearchResult], max_snippet_lines: i
             entry["content"] = "\n".join(lines[:max_snippet_lines])
         formatted.append(entry)
     return {"query": query, "results": formatted}
-
-
-def resolve_model_name() -> str:
-    """Resolve a model name to a configurable."""
-    return os.environ.get("ZEMBLE_MODEL_NAME", DEFAULT_MODEL_NAME)

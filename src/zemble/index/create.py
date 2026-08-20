@@ -3,10 +3,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
-from model2vec.model import StaticModel
 from vicinity.backends.basic import BasicArgs
 
 from zemble.chunking import chunk_source
+from zemble.embedding.base import Embedder
 from zemble.index.bm25 import BM25
 from zemble.index.dense import SelectableBasicBackend, embed_chunks
 from zemble.index.file_walker import walk_files
@@ -51,7 +51,7 @@ def _has_same_vector_layout(
 
 def create_index_from_path(
     path: Path,
-    model: StaticModel,
+    embedder: Embedder,
     content: ContentType | Sequence[ContentType] = (ContentType.CODE,),
     display_root: Path | None = None,
     previous: PreviousIndex | None = None,
@@ -59,7 +59,7 @@ def create_index_from_path(
     """Create an index from a resolved directory, optionally reusing a previous index's unchanged files.
 
     :param path: Resolved absolute path to index.
-    :param model: The model to use for indexing.
+    :param embedder: The embedder to use for indexing.
     :param content: Content types to index.
     :param display_root: If set, chunk file paths are stored relative to this root.
     :param previous: A previously built index to reuse unchanged files' chunks/embeddings/postings from.
@@ -98,8 +98,11 @@ def create_index_from_path(
                 file_chunks = chunk_source(source, indexed_path, language)
                 _reindex_file(bm25_index, indexed_path, file_chunks, previous_entry)
 
-                embedding_parts.append((len(vector_parts), len(chunks), len(file_chunks)))
-                vector_parts.append(embed_chunks(model, file_chunks))
+                # Only the incremental path embeds per file; a full build embeds every chunk
+                # in one call below, which for a paid provider is one request instead of thousands.
+                if previous is not None:
+                    embedding_parts.append((len(vector_parts), len(chunks), len(file_chunks)))
+                    vector_parts.append(embed_chunks(embedder, file_chunks))
 
             start = len(chunks)
             chunks.extend(file_chunks)
@@ -113,7 +116,7 @@ def create_index_from_path(
         raise ValueError(f"No supported files found under {path}.")
 
     if previous is None:
-        embeddings = embed_chunks(model, chunks)
+        embeddings = embed_chunks(embedder, chunks)
     else:
         if _has_same_vector_layout(manifest, previous_manifest):
             embeddings = previous.vectors

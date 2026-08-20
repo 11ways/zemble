@@ -16,9 +16,12 @@ from zemble.index.file_walker import walk_files
 from zemble.index.files import FileStatus, get_extensions, get_file_status
 from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath, PreviousIndex, make_chunk_id
 from zemble.types import Chunk, ContentType
-from zemble.utils import is_git_url, resolve_model_name
+from zemble.utils import is_git_url
 
 logger = logging.getLogger(__name__)
+
+#: (stored, requested) embedder pairs already reported, so one rebuild logs one line.
+_REPORTED_EMBEDDER_MISMATCHES: set[tuple[str, str]] = set()
 
 if TYPE_CHECKING:
     from zemble.index import ZembleIndex
@@ -100,8 +103,17 @@ def save_index_to_cache(index: "ZembleIndex", path: str) -> None:
         index.save(find_index_from_cache_folder(path, index.content))
 
 
-def _metadata_matches(metadata: dict, model_path: str, content: Sequence[ContentType]) -> bool:
-    """Return True if the stored metadata is compatible with the requested parameters."""
+def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[ContentType]) -> bool:
+    """Return True if the stored metadata is compatible with the requested parameters.
+
+    A cache built with a different embedder is never reused silently: mixing vector spaces
+    produces plausible-looking nonsense, so the mismatch is logged by name and rebuilt.
+
+    :param metadata: The stored metadata document.
+    :param embedder_id: The normalized spec string of the requested embedder.
+    :param content: The requested content types.
+    :return: Whether the cache can be reused.
+    """
     from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS  # avoid circular import at module level
 
     try:
@@ -110,15 +122,30 @@ def _metadata_matches(metadata: dict, model_path: str, content: Sequence[Content
         # treat that as a mismatch so old caches are transparently rebuilt in the current format.
         chunk_size_ok = metadata.get("chunk_size") == _DESIRED_CHUNK_LENGTH_CHARS
         version_ok = metadata.get("cache_version") == CACHE_FORMAT_VERSION
-        return (
-            metadata["model_path"] == model_path and set(content_type) == set(content) and chunk_size_ok and version_ok
-        )
+        stored_embedder = metadata["embedder"]
+        if version_ok and stored_embedder != embedder_id:
+            if (stored_embedder, embedder_id) in _REPORTED_EMBEDDER_MISMATCHES:
+                return False
+            _REPORTED_EMBEDDER_MISMATCHES.add((stored_embedder, embedder_id))
+            logger.warning(
+                "Cached index was built with embedder %s but %s was requested; rebuilding the index.",
+                stored_embedder,
+                embedder_id,
+            )
+            return False
+        return set(content_type) == set(content) and chunk_size_ok and version_ok
     except (KeyError, ValueError):
         return False
 
 
-def get_validated_cache(path: str, model_path: str | None, content: Sequence[ContentType]) -> Path | None:
-    """Validates the cache folder and returns the index path."""
+def get_validated_cache(path: str, embedder_id: str, content: Sequence[ContentType]) -> Path | None:
+    """Validates the cache folder and returns the index path.
+
+    :param path: Source path or git URL the index was built from.
+    :param embedder_id: The normalized spec string of the requested embedder.
+    :param content: The requested content types.
+    :return: The reusable index path, or None if it must be rebuilt.
+    """
     index_path = find_index_from_cache_folder(path, content)
     if not index_path.exists():
         return None
@@ -127,11 +154,9 @@ def get_validated_cache(path: str, model_path: str | None, content: Sequence[Con
     if persistence_path.non_existing():
         return None
 
-    if model_path is None:
-        model_path = resolve_model_name()
     with open(persistence_path.metadata, encoding="utf-8") as f:
         metadata = json.load(f)
-    if not _metadata_matches(metadata, model_path, content):
+    if not _metadata_matches(metadata, embedder_id, content):
         return None
 
     if is_git_url(str(path)):
@@ -157,13 +182,11 @@ def get_validated_cache(path: str, model_path: str | None, content: Sequence[Con
     return index_path
 
 
-def load_previous_for_incremental(
-    path: str, model_path: str | None, content: Sequence[ContentType]
-) -> PreviousIndex | None:
+def load_previous_for_incremental(path: str, embedder_id: str, content: Sequence[ContentType]) -> PreviousIndex | None:
     """Load compatible index state for incremental reuse.
 
     :param path: Source path used to locate the cached index.
-    :param model_path: Requested model, or None to use the default.
+    :param embedder_id: The normalized spec string of the requested embedder.
     :param content: Content types the cached index must support.
     :return: Previous index state, or None if the cache is unavailable or invalid.
     """
@@ -173,11 +196,9 @@ def load_previous_for_incremental(
         if persistence_path.non_existing():
             return None
 
-        if model_path is None:
-            model_path = resolve_model_name()
         with open(persistence_path.metadata, encoding="utf-8") as f:
             metadata = json.load(f)
-        if not _metadata_matches(metadata, model_path, content):
+        if not _metadata_matches(metadata, embedder_id, content):
             return None
 
         raw_manifest = metadata.get("files")

@@ -10,9 +10,9 @@ from sentence_transformers import SentenceTransformer
 from benchmarks.data import RepoSpec, Task, available_repo_specs, load_tasks, save_results
 from benchmarks.tools import run_colgrep_files, run_ripgrep_count
 from zemble import ZembleIndex
+from zemble.embedding.model2vec import load_static_model
 from zemble.index.bm25 import BM25
 from zemble.index.create import create_index_from_path
-from zemble.index.dense import load_model
 from zemble.index.sparse import enrich_for_bm25
 from zemble.index.types import make_chunk_id
 from zemble.tokens import tokenize
@@ -79,27 +79,30 @@ class ToolResult:
         return float(np.percentile(self.latencies_ms, 99))
 
 
-_UNSET = object()
-
-
 class _AsymmetricWrapper:
-    """Wrap SentenceTransformer with asymmetric query/document prompts.
-
-    zemble only passes use_multiprocessing during index-time calls, never at query time, so its
-    presence is a reliable query/document discriminator (batch size is not: single-chunk files are
-    real one-element document batches).
-    """
+    """A zemble Embedder over SentenceTransformer, using the model's asymmetric query prompt."""
 
     def __init__(self, model: SentenceTransformer, max_seq_length: int = 512) -> None:
         self._model = model
         self._model.max_seq_length = max_seq_length
 
-    def encode(self, texts: Sequence[str], use_multiprocessing: object = _UNSET) -> np.ndarray:
-        """Encode with the query prompt only when use_multiprocessing wasn't passed."""
-        text_list = list(texts)
-        if use_multiprocessing is _UNSET:
-            return self._model.encode(text_list, prompt_name="query", batch_size=1)  # type: ignore[return-value]
-        return self._model.encode(text_list, batch_size=1)  # type: ignore[return-value]
+    @property
+    def model_id(self) -> str:
+        """The spec string recorded in index metadata."""
+        return f"sentence-transformers:{_CRE_MODEL_NAME}@{self.dimensions}"
+
+    @property
+    def dimensions(self) -> int:
+        """The model's vector width."""
+        return int(self._model.get_sentence_embedding_dimension())
+
+    def embed_documents(self, texts: Sequence[str]) -> np.ndarray:
+        """Encode documents without the query prompt."""
+        return self._model.encode(list(texts), batch_size=1)  # type: ignore[return-value]
+
+    def embed_queries(self, texts: Sequence[str]) -> np.ndarray:
+        """Encode queries with the model's query prompt."""
+        return self._model.encode(list(texts), prompt_name="query", batch_size=1)  # type: ignore[return-value]
 
 
 def _bench_coderankembed(
@@ -109,15 +112,14 @@ def _bench_coderankembed(
     started = time.perf_counter()
     bm25_index, semantic_index, chunks, _manifest = create_index_from_path(
         spec.benchmark_dir,
-        model=model,  # type: ignore[arg-type]
+        embedder=model,  # type: ignore[arg-type]
         content=(ContentType.CODE,),  # type: ignore[arg-type]
     )
     index = ZembleIndex(
-        model=model,  # type: ignore[arg-type]
+        embedder=model,  # type: ignore[arg-type]
         bm25_index=bm25_index,
         semantic_index=semantic_index,
         chunks=chunks,
-        model_path=_CRE_MODEL_NAME,
         root=spec.benchmark_dir,
     )
     index_ms = (time.perf_counter() - started) * 1000
@@ -243,7 +245,7 @@ def main() -> None:
 
     print("Loading zemble model...", file=sys.stderr)
     started = time.perf_counter()
-    load_model(DEFAULT_MODEL_NAME)  # warms zemble's internal model cache so repo #1 isn't penalized
+    load_static_model(DEFAULT_MODEL_NAME)  # warms zemble's internal model cache so repo #1 isn't penalized
     print(f"  loaded in {(time.perf_counter() - started) * 1000:.0f}ms", file=sys.stderr)
 
     print("Loading CodeRankEmbed...", file=sys.stderr)

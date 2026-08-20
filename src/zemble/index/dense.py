@@ -1,49 +1,27 @@
 from __future__ import annotations
 
-from functools import cache
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
-from huggingface_hub.utils.tqdm import disable_progress_bars
-from model2vec import StaticModel
 from vicinity.backends.basic import CosineBasicBackend
 from vicinity.datatypes import QueryResult
 from vicinity.utils import normalize
 
+from zemble.embedding.base import Embedder
 from zemble.types import Chunk
-from zemble.utils import resolve_model_name
 
 
-@cache
-def _load_cached(model_path: str) -> StaticModel:
-    """Load a model and cache it, but only after the path resolves."""
-    # Disable HF progress bars since the model is loaded silently in the background during indexing.
-    disable_progress_bars()
-    try:
-        try:
-            model = StaticModel.from_pretrained(model_path, force_download=False)
-        except ValueError:
-            model = StaticModel.from_pretrained(model_path, force_download=True)
-    finally:
-        disable_progress_bars()
+def embed_chunks(embedder: Embedder, chunks: list[Chunk]) -> npt.NDArray[np.float32]:
+    """Embed chunk contents as documents.
 
-    return model
-
-
-def load_model(model_path: str | None = None) -> tuple[StaticModel, str]:
-    """Return the current model, loading the default if none was provided."""
-    if model_path is None:
-        model_path = resolve_model_name()
-    model = _load_cached(model_path)
-    return model, model_path
-
-
-def embed_chunks(model: StaticModel, chunks: list[Chunk]) -> npt.NDArray[np.float32]:
-    """Embed chunks using the configured model."""
+    :param embedder: The embedder to use.
+    :param chunks: The chunks to embed.
+    :return: A float32 matrix, one row per chunk.
+    """
     if not chunks:
-        return np.empty((0, model.dim), dtype=np.float32)
-    return np.array(model.encode([c.content for c in chunks], use_multiprocessing=False), dtype=np.float32)
+        return np.empty((0, embedder.dimensions), dtype=np.float32)
+    return embedder.embed_documents([chunk.content for chunk in chunks])
 
 
 class SelectableBasicBackend(CosineBasicBackend):

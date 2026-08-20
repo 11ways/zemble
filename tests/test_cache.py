@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -138,7 +139,7 @@ def test_clear_cache(tmp_path: Path) -> None:
 
 def _write_metadata(
     path: Path,
-    model_path: str,
+    embedder: str,
     content_type: list[str],
     write_time: float,
     file_paths: list[str] | None = None,
@@ -152,7 +153,7 @@ def _write_metadata(
     (path / "metadata.json").write_text(
         json.dumps(
             {
-                "model_path": model_path,
+                "embedder": embedder,
                 "content_type": content_type,
                 "time": write_time,
                 "files": {file_path: {} for file_path in file_paths or []},
@@ -166,20 +167,20 @@ def _write_metadata(
 def test_get_validated_cache_invalid_index(tmp_path: Path) -> None:
     """Returns None when the index directory is missing or incomplete."""
     with patch("zemble.cache.find_index_from_cache_folder", return_value=tmp_path / "missing"):
-        assert get_validated_cache("/path", None, [ContentType.CODE]) is None
+        assert get_validated_cache("/path", "model2vec:my/model", [ContentType.CODE]) is None
 
     index_path = tmp_path / "index"
     index_path.mkdir()
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
-        assert get_validated_cache("/path", None, [ContentType.CODE]) is None
+        assert get_validated_cache("/path", "model2vec:my/model", [ContentType.CODE]) is None
 
 
 @pytest.mark.parametrize(
     ("stored_model", "stored_content", "req_model", "req_content"),
     [
-        ("other/model", ["code"], "my/model", [ContentType.CODE]),  # model mismatch
-        ("my/model", ["docs"], "my/model", [ContentType.CODE]),  # content mismatch
-        ("my/model", ["unknown_type"], "my/model", [ContentType.CODE]),  # invalid content value
+        ("other/model", ["code"], "model2vec:my/model", [ContentType.CODE]),  # model mismatch
+        ("model2vec:my/model", ["docs"], "model2vec:my/model", [ContentType.CODE]),  # content mismatch
+        ("model2vec:my/model", ["unknown_type"], "model2vec:my/model", [ContentType.CODE]),  # invalid content value
     ],
 )
 def test_get_validated_cache_metadata_mismatch(
@@ -211,7 +212,7 @@ def test_get_validated_cache_reads_utf8_metadata_with_non_ascii_file_paths(tmp_p
     (index_path / "metadata.json").write_text(
         json.dumps(
             {
-                "model_path": "my/model",
+                "embedder": "model2vec:my/model",
                 "content_type": ["docs"],
                 "time": 0.0,
                 "files": {non_ascii_path: {}},
@@ -232,7 +233,7 @@ def test_get_validated_cache_reads_utf8_metadata_with_non_ascii_file_paths(tmp_p
 
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         with patch("builtins.open", side_effect=open_with_cp936_default):
-            result = get_validated_cache("https://github.com/org/repo.git", "my/model", [ContentType.DOCS])
+            result = get_validated_cache("https://github.com/org/repo.git", "model2vec:my/model", [ContentType.DOCS])
     assert result == index_path
 
 
@@ -248,7 +249,7 @@ def test_get_validated_cache_reads_utf8_metadata_with_non_ascii_file_paths(tmp_p
 def test_get_validated_cache_format_mismatch_returns_none(field: str, value: int | None, tmp_path: Path) -> None:
     """Missing or stale persistence-format metadata forces a rebuild."""
     index_path = tmp_path / "index"
-    _write_metadata(index_path, "my/model", ["code"], float("inf"))
+    _write_metadata(index_path, "model2vec:my/model", ["code"], float("inf"))
     metadata_path = index_path / "metadata.json"
     metadata = json.loads(metadata_path.read_text())
     if value is None:
@@ -257,7 +258,7 @@ def test_get_validated_cache_format_mismatch_returns_none(field: str, value: int
         metadata[field] = value
     metadata_path.write_text(json.dumps(metadata))
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
-        assert get_validated_cache("/path", "my/model", [ContentType.CODE]) is None
+        assert get_validated_cache("/path", "model2vec:my/model", [ContentType.CODE]) is None
 
 
 def test_get_validated_cache_legacy_metadata_returns_none(tmp_path: Path) -> None:
@@ -267,27 +268,29 @@ def test_get_validated_cache_legacy_metadata_returns_none(tmp_path: Path) -> Non
     (index_path / "chunks.json").write_text("[]")
     (index_path / "bm25_index").write_text("")
     (index_path / "semantic_index").write_text("")
-    (index_path / "metadata.json").write_text(json.dumps({"model_path": "my/model", "time": 0.0}))
+    (index_path / "metadata.json").write_text(json.dumps({"embedder": "model2vec:my/model", "time": 0.0}))
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
-        assert get_validated_cache("/path", "my/model", [ContentType.CODE]) is None
+        assert get_validated_cache("/path", "model2vec:my/model", [ContentType.CODE]) is None
 
 
-def test_get_validated_cache_resolves_default_model(tmp_path: Path) -> None:
-    """When model_path is None, resolve_model_name() is used for comparison."""
+def test_get_validated_cache_refuses_a_different_embedder(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A cache built by another embedder is rebuilt, and the mismatch is logged by name."""
     index_path = tmp_path / "index"
-    _write_metadata(index_path, "default/model", ["code"], 0.0)
+    _write_metadata(index_path, "model2vec:default/model", ["code"], 0.0)
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
-        with patch("zemble.cache.resolve_model_name", return_value="other/model"):
-            assert get_validated_cache("/path", None, [ContentType.CODE]) is None
+        with caplog.at_level(logging.WARNING, logger="zemble.cache"):
+            assert get_validated_cache("/path", "voyage:voyage-code-4@256", [ContentType.CODE]) is None
+    assert "model2vec:default/model" in caplog.text
+    assert "voyage:voyage-code-4@256" in caplog.text
 
 
 def test_get_validated_cache_git_url_returns_immediately(tmp_path: Path) -> None:
     """Git URL paths skip file-mtime checks and return the index path directly."""
     index_path = tmp_path / "index"
-    _write_metadata(index_path, "my/model", ["code"], 0.0)
+    _write_metadata(index_path, "model2vec:my/model", ["code"], 0.0)
     url = "https://github.com/org/repo.git"
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
-        result = get_validated_cache(url, "my/model", [ContentType.CODE])
+        result = get_validated_cache(url, "model2vec:my/model", [ContentType.CODE])
     assert result == index_path
 
 
@@ -309,12 +312,12 @@ def test_get_validated_cache_mtime(
     files = [stale_file] if walk_result == "stale" else walk_result
     # Include the file in stored manifest so manifest check passes and mtime check fires.
     stored_files = ["src.py"] if walk_result == "stale" else []
-    _write_metadata(index_path, "my/model", ["code"], write_time, file_paths=stored_files)
+    _write_metadata(index_path, "model2vec:my/model", ["code"], write_time, file_paths=stored_files)
 
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         with patch("zemble.cache.get_extensions", return_value={".py"}):
             with patch("zemble.cache.walk_files", return_value=files):
-                result = get_validated_cache(str(tmp_path), "my/model", [ContentType.CODE])
+                result = get_validated_cache(str(tmp_path), "model2vec:my/model", [ContentType.CODE])
     assert result == (index_path if expected == "index" else None)
 
 
@@ -336,8 +339,8 @@ def test_get_validated_cache_manifest_mismatch(
         # Make sure file is not empty
         p.write_text("a")
         walk_return.append(p)
-    _write_metadata(index_path, "my/model", ["code"], float("inf"), file_paths=stored_files)
+    _write_metadata(index_path, "model2vec:my/model", ["code"], float("inf"), file_paths=stored_files)
     with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         with patch("zemble.cache.walk_files", return_value=walk_return):
-            result = get_validated_cache(str(tmp_path), "my/model", [ContentType.CODE])
+            result = get_validated_cache(str(tmp_path), "model2vec:my/model", [ContentType.CODE])
     assert result is None
