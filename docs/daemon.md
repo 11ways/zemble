@@ -58,11 +58,54 @@ loader, the same default ignored directories, the same extension set (plus `.jav
 so the symbol graph stays fresh). A watcher that disagreed with the indexer about
 what a source file is would either rebuild on noise or miss edits.
 
-Changes are coalesced with a 500 ms debounce, then one incremental reindex runs in a
-worker thread (`create_index_from_path(previous=...)`), the result is swapped into the
-cache atomically, the index is written back to the on-disk cache (at most once every
-10 s), and the symbol graph is refreshed if a `.java` file moved. One line per rebuild
-is logged with the file counts and the milliseconds.
+Changes are coalesced with a 500 ms debounce and the resulting set of paths is what the
+rebuild works from: `create_index_from_path(previous=..., changed_paths=...)` re-chunks
+and re-embeds exactly those files and reuses every other file's chunks, vectors and
+postings from the previous index, without walking the tree at all. The same set is
+handed to `build_graph(changed_paths=...)`. The full walk is still what a cold build,
+`zemble daemon refresh` and the CLI's cache validation use: a walk discovers changes,
+a watcher reports them, and only a reported set may skip the discovery.
+
+A named path is still judged the way the walk judges one - extension, `.gitignore`,
+readability - so a watcher that over-reports cannot get a file into the index that a
+build would have skipped. The reverse is a real obligation on the caller: whatever the
+change set does not name is assumed unchanged.
+
+The rebuilt index is swapped into the cache, written back to the on-disk cache (at most
+once every 10 s), and one line per rebuild is logged with the file counts and the
+milliseconds.
+
+### Rebuilding beside the index that is being served
+
+A rebuild never writes into the index answering queries. It builds a new one next to it
+and the swap is a single dict write on the event loop, so an in-flight search keeps
+reading the object it started with and a search that arrives mid-rebuild is answered by
+the index from before it. Only rebuilds of one root are serialised against each other
+(`Daemon.rebuild_lock_for`); queries take no lock.
+
+What that costs is bounded because of how the BM25 index is shaped:
+
+| Piece | Shared or copied |
+| --- | --- |
+| BM25 columnar postings (`_Frozen`) | **Shared**, memory-mapped, never written to. |
+| BM25 delta (added documents' postings, removed base rows, document order) | Copied - it holds only what moved since the base was built. |
+| Vector matrix | Copied: the rebuild writes the changed files' rows into it. |
+| Chunk list, manifest | Rebuilt, cheap. |
+
+`BM25.for_update()` is that derivation. Scoring adds the base and the delta together:
+corpus size, average document length and every term's document frequency count the live
+documents (base minus removed, plus added), and a removed base row is masked out of the
+term's posting list, so a query cannot tell where a document came from. Identity with a
+from-scratch index is asserted in `tests/index/test_bm25.py`.
+
+`BM25.fold()` turns base plus delta back into one base with a vectorized pass over the
+postings, and no per-document dictionary anywhere. A save always writes the folded form,
+so a cold load never pays for a warm process's updates, and `for_update()` folds instead
+of deriving once the delta has grown past a tenth of the base. Every column is written to
+a temporary file and moved onto its target: an older index generation may still have that
+very file mapped, and truncating it under a live mapping is a SIGBUS, not a stale read -
+which is exactly how the first measurement run of this work died, before the columns were
+shared at all.
 
 ### On demand, and only on demand
 
@@ -130,25 +173,48 @@ to output, five consecutive runs each.
   0.58 s is the client's own interpreter start and imports, which no daemon can remove.
 - RSS with the workspace index resident: **293.8 MB**. After one incremental rebuild
   and the write-back: **700.3 MB** (the rebuild copies the vector matrix and the
-  write-back serializes the BM25 index; Python does not return that to the OS).
+  write-back builds the columns to write; Python does not return that to the OS). The
+  write-back no longer materializes a dictionary per document, but the copy stands.
 
-Rebuild after `touch` on one Java file in the workspace, straight from the log:
+### One-file edit
 
-```
-INFO watchfiles.main: 1 change detected
-INFO zemble.daemon.server: rebuilt /home/skerit/projects/javaweb: 0 added, 1 changed, 0 removed, 73957 chunks in 6213 ms
-```
+`touch` on one Java file in the workspace (84,091 chunks, 7,251 files, 102,375 graph
+symbols, `potion-code-16M-v2`), measured through `Daemon._on_change` with a query loop
+running against the same root throughout. Two runs of each, both starting from a valid
+on-disk cache.
 
-The graph refresh that followed took 4,602 ms. Most of the 6.2 s is the walk over the
-whole tree that any incremental reindex does, not the one file that changed.
+| Phase | Before | After |
+| --- | ---: | ---: |
+| Index rebuild, first one after a cold load | 4,585 / 5,395 ms | 1,473 / 809 ms |
+| Index rebuild, steady state | (same, every time) | **247 ms** |
+| Longest query answered while that rebuild ran | 4,606 / 5,406 ms (blocked) | 797 / 707 ms (never blocked) |
+| Median query while rebuilding | 22 / 39 ms | 21 / 15 ms |
+| Symbol graph refresh | 47.4 / 55.4 s | 40.5 s (walk: 44.3 s) |
+| Write-back of the whole index | 5,757 / 6,510 ms | 4,753 / 5,107 ms |
+| ... of which the BM25 index | - | 547 ms |
+| Warm query, no rebuild running | 9 / 21 ms | 11 / 10 ms |
+| Cold load of the index into the daemon | 775 / 672 ms | 784 / 617 ms |
+
+The first rebuild after a cold load is dearer than the ones after it because it pages the
+memory-mapped vector matrix in; that is disk, not work. The steady-state number is three
+consecutive rebuilds of the same root.
+
+The graph numbers vary far too much run to run (the graph is a 1.9 GB sqlite database) for
+the daemon-side pair to mean anything, so they come from six alternating isolated builds of
+the same one-file edit: **44.3 s walking, 40.5 s from the change set**. The walk itself is
+only 0.6 s of that. The other 40 s is the resolve pass - every symbol and every hierarchy
+edge read back out of sqlite for one changed file - and it is what to attack next.
 
 ## Known limitations
 
-- **Queries for the root being rebuilt block for the rebuild.** The incremental path
-  consumes its `PreviousIndex`: it mutates the BM25 index in place and writes into the
-  vector matrix. Copying a 74k-document BM25 index costs more time and memory than the
-  block it would avoid, so the rebuild and the swap are done under that root's lock.
-  Other roots are unaffected, and a query never sees a half-updated index.
+- **A change set is trusted, not verified.** Only the paths the watcher reports are
+  looked at, so an event the watcher never delivered leaves the index and the graph
+  stale until something else touches that file. `zemble daemon refresh` and every cold
+  build still walk the tree, which is the way back to a known-good state.
+- **The symbol graph is still the slow half.** A one-file edit costs ~40 s of graph
+  refresh against a workspace this size, essentially all of it the resolve pass; the
+  index is ready in a quarter of a second. The graph refresh does not block queries
+  either, but it does compete with them for CPU.
 - **Symbol definitions are re-attached only when the rebuild is persisted.** The
   definition lookup is built at save time; between a rebuild and the next write-back
   (10 s throttle) a symbol query reranks with its own scan instead. Results are the

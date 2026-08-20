@@ -53,8 +53,8 @@ Warm NL under 60 ms - met (16 ms).
   term frequencies when they fit), document lengths and document ids, each an `.npy`
   loaded with `mmap_mode="r"`. Scoring slices one term's postings and accumulates with
   a fancy-index add, which is a true accumulate because a term names each document
-  once. The mutable dictionaries still exist for building; a loaded index thaws into
-  them lazily, only when a mutation is requested.
+  once. The mutable dictionaries still exist for building; a loaded index keeps its
+  columns and puts an update in a delta beside them (see `docs/daemon.md`).
 - **Chunks (616 ms to 4 ms).** One content blob plus offsets, a deduplicated path
   table, a language table and a line array. `index.chunks[i]` builds a `Chunk` on
   demand; the path and language columns answer whole-index questions (the file and
@@ -88,7 +88,7 @@ Warm NL under 60 ms - met (16 ms).
 unavoidable per process for any query and untouched by this work.
 
 Building an index costs ~4 s more than before at this size, because the symbol
-definitions are scanned at save time. Loading a previous index for an incremental
-rebuild got faster (3.5 s to 0.8 s), but a mutation still thaws the columnar postings
-back into dictionaries (3.4 s at 74k chunks), which is the same work the old load did
-unconditionally.
+definitions are scanned at save time - which is now the largest part of a warm
+daemon's write-back too (4.3 s of a 4.8 s save at 84k chunks). Loading a previous
+index for an incremental rebuild got faster (3.5 s to 0.8 s); the mutation itself no
+longer rebuilds the dictionaries at all, it records a delta over the mapped columns.
