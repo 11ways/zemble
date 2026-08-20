@@ -1,0 +1,8 @@
+{% declare title: String %}
+<html>
+    <head><title>{{ title }}</title></head>
+    <body>
+        <he-block block-name="main"></he-block>
+        <he-block block-name="footer"></he-block>
+    </body>
+</html>

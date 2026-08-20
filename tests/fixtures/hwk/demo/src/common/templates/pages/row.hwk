@@ -1,0 +1,2 @@
+{% declare row: String %}
+<li class="demo-row">{{ Demo.label(row) }}</li>

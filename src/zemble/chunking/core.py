@@ -12,6 +12,12 @@ logger = getLogger(__name__)
 _RECURSION_DEPTH = 500
 _MIN_CHUNK_SIZE = 50
 
+#: Languages with no grammar of their own that are close enough to borrow another one.
+#: A Hawkeye `.hwk` template is HTML with `{% ... %}` statements in it: the html grammar
+#: gives real element boundaries for the markup and folds the statements into text, which
+#: is a better chunking than falling back to lines. The chunk keeps its own language name.
+_GRAMMAR_ALIASES = {"hwk": "html"}
+
 
 @dataclass
 class ChunkBoundary:
@@ -23,9 +29,9 @@ class ChunkBoundary:
 
 @cache
 def _cached_get_parser(language: str) -> Parser | None:
-    """Gets a parser from tree_sitter."""
+    """Gets a parser from tree_sitter, resolving a borrowed grammar where one is declared."""
     try:
-        return get_parser(language)
+        return get_parser(_GRAMMAR_ALIASES.get(language, language))
     except LanguageNotFoundError:
         logger.warning("Language %s not found, falling back to line chunking", language)
     except UnsupportedPlatformError:

@@ -1,0 +1,16 @@
+{% tag DemoCard {
+
+    public heading: String = ""
+
+    style {
+        display: block;
+        padding: var(--gap);
+    }
+
+    template {
+        <section class="demo-card">
+            <h2>{{ Demo.label(heading{:}) }}</h2>
+            <slot></slot>
+        </section>
+    }
+} %}

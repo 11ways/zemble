@@ -160,6 +160,7 @@ _EXTENSION_TO_LANGUAGE = {
     ".html": "html",
     ".http": "http",
     ".hurl": "hurl",
+    ".hwk": "hwk",
     ".hx": "haxe",
     ".hxx": "cpp",
     ".idr": "idris",

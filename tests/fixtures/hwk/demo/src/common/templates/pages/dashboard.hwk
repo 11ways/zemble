@@ -1,0 +1,16 @@
+{% declare rows: List<String> %}
+{% extend "demo:base" var:title=title %}
+
+{% block "main" %}
+    <demo-card heading={% Demo.label("Rows") %}>
+        {% each rows as row %}
+            <demo-widget value={% row %}></demo-widget>
+        {% /each %}
+        <not-a-real-element></not-a-real-element>
+    </demo-card>
+    {% render "demo:pages/row" var:row=rows %}
+{% /block %}
+
+{% block "footer" %}
+    <p>{{ t("footer") }}</p>
+{% /block %}

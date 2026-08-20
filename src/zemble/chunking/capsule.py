@@ -15,12 +15,15 @@ from functools import cached_property
 
 from tree_sitter import Node
 
+from zemble.hwk import TemplateFacts, scan
 from zemble.types import Chunk
 
 #: Separator between capsule segments; the first segment is always the path.
 SEGMENT_SEPARATOR = " | "
 
 _MAX_IMPORTS = 10
+_MAX_HWK_TAGS = 8
+_MAX_HWK_BLOCKS = 6
 _MAX_SIGNATURE_CHARS = 200
 _MAX_TYPE_CHAIN = 4
 _WHITESPACE = re.compile(r"\s+")
@@ -178,6 +181,16 @@ class FileContext:
         """Whether the Java-specific capsule lane applies."""
         return self.language == "java"
 
+    @property
+    def is_hwk(self) -> bool:
+        """Whether the Hawkeye-template capsule lane applies."""
+        return self.language == "hwk"
+
+    @cached_property
+    def hwk_facts(self) -> TemplateFacts:
+        """The template's declared tags, parent, blocks and used elements."""
+        return scan(self.source)
+
     def anchor_byte(self, start_line: int) -> int:
         """Return the byte offset of the first non-whitespace character at or after a 1-based line."""
         last = len(self._line_offsets) - 1
@@ -305,6 +318,12 @@ def capsule(chunk: Chunk, file_context: FileContext, level: CapsuleLevel = Capsu
         return ""
 
     segments = [f"{file_context.file_path} {_path_words(file_context.file_path)}".strip()]
+    if file_context.is_hwk:
+        # A template's structure is lexical, not syntactic: the borrowed html grammar knows
+        # nothing about `{% tag %}`, `extend` or `block`, so the capsule is built from the
+        # template's own facts and works even where no grammar loaded at all.
+        segments.extend(_hwk_segments(chunk, file_context.hwk_facts, level))
+        return SEGMENT_SEPARATOR.join(segment for segment in segments if segment)
     root = file_context.root
     if root is None:
         return segments[0]
@@ -327,6 +346,30 @@ def capsule(chunk: Chunk, file_context: FileContext, level: CapsuleLevel = Capsu
         segments.extend(_member_segments(member, chunk, file_context))
 
     return SEGMENT_SEPARATOR.join(segment for segment in segments if segment)
+
+
+def _hwk_segments(chunk: Chunk, facts: TemplateFacts, level: CapsuleLevel) -> list[str]:
+    """Describe where a chunk lives inside a Hawkeye template.
+
+    The custom element the chunk is inside beats the file's other declarations, because a
+    component file may declare several tags and only one of them owns these lines.
+    """
+    segments = []
+    declaration = facts.tag_at(chunk.start_line)
+    if declaration is not None:
+        segments.append(f"tag <{declaration.tag}> {declaration.class_name}")
+    if facts.extends is not None:
+        segments.append(f"extends {facts.extends.target}")
+    block = facts.block_at(chunk.start_line)
+    if block is not None:
+        segments.append(f"block {block.name}")
+    elif facts.blocks:
+        segments.append("blocks " + " ".join(item.name for item in facts.blocks[:_MAX_HWK_BLOCKS]))
+    if level is CapsuleLevel.FULL:
+        used = facts.tags_used_between(chunk.start_line, chunk.end_line)[:_MAX_HWK_TAGS]
+        if used:
+            segments.append(f"uses {' '.join(used)}")
+    return segments
 
 
 def _member_segments(member: Node | None, chunk: Chunk, file_context: FileContext) -> list[str]:
