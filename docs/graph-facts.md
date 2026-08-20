@@ -355,9 +355,11 @@ Two conditions, both required:
    `template newer than generated source`, and keeps its extracted edges until the
    template is compiled again.
 
-Because that second condition is decided by a `stat` rather than by content, every
-template a source map reaches is re-resolved on every graph build - a build cannot
-otherwise see that a `touch` flipped the answer.
+That second condition is decided by a `stat` rather than by content, so the graph
+records the verdict it reached per generated source and re-decides it with two stats
+on the next build. A template whose verdict flipped is re-resolved and its generated
+source re-mapped; a template whose verdict held costs nothing. Nothing else in the
+facts file it belongs to is touched, because nothing else changed.
 
 ### What is NOT mappable, and why
 

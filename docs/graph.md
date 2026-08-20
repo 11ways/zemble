@@ -231,31 +231,147 @@ scanned and turned into symbols and edges in 0.33 s, single process.
 Sqlite at `<index cache folder>/graph.sqlite`, created on demand: the graph is
 buildable with no search index present (`zemble/graph/store.py`). Tables:
 `symbols`, `edges` (each carrying the `source` that produced it), `files` (path,
-mtime, size, package, imports), `facts_status` (one row per facts file read, see
-[the facts overlay](graph-facts.md)) and `meta` (format version, root, covered
-languages, skipped languages). A column a graph built by an older zemble lacks is
-added on the next open; a graph is derived data either way.
+mtime, size, package, imports), `decl_keys` (the Hawkeye registration keys a symbol
+declares - element tag, template tag, template id, function name and namespaced
+function key), `facts_symbols` (the `symbol` facts of every facts file, so mapping
+one file can reach the others without parsing them), `facts_status` (one row per
+facts file, see [the facts overlay](graph-facts.md)) and `meta` (format version,
+root, covered languages, skipped languages). Format version 5. A column a graph
+built by an older zemble lacks is added on the next open and `decl_keys` is filled
+in one pass over the symbol table, so a version-4 graph is migrated rather than
+rebuilt; a graph is derived data either way.
 
 A rebuild re-extracts only files whose mtime or size changed, then re-resolves
-(a) those files and (b) their **dependents**: every file holding an edge whose
-written destination name now points somewhere else.
+(a) those files, (b) their **dependents**: every file holding an edge whose
+written destination name now points somewhere else, and (c) the files whose facts
+coverage moved.
 
-That last part is narrower than "every file mentioning a name declared in a
+That second part is narrower than "every file mentioning a name declared in a
 changed file", deliberately. A common method name such as `of` is written in
 thousands of files, so the broad rule turns every save into a full re-resolve.
 What actually invalidates a resolution is the name-to-symbol mapping changing,
-so that is what is compared: name to declaring symbol ids, before against after.
-A rename, a move between packages and a file rename all change it; re-saving a
-file does not. On the javaweb workspace, touching `PageWindow.java` re-resolves
-one file, while renaming `PageWindow.of` re-resolves about 2600.
+so that is what is compared: name to declaring symbol ids, before against after,
+both sides read straight off `symbols(file_path)` and `edges(dst_name)`. A rename,
+a move between packages and a file rename all change it; re-saving a file does not.
+On the javaweb workspace, touching `PageWindow.java` re-resolves one file, while
+renaming `PageWindow.of` re-resolves about 2600.
 
-Measured on the javaweb workspace (6.2k Java files, 10 cores): a full build takes
-about 33 s and produces roughly 101k symbols and 923k edges; the zenit repository
-alone takes 5.6 s for 19k symbols and 184k edges. Queries answer off the indexes
-on `symbols(name)`, `symbols(qualified_name)`, `edges(dst_id, kind)`,
-`edges(src_id, kind)` and `edges(dst_name, kind)`: a name lookup is about 2 ms, a
-hierarchy or tests-of query is well under 1 ms, and the worst case measured -
-`callers` of `Model.save`, 682 hits - is about 11 ms.
+### Nothing more than the targets need
+
+A refresh of one file must not read the workspace. Four things used to, and none
+of them does any more.
+
+**The symbol tables the resolver runs on** live behind `SymbolLookup`
+(`zemble/graph/lookup.py`). `MemoryLookup` is the old behaviour - every dictionary
+built in one pass over the symbol list - and `SqliteLookup` answers each question
+with an indexed query and caches what it touched: by id, by qualified name, by
+simple name, by container, by file, by Hawkeye registration key, and the resolved
+supertypes of one type. `store` picks between them on the number of target files
+alone (`_MEMORY_LOOKUP_TARGETS`, 400): below it the indexes sqlite already keeps
+are cheaper, above it reading the table once is. Both must answer identically, and
+`tests/test_graph_incremental.py` runs its whole journey through each.
+
+Reading the supertype map out of `edges` rather than out of a list handed to the
+resolver is what makes it work: the build deletes a target file's edges before
+resolution, so what the table holds at that moment is exactly the workspace minus
+the edges about to be rewritten.
+
+**The facts files** are read only when something must be mapped, and then only the
+ones that must. `plan_facts` decides that from `stat` alone: a facts file moved
+when its own bytes moved or it vanished, and a template it mapped facts onto is
+invalidated on its own when its modification time crosses the generated class it
+was compiled from - a verdict the graph records per generated source and re-decides
+with two stats. A facts file that did not move is asked only for the sources the
+build is re-resolving, so a `.java` edit whose facts have just gone stale reads one
+facts file, learns the sha no longer matches, and maps nothing at all.
+
+Because a build maps only part of a facts file, what a facts file contributed is
+accounted per SOURCE (`contributions` in its status row), never as one total: the
+sources this build did not map keep the accounting they already had, so
+`zemble graph build --stats` reports the whole truth however little was read.
+
+**The `symbol` facts of the other facts files** live in `facts_symbols`. A ref
+written in one facts file can be answered by a `symbol` fact in another, so mapping
+needs all of them; parsing every facts file to answer a handful of refs is what an
+incremental build must not do, and the table answers one ref at a time instead.
+
+**The workspace walk** happens only when nobody named the change set. `build_graph`
+takes `changed_paths` from the daemon's watcher, which already promises to name
+every path that moved - facts files included, since the watcher matches them
+explicitly - so the graph's own file record plus that change set replaces both the
+source walk and the `**/build/zemble/*.jsonl` discovery walk. The two walks are
+about 2 s of a javaweb refresh, and the CLI still pays them.
+
+### Facts hierarchy is indexed before calls are resolved
+
+A file whose facts own its supertypes contributes the tool's `EXTENDS` and
+`IMPLEMENTS` edges to the hierarchy the call resolver walks, not the extractor's.
+Resolving calls against the extractor's guesses and then storing the tool's edges
+left a chain the stored graph did not have, which showed up as a cold build
+grading a call `AMBIGUOUS` where a refreshed graph had it `EXACT`. Both now agree,
+and the agreement is what the identity journeys check.
+
+### It lands where a full rebuild would
+
+Every narrowing above is a chance to leave a stale edge behind, and none of them is
+visible in a count, so `tests/test_graph_incremental.py` applies a sequence of edits
+- a rename, a move between packages, a deletion, a new caller, a template touch, a
+template edit, a facts file appearing, changing and vanishing - and after each one
+compares the whole `symbols`, `edges` and `decl_keys` tables against a from-scratch
+build of the very same tree.
+
+That found one real defect, which is fixed: a file the facts covered had its
+extracted edges REPLACED in the table, so when its facts later vanished there was
+nothing to re-resolve from but degraded copies of the fact edges. A target file
+whose facts coverage moved is now re-extracted rather than reloaded.
+
+The same check on the javaweb workspace - cold build, then seven edits applied
+incrementally, then a fresh cold build of the resulting tree - reports zero rows
+differing in either direction, for symbols and for edges.
+
+### Measured
+
+javaweb workspace (6.2k Java files, 1.6k templates, 35 facts files, 102k symbols,
+~958k edges, 10 cores, warm page cache). "Change set" is the daemon's lane, where
+the watcher names what moved; "walk" is the CLI's, where nothing does.
+
+| Lane | Before | After |
+| --- | --- | --- |
+| Cold build | 64.9 s | 42.4 s |
+| No-op rebuild (walk) | 38.2 s | 2.6 s |
+| No-op rebuild (change set) | 37.4 s | 0.6 s |
+| One `.java` edit (walk) | 37.6 s | 2.8 s |
+| One `.java` edit (change set) | 38.0 s | 0.9 s |
+| A method renamed in that file | 40.0 s | 2.4 s |
+| One `.hwk` edit | 39.6 s | 0.6 s |
+| One `.hwk` edit, template covered by facts | 40.1 s | 1.8 s |
+| One facts file rewritten | 41.5 s | 5.5 s |
+| A file deleted | 38.9 s | 0.6 s |
+
+The before column has no cheap row because the old build had no cheap path: it read
+every symbol, every hierarchy edge and every facts file on every build, and
+re-resolved all 139 fact-mapped templates even when nothing had moved.
+
+The daemon's `graph_ms` is exactly the change-set column: `_refresh_graph` hands the
+watcher's paths straight to `build_graph`, so an edit is in the graph one 500 ms
+debounce plus that number after it is saved.
+
+The walk lane costs the source walk (0.6 s) plus the facts discovery walk (1.4 s),
+the latter because `**/build/zemble/*.jsonl` can prune nothing - `**` keeps every
+directory alive - so it descends the whole tree. A facts file rewrite is the
+expensive lane by design: mapping it needs the whole symbol table and a ref mapper
+built over it, and there is no smaller unit than the facts file it rewrote.
+
+Two constants were worth more than any of the structure. `_relative_to_workspace`
+called `Path.resolve` - a realpath syscall - once per fact line, 1.4 M times per
+build; memoising it took reading the workspace's facts files from 31 s to 1 s.
+And `symbol_from_row` decodes four JSON columns per symbol, so it decodes them with
+orjson: 2.4 s to 1.2 s for the whole table.
+
+Queries answer off the indexes on `symbols(name)`, `symbols(qualified_name)`,
+`edges(dst_id, kind)`, `edges(src_id, kind)` and `edges(dst_name, kind)`: a name
+lookup is about 2 ms, a hierarchy or tests-of query is well under 1 ms, and the
+worst case measured - `callers` of `Model.save`, 682 hits - is about 11 ms.
 
 Extraction runs in a process pool using the `fork` start method where the
 platform has it, because the alternatives re-import the host's `__main__` and so

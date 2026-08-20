@@ -89,9 +89,13 @@ Changes are coalesced with a 500 ms debounce and the resulting set of paths is w
 rebuild works from: `create_index_from_path(previous=..., changed_paths=...)` re-chunks
 and re-embeds exactly those files and reuses every other file's chunks, vectors and
 postings from the previous index, without walking the tree at all. The same set is
-handed to `build_graph(changed_paths=...)`. The full walk is still what a cold build,
-`zemble daemon refresh` and the CLI's cache validation use: a walk discovers changes,
-a watcher reports them, and only a reported set may skip the discovery.
+handed to `build_graph(changed_paths=...)`, where it replaces two walks: the source
+walk and the `**/build/zemble/*.jsonl` discovery of the graph's facts files. The
+watcher can stand in for the second because its ignore rules always admit a facts
+file by name, whatever `.gitignore` says about the `build/` directory it lives in.
+The full walk is still what a cold build, `zemble daemon refresh` and the CLI's cache
+validation use: a walk discovers changes, a watcher reports them, and only a reported
+set may skip the discovery.
 
 A named path is still judged the way the walk judges one - extension, `.gitignore`,
 readability - so a watcher that over-reports cannot get a file into the index that a
@@ -101,6 +105,11 @@ change set does not name is assumed unchanged.
 The rebuilt index is swapped into the cache, written back to the on-disk cache (at most
 once every 10 s), and one line per rebuild is logged with the file counts and the
 milliseconds.
+
+The `graph_ms` on that line is the whole symbol-graph refresh. On the javaweb
+workspace it is around 0.6 s for a template edit, 0.9 s for a Java one and 2.4 s when
+that edit renames a method other files call; the numbers per edit shape, and what
+they were before, are in [the symbol graph doc](graph.md).
 
 ### Rebuilding beside the index that is being served
 
