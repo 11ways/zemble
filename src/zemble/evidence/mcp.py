@@ -5,13 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
 
-from zemble.evidence.bundle import build_bundle
-from zemble.evidence.outline import OutlineError, outline, signatures
-from zemble.graph.cli import ensure_graph, select_symbol
+from zemble.evidence.answers import explain_payload, outline_payload, signatures_payload
+from zemble.graph.cli import ensure_graph
 from zemble.graph.provider import SqliteGraphProvider
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
@@ -42,44 +41,51 @@ def _open(repo: str) -> SqliteGraphProvider:
     return SqliteGraphProvider(repo)
 
 
-def _bundle_markdown(index: ZembleIndex, repo: str, query: str, budget: int, top_k: int) -> str:
-    """Build a bundle and render it as markdown, with its cost stated."""
-    provider = _open(repo)
-    try:
-        bundle = build_bundle(index, provider, query, budget, top_k=top_k)
-    finally:
-        provider.close()
-    if not bundle.items:
-        return f"No evidence found for {query!r}."
-    return bundle.render()
+async def _remote(cmd: str, args: dict[str, Any]) -> dict[str, Any] | None:
+    """Ask the warm daemon for one evidence payload, or return None to answer here.
+
+    Imported lazily: `zemble.mcp` imports this module, so the reverse import can only
+    run once the server is being built.
+    """
+    from zemble.mcp import _daemon_call
+
+    return await _daemon_call(cmd, args)
 
 
-def _outline_json(repo: str, target: str, members: str | None) -> str:
-    """Render an outline as JSON."""
+def _explain_here(index: ZembleIndex, repo: str, query: str, budget: int, top_k: int) -> dict[str, Any]:
+    """Build an evidence bundle in this process."""
     provider = _open(repo)
     try:
-        return json.dumps(outline(provider, target, members).to_dict())
-    except OutlineError as error:
-        return json.dumps({"error": error.message, "candidates": [s.qualified_name for s in error.candidates]})
+        return explain_payload(index, provider, query, budget, top_k)
     finally:
         provider.close()
 
 
-def _signatures_json(repo: str, symbol: str) -> str:
-    """Render a symbol's signature and exact callers as JSON."""
+def _outline_here(repo: str, target: str, members: str | None) -> dict[str, Any]:
+    """Outline a file or a type in this process."""
     provider = _open(repo)
     try:
-        chosen, candidates = select_symbol(provider.definition(symbol), symbol)
-        if chosen is None:
-            message = (
-                f"{symbol!r} is ambiguous; pass a qualified name."
-                if candidates
-                else f"No symbol named {symbol!r}. {provider.coverage_note()}"
-            )
-            return json.dumps({"error": message, "candidates": [s.qualified_name for s in candidates]})
-        return json.dumps(signatures(provider, chosen).to_dict())
+        return outline_payload(provider, target, members)
     finally:
         provider.close()
+
+
+def _signatures_here(repo: str, symbol: str) -> dict[str, Any]:
+    """Describe a symbol and its exact callers in this process."""
+    provider = _open(repo)
+    try:
+        return signatures_payload(provider, symbol)
+    finally:
+        provider.close()
+
+
+def _as_json(payload: dict[str, Any], key: str) -> str:
+    """Render an outline or signatures payload the way the tool's callers expect it."""
+    if "error" in payload:
+        return json.dumps(
+            {"error": payload["error"], "candidates": [c["qualified_name"] for c in payload["candidates"]]}
+        )
+    return json.dumps(payload[key])
 
 
 def register_evidence_tools(
@@ -118,8 +124,23 @@ def register_evidence_tools(
         # only run once the server is being built.
         from zemble.mcp import _resolve_content_selection
 
-        index = await get_index(repo, _resolve_content_selection(content, default_content))
-        return await asyncio.to_thread(_bundle_markdown, index, repo, query, budget, top_k)
+        selected = _resolve_content_selection(content, default_content)
+        payload = await _remote(
+            "explain",
+            {
+                "path": repo,
+                "query": query,
+                "budget": budget,
+                "top_k": top_k,
+                "content": [item.value for item in selected],
+            },
+        )
+        if payload is None:
+            index = await get_index(repo, selected)
+            payload = await asyncio.to_thread(_explain_here, index, repo, query, budget, top_k)
+        if not payload["bundle"]["items"]:
+            return f"No evidence found for {query!r}."
+        return str(payload["markdown"])
 
     @server.tool()
     async def outline(
@@ -134,7 +155,10 @@ def register_evidence_tools(
         Use this before reading a file: it shows every member with its line range, so
         the next read can be a line span instead of a whole file.
         """
-        return await asyncio.to_thread(_outline_json, repo, target, members)
+        payload = await _remote("outline", {"path": repo, "target": target, "members": members})
+        if payload is None:
+            payload = await asyncio.to_thread(_outline_here, repo, target, members)
+        return _as_json(payload, "outline")
 
     @server.tool()
     async def signatures(
@@ -146,7 +170,10 @@ def register_evidence_tools(
         Cheaper than `graph_callers` when all you need is whether something is used
         and from where; weaker resolutions are counted rather than listed.
         """
-        return await asyncio.to_thread(_signatures_json, repo, symbol)
+        payload = await _remote("signatures", {"path": repo, "symbol": symbol})
+        if payload is None:
+            payload = await asyncio.to_thread(_signatures_here, repo, symbol)
+        return _as_json(payload, "signatures")
 
 
 __all__ = ["DEFAULT_MCP_BUDGET", "register_evidence_tools"]

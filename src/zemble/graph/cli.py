@@ -104,20 +104,26 @@ def _run_build(args: argparse.Namespace) -> int:
     return 0
 
 
-def ensure_graph(path: str, *, refresh: bool = True) -> None:
+def ensure_graph(path: str, *, refresh: bool = True, allow_daemon: bool = True) -> None:
     """Build the graph if it is missing, and refresh it once per process.
 
     A warm daemon does both instead where one is reachable: it keeps the graph fresh with
     its watcher, so the client skips the workspace scan a refresh costs.
+
+    :param path: The workspace directory.
+    :param refresh: Whether an existing graph is refreshed once per process.
+    :param allow_daemon: Whether a daemon may be asked; a handler running INSIDE the daemon
+        passes False, because asking a daemon to ensure the graph it is already ensuring
+        recurses through its own socket.
     """
     if not graph_exists(path):
         _refreshed.add(path)
-        if not _ensure_via_daemon(path):
+        if not (allow_daemon and _ensure_via_daemon(path)):
             build_graph(path)
         return
     if refresh and path not in _refreshed:
         _refreshed.add(path)
-        if not _ensure_via_daemon(path):
+        if not (allow_daemon and _ensure_via_daemon(path)):
             build_graph(path)
 
 

@@ -491,6 +491,66 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
     return await asyncio.to_thread(answer, path, str(args.get("symbol", "")), command, **extra)
 
 
+def _with_graph(root: str, work: Callable[[Any], Any]) -> Any:
+    """Run one graph question against a fresh provider, building the graph if needed.
+
+    Called inside a worker thread: `ensure_graph` and the sqlite provider are both blocking,
+    and a provider is not shared across threads.
+    """
+    from zemble.graph.cli import ensure_graph
+    from zemble.graph.provider import SqliteGraphProvider
+
+    ensure_graph(root, allow_daemon=False)
+    provider = SqliteGraphProvider(root)
+    try:
+        return work(provider)
+    finally:
+        provider.close()
+
+
+def _root_of(args: dict[str, Any]) -> str:
+    """Read the workspace root out of a request, refusing a missing one."""
+    root = args.get("path")
+    if not root:
+        raise ValueError("missing 'path'")
+    return str(root)
+
+
+async def _cmd_explain(daemon: Daemon, args: dict[str, Any]) -> Any:
+    """Build an evidence bundle over the warm index and the daemon's own symbol graph."""
+    from zemble.evidence.answers import DEFAULT_BUDGET, DEFAULT_TOP_K, explain_payload
+
+    cache_key, index = await daemon.index_for(args)
+    query = str(args.get("query", ""))
+    budget = int(args.get("budget", DEFAULT_BUDGET))
+    top_k = int(args.get("top_k", DEFAULT_TOP_K))
+    async with daemon.lock_for(cache_key):
+        return await asyncio.to_thread(
+            _with_graph,
+            cache_key[0],
+            lambda graph: explain_payload(index, graph, query, budget, top_k),
+        )
+
+
+async def _cmd_outline(daemon: Daemon, args: dict[str, Any]) -> Any:
+    """Outline a file or a type from the daemon's graph."""
+    from zemble.evidence.answers import outline_payload
+
+    root = _root_of(args)
+    target = str(args.get("target", ""))
+    members = args.get("members")
+    return await asyncio.to_thread(_with_graph, root, lambda graph: outline_payload(graph, target, members))
+
+
+async def _cmd_signatures(daemon: Daemon, args: dict[str, Any]) -> Any:
+    """Describe one symbol and its exactly resolved call sites."""
+    from zemble.evidence.answers import signatures_payload
+
+    root = _root_of(args)
+    symbol = str(args.get("symbol", ""))
+    return await asyncio.to_thread(_with_graph, root, lambda graph: signatures_payload(graph, symbol))
+
+
 async def _cmd_refresh(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Force a rebuild check for a root, loading it first if it is not resident."""
     cache_key, _index = await daemon.index_for(args)
@@ -521,6 +581,9 @@ COMMANDS: dict[str, Handler] = {
     "find_related": _cmd_find_related,
     "stats": _cmd_stats,
     "graph": _cmd_graph,
+    "explain": _cmd_explain,
+    "outline": _cmd_outline,
+    "signatures": _cmd_signatures,
     "refresh": _cmd_refresh,
     "evict": _cmd_evict,
     "shutdown": _cmd_shutdown,

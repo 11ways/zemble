@@ -155,12 +155,17 @@ async def test_every_command_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     monkeypatch.setattr(server.Daemon, "rebuild", _rebuild)
     monkeypatch.setattr("zemble.graph.cli.ensure_graph", lambda path, **kwargs: None)
     monkeypatch.setattr("zemble.graph.mcp.answer", lambda *args, **kwargs: '{"results": []}')
+    # The evidence handlers are exercised for real over a socket below; here only dispatch is.
+    monkeypatch.setattr(server, "_with_graph", lambda root, work: {"stubbed": True})
 
     args_by_command = {
         "search": {"path": str(tmp_path), "query": "anything"},
         "find_related": {"path": str(tmp_path), "file_path": "a.py", "line": 1},
         "stats": {"path": str(tmp_path)},
         "graph": {"path": str(tmp_path), "command": "callers", "symbol": "Foo"},
+        "explain": {"path": str(tmp_path), "query": "anything"},
+        "outline": {"path": str(tmp_path), "target": "Thing"},
+        "signatures": {"path": str(tmp_path), "symbol": "Thing.method"},
         "refresh": {"path": str(tmp_path)},
         "evict": {"path": str(tmp_path)},
     }
@@ -369,6 +374,55 @@ def test_autostart_spawns_a_daemon_and_stop_removes_it(monkeypatch: pytest.Monke
     while time.monotonic() < deadline and socket_path().exists():
         time.sleep(0.05)
     assert not socket_path().exists(), "the daemon cleaned up after itself"
+
+
+def test_evidence_commands_answer_over_a_real_socket(graph_fixture_root: Path, no_embedder_load: None) -> None:
+    """explain, outline and signatures all answer from the daemon's own index and graph."""
+    from zemble.graph import cli as graph_cli
+
+    graph_cli._refreshed.clear()
+    root = str(graph_fixture_root)
+    with running_server(watch=False, idle_minutes=0):
+        # 1. explain answers with a budgeted bundle, in both of its renderings.
+        explained = client.call(
+            "explain", {"path": root, "query": "how is an area computed", "budget": 900, "top_k": 5}, timeout=120
+        )
+        assert explained["markdown"].startswith("# Evidence for: how is an area computed"), "1: markdown comes back"
+        bundle = explained["bundle"]
+        assert bundle["items"], "1: the bundle carries evidence"
+        assert bundle["total_tokens"] <= bundle["budget_tokens"], "1: the budget was respected"
+
+        # 2. the same root is now resident once, not once per surface.
+        status = client.call("status", timeout=30)
+        assert [index["root"] for index in status["indexes"]] == [root], "2: one warm index for the workspace"
+
+        # 3. outline answers off the graph the daemon built.
+        outlined = client.call("outline", {"path": root, "target": "Registry"}, timeout=60)
+        assert "class Registry<T extends Shape>" in outlined["text"], "3: the declaration is rendered"
+        assert outlined["outline"]["package"] == "com.example.core", "3: and carried as data"
+
+        # 4. a narrowed outline drops the members that do not match.
+        narrowed = client.call(
+            "outline",
+            {"path": root, "target": "src/main/java/com/example/core/Circle.java", "members": "scale"},
+            timeout=60,
+        )
+        assert "scale(double factor)" in narrowed["text"] and "label()" not in narrowed["text"], "4: only matches"
+
+        # 5. an ambiguous target is an error payload, not a failed command.
+        ambiguous = client.call("outline", {"path": root, "target": "Circle"}, timeout=60)
+        assert "ambiguous" in ambiguous["error"], "5: ambiguity is reported as data"
+        assert len(ambiguous["candidates"]) == 2, "5: with every candidate named and located"
+        assert all(candidate["file_path"] for candidate in ambiguous["candidates"]), "5: candidates carry their file"
+
+        # 6. signatures answers with the exact call sites.
+        signed = client.call("signatures", {"path": root, "symbol": "Helpers.twice"}, timeout=60)
+        assert signed["signatures"]["signature"] == "double twice(double value)", "6: the signature is reported"
+        assert signed["signatures"]["callers"], "6: its callers come with it"
+
+        # 7. an unknown symbol is refused with the graph's coverage note.
+        unknown = client.call("signatures", {"path": root, "symbol": "NotHere"}, timeout=60)
+        assert "No symbol named" in unknown["error"] and not unknown["candidates"], "7: nothing to disambiguate"
 
 
 def test_cli_search_falls_back_when_the_daemon_is_unavailable(

@@ -138,3 +138,57 @@ def test_mcp_tools(graph_fixture_root: Path, graph_cache: Path, cache: IndexCach
     ambiguous = json.loads(asyncio.run(_call(cache, graph_fixture_root, "outline", {"target": "Circle", "repo": root})))
     assert "ambiguous" in ambiguous["error"], "step 4: ambiguity is reported as data"
     assert len(ambiguous["candidates"]) == 2, "step 4: with every candidate named"
+
+
+def test_cli_explain_prefers_the_daemon_then_falls_back(
+    graph_fixture_root: Path, graph_cache: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`explain` asks the daemon first, and answers in this process with one notice when it cannot."""
+    from zemble.daemon import client
+    from zemble.daemon.protocol import DaemonUnavailable
+    from zemble.evidence import cli as evidence_cli
+
+    root = str(graph_fixture_root)
+
+    # 1. A daemon answer is rendered as-is, without scanning the workspace here.
+    warm = {"bundle": {"items": [{"reason": "from the daemon"}]}, "markdown": "# Evidence for: warm"}
+    monkeypatch.setattr(client, "call", lambda cmd, args, **kwargs: warm)
+    monkeypatch.setattr(evidence_cli, "ensure_graph", lambda *args, **kwargs: pytest.fail("no in-process scan"))
+    assert _run(monkeypatch, graph_fixture_root, "explain", root, "warm") == 0, "step 1: the daemon answer is a success"
+    assert capsys.readouterr().out.startswith("# Evidence for: warm"), "step 1: printed verbatim"
+
+    # 2. An unreachable daemon is one stderr line, then the real in-process bundle.
+    monkeypatch.undo()
+
+    def _refuse(*args: Any, **kwargs: Any) -> Any:
+        raise DaemonUnavailable("not running (ENOENT)")
+
+    monkeypatch.setattr(client, "call", _refuse)
+    assert _run(monkeypatch, graph_fixture_root, "explain", root, "how is an area computed", "--budget", "1200") == 0, (
+        "step 2: the fallback still answers"
+    )
+    captured = capsys.readouterr()
+    assert "daemon unavailable (not running (ENOENT)); running in-process" in captured.err, "step 2: one honest line"
+    assert captured.out.startswith("# Evidence for: how is an area computed"), "step 2: built here instead"
+
+
+def test_mcp_explain_prefers_the_daemon(
+    graph_fixture_root: Path, graph_cache: Path, cache: IndexCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MCP tool takes the daemon's bundle rather than building a second index of its own."""
+    import asyncio
+
+    from zemble.daemon import client
+
+    asked: list[str] = []
+
+    def _answer(cmd: str, args: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        asked.append(cmd)
+        return {"bundle": {"items": [{"reason": "from the daemon"}]}, "markdown": "# Evidence for: warm"}
+
+    monkeypatch.setattr(client, "call", _answer)
+    with patch("zemble.mcp.ZembleIndex.from_path", side_effect=AssertionError("must not index here")):
+        server = create_server(cache)
+        result = asyncio.run(server.call_tool("explain", {"query": "warm", "repo": str(graph_fixture_root)}))
+    assert result[0][0].text == "# Evidence for: warm", "the daemon's markdown is what the tool returns"
+    assert asked == ["explain"], "and it asked for exactly that command"

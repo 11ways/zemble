@@ -9,18 +9,21 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Any
 
-from zemble.evidence.bundle import build_bundle
-from zemble.evidence.outline import OutlineError, outline, signatures
-from zemble.graph.cli import EXIT_AMBIGUOUS, EXIT_NOT_FOUND, ensure_graph, select_symbol
+from zemble.evidence.answers import (
+    DEFAULT_BUDGET,
+    DEFAULT_TOP_K,
+    explain_payload,
+    outline_payload,
+    signatures_payload,
+)
+from zemble.graph.cli import EXIT_AMBIGUOUS, EXIT_NOT_FOUND, ensure_graph
 from zemble.graph.provider import SqliteGraphProvider
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
 
 EVIDENCE_COMMANDS = ("explain", "outline", "signatures")
-
-DEFAULT_BUDGET = 3000
-DEFAULT_TOP_K = 20
 
 
 def add_evidence_parser(sub: argparse._SubParsersAction) -> None:
@@ -35,34 +38,68 @@ def add_evidence_parser(sub: argparse._SubParsersAction) -> None:
         "-k", "--top-k", type=int, default=DEFAULT_TOP_K, help=f"Search results to expand (default: {DEFAULT_TOP_K})."
     )
     explain_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
+    # Only `explain` reads the index, so it is the only one an embedder override concerns.
+    from zemble.cli import _add_daemon_arg, _add_embedder_arg
+
+    _add_embedder_arg(explain_p)
+    _add_daemon_arg(explain_p)
 
     outline_p = sub.add_parser("outline", help="Signature-only view of a file or a type.")
     outline_p.add_argument("path", help="Workspace directory the graph was built for.")
     outline_p.add_argument("target", help="Workspace-relative file path, or a simple or qualified type name.")
     outline_p.add_argument("--members", metavar="PATTERN", help="Only show members matching this name pattern.")
     outline_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
+    _add_daemon_arg(outline_p)
 
     signatures_p = sub.add_parser("signatures", help="A symbol's signature and the call sites resolved exactly.")
     signatures_p.add_argument("path", help="Workspace directory the graph was built for.")
     signatures_p.add_argument("symbol", help="Simple name, qualified name, or Type.member.")
     signatures_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
+    _add_daemon_arg(signatures_p)
 
 
 def run_evidence(args: argparse.Namespace) -> int:
-    """Run one evidence subcommand and return its exit code."""
+    """Run one evidence subcommand, from the warm daemon where there is one, and return its exit code."""
+    from zemble.cli import _via_daemon
+
+    payload = _via_daemon(args.command, _daemon_args(args), args.no_daemon, getattr(args, "embedder", None))
+    if payload is None:
+        payload = _in_process(args)
+    if args.command == "explain":
+        return _print_explain(args, payload)
+    return _print_answer(args, payload, "outline" if args.command == "outline" else "signatures")
+
+
+def _daemon_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Shape one evidence subcommand as daemon command arguments."""
+    if args.command == "explain":
+        return {
+            "path": args.path,
+            "query": args.query,
+            "budget": args.budget,
+            "top_k": args.top_k,
+            "content": [ContentType.CODE.value],
+        }
+    if args.command == "outline":
+        return {"path": args.path, "target": args.target, "members": args.members}
+    return {"path": args.path, "symbol": args.symbol}
+
+
+def _in_process(args: argparse.Namespace) -> dict[str, Any]:
+    """Answer one evidence subcommand in this process, building whatever it needs."""
     ensure_graph(args.path)
     provider = SqliteGraphProvider(args.path)
     try:
         if args.command == "explain":
-            return _run_explain(args, provider)
+            return explain_payload(_load_index(args.path, args.embedder), provider, args.query, args.budget, args.top_k)
         if args.command == "outline":
-            return _run_outline(args, provider)
-        return _run_signatures(args, provider)
+            return outline_payload(provider, args.target, args.members)
+        return signatures_payload(provider, args.symbol)
     finally:
         provider.close()
 
 
-def _load_index(path: str) -> ZembleIndex:
+def _load_index(path: str, embedder: str | None = None) -> ZembleIndex:
     """Build or load the code index for a workspace, saving it back to the cache.
 
     Imported lazily: `zemble.cli` imports this module, so the reverse import can
@@ -71,64 +108,34 @@ def _load_index(path: str) -> ZembleIndex:
     from zemble.cli import _load_index as load
     from zemble.cli import _maybe_save_index
 
-    index = load(path, [ContentType.CODE])
+    index = load(path, [ContentType.CODE], embedder)
     _maybe_save_index(index, path)
     return index
 
 
-def _run_explain(args: argparse.Namespace, provider: SqliteGraphProvider) -> int:
-    """Build and print an evidence bundle."""
-    index = _load_index(args.path)
-    bundle = build_bundle(index, provider, args.query, args.budget, top_k=args.top_k)
-    if args.json:
-        print(json.dumps(bundle.to_dict(), indent=2))
-    else:
-        print(bundle.render())
-    return 0 if bundle.items else EXIT_NOT_FOUND
+def _print_explain(args: argparse.Namespace, payload: dict[str, Any]) -> int:
+    """Print an evidence bundle, as JSON or as markdown."""
+    bundle = payload["bundle"]
+    print(json.dumps(bundle, indent=2) if args.json else payload["markdown"])
+    return 0 if bundle["items"] else EXIT_NOT_FOUND
 
 
-def _run_outline(args: argparse.Namespace, provider: SqliteGraphProvider) -> int:
-    """Print the outline of a file or a type."""
-    try:
-        rendered = outline(provider, args.target, args.members)
-    except OutlineError as error:
+def _print_answer(args: argparse.Namespace, payload: dict[str, Any], key: str) -> int:
+    """Print an outline or a signatures answer, or the refusal that came instead."""
+    if "error" in payload:
+        candidates = payload["candidates"]
         if args.json:
             print(
                 json.dumps(
-                    {
-                        "error": error.message,
-                        "candidates": [symbol.qualified_name for symbol in error.candidates],
-                    },
-                    indent=2,
+                    {"error": payload["error"], "candidates": [c["qualified_name"] for c in candidates]}, indent=2
                 )
             )
         else:
-            print(error.message, file=sys.stderr)
-            for symbol in error.candidates:
-                print(f"  {symbol.qualified_name}  {symbol.file_path}", file=sys.stderr)
-        return EXIT_AMBIGUOUS if error.candidates else EXIT_NOT_FOUND
-    print(json.dumps(rendered.to_dict(), indent=2) if args.json else rendered.render())
-    return 0
-
-
-def _run_signatures(args: argparse.Namespace, provider: SqliteGraphProvider) -> int:
-    """Print a symbol's signature and its exact callers."""
-    chosen, candidates = select_symbol(provider.definition(args.symbol), args.symbol)
-    if chosen is None:
-        message = (
-            f"{args.symbol!r} is ambiguous; pass a qualified name."
-            if candidates
-            else f"No symbol named {args.symbol!r}. {provider.coverage_note()}"
-        )
-        if args.json:
-            print(json.dumps({"error": message, "candidates": [s.qualified_name for s in candidates]}, indent=2))
-        else:
-            print(message, file=sys.stderr)
-            for symbol in candidates:
-                print(f"  {symbol.qualified_name}  {symbol.file_path}", file=sys.stderr)
+            print(payload["error"], file=sys.stderr)
+            for candidate in candidates:
+                print(f"  {candidate['qualified_name']}  {candidate['file_path']}", file=sys.stderr)
         return EXIT_AMBIGUOUS if candidates else EXIT_NOT_FOUND
-    answer = signatures(provider, chosen)
-    print(json.dumps(answer.to_dict(), indent=2) if args.json else answer.render())
+    print(json.dumps(payload[key], indent=2) if args.json else payload["text"])
     return 0
 
 
