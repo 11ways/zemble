@@ -87,6 +87,11 @@ Every edge records which rung it landed on:
 
 A guess is never upgraded to `EXACT`.
 
+An external tool that already knows the answer can replace this ladder for the
+files it covers: see **[the graph facts overlay](graph-facts.md)**, which is the
+documented file format any analyzer can write and `zemble graph facts status`
+reports on. Every edge records a `source` saying which side produced it.
+
 **Type names** climb: same file, then explicit import, then same package, then
 wildcard imports, then the workspace by simple name. An explicit import that
 names a type outside the workspace ends the climb at `UNRESOLVED` rather than
@@ -138,8 +143,10 @@ These are real, not hypothetical:
 
 Sqlite at `<index cache folder>/graph.sqlite`, created on demand: the graph is
 buildable with no search index present (`zemble/graph/store.py`). Tables:
-`symbols`, `edges`, `files` (path, mtime, size, package, imports) and `meta`
-(format version, root, covered language, skipped languages).
+`symbols`, `edges` (each carrying the `source` that produced it), `files` (path,
+mtime, size, package, imports), `facts_status` (one row per facts file read, see
+[the facts overlay](graph-facts.md)) and `meta` (format version, root, covered
+language, skipped languages).
 
 A rebuild re-extracts only files whose mtime or size changed, then re-resolves
 (a) those files and (b) their **dependents**: every file holding an edge whose
@@ -171,6 +178,8 @@ in the calling process.
 
 ```
 zemble graph build <path> [--stats] [--force] [--json]
+
+zemble graph facts status <path> [--json] [--limit N]
 
 zemble graph definition      <path> <symbol> [--json]
 zemble graph callers         <path> <symbol> [--json]
