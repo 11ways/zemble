@@ -158,6 +158,12 @@ def test_resolve_index_root_finds_a_validated_on_disk_ancestor(
         None,
     ), "a deliberate sub-root index is not thrown away"
 
+    # 6. ...unless the workspace index is already IN MEMORY: then the loaded ancestor answers,
+    #    because a second resident index costs RAM and a build for nothing.
+    assert resolve_index_root(
+        str(workspace / "alpha"), mock_embedder.model_id, [ContentType.CODE], loaded_roots={str(workspace)}
+    ) == (str(workspace), "alpha"), "a loaded ancestor beats an on-disk exact index"
+
 
 def test_the_refusal_names_the_ancestor_that_is_already_indexed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

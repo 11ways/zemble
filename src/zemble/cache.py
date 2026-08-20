@@ -207,6 +207,7 @@ def find_ancestor_index_root(
     content: Sequence[ContentType] = (ContentType.CODE,),
     capsules: CapsuleOptions | None = None,
     loaded_roots: Collection[str] = (),
+    on_disk: bool = True,
 ) -> str | None:
     """Return the nearest ancestor of *path* that already has a usable index of the same content.
 
@@ -218,13 +219,18 @@ def find_ancestor_index_root(
     :param content: The requested content types.
     :param capsules: The requested context-capsule configuration.
     :param loaded_roots: Roots a caller already holds in memory for exactly this content.
+    :param on_disk: Whether an ancestor that is only on disk (validated) may be returned.
     :return: The ancestor root, or None when the sub-path needs its own index.
     """
     for ancestor in _ancestor_directories(Path(path)):
         candidate = str(ancestor)
         if candidate in loaded_roots:
             return candidate
-        if has_cached_index(candidate, content) and get_validated_cache(candidate, embedder_id, content, capsules):
+        if (
+            on_disk
+            and has_cached_index(candidate, content)
+            and get_validated_cache(candidate, embedder_id, content, capsules)
+        ):
             return candidate
     return None
 
@@ -254,13 +260,26 @@ def resolve_index_root(
     resolved = Path(path).expanduser().resolve()
     if not resolved.is_dir():
         return path, None
-    # An index of exactly this path, in memory or on disk, keeps serving it: someone asked for
-    # it deliberately, and it is already paid for.
-    if str(resolved) in loaded_roots or has_cached_index(str(resolved), content):
+    # Precedence: an index of exactly this path that is already IN MEMORY, then an ancestor
+    # that is already in memory (free, no second resident index), then an index of exactly
+    # this path on disk (someone built it deliberately), then an ancestor on disk, else build.
+    if str(resolved) in loaded_roots:
+        return path, None
+    loaded_ancestor = find_ancestor_index_root(
+        str(resolved), embedder_id, content, capsules, loaded_roots, on_disk=False
+    )
+    if loaded_ancestor is not None:
+        return _subtree_of(resolved, loaded_ancestor)
+    if has_cached_index(str(resolved), content):
         return path, None
     ancestor = find_ancestor_index_root(str(resolved), embedder_id, content, capsules, loaded_roots)
     if ancestor is None:
         return path, None
+    return _subtree_of(resolved, ancestor)
+
+
+def _subtree_of(resolved: Path, ancestor: str) -> tuple[str, str]:
+    """Answer for a sub-path from an ancestor root, logging the routing once."""
     prefix = resolved.relative_to(ancestor).as_posix()
     logger.info("serving %s from the %s index (subtree filter)", resolved, ancestor)
     return ancestor, prefix
