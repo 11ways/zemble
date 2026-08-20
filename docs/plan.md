@@ -58,7 +58,7 @@ API). Kept only if it beats the heuristics on the hard subset.
 
 ## Status (2026-08-20)
 
-Every step 0-8 shipped on `main`; step 7 (reranker) shipped behind a flag, default `none`. Linear history,
+Every step 0-10 shipped on `main`; step 7 (reranker) shipped behind a flag, default `none`. Linear history,
 one agent branch per step, rebased in. Numbers below are from the docs each
 step wrote; the eval sets are the upstream 63-repo benchmark and the javaweb
 local set (benchmarks/local, 80 queries).
@@ -74,12 +74,15 @@ local set (benchmarks/local, 80 queries).
 | 6 | `zemble dupes`: exact / alpha-renamed / logic clone classes over Java bodies + statement windows, zenit-dev-shaped report, MCP tool | workspace exact+renamed 45 s; first real finding: `trimToNull`-family copied 9x across 5 repos; detector false positive (`this.f = f` ctors) found and fixed |
 | 8 | `zemble home` (config-driven `.zemble/home.toml`: module order, forbidden deps, declared-home table, skills, rules; existing mechanisms + candidate homes + verdict + checklist; CLI/MCP/daemon) | 61 paraphrased capability rows: declared home ranked #1 in 90% (77% with the table lane off), top-3 93%; ~0.3 s per answer |
 | 7 | `Reranker` seam (`none` / `cross:<hf>` / `voyage:<model>`), post-fusion window blend, optional `zemble[rerank]` extra, `--reranker` / `ZEMBLE_RERANKER` | javaweb best +0.024 (0.567 -> 0.591; consumer +0.18, bug-report +0.08, symbol -0.03, architecture -0.05) at p50 ~2.6 s on CPU: quality bar passed, latency bar missed 9x, so DEFAULT STAYS NONE; capsule passage + alpha 0.7 + k 50 recommended when opted in; a hosted reranker is the path to on-by-default (client built, unmeasured: no key) |
+| 9 | `.hwk` templates in the code lane (HTML-grammar chunking + lexical capsule), template graph extractor (TEMPLATE/BLOCK symbols; REFERENCES to custom elements via Hawkeye's tag rule, CALLS to `@HawkeyeFunction`s by namespace+name, EXTENDS/render includes), 10 template queries in the eval set | 619 templates / 3,114 chunks; 7,806 template edges (element refs 98.7% EXACT, includes 100%); `graph callers StringFunctions.presence` now lists templates; original 80 code queries 0.567 -> 0.545 (templates that use a mechanism outrank the annotated Java file on 5 queries; NOT tuned away), new 10 at 0.655 |
+| 10 | Graph facts overlay (generic JSONL contract `docs/graph-facts.md`: sha256 freshness, per-language `RefMapper`, fresh facts REPLACE tree-sitter CALLS/OVERRIDES/EXTENDS/IMPLEMENTS per file, `zemble graph facts status`) + `zemble-javac-facts` (standalone javac plugin in `javac-facts/`, any Java project) + javaweb wiring (`ZembleFactsInstaller` in protoblast-gradle-plugin, opt-in by jar presence, one file per JavaCompile task) | workspace: 1,483 files covered, all fresh; in covered files calls = 32,505 EXACT + 20,570 external, ZERO by-name/ambiguous (uncovered files keep the ladder: 138k ambiguous); +2.6 s per full repo build; next lever = map generated `Tpl_*` facts back to `.hwk` via source maps |
 | B1 | columnar BM25 (CSR + vectorized scoring), mmap vectors, columnar lazy chunks, precomputed symbol-definition table, scandir walker, lazy imports | cold query 7.0 s -> 1.0 s, warm symbol 379 -> 17 ms, NL 95 -> 16 ms; ranking bit-identical on both sets |
 
-Open: Voyage benchmark (needs a key); `.hwk` template extractor for the graph
-(so `callers` of a `@HawkeyeFunction` stops under-reporting); query-kind-aware
+Open: Voyage benchmark (running with a key, results land in docs/voyage.md); query-kind-aware
 tier order in `explain` (the `consumer` kind is where bundles should win and
-do not); a javac-grade `GraphProvider` from zenit-dev behind the existing seam.
+do not); facts coverage for repos on the publish-only plugin variant and the apps;
+mapping generated-template facts back to `.hwk`; revisit the 5 code-query annotations
+that now have template answers.
 
 ## Later
 
