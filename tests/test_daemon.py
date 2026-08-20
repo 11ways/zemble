@@ -166,6 +166,7 @@ async def test_every_command_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         "explain": {"path": str(tmp_path), "query": "anything"},
         "outline": {"path": str(tmp_path), "target": "Thing"},
         "signatures": {"path": str(tmp_path), "symbol": "Thing.method"},
+        "home": {"path": str(tmp_path), "description": "anything"},
         "refresh": {"path": str(tmp_path)},
         "evict": {"path": str(tmp_path)},
     }
@@ -423,6 +424,54 @@ def test_evidence_commands_answer_over_a_real_socket(graph_fixture_root: Path, n
         # 7. an unknown symbol is refused with the graph's coverage note.
         unknown = client.call("signatures", {"path": root, "symbol": "NotHere"}, timeout=60)
         assert "No symbol named" in unknown["error"] and not unknown["candidates"], "7: nothing to disambiguate"
+
+
+def test_home_answers_over_a_real_socket(
+    graph_fixture_root: Path, tmp_path: Path, no_embedder_load: None
+) -> None:
+    """`home` answers from the daemon's warm index, its graph and the workspace's own config."""
+    import shutil
+
+    from zemble.graph import cli as graph_cli
+
+    graph_cli._refreshed.clear()
+    root_path = tmp_path / "workspace"
+    shutil.copytree(graph_fixture_root, root_path)
+    (root_path / ".zemble").mkdir()
+    (root_path / ".zemble" / "home.toml").write_text(
+        textwrap.dedent(
+            """
+            order = ["core", "util", "app"]
+
+            [modules]
+            core = "src/main/java/com/example/core/**"
+            util = "src/main/java/com/example/util/**"
+            app = "src/main/java/com/example/app/**"
+
+            [[rules]]
+            text = "Nothing lands without a wired consumer and a test"
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    root = str(root_path)
+    with running_server(watch=False, idle_minutes=0):
+        # 1. The answer comes back in both renderings.
+        answer = client.call("home", {"path": root, "description": "compute the area of a shape"}, timeout=180)
+        assert answer["markdown"].startswith("# Home for: compute the area of a shape"), "1: markdown comes back"
+        assert answer["home"]["verdict"], "1: and the verdict as data"
+
+        # 2. The declared globs, not the path segments, name the modules.
+        modules = {candidate["module"] for candidate in answer["home"]["candidates"]}
+        assert modules and modules <= {"core", "util", "app"}, f"2: declared modules only, got {modules}"
+
+        # 3. The workspace's own rule rides along.
+        assert "Nothing lands without a wired consumer and a test" in answer["home"]["checklist"]["rules"], "3: rules"
+
+        # 4. The root is resident once, shared with every other surface.
+        status = client.call("status", timeout=30)
+        assert [index["root"] for index in status["indexes"]] == [root], "4: one warm index for the workspace"
 
 
 def test_cli_search_falls_back_when_the_daemon_is_unavailable(

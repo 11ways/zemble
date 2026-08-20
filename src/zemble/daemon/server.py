@@ -551,6 +551,23 @@ async def _cmd_signatures(daemon: Daemon, args: dict[str, Any]) -> Any:
     return await asyncio.to_thread(_with_graph, root, lambda graph: signatures_payload(graph, symbol))
 
 
+async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
+    """Answer where a capability belongs, over the warm index and the daemon's graph."""
+    from zemble.home.answers import DEFAULT_TOP_K, home_payload
+    from zemble.home.config import HomeConfig
+
+    cache_key, index = await daemon.index_for(args)
+    description = str(args.get("description", ""))
+    top_k = int(args.get("top_k", DEFAULT_TOP_K))
+    config = await asyncio.to_thread(HomeConfig.load, cache_key[0])
+    async with daemon.lock_for(cache_key):
+        return await asyncio.to_thread(
+            _with_graph,
+            cache_key[0],
+            lambda graph: home_payload(index, graph, config, description, top_k),
+        )
+
+
 async def _cmd_refresh(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Force a rebuild check for a root, loading it first if it is not resident."""
     cache_key, _index = await daemon.index_for(args)
@@ -584,6 +601,7 @@ COMMANDS: dict[str, Handler] = {
     "explain": _cmd_explain,
     "outline": _cmd_outline,
     "signatures": _cmd_signatures,
+    "home": _cmd_home,
     "refresh": _cmd_refresh,
     "evict": _cmd_evict,
     "shutdown": _cmd_shutdown,

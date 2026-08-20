@@ -14,6 +14,7 @@ from zemble.daemon.protocol import DaemonError
 from zemble.dedup.mcp import register_dupes_tool
 from zemble.evidence.mcp import register_evidence_tools
 from zemble.graph.mcp import register_graph_tools
+from zemble.home.mcp import register_home_tool
 from zemble.index import ZembleIndex
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.types import ContentType
@@ -225,6 +226,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
     register_graph_tools(server)
     register_dupes_tool(server)
     register_evidence_tools(server, lambda repo, selected: _get_index(repo, cache, selected), default_content)
+    register_home_tool(server, lambda repo, selected: _get_index(repo, cache, selected))
     return server
 
 

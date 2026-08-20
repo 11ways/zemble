@@ -15,6 +15,7 @@ from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
+from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
 from zemble.index import ZembleIndex
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
@@ -39,6 +40,7 @@ _CLI_DISPATCH_ARGS = frozenset(
         "graph",
         "dupes",
         *EVIDENCE_COMMANDS,
+        *HOME_COMMANDS,
         "daemon",
     }
 )
@@ -50,6 +52,7 @@ _SUBCOMMAND_RUNNERS = {
     "dupes": run_dupes,
     "daemon": run_daemon,
     **dict.fromkeys(EVIDENCE_COMMANDS, run_evidence),
+    **dict.fromkeys(HOME_COMMANDS, run_home),
 }
 
 _SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
@@ -424,6 +427,7 @@ def _cli_main() -> None:
     add_graph_parser(sub)
     add_dupes_parser(sub)
     add_evidence_parser(sub)
+    add_home_parser(sub)
     add_daemon_parser(sub)
 
     install_p = sub.add_parser("install", help="Configure zemble across coding agents.")
