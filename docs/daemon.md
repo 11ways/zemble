@@ -34,6 +34,9 @@ one entry in that table. Nothing else has to change: the client is generic.
 | `find_related` | The same payload as `find-related`; a location that is not indexed answers `chunk_missing`. |
 | `stats` | What one index holds. |
 | `graph` | `command: "ensure"` guarantees a fresh symbol graph; any other name is a provider query answered through `zemble.graph.mcp.answer`. |
+| `explain` | The evidence bundle `zemble explain` and the MCP `explain` tool render, built over the warm index and the daemon's graph; honours `budget`, `top_k` and `content`. |
+| `outline` | The outline of a file or a type; an ambiguous or unknown target comes back as an error payload, not a failed command. |
+| `signatures` | A symbol's signature and its exactly resolved call sites, with the same refusal shape. |
 | `refresh` | Force a rebuild check for one root (loads it first if needed). |
 | `evict` | Drop one root from memory and stop its watcher. |
 | `shutdown` | Stop after answering. |
@@ -91,7 +94,8 @@ so a daemon that is still starting is never pulled out from under itself.
 
 The daemon is an accelerator, never a requirement.
 
-- `zemble search`, `find-related`, `stats` and `graph *` go through the client by default.
+- `zemble search`, `find-related`, `stats`, `graph *`, `explain`, `outline` and `signatures`
+  go through the client by default, as do their MCP tools.
 - If the socket is absent or dead, the client spawns `python -m zemble.daemon run`
   detached (new session, stdio to the log) and waits up to 10 s for it to answer.
 - Any failure (cannot start, connection lost, protocol error) raises `DaemonError`,

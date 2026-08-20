@@ -90,8 +90,10 @@ zemble outline <path> <file-or-type> [--members PATTERN] [--json]
 zemble signatures <path> <symbol> [--json]
 ```
 
-Both the index and the symbol graph are built on demand and refreshed once per
-process, the same way `zemble graph` does it. `outline` takes a workspace
+All three surfaces ask the warm daemon first and answer in-process only when it
+cannot be reached (see `docs/daemon.md`), so they share one RAM copy of the index
+and the graph with `search`. Both the index and the symbol graph are built on
+demand and refreshed once per process, the same way `zemble graph` does it. `outline` takes a workspace
 relative file path or a simple or qualified type name; `--members` matches a
 plain word as `*word*` and prunes the types left with nothing under them. Exit
 codes match the graph subcommands: `0` answered, `1` nothing found, `2` the name
@@ -114,8 +116,9 @@ record PageWindow(int page, int pageCount, int offset, int pageSize)  L19-85
 
 Three tools are registered on the existing server: `explain` (returns the
 markdown bundle, default budget 2500), `outline` and `signatures` (both return
-JSON). `explain` receives the index from the server's own cache, so it shares
-the warm index with `search`.
+JSON). All three go through the daemon first; when there is none, `explain`
+receives the index from the server's own cache, so it still shares the warm index
+with `search`.
 
 ## Measurement
 
