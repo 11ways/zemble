@@ -64,9 +64,9 @@ def test_packing_journey() -> None:
     # 2. Every budget is respected exactly, and nothing that fits is silently dropped.
     for budget in range(10, 400, 7):
         tight = pack("q", candidates, budget)
-        assert tight.total_tokens <= budget, f"step 2: the budget {budget} is never exceeded"
-        assert len(tight.items) + len(tight.omitted) == len(candidates), (
-            f"step 2: at budget {budget} every candidate is either packed or listed as omitted"
+        assert tight.rendered_tokens <= budget, f"step 2: the whole rendered answer fits budget {budget}"
+        assert len(tight.items) + len(tight.omitted) + tight.unlisted_omissions == len(candidates), (
+            f"step 2: at budget {budget} every candidate is packed, listed as omitted, or counted"
         )
 
     # 3. A budget that cannot hold the content still degrades rather than dropping.
@@ -78,7 +78,7 @@ def test_packing_journey() -> None:
     assert caller.tokens < full.tokens, "step 3: degrading is cheaper than the content it replaced"
 
     # 4. A primary chunk is truncated instead of degraded, and says so.
-    chunk_budget = pack("q", candidates, 90)
+    chunk_budget = pack("q", candidates, 130)
     chunk = next(item for item in chunk_budget.items if item.kind is ItemKind.CHUNK)
     assert chunk.presentation is Presentation.TRUNCATED, "step 4: the chunk is truncated"
     assert "... (truncated," in chunk.text, "step 4: the truncation is marked in the text"
@@ -86,8 +86,17 @@ def test_packing_journey() -> None:
     # 5. A zero budget packs nothing and reports everything as omitted.
     empty = pack("q", candidates, 0)
     assert not empty.items, "step 5: nothing fits in no budget"
-    assert len(empty.omitted) == len(candidates), "step 5: every candidate is still named"
-    assert empty.omitted[0].reason, "step 5: an omission keeps its reason"
+    assert len(empty.omitted) + empty.unlisted_omissions == len(candidates), (
+        "step 5: every candidate is at least counted"
+    )
+    assert empty.rendered_tokens == 0, "step 5: and the answer itself costs nothing"
+
+    # 6. The footer is trimmed before any evidence is, and the whole answer stays inside the budget.
+    footer = pack("q", candidates, 200)
+    assert footer.items, "step 6: evidence survives a budget the footer cannot fit in"
+    assert footer.rendered_tokens <= 200, "step 6: headings and footer are inside the budget too"
+    if footer.unlisted_omissions:
+        assert "not listed for budget" in footer.render(), "step 6: a trimmed footer says it was trimmed"
 
 
 def test_duplicate_regions_are_packed_once() -> None:

@@ -137,18 +137,28 @@ class Bundle:
     budget_tokens: int
     items: list[BundleItem] = field(default_factory=list)
     omitted: list[OmittedItem] = field(default_factory=list)
+    # Omissions the budget could not even name. Counted rather than listed, because a
+    # bundle that overspends its budget to say what it left out has missed the point.
+    unlisted_omissions: int = 0
 
     @property
     def total_tokens(self) -> int:
         """The estimated token cost of the packed items."""
         return sum(item.tokens for item in self.items)
 
+    @property
+    def rendered_tokens(self) -> int:
+        """The estimated token cost of the whole markdown answer, headings and footer included."""
+        return estimate_tokens(self.render())
+
     def files(self) -> list[str]:
         """The distinct files the bundle shows content from, in bundle order."""
         return list(dict.fromkeys(item.file_path for item in self.items))
 
     def render(self) -> str:
-        """Render the bundle as markdown."""
+        """Render the bundle as markdown, or nothing at all when no evidence survived the budget."""
+        if not self.items:
+            return ""
         lines = [f"# Evidence for: {self.query}", "", f"{len(self.items)} item(s), ~{self.total_tokens} tokens.", ""]
         for item in self.items:
             lines.append(_render_item(item))
@@ -157,6 +167,8 @@ class Bundle:
             lines += [
                 f"- {entry.file_path}:{entry.start_line}-{entry.end_line}  ({entry.reason})" for entry in self.omitted
             ]
+            if self.unlisted_omissions:
+                lines.append(f"- ... and {self.unlisted_omissions} more, not listed for budget")
             lines.append("")
         return "\n".join(lines)
 
@@ -166,6 +178,8 @@ class Bundle:
             "query": self.query,
             "budget_tokens": self.budget_tokens,
             "total_tokens": self.total_tokens,
+            "rendered_tokens": self.rendered_tokens,
+            "unlisted_omissions": self.unlisted_omissions,
             "items": [item.to_dict() for item in self.items],
             "omitted": [entry.to_dict() for entry in self.omitted],
         }
@@ -280,12 +294,17 @@ def _normalise(file_path: str) -> str:
 
 
 def _primary_files(results: Sequence[SearchResult], limit: int) -> list[str]:
-    """Return the files with the most fused score behind them, best first."""
-    totals: dict[str, float] = {}
+    """Return the files behind the best search hits, best first.
+
+    Ranked on a file's BEST chunk, not the sum of its chunks: summing rewards a
+    fragmented file with many mediocre hits over the file holding the single best
+    one, which is exactly how the real answer falls out of the primary set.
+    """
+    best: dict[str, float] = {}
     for result in results:
         path = _normalise(result.chunk.file_path)
-        totals[path] = totals.get(path, 0.0) + result.score
-    return [path for path, _ in sorted(totals.items(), key=lambda item: -item[1])[:limit]]
+        best[path] = max(best.get(path, 0.0), result.score)
+    return [path for path, _ in sorted(best.items(), key=lambda item: -item[1])[:limit]]
 
 
 def _overlapping(graph: GraphProvider, file_path: str, start_line: int, end_line: int) -> list[Symbol]:
@@ -536,7 +555,12 @@ def _expand(
     return candidates
 
 
-def pack(query: str, candidates: Sequence[_Candidate], budget_tokens: int) -> Bundle:
+def pack(
+    query: str,
+    candidates: Sequence[_Candidate],
+    budget_tokens: int,
+    omissions: Sequence[OmittedItem] = (),
+) -> Bundle:
     """Pack candidates into a bundle under a token budget.
 
     Order is tier first, then fused score, then discovery order. An item that does
@@ -551,10 +575,11 @@ def pack(query: str, candidates: Sequence[_Candidate], budget_tokens: int) -> Bu
     :param query: The query the bundle answers.
     :param candidates: The candidates to pack.
     :param budget_tokens: The maximum estimated tokens the packed items may cost.
+    :param omissions: Things the caller already knows it will not show, listed after the packed ones.
     :return: The packed bundle.
     """
     bundle = Bundle(query=query, budget_tokens=budget_tokens)
-    remaining = budget_tokens
+    remaining = budget_tokens - _frame_cost(query)
     seen: set[tuple[object, ...]] = set()
     ordered = [candidate for _, candidate in sorted(enumerate(candidates), key=_pack_order)]
     floors = _tier_floors(ordered)
@@ -571,7 +596,27 @@ def pack(query: str, candidates: Sequence[_Candidate], budget_tokens: int) -> Bu
             continue
         bundle.items.append(item)
         remaining -= item.tokens
+    for entry in omissions:
+        if len(bundle.omitted) < MAX_OMITTED:
+            bundle.omitted.append(entry)
+        else:
+            bundle.unlisted_omissions += 1
+    _trim_to_budget(bundle)
     return bundle
+
+
+def _frame_cost(query: str) -> int:
+    """Estimate what the title and the footer heading cost before any item is packed."""
+    return estimate_tokens(f"# Evidence for: {query}\n\n0 item(s), ~0 tokens.\n\n## Not included (locations only)\n\n")
+
+
+def _trim_to_budget(bundle: Bundle) -> None:
+    """Shrink the rendered answer until it fits, dropping the footer before any evidence."""
+    while bundle.rendered_tokens > bundle.budget_tokens and bundle.omitted:
+        bundle.omitted.pop()
+        bundle.unlisted_omissions += 1
+    while bundle.rendered_tokens > bundle.budget_tokens and bundle.items:
+        bundle.items.pop()
 
 
 def _pack_order(pair: tuple[int, _Candidate]) -> tuple[int, float, int]:
@@ -680,21 +725,18 @@ def build_bundle(
         return Bundle(query=query, budget_tokens=budget_tokens)
     primary = _primary_files(results, primary_files)
     candidates = _expand(graph, results, primary, bundle_sources)
-    bundle = pack(query, candidates, budget_tokens)
-    for result in results:
-        path = _normalise(result.chunk.file_path)
-        if path in primary or len(bundle.omitted) >= MAX_OMITTED:
-            continue
-        bundle.omitted.append(
-            OmittedItem(
-                kind=ItemKind.CHUNK,
-                file_path=path,
-                start_line=result.chunk.start_line,
-                end_line=result.chunk.end_line,
-                reason="search hit outside the primary files",
-            )
+    elsewhere = [
+        OmittedItem(
+            kind=ItemKind.CHUNK,
+            file_path=_normalise(result.chunk.file_path),
+            start_line=result.chunk.start_line,
+            end_line=result.chunk.end_line,
+            reason="search hit outside the primary files",
         )
-    return bundle
+        for result in results
+        if _normalise(result.chunk.file_path) not in primary
+    ]
+    return pack(query, candidates, budget_tokens, elsewhere)
 
 
 __all__ = [

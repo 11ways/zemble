@@ -103,7 +103,7 @@ def test_bundle_end_to_end(java_workspace: Path) -> None:
 
     # 4. Every item carries its own token cost and the total is honest.
     assert bundle.total_tokens == sum(item.tokens for item in bundle.items), "step 4: the total is the item sum"
-    assert bundle.total_tokens <= 4000, "step 4: the budget holds"
+    assert bundle.rendered_tokens <= 4000, "step 4: the whole rendered answer holds the budget"
 
     # 5. The markdown says what each item is and why.
     markdown = bundle.render()
@@ -114,7 +114,7 @@ def test_bundle_end_to_end(java_workspace: Path) -> None:
 
     # 6. A small budget keeps the same shape and still names what it dropped.
     tight = build_bundle(index, graph, "store a session against its token", 500)
-    assert tight.total_tokens <= 500, "step 6: the tight budget holds"
+    assert tight.rendered_tokens <= 500, "step 6: the tight budget holds for the rendered answer"
     assert tight.omitted, "step 6: what did not fit is still listed"
     assert "## Not included (locations only)" in tight.render(), "step 6: and is rendered as locations"
     graph.close()
