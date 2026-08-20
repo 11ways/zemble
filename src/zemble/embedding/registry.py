@@ -5,10 +5,6 @@ from __future__ import annotations
 import os
 
 from zemble.embedding.base import Embedder
-from zemble.embedding.cache import CachingEmbedder
-from zemble.embedding.model2vec import Model2VecEmbedder
-from zemble.embedding.openai_compat import DEFAULT_API_KEY_ENV, OpenAICompatibleEmbedder
-from zemble.embedding.voyage import VoyageEmbedder
 from zemble.utils import DEFAULT_MODEL_NAME
 
 DEFAULT_EMBEDDER_SPEC = f"model2vec:{DEFAULT_MODEL_NAME}"
@@ -69,6 +65,8 @@ def _build(spec: str) -> tuple[Embedder, str, str]:
         raise EmbedderSpecError(f"Embedder spec {spec!r} names no model")
 
     if scheme == "model2vec":
+        from zemble.embedding.model2vec import Model2VecEmbedder
+
         if "@" in rest:
             raise EmbedderSpecError(
                 f"Embedder spec {spec!r} sets dimensions, but a Model2Vec model's width is fixed by the model"
@@ -76,10 +74,14 @@ def _build(spec: str) -> tuple[Embedder, str, str]:
         return Model2VecEmbedder(rest), scheme, f"model2vec:{rest}"
 
     if scheme == "voyage":
+        from zemble.embedding.voyage import VoyageEmbedder
+
         model, dimensions = _split_dimensions(rest)
         if not model:
             raise EmbedderSpecError(f"Embedder spec {spec!r} names no model")
         return VoyageEmbedder(model, dimensions), scheme, f"voyage:{model}"
+
+    from zemble.embedding.openai_compat import DEFAULT_API_KEY_ENV, OpenAICompatibleEmbedder
 
     base_url, separator, tail = rest.partition("#")
     if not separator or not base_url.strip() or not tail.strip():
@@ -115,6 +117,8 @@ def parse_embedder_spec(spec: str) -> Embedder:
     """
     embedder, scheme, family = _build(spec)
     if scheme in _CACHED_SCHEMES and caching_enabled():
+        from zemble.embedding.cache import CachingEmbedder
+
         return CachingEmbedder(embedder, family)
     return embedder
 

@@ -151,9 +151,7 @@ def test_model2vec_embedder_loads_lazily(model_name: str, incomplete_cache: bool
     side_effect = [ValueError("Could not find expected model files"), fake_model] if incomplete_cache else None
     embedder = Model2VecEmbedder(model_name)
     assert embedder.model_id == f"model2vec:{model_name}"
-    with patch(
-        "zemble.embedding.model2vec.StaticModel.from_pretrained", return_value=fake_model, side_effect=side_effect
-    ) as mock_fp:
+    with patch("model2vec.StaticModel.from_pretrained", return_value=fake_model, side_effect=side_effect) as mock_fp:
         assert embedder.model is fake_model
     expected_calls = [call(model_name, force_download=False)]
     if incomplete_cache:

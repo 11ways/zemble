@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 from functools import cache
+from typing import TYPE_CHECKING
 
 import numpy as np
-from huggingface_hub.utils.tqdm import disable_progress_bars
-from model2vec import StaticModel
 
 from zemble.embedding.base import EmbeddingMatrix, normalize_rows
 
+if TYPE_CHECKING:
+    from model2vec import StaticModel
+
 
 @cache
-def load_static_model(model_path: str) -> StaticModel:
+def load_static_model(model_path: str) -> "StaticModel":
     """Load a Model2Vec model, retrying once with a forced download when the local cache is unusable."""
+    # model2vec drags in huggingface_hub, which is a fifth of a search's import budget and is
+    # needed only once a model is actually loaded.
+    from huggingface_hub.utils.tqdm import disable_progress_bars
+    from model2vec import StaticModel
+
     # Disable HF progress bars since the model is loaded silently in the background during indexing.
     disable_progress_bars()
     try:
@@ -34,10 +41,10 @@ class Model2VecEmbedder:
         :param model_path: A Hugging Face model id or a local directory.
         """
         self._model_path = model_path
-        self._model: StaticModel | None = None
+        self._model: "StaticModel | None" = None
 
     @property
-    def model(self) -> StaticModel:
+    def model(self) -> "StaticModel":
         """The underlying static model, loaded on first use."""
         if self._model is None:
             self._model = load_static_model(self._model_path)

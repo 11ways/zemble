@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import io
 import json
 import re
@@ -9,8 +8,6 @@ from importlib.util import find_spec
 from pathlib import Path
 from shutil import rmtree
 from typing import Literal
-
-from model2vec.utils import get_package_extras
 
 from zemble.cache import cache_key, resolve_cache_folder, save_index_to_cache
 from zemble.dedup.cli import add_dupes_parser, run_dupes
@@ -141,9 +138,13 @@ def _mcp_main() -> None:
     )
     _add_content_args(parser)
     args = parser.parse_args()
+    from model2vec.utils import get_package_extras
+
     if any(find_spec(dep) is None for dep in get_package_extras("zemble", "mcp")):
         print("MCP dependencies are not installed. Run: pip install 'zemble[mcp]'", file=sys.stderr)
         raise SystemExit(1)
+    import asyncio
+
     from zemble.mcp import serve
 
     content = _resolve_content(args.content, args.include_text_files)

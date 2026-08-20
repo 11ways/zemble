@@ -6,8 +6,6 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Callable, NoReturn, Sequence, TypeVar
 
-import questionary
-
 from zemble.installer.agents import (
     AGENTS,
     INSTRUCTIONS,
@@ -143,6 +141,8 @@ def _checkbox(prompt: str, items: Sequence[tuple[str, _T, bool]]) -> list[_T] | 
     """Show an interactive multi-select checkbox; return selected values or None if cancelled."""
     # prompt_toolkit defaults "selected" to reverse-video (a filled block); override it
     # so checked rows show a clean green ● and the cursor row is just bold.
+    import questionary
+
     style = questionary.Style(
         [
             ("pointer", "bold"),
@@ -224,6 +224,8 @@ def run(
 
     if not yes:
         question = "Proceed?" if install else "Remove zemble configuration?"
+        import questionary
+
         if not questionary.confirm(question, default=install).ask():
             _exit("Cancelled.")
 

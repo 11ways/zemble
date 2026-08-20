@@ -490,7 +490,7 @@ def test_checkbox(monkeypatch):
         def ask(self):
             return ["a"]
 
-    monkeypatch.setattr("zemble.installer.installer.questionary.checkbox", lambda *_, **__: _Fake())
+    monkeypatch.setattr("questionary.checkbox", lambda *_, **__: _Fake())
     assert _checkbox("Pick:", [("Option A", "a", False)]) == ["a"]
 
 
@@ -510,7 +510,7 @@ def test_run_completes(run_setup, monkeypatch, capsys):
         def ask(self):
             return True
 
-    monkeypatch.setattr("zemble.installer.installer.questionary.confirm", lambda *_, **__: _Yes())
+    monkeypatch.setattr("questionary.confirm", lambda *_, **__: _Yes())
     run("install")
     assert "Done!" in capsys.readouterr().out
 
@@ -522,7 +522,7 @@ def test_run_cancels(run_setup, monkeypatch):
         def ask(self):
             return False
 
-    monkeypatch.setattr("zemble.installer.installer.questionary.confirm", lambda *_, **__: _No())
+    monkeypatch.setattr("questionary.confirm", lambda *_, **__: _No())
     with pytest.raises(SystemExit):
         run("install")
 
@@ -620,7 +620,7 @@ def test_run_unattended_skips_prompts(run_setup, monkeypatch):
         raise AssertionError("should not prompt in unattended mode")
 
     monkeypatch.setattr("zemble.installer.installer._checkbox", _boom)
-    monkeypatch.setattr("zemble.installer.installer.questionary.confirm", _boom)
+    monkeypatch.setattr("questionary.confirm", _boom)
     run("install", agent_ids=["claude"], yes=True)
 
 
