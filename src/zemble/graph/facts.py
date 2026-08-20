@@ -15,18 +15,19 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
-import json
 import logging
 import os
 import time
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from zemble.graph.generated import GeneratedMapping, GeneratedSourceMapper
+import orjson
+
+from zemble.graph.generated import GeneratedMapping, GeneratedSourceMapper, template_is_newer
 from zemble.graph.model import (
     CALLABLE_KINDS,
     TYPE_KINDS,
@@ -151,6 +152,40 @@ class SkipBucket(Enum):
 
 
 @dataclass
+class SourceContribution:
+    """What mapping one declared source file put into the graph.
+
+    Kept per SOURCE rather than per facts file because a build maps only the sources it is
+    re-resolving: a per-file total could not then be updated without mapping the whole file
+    again, and would quietly drift instead.
+    """
+
+    edges: int = 0
+    external_targets: int = 0
+    generated_mapped: int = 0
+    buckets: Counter = field(default_factory=Counter)
+
+    def to_json(self) -> dict[str, object]:
+        """Return the shape stored in the graph's `facts_status` row."""
+        return {
+            "edges": self.edges,
+            "external_targets": self.external_targets,
+            "generated_mapped": self.generated_mapped,
+            "buckets": dict(self.buckets),
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict) -> SourceContribution:
+        """Rebuild a contribution stored by an earlier build."""
+        return cls(
+            edges=int(payload.get("edges", 0)),
+            external_targets=int(payload.get("external_targets", 0)),
+            generated_mapped=int(payload.get("generated_mapped", 0)),
+            buckets=Counter(payload.get("buckets", {})),
+        )
+
+
+@dataclass
 class FactsFile:
     """One parsed facts file."""
 
@@ -169,6 +204,14 @@ class FactsFile:
     #: are edges this facts file owns just as much as the ones it declares by path, so they
     #: are re-resolved with it when it moves.
     template_paths: set[str] = field(default_factory=set)
+    #: Generated source path -> (template it maps onto, whether the template was newer than it).
+    #: A later build re-decides that verdict with two `stat` calls instead of re-reading anything.
+    generated_templates: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    #: Skips this file's own parse decided, which no mapping can change.
+    parse_buckets: Counter = field(default_factory=Counter)
+    #: Declared source path -> what mapping it contributed. Only the sources this build
+    #: actually mapped are in here; the rest keep the accounting the graph already holds.
+    contributions: dict[str, SourceContribution] = field(default_factory=dict)
 
     @property
     def fresh_files(self) -> list[str]:
@@ -340,11 +383,11 @@ def matches_facts_glob(root: Path, path: Path) -> bool:
 # ---- loading -------------------------------------------------------------
 
 
-def _read_header(raw: str, path: Path) -> FactsHeader:
+def _read_header(raw: bytes, path: Path) -> FactsHeader:
     """Parse and validate line 1 of a facts file."""
     try:
-        payload = json.loads(raw)
-    except ValueError as error:
+        payload = orjson.loads(raw)
+    except orjson.JSONDecodeError as error:
         raise FactsFormatError(f"{path}: line 1 is not JSON") from error
     if not isinstance(payload, dict) or "zemble_facts" not in payload:
         raise FactsFormatError(f"{path}: line 1 is not a zemble facts header")
@@ -372,13 +415,24 @@ def file_sha256(path: Path) -> str | None:
     return digest.hexdigest()
 
 
+#: Resolved (facts root, written path) -> workspace-relative path, or None when it is outside.
+#: Every fact line of one source file writes the same path, and `Path.resolve` is a realpath
+#: syscall per call, so without this a facts file's own body costs a million of them.
+_RELATIVE_CACHE: dict[tuple[str, str, str], str | None] = {}
+
+
 def _relative_to_workspace(root: Path, facts_root: Path, declared: str) -> str | None:
     """Turn a path written in a facts file into a workspace-relative path."""
+    key = (str(root), str(facts_root), declared)
+    if key in _RELATIVE_CACHE:
+        return _RELATIVE_CACHE[key]
     candidate = (facts_root / declared).resolve()
     try:
-        return candidate.relative_to(root).as_posix()
+        resolved: str | None = candidate.relative_to(root).as_posix()
     except ValueError:
-        return None
+        resolved = None
+    _RELATIVE_CACHE[key] = resolved
+    return resolved
 
 
 def load_facts_file(path: Path, root: Path) -> FactsFile:
@@ -390,10 +444,10 @@ def load_facts_file(path: Path, root: Path) -> FactsFile:
     :raises FactsFormatError: If the header is missing, unreadable or of another version.
     """
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = path.read_bytes().split(b"\n")
     except OSError as error:
         raise FactsFormatError(f"{path}: cannot be read") from error
-    if not lines:
+    if not lines or not lines[0].strip():
         raise FactsFormatError(f"{path}: is empty")
     header = _read_header(lines[0], path)
     facts_root = Path(header.root)
@@ -419,7 +473,7 @@ def _display_path(root: Path, path: Path) -> str:
         return str(path)
 
 
-def _read_body(lines: Sequence[str], loaded: FactsFile, root: Path, facts_root: Path) -> None:
+def _read_body(lines: Sequence[bytes], loaded: FactsFile, root: Path, facts_root: Path) -> None:
     """Group every fact under the source file it was declared for."""
     current: SourceFacts | None = None
     outside: str | None = None
@@ -427,8 +481,8 @@ def _read_body(lines: Sequence[str], loaded: FactsFile, root: Path, facts_root: 
         if not raw.strip():
             continue
         try:
-            payload = json.loads(raw)
-        except ValueError:
+            payload = orjson.loads(raw)
+        except orjson.JSONDecodeError:
             loaded.unknown_kinds["(not json)"] += 1
             continue
         kind = payload.get("t") if isinstance(payload, dict) else None
@@ -463,6 +517,7 @@ def _record_unattached(
     if declared is None:
         loaded.orphan_facts += 1
         return
+    loaded.parse_buckets[SkipBucket.OUTSIDE_INDEX.value] += 1
     loaded.skipped.append(
         SkippedFact(
             bucket=SkipBucket.OUTSIDE_INDEX,
@@ -543,6 +598,19 @@ class MappedRef:
         return self.symbol_id is None and not self.external
 
 
+class DeclaredSymbols(Protocol):
+    """Where a `symbol` fact placed a ref, asked one ref at a time.
+
+    A plain dict satisfies it, and so does a table in the graph: a build that reads one facts
+    file must still be able to reach the `symbol` facts of every other one, and parsing them
+    all to answer a handful of refs is what this exists to avoid.
+    """
+
+    def get(self, ref: str) -> tuple[str, int] | None:
+        """Return the file path and line a `symbol` fact gave a ref, or None."""
+        ...
+
+
 @runtime_checkable
 class RefMapper(Protocol):
     """Maps a language's refs onto zemble symbol ids.
@@ -608,12 +676,12 @@ class JavaRefMapper:
 
     language = "java"
 
-    def __init__(self, symbols: Iterable[Symbol], declared: dict[str, tuple[str, int]] | None = None) -> None:
+    def __init__(self, symbols: Iterable[Symbol], declared: DeclaredSymbols | None = None) -> None:
         """Index the workspace symbols a ref can land on.
 
         :param symbols: Every symbol in the workspace.
-        :param declared: Optional `symbol` facts, ref -> (file path, line), used as a
-            second rung when name matching fails.
+        :param declared: Optional `symbol` facts, ref -> (file path, line), used as a second
+            rung when name matching fails.
         """
         self.by_id: dict[str, Symbol] = {}
         self.by_qualified: dict[str, list[Symbol]] = {}
@@ -625,7 +693,7 @@ class JavaRefMapper:
             self.by_position.setdefault((symbol.file_path, symbol.start_line), []).append(symbol)
             if symbol.container_id:
                 self.by_container.setdefault(symbol.container_id, []).append(symbol)
-        self.declared = declared or {}
+        self.declared: DeclaredSymbols = declared if declared is not None else {}
         self._numbered: dict[str, list[Symbol]] = {}
         self._locals: dict[tuple[str, str], list[Symbol]] = {}
         self._index_flat_names()
@@ -798,6 +866,11 @@ MAPPER_FACTORIES = {"java": JavaRefMapper}
 # ---- the overlay ---------------------------------------------------------
 
 
+#: Every symbol of the workspace, or a callable producing them. Mapping refs needs the whole
+#: table, and a build that maps nothing must never pay for materialising it.
+SymbolSource = Iterable[Symbol] | Callable[[], Iterable[Symbol]]
+
+
 @dataclass
 class FactsOverlay:
     """Every fact edge a workspace's facts files contribute, grouped by source file."""
@@ -823,6 +896,29 @@ class FactsOverlay:
     _ignored_prefixes: dict[str, str] = field(default_factory=dict, repr=False)
     #: Covered file -> the identities of the edges already collected for it.
     _edge_keys: dict[str, set[tuple]] = field(default_factory=dict, repr=False)
+    #: Facts file -> the declared sources of it this overlay has already mapped. A build maps
+    #: only the sources its targets need, so the rest keep the accounting the graph holds.
+    mapped_sources: dict[str, set[str]] = field(default_factory=dict)
+    #: Ref mappers built so far, per language, so a second round of mapping reuses them.
+    mappers: dict[str, RefMapper] = field(default_factory=dict, repr=False)
+    _symbols: list[Symbol] | None = field(default=None, repr=False)
+
+    @property
+    def materialised_symbols(self) -> list[Symbol] | None:
+        """The workspace symbols, if mapping already had to read them; None otherwise."""
+        return self._symbols
+
+    def symbols(self, source: SymbolSource) -> list[Symbol]:
+        """Materialise the workspace symbols once, however many rounds of mapping there are."""
+        if self._symbols is None:
+            self._symbols = list(source() if callable(source) else source)
+            self.generated = GeneratedSourceMapper(self.root, self._symbols)
+        return self._symbols
+
+    @property
+    def mapped_files(self) -> set[str]:
+        """The facts files this overlay mapped anything of."""
+        return set(self.mapped_sources)
 
     def kinds_owned(self, file_path: str) -> frozenset[EdgeKind]:
         """Return the edge kinds whose extracted edges this file's facts replace.
@@ -910,64 +1006,148 @@ class FactsOverlay:
         }
 
 
-def load_overlay(root: Path, symbols: Iterable[Symbol]) -> FactsOverlay:
-    """Discover, read and map every facts file of a workspace.
+#: What one facts file must be mapped for: a set of declared source paths, or None for all
+#: of them. A build asks for only the sources it is re-resolving, so the rest of a facts file
+#: keeps the edges and the accounting the graph already holds for it.
+MappingRequest = dict[str, set[str] | None]
+
+
+def load_overlay(
+    root: Path, symbols: SymbolSource, *, paths: Sequence[Path] | None = None, mapped: MappingRequest | None = None
+) -> FactsOverlay:
+    """Discover, read and map the facts files of a workspace.
 
     :param root: The workspace root.
-    :param symbols: Every symbol zemble extracted, which the refs are mapped onto.
+    :param symbols: Every symbol zemble extracted, or a callable producing them.
+    :param paths: The facts files to read; None discovers them.
+    :param mapped: Per facts file, the sources to turn into edges; None maps every one whole.
     :return: The overlay, ready to be applied to a resolved edge list.
     """
-    overlay = FactsOverlay(root=root)
-    symbol_list = list(symbols)
-    overlay.generated = GeneratedSourceMapper(root, symbol_list)
-    for path in discover_facts_files(root):
-        try:
-            loaded = load_facts_file(path, root)
-            overlay.files.append(loaded)
-            overlay.skipped.extend(loaded.skipped)
-        except FactsFormatError as error:
-            overlay.errors.append((_display_path(root, path), str(error)))
-            logger.warning("Ignoring facts file: %s", error)
-    _map_overlay(overlay, symbol_list)
+    overlay = read_facts_files(root, paths)
+    request = {loaded.relative_path: None for loaded in overlay.files} if mapped is None else mapped
+    map_facts_files(overlay, symbols, request)
     return overlay
 
 
-def _map_overlay(overlay: FactsOverlay, symbols: list[Symbol]) -> None:
-    """Turn every fresh file's facts into edges, recording what could not be mapped."""
-    mappers: dict[str, RefMapper] = {}
-    lines = {symbol.id: symbol.start_line for symbol in symbols}
+def read_facts_files(root: Path, paths: Sequence[Path] | None = None) -> FactsOverlay:
+    """Parse facts files into an overlay, deciding per source file whether it is still fresh."""
+    overlay = FactsOverlay(root=root)
+    for path in discover_facts_files(root) if paths is None else paths:
+        try:
+            overlay.files.append(load_facts_file(path, root))
+        except FactsFormatError as error:
+            overlay.errors.append((_display_path(root, path), str(error)))
+            logger.warning("Ignoring facts file: %s", error)
+    return overlay
+
+
+def map_facts_files(
+    overlay: FactsOverlay,
+    symbols: SymbolSource,
+    request: MappingRequest,
+    declared: DeclaredSymbols | None = None,
+) -> None:
+    """Turn the requested sources into edges, recording what could not be mapped.
+
+    Callable more than once: a build learns from one round of mapping which further facts
+    files cover a file it is now re-resolving, and asks for those too. Nothing here reads the
+    symbol table until a source that is actually fresh has to be mapped, because a source
+    whose content moved on contributes no edge and needs no lookup to say so.
+
+    :param declared: Where a `symbol` fact placed a ref, for the whole workspace. None falls
+        back to the `symbol` facts of the files this overlay itself parsed, which is only the
+        whole workspace when it parsed all of them.
+    """
+    work: list[tuple[FactsFile, list[SourceFacts]]] = []
     for loaded in overlay.files:
+        if loaded.relative_path not in request:
+            continue
+        only = request[loaded.relative_path]
+        done = overlay.mapped_sources.get(loaded.relative_path, set())
+        chosen = [
+            source
+            for source in loaded.sources.values()
+            if (only is None or source.path in only) and source.path not in done
+        ]
+        if chosen:
+            work.append((loaded, chosen))
+    if not work:
+        return
+    if not any(source.fresh for _, chosen in work for source in chosen):
+        # Nothing fresh to map: record the staleness, which the parse alone already decided.
+        for loaded, chosen in work:
+            _mark_mapped(overlay, loaded, chosen)
+            _map_file(overlay, loaded, _NO_MAPPER, {}, chosen)
+        return
+    symbol_list = overlay.symbols(symbols)
+    lines = {symbol.id: symbol.start_line for symbol in symbol_list}
+    for loaded, chosen in work:
         factory = MAPPER_FACTORIES.get(loaded.header.language)
         if factory is None:
             overlay.errors.append((loaded.relative_path, f"no ref mapper for language {loaded.header.language!r}"))
             continue
-        mapper = mappers.get(loaded.header.language)
+        mapper = overlay.mappers.get(loaded.header.language)
         if mapper is None:
-            mapper = factory(symbols, _declared_symbols(overlay.files, loaded.header.language))
-            mappers[loaded.header.language] = mapper
-        _map_file(overlay, loaded, mapper, lines)
+            found = declared if declared is not None else _declared_symbols(overlay.files, loaded.header.language)
+            mapper = factory(symbol_list, found)
+            overlay.mappers[loaded.header.language] = mapper
+        _mark_mapped(overlay, loaded, chosen)
+        _map_file(overlay, loaded, mapper, lines, chosen)
+
+
+def _mark_mapped(overlay: FactsOverlay, loaded: FactsFile, chosen: list[SourceFacts]) -> None:
+    """Record which sources of a facts file are now mapped, once per facts file."""
+    done = overlay.mapped_sources.setdefault(loaded.relative_path, set())
+    if not done:
+        overlay.skipped.extend(loaded.skipped)
+    done.update(source.path for source in chosen)
+
+
+class _NoMapper:
+    """Stands in where a source is known to be stale, so no ref is ever mapped through it."""
+
+    def map_ref(self, ref: str) -> MappedRef:  # pragma: no cover - a stale source maps nothing
+        """Refuse every ref: reaching this would mean a stale source was mapped after all."""
+        raise AssertionError(f"a stale source cannot map {ref}")
+
+
+_NO_MAPPER = _NoMapper()
+
+
+def symbol_facts(loaded: FactsFile) -> Iterator[tuple[str, str, int]]:
+    """Yield every `symbol` fact of one parsed facts file as (ref, source path, line).
+
+    In the order it was written, because two facts of one file may name the same ref and the
+    last one is the one a reader takes.
+    """
+    for source in loaded.sources.values():
+        for payload in source.facts:
+            ref, line = payload.get("ref"), payload.get("line")
+            if payload.get("t") == "symbol" and isinstance(ref, str) and isinstance(line, int):
+                yield ref, source.path, line
 
 
 def _declared_symbols(files: list[FactsFile], language: str) -> dict[str, tuple[str, int]]:
-    """Collect every `symbol` fact of one language as ref -> (file path, line)."""
+    """Collect every `symbol` fact of one language as ref -> (file path, line).
+
+    Sorted by facts file, because two files may declare the same ref and a build must not
+    depend on the order it happened to read them in.
+    """
     declared: dict[str, tuple[str, int]] = {}
-    for loaded in files:
+    for loaded in sorted(files, key=lambda entry: entry.relative_path):
         if loaded.header.language != language:
             continue
-        for source in loaded.sources.values():
-            for payload in source.facts:
-                if payload.get("t") != "symbol":
-                    continue
-                ref = payload.get("ref")
-                line = payload.get("line")
-                if isinstance(ref, str) and isinstance(line, int):
-                    declared[ref] = (source.path, line)
+        for ref, path, line in symbol_facts(loaded):
+            declared[ref] = (path, line)
     return declared
 
 
-def _map_file(overlay: FactsOverlay, loaded: FactsFile, mapper: RefMapper, lines: dict[str, int]) -> None:
-    """Map one facts file's fresh sources into edges, merging with any already collected."""
-    for source in loaded.sources.values():
+def _map_file(
+    overlay: FactsOverlay, loaded: FactsFile, mapper: RefMapper, lines: dict[str, int], sources: list[SourceFacts]
+) -> None:
+    """Map the chosen sources of one facts file into edges, merging with what is collected."""
+    for source in sources:
+        loaded.contributions[source.path] = SourceContribution()
         if not source.fresh:
             _record_stale(overlay, loaded, source)
             continue
@@ -980,8 +1160,16 @@ def _map_file(overlay: FactsOverlay, loaded: FactsFile, mapper: RefMapper, lines
             if kind is None:
                 continue
             edge = _edge_from_fact(payload, kind, source, loaded, mapper, overlay, lines)
-            if edge is not None:
-                _collect(overlay, source.path, edge)
+            if edge is not None and _collect(overlay, source.path, edge):
+                loaded.contributions[source.path].edges += 1
+
+
+def _skip(overlay: FactsOverlay, loaded: FactsFile, entry: SkippedFact) -> None:
+    """Record one fact that never became an edge, on the overlay and on its source's account."""
+    overlay.skipped.append(entry)
+    contribution = loaded.contributions.get(entry.source_path)
+    if contribution is not None:
+        contribution.buckets[entry.bucket.value] += 1
 
 
 def _collect(overlay: FactsOverlay, file_path: str, edge: Edge) -> bool:
@@ -1014,6 +1202,7 @@ def _map_generated_source(overlay: FactsOverlay, loaded: FactsFile, source: Sour
             continue
         line = payload.get("line")
         mapped = overlay.generated.resolve(source.path, line if isinstance(line, int) else 0)
+        loaded.generated_templates[source.path] = (mapped.template_path or "", mapped.stale)
         if not mapped.mapped:
             bucket = SkipBucket.STALE if mapped.stale else SkipBucket.GENERATED_NO_TEMPLATE
             _record_generated_skip(overlay, loaded, source, kind, mapped.reason, bucket=bucket)
@@ -1028,7 +1217,9 @@ def _map_generated_source(overlay: FactsOverlay, loaded: FactsFile, source: Sour
         # Counted per FACT, not per edge: several generated call sites collapse onto one
         # template line, and the count answers "how much did the source map recover".
         overlay.generated_mapped += 1
-        _collect(overlay, template_path, edge)
+        loaded.contributions[source.path].generated_mapped += 1
+        if _collect(overlay, template_path, edge):
+            loaded.contributions[source.path].edges += 1
 
 
 def _template_edge(
@@ -1047,7 +1238,9 @@ def _template_edge(
         return None
     target = mapper.map_ref(to_ref)
     if target.unmapped:
-        overlay.skipped.append(
+        _skip(
+            overlay,
+            loaded,
             SkippedFact(
                 bucket=SkipBucket.UNMAPPED,
                 subject=to_ref,
@@ -1055,11 +1248,12 @@ def _template_edge(
                 fact_kind=EdgeKind.CALLS.value,
                 facts_file=loaded.relative_path,
                 source_path=source.path,
-            )
+            ),
         )
         return None
     if target.external:
         overlay.external_targets += 1
+        loaded.contributions[source.path].external_targets += 1
     parsed = parse_java_ref(to_ref)
     return Edge(
         src_id=mapped.symbol_id or "",
@@ -1084,7 +1278,9 @@ def _record_generated_skip(
     bucket: SkipBucket = SkipBucket.GENERATED_NO_TEMPLATE,
 ) -> None:
     """Count one generated-source fact that never reached a template."""
-    overlay.skipped.append(
+    _skip(
+        overlay,
+        loaded,
         SkippedFact(
             bucket=bucket,
             subject=source.path,
@@ -1092,7 +1288,7 @@ def _record_generated_skip(
             fact_kind=kind.value,
             facts_file=loaded.relative_path,
             source_path=source.path,
-        )
+        ),
     )
 
 
@@ -1104,7 +1300,9 @@ def _record_stale(overlay: FactsOverlay, loaded: FactsFile, source: SourceFacts)
         kind = _EDGE_KIND_BY_FACT.get(str(payload.get("t")))
         if kind is None:
             continue
-        overlay.skipped.append(
+        _skip(
+            overlay,
+            loaded,
             SkippedFact(
                 bucket=bucket,
                 subject=source.path,
@@ -1112,7 +1310,7 @@ def _record_stale(overlay: FactsOverlay, loaded: FactsFile, source: SourceFacts)
                 fact_kind=kind.value,
                 facts_file=loaded.relative_path,
                 source_path=source.path,
-            )
+            ),
         )
 
 
@@ -1146,7 +1344,9 @@ def _edge_from_fact(
             if classified is not None
             else (SkipBucket.UNMAPPED, origin.reason or "the source of an edge is outside the workspace")
         )
-        overlay.skipped.append(
+        _skip(
+            overlay,
+            loaded,
             SkippedFact(
                 bucket=bucket,
                 subject=from_ref if bucket is SkipBucket.UNMAPPED else source.path,
@@ -1154,12 +1354,14 @@ def _edge_from_fact(
                 fact_kind=kind.value,
                 facts_file=loaded.relative_path,
                 source_path=source.path,
-            )
+            ),
         )
         return None
     target = mapper.map_ref(to_ref)
     if target.unmapped:
-        overlay.skipped.append(
+        _skip(
+            overlay,
+            loaded,
             SkippedFact(
                 bucket=SkipBucket.UNMAPPED,
                 subject=to_ref,
@@ -1167,11 +1369,12 @@ def _edge_from_fact(
                 fact_kind=kind.value,
                 facts_file=loaded.relative_path,
                 source_path=source.path,
-            )
+            ),
         )
         return None
     if target.external:
         overlay.external_targets += 1
+        loaded.contributions[source.path].external_targets += 1
     # `override`, `extends` and `implements` facts carry no line: the declaration's own
     # line is the honest answer, and is what the derived tree-sitter edges use too.
     line = payload.get("line")
@@ -1191,3 +1394,124 @@ def _edge_from_fact(
         is_new=parsed.is_constructor,
         source=loaded.header.tool,
     )
+
+
+# ---- incremental planning ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FactsFileState:
+    """What a previous build recorded about one facts file, read back from the graph."""
+
+    relative_path: str
+    mtime_ns: int
+    size: int
+    #: The source files the facts file declares.
+    sources: frozenset[str]
+    #: The templates its generated-source facts were mapped onto.
+    template_paths: frozenset[str]
+    #: Generated source path -> (template it maps onto, whether the template was newer than it).
+    generated: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    #: Declared source path -> what mapping it contributed, so a build that maps only part of
+    #: a facts file can carry the rest of its accounting forward untouched.
+    contributions: dict[str, SourceContribution] = field(default_factory=dict)
+
+    @property
+    def covers(self) -> frozenset[str]:
+        """Every source file whose overlay edges this facts file owns."""
+        return self.sources | self.template_paths
+
+
+@dataclass(frozen=True)
+class FactsPlan:
+    """Which facts files a build must map again, and what that alone invalidates."""
+
+    #: Relative path -> the facts file on disk, as discovered for this build.
+    present: dict[str, Path]
+    #: Relative path -> what the previous build recorded.
+    states: dict[str, FactsFileState]
+    #: Facts files that appeared, changed or vanished.
+    moved: frozenset[str]
+    #: Source files whose overlay edges this build must rebuild whatever else it touches.
+    invalidated: frozenset[str]
+
+    @property
+    def paths(self) -> list[Path]:
+        """Every facts file to read, in a stable order."""
+        return [self.present[relative] for relative in sorted(self.present)]
+
+    def moved_coverage(self, overlay: FactsOverlay) -> set[str]:
+        """Return the source files a moved facts file covers, as the freshly read file says.
+
+        Only mapping can tell which templates a generated-source fact reaches, so this is asked
+        after the first round and decides which further files the build must re-resolve.
+        """
+        return {
+            path
+            for loaded in overlay.files
+            if loaded.relative_path in self.moved
+            for path in (set(loaded.sources) | loaded.template_paths)
+        }
+
+    @property
+    def vanished(self) -> frozenset[str]:
+        """Facts files the graph remembers that are no longer on disk."""
+        return frozenset(self.states) - frozenset(self.present)
+
+    def mapping_request(self, targets: set[str]) -> MappingRequest:
+        """Return, per facts file, the declared sources this build must map from it.
+
+        A file that moved is mapped whole, because its content decides everything about it. A
+        file that did not is asked only for the sources the build is re-resolving: every other
+        source it covers keeps the edges - and the accounting - already stored for it.
+        """
+        request: MappingRequest = {}
+        for relative in self.present:
+            state = self.states.get(relative)
+            if relative in self.moved or state is None:
+                request[relative] = None
+                continue
+            needed = set(state.sources & targets)
+            needed |= {source for source, (template, _) in state.generated.items() if template in targets}
+            if needed:
+                request[relative] = needed
+        return request
+
+
+def plan_facts(root: Path, present: dict[str, Path], states: dict[str, FactsFileState]) -> FactsPlan:
+    """Decide, from `stat` alone, which facts files moved and what that invalidates.
+
+    Two things move a facts file: its own bytes and its disappearance. A third thing changes
+    what it CONTRIBUTES without moving it - the modification time of a template it mapped facts
+    onto crossing the generated class it was compiled into - and that invalidates the template
+    alone. It is why `template newer than generated source` no longer costs a re-resolution of
+    every mapped template on every build: the verdict is recorded per generated source and
+    re-decided with two stats.
+    """
+    moved: set[str] = set()
+    invalidated: set[str] = set()
+    for relative, path in present.items():
+        state = states.get(relative)
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if state is None:
+            moved.add(relative)
+            continue
+        if (state.mtime_ns, state.size) != (stat.st_mtime_ns, stat.st_size):
+            moved.add(relative)
+            invalidated |= state.covers
+            continue
+        # A template whose freshness flipped invalidates that template and nothing else: the
+        # facts file itself did not move, so every other source it covers is untouched.
+        invalidated |= {
+            template
+            for generated, (template, was_stale) in state.generated.items()
+            if template and template_is_newer(root, template, generated) != was_stale
+        }
+    for relative, state in states.items():
+        if relative not in present:
+            moved.add(relative)
+            invalidated |= state.covers
+    return FactsPlan(present=present, states=states, moved=frozenset(moved), invalidated=frozenset(invalidated))

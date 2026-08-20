@@ -73,6 +73,25 @@ def camel_case_identifier(identifier: str) -> str:
     return "".join(result)
 
 
+def template_is_newer(root: Path, template_path: str, source_path: str) -> bool:
+    """Return whether a template was edited after the class was generated from it.
+
+    Hawkeye records no hash of the template inside its output, so modification time is the
+    only handle. A missing file answers False: the sha of the generated source already
+    decided that javac saw what is on disk, and inventing staleness out of a stat error
+    would drop true facts.
+
+    This is the whole freshness rule for mapped templates, and an incremental build re-decides
+    it with these two stats rather than by re-resolving every template a facts file touched.
+    """
+    try:
+        template = (root / template_path).stat().st_mtime_ns
+        generated = (root / source_path).stat().st_mtime_ns
+    except OSError:
+        return False
+    return template > generated
+
+
 @dataclass(frozen=True)
 class GeneratedOrigin:
     """The pieces of a generated Java path a template is looked up by."""
@@ -347,19 +366,8 @@ class GeneratedSourceMapper:
         return found
 
     def _template_is_newer(self, template_path: str, source_path: str) -> bool:
-        """Return whether the template was edited after the class was generated from it.
-
-        Hawkeye records no hash of the template inside its output, so modification time is the
-        only handle. A missing file answers False: the sha of the generated source already
-        decided that javac saw what is on disk, and inventing staleness out of a stat error
-        would drop true facts.
-        """
-        try:
-            template = (self.root / template_path).stat().st_mtime_ns
-            generated = (self.root / source_path).stat().st_mtime_ns
-        except OSError:
-            return False
-        return template > generated
+        """Return whether the template was edited after the class was generated from it."""
+        return template_is_newer(self.root, template_path, source_path)
 
     def _template_line(self, found: _GeneratedFile, java_line: int) -> int | None:
         """Look a generated Java line up in the line map, floor-style like Hawkeye does."""
