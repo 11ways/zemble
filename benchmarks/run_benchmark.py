@@ -19,8 +19,8 @@ from benchmarks.data import (
 )
 from benchmarks.metrics import ndcg_at_k, target_rank
 from zemble import ZembleIndex
+from zemble.embedding.registry import resolve_embedder_spec
 from zemble.types import SearchResult
-from zemble.utils import DEFAULT_MODEL_NAME
 
 _LATENCY_RUNS = 5
 _DIRECT_TOP_K = 10
@@ -278,7 +278,7 @@ def _save_results(results: list[RepoResult], label: str) -> None:
     n_repos = len(results)
     output = {
         "tool": label,
-        "model": DEFAULT_MODEL_NAME,
+        "model": resolve_embedder_spec(),
         "summary": {
             "ndcg10": round(sum(r.ndcg10 for r in results) / n_repos, 4),
             "tokens": round(sum(r.tokens for r in results) / n_repos, 0),
@@ -315,6 +315,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark hybrid zemble search across the pinned benchmark repos.")
     add_filter_args(parser, verbose=True)
     add_repo_source_args(parser)
+    parser.add_argument(
+        "--label-suffix",
+        default="",
+        help="Appended to the result label, so runs that differ only by environment do not overwrite each other.",
+    )
     args = parser.parse_args()
     repo_specs, tasks = load_filtered_tasks(
         args.repo or None, args.language or None, args.repos_file, args.annotations_dir
@@ -327,7 +332,8 @@ def main() -> None:
     results = _bench_quality(repo_tasks, repo_specs, verbose=args.verbose)
     _print_summary(results)
     if not args.repo and not args.language:
-        _save_results(results, results_label("zemble-hybrid", args.repos_file, list(repo_tasks)))
+        label = results_label("zemble-hybrid", args.repos_file, list(repo_tasks))
+        _save_results(results, f"{label}-{args.label_suffix}" if args.label_suffix else label)
 
 
 if __name__ == "__main__":
