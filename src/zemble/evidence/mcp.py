@@ -23,6 +23,13 @@ IndexGetter = Callable[[str, Sequence[ContentType]], Awaitable[ZembleIndex]]
 
 DEFAULT_MCP_BUDGET = 2500
 
+# The vocabulary is derived from ContentType rather than spelled out again; the value
+# is resolved by `zemble.mcp._resolve_content_selection`, which refuses an unknown one.
+_CONTENT_DESCRIPTION = (
+    f"Content to search: {', '.join(kind.value for kind in ContentType)} or all. "
+    "Defaults to the content the server was configured with."
+)
+
 _REPO_DESCRIPTION = (
     "Local directory path of the workspace. Both the code index and the Java symbol graph are built "
     "on first use and refreshed once per server process."
@@ -94,6 +101,10 @@ def register_evidence_tools(
             Field(description="Token budget for the whole bundle.", ge=200, le=50_000),
         ] = DEFAULT_MCP_BUDGET,
         top_k: Annotated[int, Field(description="Search results to expand.", ge=1, le=50)] = 20,
+        content: Annotated[
+            str | None,
+            Field(description=_CONTENT_DESCRIPTION),
+        ] = None,
     ) -> str:
         """Get a budgeted evidence bundle instead of reading whole files.
 
@@ -103,7 +114,11 @@ def register_evidence_tools(
         anything that did not fit is listed as a location so you know it exists.
         Prefer this over `search` plus several `Read` calls.
         """
-        index = await get_index(repo, tuple(default_content))
+        # Imported here: `zemble.mcp` imports this module, so the reverse import can
+        # only run once the server is being built.
+        from zemble.mcp import _resolve_content_selection
+
+        index = await get_index(repo, _resolve_content_selection(content, default_content))
         return await asyncio.to_thread(_bundle_markdown, index, repo, query, budget, top_k)
 
     @server.tool()
