@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 
 _SLUG_UNSAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 
+#: Misses are handed to the provider in slices of this many texts, and every slice is
+#: written to sqlite before the next one is asked for. A cold workspace index is a single
+#: ``embed_documents`` call of tens of thousands of texts and half an hour of paid requests;
+#: without a flush boundary one failure at the end throws away every vector already bought.
+FLUSH_EVERY = 512
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS embeddings (
     text_sha256 TEXT NOT NULL,
@@ -173,10 +179,11 @@ class CachingEmbedder:
             first_position[digest] = position
             missing_positions.append(position)
 
-        if missing_positions:
-            fresh = self.inner.embed_documents([texts[position] for position in missing_positions])
+        for start in range(0, len(missing_positions), FLUSH_EVERY):
+            slice_positions = missing_positions[start : start + FLUSH_EVERY]
+            fresh = self.inner.embed_documents([texts[position] for position in slice_positions])
             store: list[tuple[str, int, np.ndarray]] = []
-            for row, position in enumerate(missing_positions):
+            for row, position in enumerate(slice_positions):
                 result[position] = fresh[row]
                 store.append((digests[position], dims, fresh[row]))
             self.cache.put_many(store)

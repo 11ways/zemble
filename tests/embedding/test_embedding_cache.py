@@ -140,3 +140,35 @@ def test_family_slug_shortens_long_names() -> None:
     slug = family_slug("openai:" + "x" * 500 + "#model")
     assert len(slug) <= 80
     assert slug != family_slug("openai:" + "y" * 500 + "#model")
+
+
+def test_a_failure_mid_call_keeps_the_vectors_already_paid_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Misses are flushed to sqlite per slice, so a provider failure loses only the slice in flight."""
+    monkeypatch.setattr("zemble.embedding.cache.FLUSH_EVERY", 2)
+    texts = [f"chunk {index}" for index in range(6)]
+
+    class FailsOnTheThirdSlice(CountingEmbedder):
+        """Serves two slices, then refuses."""
+
+        def embed_documents(self, batch: list[str]) -> npt.NDArray[np.float32]:
+            """Fail once two slices have been served."""
+            if len(self.document_batches) == 2:
+                raise RuntimeError("provider went away")
+            return super().embed_documents(batch)
+
+    # 1. The provider dies part-way through a single logical call.
+    failing = FailsOnTheThirdSlice(dimensions=8)
+    embedder = CachingEmbedder(failing, "fake:counting", tmp_path)
+    with pytest.raises(RuntimeError):
+        embedder.embed_documents(texts)
+    assert failing.document_batches == [texts[0:2], texts[2:4]], "step 1: two slices must have been served"
+
+    # 2. The four vectors that were paid for survive in sqlite.
+    cache = EmbeddingCache("fake:counting", tmp_path)
+    stored = [text for text in texts if cache.get(text_hash(text), 8) is not None]
+    assert stored == texts[:4], "step 2: every flushed slice must be readable back"
+
+    # 3. A retry only pays for what is still missing.
+    healthy = CountingEmbedder(dimensions=8)
+    CachingEmbedder(healthy, "fake:counting", tmp_path).embed_documents(texts)
+    assert healthy.document_batches == [texts[4:6]], "step 3: the retry must ask only for the unflushed tail"
