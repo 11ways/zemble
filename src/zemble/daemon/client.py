@@ -30,12 +30,25 @@ from zemble.daemon.protocol import (
     read_pid,
     socket_path,
 )
+from zemble.utils import is_git_url
 
 logger = logging.getLogger(__name__)
 
 _request_ids = count(1)
 #: Set once a process must never talk to a daemon: the daemon itself, or --no-daemon.
 _disabled_reason: str | None = None
+
+
+def absolutize_path(args: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a local ``path`` argument against THIS process's cwd before it leaves the process.
+
+    The daemon runs with cwd ``/`` and cannot know the caller's directory; a relative path sent
+    as-is would make it index the filesystem root. Git URLs pass through untouched.
+    """
+    path = args.get("path")
+    if isinstance(path, str) and path and not is_git_url(path):
+        return {**args, "path": os.path.abspath(os.path.expanduser(path))}
+    return args
 
 
 def disable_for_this_process(reason: str) -> None:
@@ -167,7 +180,7 @@ def call(cmd: str, args: dict[str, Any] | None = None, *, auto_start: bool = Tru
     try:
         client.settimeout(timeout)
         with client, client.makefile("rwb") as stream:
-            stream.write(encode({"id": request_id, "cmd": cmd, "args": args or {}}))
+            stream.write(encode({"id": request_id, "cmd": cmd, "args": absolutize_path(args or {})}))
             stream.flush()
             line = stream.readline()
     except (OSError, TimeoutError) as exc:

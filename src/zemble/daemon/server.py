@@ -169,9 +169,7 @@ class Daemon:
         :return: The cache key and the index.
         :raises ValueError: If no path was given.
         """
-        path = args.get("path")
-        if not path:
-            raise ValueError("missing 'path'")
+        path = _root_of(args)
         if is_git_url(str(path)) and not str(path).startswith(("https://", "http://")):
             raise ValueError(f"Only https://, http://, or local directory paths are accepted. Got: {path!r}")
         content = _content_types(args.get("content"))
@@ -518,7 +516,11 @@ def _root_of(args: dict[str, Any]) -> str:
     root = args.get("path")
     if not root:
         raise ValueError("missing 'path'")
-    return str(root)
+    root = str(root)
+    if not is_git_url(root) and not os.path.isabs(root):
+        # The daemon's cwd is "/"; resolving a relative path here would index the whole filesystem.
+        raise ValueError(f"daemon needs an absolute path, got {root!r}")
+    return root
 
 
 async def _cmd_explain(daemon: Daemon, args: dict[str, Any]) -> Any:
