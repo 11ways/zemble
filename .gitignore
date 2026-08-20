@@ -9,6 +9,10 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+#   A fixture workspace ships real Hawkeye output, `build/` segment and all: without
+#   these two negations `git add` silently skips the whole generated fixture.
+!tests/fixtures/**/build/
+!tests/fixtures/**/build/**
 develop-eggs/
 dist/
 downloads/

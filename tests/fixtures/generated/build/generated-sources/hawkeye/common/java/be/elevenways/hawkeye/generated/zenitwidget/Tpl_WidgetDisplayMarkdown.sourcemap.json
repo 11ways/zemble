@@ -1,0 +1,8 @@
+{
+    "templatePath": "widget-display/markdown",
+    "generatedClass": "be.elevenways.hawkeye.generated.zenitwidget.Tpl_WidgetDisplayMarkdown",
+    "mappings": [
+        {"javaLine": 61, "templateLine": 6},
+        {"javaLine": 73, "templateLine": 8}
+    ]
+}
