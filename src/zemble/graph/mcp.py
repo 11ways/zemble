@@ -48,6 +48,7 @@ def _hit_json(hit: Hit) -> dict[str, Any]:
         "edge_kind": hit.edge_kind.value,
         "resolution": hit.resolution.value,
         "depth": hit.depth,
+        "source": hit.source,
         "reason": hit.reason,
     }
 

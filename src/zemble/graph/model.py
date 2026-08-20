@@ -115,6 +115,9 @@ class Edge:
     receiver_type: str | None = None
     # True for `new Foo(...)`, `this(...)` and `super(...)`: the call targets a constructor.
     is_new: bool = False
+    # Who produced this edge: "tree-sitter" for zemble's own extractor, else the `tool`
+    # name of the facts file that replaced it (see `zemble.graph.facts`).
+    source: str = "tree-sitter"
 
 
 @dataclass
@@ -128,3 +131,5 @@ class Hit:
     reason: str
     # Hops from the queried symbol, for the transitive hierarchy and neighbour walks.
     depth: int = 1
+    # The edge's producer: "tree-sitter" or the name of the tool whose facts replaced it.
+    source: str = "tree-sitter"

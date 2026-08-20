@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Iterable, Sequence
 from typing import Protocol, runtime_checkable
 
+from zemble.graph.facts import TREE_SITTER_SOURCE
 from zemble.graph.model import TYPE_KINDS, Edge, EdgeKind, Hit, Resolution, Symbol
 from zemble.graph.store import connect, edge_from_row, symbol_from_row
 
@@ -112,12 +113,18 @@ def display_name(symbol: Symbol) -> str:
 
 
 def _reason(symbol: Symbol, edge: Edge, depth: int = 1, *, outgoing: bool = False) -> str:
-    """Build the one-line sentence explaining why a hit is in the answer."""
+    """Build the one-line sentence explaining why a hit is in the answer.
+
+    An edge an external tool wrote names that tool instead of a resolution grade: the
+    grade is always `exact` there, and which tool said so is the part worth reading.
+    """
     table = _VERBS_OUT if outgoing else _VERBS
     verb = table.get(edge.kind, edge.kind.value)
     phrase = _RESOLUTION_PHRASES[edge.resolution]
     if edge.resolution is Resolution.AMBIGUOUS:
         phrase = f"ambiguous, {len(edge.candidates)} candidates"
+    if edge.source != TREE_SITTER_SOURCE:
+        phrase = edge.source
     depth_note = f", depth {depth}" if depth > 1 else ""
     return f"{verb} {display_name(symbol)} (line {edge.line}, {phrase}{depth_note})"
 
@@ -242,6 +249,7 @@ class SqliteGraphProvider:
                     resolution=edge.resolution,
                     reason=_reason(symbol, edge, depth, outgoing=side == "dst"),
                     depth=depth,
+                    source=edge.source,
                 )
             )
         return hits

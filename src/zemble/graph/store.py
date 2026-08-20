@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from zemble.cache import find_index_from_cache_folder
+from zemble.graph.facts import OVERLAY_KINDS, TREE_SITTER_SOURCE, FactsOverlay, load_overlay
 from zemble.graph.java import FileExtraction, FileImports, extract_java_file
 from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol, SymbolKind
 from zemble.graph.resolve import FileContext, Resolver
@@ -29,7 +30,7 @@ from zemble.types import ContentType
 
 logger = logging.getLogger(__name__)
 
-GRAPH_FORMAT_VERSION = 1
+GRAPH_FORMAT_VERSION = 2
 GRAPH_DB_NAME = "graph.sqlite"
 GRAPH_LANGUAGE = "java"
 # Edge kinds that are computed from resolved symbols rather than extracted from source.
@@ -52,7 +53,12 @@ CREATE TABLE IF NOT EXISTS symbols (
 CREATE TABLE IF NOT EXISTS edges (
     src_id TEXT, dst_id TEXT, dst_name TEXT, kind TEXT, line INTEGER,
     resolution TEXT, candidates TEXT, arity INTEGER, receiver TEXT,
-    receiver_type TEXT, is_new INTEGER, file_path TEXT
+    receiver_type TEXT, is_new INTEGER, file_path TEXT, source TEXT
+);
+CREATE TABLE IF NOT EXISTS facts_status (
+    path TEXT PRIMARY KEY, tool TEXT, tool_version TEXT, generated_at TEXT, language TEXT,
+    mtime_ns INTEGER, size INTEGER, files_declared INTEGER, files_fresh INTEGER,
+    files_stale INTEGER, unmapped INTEGER, paths TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified ON symbols(qualified_name);
@@ -79,6 +85,7 @@ class GraphStats:
     symbols: int = 0
     edges: int = 0
     resolution_counts: dict[str, int] = field(default_factory=dict)
+    facts: dict[str, object] = field(default_factory=dict)
     duration_seconds: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
@@ -94,6 +101,7 @@ class GraphStats:
             "symbols": self.symbols,
             "edges": self.edges,
             "resolution_counts": self.resolution_counts,
+            "facts": self.facts,
             "duration_seconds": round(self.duration_seconds, 3),
         }
 
@@ -117,7 +125,15 @@ def connect(path: str, *, read_only: bool = False) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     if not read_only:
         connection.executescript(_SCHEMA)
+        _migrate(connection)
     return connection
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    """Add the columns a graph built by an older zemble does not have yet."""
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(edges)")}
+    if "source" not in columns:
+        connection.execute("ALTER TABLE edges ADD COLUMN source TEXT")
 
 
 def graph_exists(path: str) -> bool:
@@ -192,6 +208,7 @@ def _edge_row(edge: Edge) -> tuple:
         edge.receiver_type,
         int(edge.is_new),
         edge.src_id.split("#", 1)[0],
+        edge.source,
     )
 
 
@@ -209,6 +226,7 @@ def edge_from_row(row: sqlite3.Row) -> Edge:
         receiver=row["receiver"],
         receiver_type=row["receiver_type"],
         is_new=bool(row["is_new"]),
+        source=row["source"] or TREE_SITTER_SOURCE,
     )
 
 
@@ -341,8 +359,7 @@ def _run_build(
 
     targets = set(touched) | _dependent_files(connection, _moved_names(before, after))
     targets &= set(scan.stamps)
-    stats.reresolved_files = len(targets)
-    _resolve_pass(connection, extractions, targets)
+    _resolve_pass(connection, extractions, targets, root, stats)
     connection.commit()
     _write_meta(connection, root)
     _write_coverage(connection, stats.skipped_by_language)
@@ -484,9 +501,22 @@ def _load_contexts(connection: sqlite3.Connection) -> dict[str, FileContext]:
     return contexts
 
 
-def _resolve_pass(connection: sqlite3.Connection, extractions: list[FileExtraction], targets: set[str]) -> None:
-    """Run pass 2 for the target files against the whole workspace symbol table."""
+def _resolve_pass(
+    connection: sqlite3.Connection, extractions: list[FileExtraction], targets: set[str], root: Path, stats: GraphStats
+) -> None:
+    """Run pass 2 for the target files against the whole workspace symbol table.
+
+    The facts overlay is folded in here rather than afterwards, because the derived
+    edges (overrides, exercises) must be derived from the edges the graph keeps, not
+    from the extracted ones a facts file just replaced.
+    """
     symbols = [symbol_from_row(row) for row in connection.execute("SELECT * FROM symbols")]
+    overlay = load_overlay(root, symbols)
+    targets |= _facts_targets(connection, overlay) & set(
+        row["path"] for row in connection.execute("SELECT path FROM files")
+    )
+    stats.reresolved_files = len(targets)
+    stats.facts = overlay.stats()
     resolver = Resolver(symbols, _load_contexts(connection))
 
     fresh = {extraction.file_path for extraction in extractions}
@@ -503,14 +533,17 @@ def _resolve_pass(connection: sqlite3.Connection, extractions: list[FileExtracti
 
     resolver.index_hierarchy(_stored_hierarchy(connection, targets))
     resolver.resolve_all(pending)
+    pending = _apply_overlay(pending, overlay, targets)
 
     target_symbols = [symbol for symbol in symbols if symbol.file_path in targets]
-    derived = resolver.derive_overrides(target_symbols)
+    # A covered file's overrides come from its facts; deriving them again would double them.
+    derived = resolver.derive_overrides([symbol for symbol in target_symbols if not overlay.covers(symbol.file_path)])
     derived += resolver.derive_tests(target_symbols)
     derived += resolver.derive_exercises(pending)
     connection.executemany(
-        "INSERT INTO edges VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [_edge_row(edge) for edge in pending + derived]
+        "INSERT INTO edges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [_edge_row(edge) for edge in pending + derived]
     )
+    _write_facts_status(connection, overlay)
 
 
 def _stored_hierarchy(connection: sqlite3.Connection, targets: set[str]) -> list[Edge]:
@@ -531,4 +564,65 @@ def _reset(edge: Edge) -> Edge:
     edge.dst_id = None
     edge.resolution = Resolution.UNRESOLVED
     edge.candidates = []
+    edge.source = TREE_SITTER_SOURCE
     return edge
+
+
+def _apply_overlay(pending: list[Edge], overlay: FactsOverlay, targets: set[str]) -> list[Edge]:
+    """Replace the extracted call and hierarchy edges of every fact-covered file.
+
+    Replacement is per FILE, never per edge: mixing a tool's edges with the extractor's
+    would mean an answer no one could grade. A file the facts do not cover, or whose
+    content moved on since they were written, keeps every extracted edge it had.
+    """
+    kept = [
+        edge for edge in pending if not (edge.kind in OVERLAY_KINDS and overlay.covers(edge.src_id.split("#", 1)[0]))
+    ]
+    for file_path in sorted(overlay.covered_files & targets):
+        kept.extend(overlay.edges[file_path])
+    return kept
+
+
+def _facts_targets(connection: sqlite3.Connection, overlay: FactsOverlay) -> set[str]:
+    """Return the source files whose edges must be rebuilt because their facts moved.
+
+    A facts file that appeared, changed or vanished invalidates every source file it
+    declares - now or last time - even though none of those files was itself edited.
+    """
+    previous = {row["path"]: row for row in connection.execute("SELECT * FROM facts_status")}
+    current = {loaded.relative_path: loaded for loaded in overlay.files}
+    moved: set[str] = set()
+    for path, loaded in current.items():
+        row = previous.get(path)
+        if row is None or (row["mtime_ns"], row["size"]) != (loaded.mtime_ns, loaded.size):
+            moved |= set(loaded.sources)
+            if row is not None:
+                moved |= set(json.loads(row["paths"] or "[]"))
+    for path, row in previous.items():
+        if path not in current:
+            moved |= set(json.loads(row["paths"] or "[]"))
+    return moved
+
+
+def _write_facts_status(connection: sqlite3.Connection, overlay: FactsOverlay) -> None:
+    """Record what every facts file contributed, and forget the ones that are gone."""
+    connection.execute("DELETE FROM facts_status")
+    unmapped_per_file: Counter = Counter(entry.facts_file for entry in overlay.unmapped)
+    rows = [
+        (
+            loaded.relative_path,
+            loaded.header.tool,
+            loaded.header.tool_version,
+            loaded.header.generated_at,
+            loaded.header.language,
+            loaded.mtime_ns,
+            loaded.size,
+            len(loaded.sources),
+            len(loaded.fresh_files),
+            len(loaded.stale_files),
+            unmapped_per_file.get(loaded.relative_path, 0),
+            json.dumps(sorted(loaded.sources)),
+        )
+        for loaded in overlay.files
+    ]
+    connection.executemany("INSERT OR REPLACE INTO facts_status VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)

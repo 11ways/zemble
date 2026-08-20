@@ -29,6 +29,7 @@ from zemble.daemon.protocol import (
     socket_path,
 )
 from zemble.daemon.watch import IgnoreRules, RootWatcher
+from zemble.graph.facts import matches_facts_glob
 from zemble.index import ZembleIndex
 from zemble.index.create import create_index_from_path
 from zemble.index.files import get_extensions
@@ -189,7 +190,8 @@ class Daemon:
         if not root.is_dir():
             return
         extensions = set(get_extensions(index.content)) | _GRAPH_EXTENSIONS
-        watcher = RootWatcher(root, IgnoreRules(root, extensions), lambda paths: self._on_change(cache_key, paths))
+        rules = IgnoreRules(root, extensions, always=lambda path: matches_facts_glob(root, path))
+        watcher = RootWatcher(root, rules, lambda paths: self._on_change(cache_key, paths))
         self.watchers[cache_key] = watcher
         watcher.start()
         logger.info("watching %s (%d extensions)", root, len(extensions))
@@ -210,8 +212,11 @@ class Daemon:
         if cache_key not in self.cache._tasks:
             return
         self.pending.add(cache_key)
+        root = Path(cache_key[0])
+        # A changed facts file moves graph edges without moving a single .java byte.
+        java_changed = any(path.suffix == ".java" or matches_facts_glob(root, path) for path in paths)
         try:
-            await self.rebuild(cache_key, java_changed=any(path.suffix == ".java" for path in paths))
+            await self.rebuild(cache_key, java_changed=java_changed)
         finally:
             self.pending.discard(cache_key)
 

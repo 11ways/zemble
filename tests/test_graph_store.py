@@ -3,7 +3,15 @@
 import shutil
 from pathlib import Path
 
-from zemble.graph.store import GRAPH_DB_NAME, build_graph, connect, graph_db_path, graph_exists, graph_folder
+from zemble.graph.store import (
+    GRAPH_DB_NAME,
+    GRAPH_FORMAT_VERSION,
+    build_graph,
+    connect,
+    graph_db_path,
+    graph_exists,
+    graph_folder,
+)
 
 
 def _copy_workspace(source: Path, destination: Path) -> Path:
@@ -28,7 +36,7 @@ def test_build_journey(graph_fixture_root: Path, graph_cache: Path) -> None:
     connection = connect(str(graph_fixture_root))
     meta = {row["key"]: row["value"] for row in connection.execute("SELECT key, value FROM meta")}
     connection.close()
-    assert meta["format_version"] == "1", "step 3: the format version is stored"
+    assert meta["format_version"] == str(GRAPH_FORMAT_VERSION), "step 3: the format version is stored"
     assert meta["root"] == str(graph_fixture_root), "step 3: the root is stored"
 
     # 4. Rebuilding without changes extracts nothing and re-resolves nothing.

@@ -36,13 +36,17 @@ STEP_MS = 50
 class IgnoreRules:
     """Answers whether a changed path is one the index would have walked."""
 
-    def __init__(self, root: Path, extensions: Iterable[str]) -> None:
+    def __init__(self, root: Path, extensions: Iterable[str], always: Callable[[Path], bool] | None = None) -> None:
         """Build the rules for one root.
 
         :param root: The indexed root directory.
         :param extensions: Lower-case file suffixes (with the dot) that count as source.
+        :param always: Optional predicate for paths that matter whatever the ignore rules
+            say. A graph facts file lives under `build/` or `.zemble/` by convention, both
+            of which the walker skips, so without this the daemon would never see one change.
         """
         self.root = root
+        self.always = always
         self.extensions = frozenset(extension.lower() for extension in extensions)
         base_spec = GitIgnoreSpec.from_lines(sorted(_DEFAULT_IGNORED_DIRS), backend="simple")
         base_patterns = _prepare(base_spec)
@@ -82,6 +86,8 @@ class IgnoreRules:
 
     def matches(self, path: Path) -> bool:
         """Return whether a changed path is one the index cares about."""
+        if self.always is not None and self.always(path):
+            return True
         if path.suffix.lower() not in self.extensions:
             return False
         try:
