@@ -279,15 +279,19 @@ def module_hits_of(config: HomeConfig, hits: Sequence[SearchResult]) -> list[Mod
     return grouped
 
 
-def mark_strong(config: HomeConfig, mechanisms: Sequence[Mechanism]) -> list[Mechanism]:
+def mark_strong(
+    config: HomeConfig, mechanisms: Sequence[Mechanism], row_matches: Sequence[RowMatch] = ()
+) -> list[Mechanism]:
     """Decide which mechanisms are strong enough to be "this already exists".
 
     Strong means near the top of the ranking AND carrying the shape of a mechanism
-    rather than one caller's private helper: consumers in two or more modules, or a
-    position closer to the core than everything that uses it.
+    rather than one caller's private helper: consumers in two or more modules, a
+    position closer to the core than everything that uses it, or - the case consumer
+    spread cannot see - being the very symbol a matched declared row names.
     """
     if not mechanisms:
         return []
+    named_by = _named_rows(row_matches)
     top = max(mechanism.score for mechanism in mechanisms)
     marked = []
     for mechanism in mechanisms:
@@ -296,16 +300,58 @@ def mark_strong(config: HomeConfig, mechanisms: Sequence[Mechanism]) -> list[Mec
         spread = len(mechanism.consumer_modules) >= 2
         own_rank = config.rank(mechanism.module)
         below = [module for module in mechanism.consumer_modules if config.rank(module) > own_rank]
+        declared = _declaring_row(mechanism.label, named_by)
         if spread:
             reasons.append(
                 f"used from {len(mechanism.consumer_modules)} modules: {', '.join(mechanism.consumer_modules)}"
             )
         if below and len(below) == len(mechanism.consumer_modules):
             reasons.append(f"lives closer to the core than all {len(below)} of its consumers")
-        strong = bool(near_top and (spread or below))
+        if declared is not None:
+            reasons.append(f"named by the declared row '{declared.row.title}'")
+        strong = bool(near_top and (spread or below or declared is not None))
         marked.append(replace(mechanism, strong=strong, reasons=tuple(reasons)))
     marked.sort(key=lambda mechanism: (-mechanism.score, mechanism.label))
     return marked
+
+
+def _named_rows(row_matches: Sequence[RowMatch]) -> dict[str, RowMatch]:
+    """Index the symbol names the matched rows write, best-matching row first.
+
+    Only rows near the best match may name anything, the same near-the-top rule the
+    mechanisms themselves are held to: a row the description faintly resembles names
+    its own capability's classes, and letting those speak turns every neighbouring
+    row's mechanism into "this already exists".
+
+    The owning class of a `Class.member` name is indexed too: a row that names one
+    method of a class is naming that class as the mechanism, and the hit the search
+    anchors on is the type at least as often as the member.
+    """
+    if not row_matches:
+        return {}
+    best = max(match.score for match in row_matches)
+    table: dict[str, RowMatch] = {}
+    for match in row_matches:
+        if match.score < STRONG_SCORE_RATIO * best:
+            continue
+        for name in match.row.symbols:
+            for key in (name, name.split(".")[0]):
+                table.setdefault(key, match)
+    return table
+
+
+def _declaring_row(label: str, named_by: dict[str, RowMatch]) -> RowMatch | None:
+    """Return the matched row that names this symbol, if one does.
+
+    AIDEV-NOTE: this is the "by declaration" strong match. A mechanism a human wrote
+    into the capability table IS the mechanism, however few modules consume it: the
+    wrappers around `PreferenceCookie` all live inside its own module by design, and
+    the consumer-spread rule alone reads that as a private helper.
+    """
+    for key in (label, label.split(".")[0]):
+        if key in named_by:
+            return named_by[key]
+    return None
 
 
 def candidates_of(
@@ -334,6 +380,9 @@ def candidates_of(
             f"{entry.hits} of {sum(g.hits for g in grouped)} hits live here"
             f" ({share:.0%} of the relevance){'' if entry is not strongest else ', the largest share'}"
         ]
+        # AIDEV-NOTE: the declared bonus is per MODULE and applied once, so a row whose
+        # named symbol also turns up as a hit in that module does not pay twice: the
+        # symbol makes the mechanism strong, the row makes the module a candidate.
         match = declared.get(entry.module)
         if match is not None:
             score += DECLARED_BONUS * min(match.score, 1.0)
@@ -396,7 +445,7 @@ def decide(
     :return: The verdict, its candidates, and everything it was based on.
     """
     grouped = module_hits_of(config, hits)
-    judged = mark_strong(config, mechanisms)
+    judged = mark_strong(config, mechanisms, row_matches)
     candidates = candidates_of(config, grouped, row_matches)
     strong = [mechanism for mechanism in judged if mechanism.strong]
     notes = []

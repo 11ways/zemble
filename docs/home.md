@@ -26,9 +26,27 @@ call, import, subclass or otherwise point at it, its own module excluded. A type
 is consumed by every incoming edge (`references`), a method by its callers.
 
 A mechanism is marked a **strong match** when it is within 15% of the best hit's
-score AND either has consumers in two or more modules, or sits closer to the core
-than every one of its consumers. That is the shape of a mechanism rather than of
-one caller's private helper.
+score AND carries the shape of a mechanism rather than of one caller's private
+helper: consumers in two or more modules, a position closer to the core than every
+one of its consumers, or - the case consumer spread cannot see - **being the symbol
+a matched declared row names**.
+
+That last lane exists because a mechanism's wrappers often all live inside its own
+module by design. `PreferenceCookie` is the reference case: `Themes`, `Timezones`
+and `Disclosures` wrap it without leaving `zenit`, so its cross-module consumer
+spread is zero and the first two rules read the declared mechanism as a private
+helper. A row that writes a name in backticks - `PreferenceCookie.named(...)`,
+`Brand`, `RecordSource.accessCriteria(AccessContext -> Criteria)` - is naming that
+symbol as the mechanism, and a hit on it is "this already exists".
+
+Only `Class` and `Class.member` are read as names: argument lists and generic
+parameters are dropped first, the `Class.a/b/c` shorthand expands to one name per
+member, the owner of a `Class.member` name counts as named too, and a backticked
+path, package or setting key (`common/holder`, `comms.channels.*`) names nothing.
+And only rows within 15% of the best-matching row may name anything - the same
+near-the-top rule the hits themselves are held to, because every row of such a table
+names classes, and letting a faintly matching row speak turns its neighbour's
+mechanism into "this already exists" (measured below).
 
 Three more lanes hang off this section: the declared-home rows the description
 resembles, `find_related` on the single best hit ("also similar"), and the
@@ -60,7 +78,7 @@ the rule unreachable.
 
 | Verdict | When |
 | --- | --- |
-| `EXTEND_EXISTING` | a strong match was found; it is named, with "wire or extend it; do not duplicate it" |
+| `EXTEND_EXISTING` | a strong match was found - by consumer spread, by core position or by declaration; it is named, with "wire or extend it; do not duplicate it" |
 | `NEW_MECHANISM` | no strong match, and one candidate leads clearly; its module is the home |
 | `UNCERTAIN` | the top two candidates are within 15% of each other, or nothing matched |
 
@@ -148,19 +166,25 @@ Every query is answered twice: once with the declared-table lane **disabled**,
 which measures what search, the graph and the module order can do alone, and once
 with it enabled.
 
-61 queries, 80946 chunks, 101166 symbols / 922803 edges, 0.31 s per answer:
+61 queries, 80946 chunks, 101166 symbols / 922803 edges, 0.2 s per answer:
 
 | Lane | hit@1 | hit@3 | verdict names the home | EXTEND_EXISTING | UNCERTAIN |
 | --- | --- | --- | --- | --- | --- |
 | search + graph only | 0.770 | 0.918 | 0.738 | 0.59 | 0.08 |
-| plus the declared table | 0.902 | 0.934 | 0.787 | 0.59 | 0.07 |
+| plus the declared table | 0.902 | 0.934 | 0.787 | 0.62 | 0.07 |
 
 "hit@1" is the declared home ranked first among the candidates; "verdict names the
 home" is the module the verdict itself named, which is `null` whenever the answer
 is `UNCERTAIN`. `EXTEND_EXISTING` is the right verdict for all 61 - every one of
-these capabilities exists - and it is reached for 59% of them; the rest report the
-right module but do not find a symbol whose consumer spread proves it is the
+these capabilities exists - and it is reached for 62% of them; the rest report the
+right module but do not find a symbol the graph or the table proves is the
 mechanism.
+
+The by-declaration lane is what moved that last figure from 0.59 to 0.623, at no
+cost anywhere else: hit@1, hit@3, "verdict names the home" and the `UNCERTAIN` rate
+are unchanged, no candidate ranking moved, and the two answers that changed are
+`Dev tunnel` and `Trusted-proxy client IP`, both `NEW_MECHANISM -> EXTEND_EXISTING`
+naming the same, correct module.
 
 The six remaining rank-1 misses with the table lane on are nearly all the same
 shape: the core-proximity bonus pulls the answer one step towards the core.
@@ -179,13 +203,24 @@ allow" is the rule it encodes - and it is why the answer is a ranked list with
 reasons rather than a single module. hit@3 is 0.918 either way: what the answer
 misses at rank 1 it almost always still shows.
 
-`EXTEND_EXISTING` is reached for 59% of the rows at the 15% strong-match window.
-Widening that window to 30% raises it to 80%, but "the verdict names the declared
-home" falls from 0.787 to 0.721: the extra matches are mechanisms in a *different*
+`EXTEND_EXISTING` is reached for 62% of the rows at the 15% strong-match window.
+Widening that window to 30% raised it to 80% when it was measured, but "the verdict
+names the declared home" fell from 0.787 to 0.721: the extra matches are mechanisms in a *different*
 module, and an `EXTEND_EXISTING` pointing at the wrong module is a worse answer
 than a `NEW_MECHANISM` pointing at the right one. The narrow window is kept.
 
-One measured non-improvement, recorded so it is not tried again: discounting a
+A second measured non-improvement, of the by-declaration lane: letting *every*
+matched row name symbols, rather than only the rows near the best match, reaches
+`EXTEND_EXISTING` for 0.656 of the rows but drops "verdict names the home" from
+0.787 to 0.770. It buys `Outbound message shapes` (`ChannelMessage`, named by a row
+matching at 0.26 while the leading row matched at 0.72) and loses `Event delegation`
+to `KeyedListenerTable` in protoblast, named by a row matching at 0.26 while the
+leading rows matched at 0.57. The two are the same shape - a faint row naming a
+neighbouring capability's class - and nothing in the numbers separates them, so the
+narrow rule is kept.
+
+One measured non-improvement of the row scoring itself, recorded so it is not tried
+again: discounting a
 declared row by how little of ITSELF the overlap covers - the obvious fix for a
 row whose capability text is a paragraph and therefore shares a word with
 everything - drops hit@1 from 0.902 to 0.869, because the genuine rows in that

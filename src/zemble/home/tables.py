@@ -22,6 +22,17 @@ _BACKTICKED = re.compile(r"`([^`]+)`")
 _SEPARATOR_CELL = re.compile(r"^:?-{2,}:?$")
 _WORD = re.compile(r"[a-z0-9]+")
 
+#: An argument list, dropped before names are read: it holds types, not the name.
+_PARENS = re.compile(r"\([^()]*\)")
+#: A generic parameter list, dropped for the same reason.
+_GENERICS = re.compile(r"<[^<>]*>")
+#: Everything that cannot be part of a symbol name separates two of them.
+_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9_./]+")
+#: `Class` or `Class.member`, the only two shapes a declared name is read as.
+_SYMBOL = re.compile(r"^[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+#: A bare member, as written in the `Class.a/b/c` shorthand the tables use.
+_MEMBER = re.compile(r"^[a-z_][A-Za-z0-9_]*$")
+
 #: Words too common in a capability description to say anything about which row it is.
 _STOPWORDS = frozenset(
     {
@@ -44,6 +55,8 @@ class DeclaredRow:
     """One row of a declared-home table, as far as it could be understood."""
 
     capability: str
+    #: Class and `Class.member` names the capability cell writes in backticks.
+    symbols: tuple[str, ...]
     home_modules: tuple[str, ...]
     #: Backticked names in the home cell that are not declared modules, kept verbatim.
     home_names: tuple[str, ...]
@@ -63,6 +76,7 @@ class DeclaredRow:
         return {
             "capability": self.capability,
             "title": self.title,
+            "symbols": list(self.symbols),
             "home_modules": list(self.home_modules),
             "home_names": list(self.home_names),
             "consumer_modules": list(self.consumer_modules),
@@ -88,6 +102,52 @@ class RowMatch:
 def words(text: str) -> set[str]:
     """Return the meaningful lowercase words of a text."""
     return {word for word in _WORD.findall(text.lower()) if len(word) > 2 and word not in _STOPWORDS}
+
+
+def symbol_names(text: str) -> tuple[str, ...]:
+    """Extract the symbol names a text writes in backticks, in the order they appear.
+
+    Only `Class` and `Class.member` are read as names: a backticked path, setting key
+    or package (`common/holder`, `comms.channels.*`) names no symbol, and reading one
+    out of it is how a row starts claiming code it never mentioned. Argument lists and
+    generic parameters are dropped first, and the `Class.a/b/c` shorthand these tables
+    use for a family of members expands to one name per member.
+    """
+    found: list[str] = []
+    for span in _BACKTICKED.findall(text):
+        cleaned = _strip_groups(span)
+        for token in _TOKEN_SPLIT.split(cleaned):
+            for name in _names_of(token):
+                if name not in found:
+                    found.append(name)
+    return tuple(found)
+
+
+def _strip_groups(span: str) -> str:
+    """Remove parenthesised and generic groups, innermost first."""
+    for pattern in (_PARENS, _GENERICS):
+        while True:
+            stripped = pattern.sub(" ", span)
+            if stripped == span:
+                break
+            span = stripped
+    # An unclosed group is the common case in a truncated cell: cut it off entirely.
+    return span.split("(")[0].split("<")[0]
+
+
+def _names_of(token: str) -> list[str]:
+    """Read one whitespace-free token as zero or more declared names."""
+    parts = [part for part in token.split("/") if part]
+    if not parts:
+        return []
+    head = parts[0].strip(".")
+    if not _SYMBOL.match(head):
+        return []
+    names = [head]
+    if "." in head:
+        owner = head.split(".")[0]
+        names.extend(f"{owner}.{part}" for part in parts[1:] if _MEMBER.match(part))
+    return names
 
 
 def load_rows(config: HomeConfig) -> list[DeclaredRow]:
@@ -206,6 +266,7 @@ def _row(
     consumer_cell = cells[columns["consumers"]] if "consumers" in columns else ""
     return DeclaredRow(
         capability=capability,
+        symbols=symbol_names(capability),
         home_modules=home_modules,
         home_names=home_names,
         consumer_modules=_mentioned_modules(consumer_cell, config),
@@ -245,4 +306,13 @@ def _mentioned_modules(cell: str, config: HomeConfig) -> tuple[str, ...]:
     return tuple(found)
 
 
-__all__ = ["MIN_MATCH_SCORE", "MIN_SHARED_WORDS", "DeclaredRow", "RowMatch", "load_rows", "match_rows", "words"]
+__all__ = [
+    "MIN_MATCH_SCORE",
+    "MIN_SHARED_WORDS",
+    "DeclaredRow",
+    "RowMatch",
+    "load_rows",
+    "match_rows",
+    "symbol_names",
+    "words",
+]

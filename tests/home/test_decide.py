@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,50 @@ def test_a_private_helper_is_not_a_mechanism(config: HomeConfig) -> None:
     assert not answer.mechanisms[0].strong, "the helper is reported, not promoted"
 
 
+def test_a_symbol_a_declared_row_names_is_strong_without_consumers(config: HomeConfig) -> None:
+    """A mechanism the table itself names is the mechanism, however few modules use it."""
+    row = DeclaredRow(
+        capability="UI preference cookies (`PreferenceCookie.named(...)` = ONE cookie shape)",
+        symbols=("PreferenceCookie.named",),
+        home_modules=("zenit",),
+        home_names=("common/ui",),
+        consumer_modules=(),
+        file="CLAUDE.md",
+        line=17,
+        raw_home="`zenit` core (`common/ui`)",
+    )
+    match = RowMatch(row=row, score=0.6, shared=("cookie", "preference"))
+    hits = [hit("zenit", "PreferenceCookie", 0.9), hit("zenit", "Themes", 0.88)]
+    found = [mechanism("zenit", "PreferenceCookie", 0.9), mechanism("zenit", "Themes", 0.88)]
+    # 1. Its wrappers all live in its own module, so consumer spread says "private helper".
+    without = decide(config, "remember a ui preference in a cookie", hits, found)
+    assert without.verdict is Verdict.NEW_MECHANISM, "step 1: spread alone cannot see it"
+
+    # 2. The declared row names it, which is the evidence the graph does not have.
+    answer = decide(config, "remember a ui preference in a cookie", hits, found, [match])
+    assert answer.verdict is Verdict.EXTEND_EXISTING, "step 2: a declared name is a strong match"
+    assert answer.extend is not None and answer.extend.label == "PreferenceCookie", "step 2: it names what to extend"
+    assert any(
+        "named by the declared row 'UI preference cookies'" in reason for reason in answer.mechanisms[0].reasons
+    ), "step 2: and says which row named it"
+
+    # 3. The row named `PreferenceCookie.named`, so its owning class matched; a neighbour
+    #    that is just as relevant but named nowhere in the table did not.
+    assert answer.mechanisms[0].label == "PreferenceCookie", "step 3: the named class is the strong one"
+    assert not answer.mechanisms[1].strong, "step 3: an equally relevant unnamed neighbour is only a hit"
+
+    # 4. A row that names no symbol leaves the old rule untouched.
+    bare = RowMatch(row=replace(row, symbols=()), score=0.6, shared=("cookie", "preference"))
+    plain = decide(config, "remember a ui preference in a cookie", hits, found, [bare])
+    assert plain.verdict is Verdict.NEW_MECHANISM, "step 4: no named symbol, no by-declaration match"
+
+    # 5. A row the description only faintly resembles names nothing: every row in the
+    #    table names classes, and a distant one would make any neighbour "this exists".
+    leader = RowMatch(row=replace(row, capability="Session cookies", symbols=("SessionCookies",)), score=0.9, shared=())
+    faint = decide(config, "remember a ui preference in a cookie", hits, found, [leader, match])
+    assert faint.verdict is Verdict.NEW_MECHANISM, "step 5: only rows near the best match may name a mechanism"
+
+
 def test_closer_to_core_wins_but_only_where_the_family_lives(config: HomeConfig) -> None:
     """The core-proximity bonus needs the module to already hold this family."""
     hits = [hit("zenit", "Icon", 0.6), hit("zenit-cms", "IconCell", 0.55), hit("zenit-cms", "IconColumn", 0.5)]
@@ -128,6 +173,7 @@ def test_a_declared_row_names_the_home(config: HomeConfig) -> None:
     """A matching declared-home row lifts the module it names and says which row did it."""
     row = DeclaredRow(
         capability="Pagination arithmetic over a record source",
+        symbols=(),
         home_modules=("zenit",),
         home_names=("common/data",),
         consumer_modules=("zenit-cms",),
