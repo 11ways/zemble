@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -59,25 +58,27 @@ def _open(repo: str) -> SqliteGraphProvider:
     return SqliteGraphProvider(repo)
 
 
-def answer(repo: str, symbol: str, method: str, **kwargs: Any) -> str:
-    """Resolve a written name and run one provider query, as JSON."""
+def answer(repo: str, symbol: str, method: str, **kwargs: Any) -> dict[str, Any]:
+    """Resolve a written name and run one provider query, as a payload object.
+
+    Returned as an object rather than a JSON string: both callers (this module's tools and
+    the daemon) hand it straight to a client that would otherwise decode JSON out of JSON.
+    """
     provider = _open(repo)
     try:
         candidates = provider.definition(symbol)
         if method == "definition":
             if not candidates:
-                return json.dumps({"error": f"No symbol named {symbol!r}.", "note": provider.coverage_note()})
-            return json.dumps({"results": [_symbol_json(found) for found in candidates]})
+                return {"error": f"No symbol named {symbol!r}.", "note": provider.coverage_note()}
+            return {"results": [_symbol_json(found) for found in candidates]}
         chosen, competing = select_symbol(candidates, symbol)
         if chosen is None:
             if not competing:
-                return json.dumps({"error": f"No symbol named {symbol!r}.", "note": provider.coverage_note()})
-            return json.dumps(
-                {
-                    "error": f"{symbol!r} is ambiguous; pass a qualified name.",
-                    "candidates": [_symbol_json(found) for found in competing],
-                }
-            )
+                return {"error": f"No symbol named {symbol!r}.", "note": provider.coverage_note()}
+            return {
+                "error": f"{symbol!r} is ambiguous; pass a qualified name.",
+                "candidates": [_symbol_json(found) for found in competing],
+            }
         hits = getattr(provider, method)(chosen.id, **kwargs)
         payload: dict[str, Any] = {
             "symbol": _symbol_json(chosen),
@@ -86,12 +87,12 @@ def answer(repo: str, symbol: str, method: str, **kwargs: Any) -> str:
         }
         if not hits:
             payload["note"] = provider.coverage_note()
-        return json.dumps(payload)
+        return payload
     finally:
         provider.close()
 
 
-async def _dispatch(repo: str, symbol: str, method: str, **kwargs: Any) -> str:
+async def _dispatch(repo: str, symbol: str, method: str, **kwargs: Any) -> dict[str, Any]:
     """Answer through the warm daemon when there is one, else in this process.
 
     The daemon holds a graph it keeps fresh with its watcher, so the workspace scan
@@ -106,7 +107,9 @@ async def _dispatch(repo: str, symbol: str, method: str, **kwargs: Any) -> str:
         kinds = kwargs.get("kinds")
         args["kinds"] = [kind.value for kind in kinds] if kinds else None
     try:
-        return str(await asyncio.to_thread(client.call, "graph", args))
+        remote = await asyncio.to_thread(client.call, "graph", args)
+        if isinstance(remote, dict):
+            return remote
     except DaemonError:
         logger.debug("Falling back to an in-process graph query for %s", repo, exc_info=True)
     return await asyncio.to_thread(answer, repo, symbol, method, **kwargs)
@@ -119,7 +122,7 @@ def register_graph_tools(server: FastMCP) -> None:
     async def graph_definition(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
-    ) -> str:
+    ) -> dict[str, Any]:
         """Find where a Java symbol is declared, with its exact file, line and signature.
 
         Use this instead of grepping for `class Foo` or `void bar(`.
@@ -130,7 +133,7 @@ def register_graph_tools(server: FastMCP) -> None:
     async def graph_callers(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
-    ) -> str:
+    ) -> dict[str, Any]:
         """List every call site of a Java method or constructor, with a reason per hit.
 
         Each result says how confidently it was resolved: `exact` means the declaring
@@ -143,7 +146,7 @@ def register_graph_tools(server: FastMCP) -> None:
     async def graph_implementations(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
-    ) -> str:
+    ) -> dict[str, Any]:
         """List the direct and transitive subtypes of a Java class or interface, with their depth."""
         return await _dispatch(repo, symbol, "implementations")
 
@@ -151,7 +154,7 @@ def register_graph_tools(server: FastMCP) -> None:
     async def graph_tests_of(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
-    ) -> str:
+    ) -> dict[str, Any]:
         """Find the tests covering a Java symbol: naming matches (FooTest) first, then tests that use it."""
         return await _dispatch(repo, symbol, "tests_of")
 
@@ -164,7 +167,7 @@ def register_graph_tools(server: FastMCP) -> None:
             list[str] | None,
             Field(description=f"Only follow these edge kinds: {', '.join(kind.value for kind in EdgeKind)}."),
         ] = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         """Walk the graph outward from a symbol in both directions, to see what it is wired to."""
         selected = [EdgeKind(value) for value in kinds] if kinds else None
         return await _dispatch(repo, symbol, "neighbors", hops=hops, kinds=selected)

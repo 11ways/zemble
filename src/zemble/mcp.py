@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal
@@ -61,19 +60,21 @@ def unsafe_repo_reason(repo: str) -> str | None:
     return None
 
 
-async def _answer_remotely(cmd: str, repo: str, args: dict[str, Any]) -> str | None:
+async def _answer_remotely(cmd: str, repo: str, args: dict[str, Any]) -> str | dict[str, Any] | None:
     """Refuse an unacceptable repo, or answer one tool call from the warm daemon.
+
+    The daemon's payload is returned as the object it is; encoding it into a string here
+    would make the client parse JSON out of JSON.
 
     :param cmd: Daemon command name.
     :param repo: The repo argument as the caller wrote it.
     :param args: The rest of the command arguments.
-    :return: The text to return from the tool, or None when this process must answer.
+    :return: The refusal text or the payload, or None when this process must answer.
     """
     refusal = unsafe_repo_reason(repo)
     if refusal is not None:
         return refusal
-    remote = await _daemon_call(cmd, {"path": repo, **args})
-    return None if remote is None else json.dumps(remote)
+    return await _daemon_call(cmd, {"path": repo, **args})
 
 
 async def _get_index(repo: str, cache: IndexCache, content: Sequence[ContentType]) -> ZembleIndex:
@@ -134,7 +135,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             ContentSelection | None,
             Field(description="Content to search. Defaults to the MCP server's configured content."),
         ] = None,
-    ) -> str:
+    ) -> str | dict[str, Any]:
         """Search once with a focused query describing what the code does or its name.
 
         Write queries using function/class names or behavior descriptions, not error messages.
@@ -160,8 +161,8 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             return str(exc)
         results = index.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines)
         if not results:
-            return json.dumps({"error": "No results found."})
-        return json.dumps(format_results(query, results, max_snippet_lines))
+            return {"error": "No results found."}
+        return format_results(query, results, max_snippet_lines)
 
     @server.tool()
     async def find_related(
@@ -186,7 +187,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             ContentSelection | None,
             Field(description="Content containing the related file. Defaults to the MCP server configuration."),
         ] = None,
-    ) -> str:
+    ) -> str | dict[str, Any]:
         """Find code similar to a known location.
 
         Useful for discovering all implementations of an interface, all callers of a function,
@@ -219,9 +220,9 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             )
         results = index.find_related(chunk, top_k=top_k, max_snippet_lines=max_snippet_lines)
         if not results:
-            return json.dumps({"error": f"No related chunks found for {file_path}:{line}."})
+            return {"error": f"No related chunks found for {file_path}:{line}."}
         label = f"Chunks related to {file_path}:{line}"
-        return json.dumps(format_results(label, results, max_snippet_lines))
+        return format_results(label, results, max_snippet_lines)
 
     register_graph_tools(server)
     register_dupes_tool(server)

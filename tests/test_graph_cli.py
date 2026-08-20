@@ -76,35 +76,38 @@ def test_cli_builds_the_graph_on_first_query(
 
 
 def test_mcp_tools_journey(graph_fixture_root: Path, graph_cache: Path) -> None:
-    """The MCP tools answer the same questions as the CLI, as JSON."""
+    """The MCP tools answer the same questions as the CLI, as payload objects."""
     from zemble.graph.mcp import answer as _answer
 
     root = str(graph_fixture_root)
 
     # 1. Definition returns every declaration.
-    payload = json.loads(_answer(root, "Shape", "definition"))
+    payload = _answer(root, "Shape", "definition")
     assert payload["results"][0]["qualified_name"] == "com.example.core.Shape", "step 1: the interface is found"
 
     # 2. Callers carry a reason and a resolution.
-    payload = json.loads(_answer(root, "Helpers.twice", "callers"))
+    payload = _answer(root, "Helpers.twice", "callers")
     assert payload["results"], "step 2: callers are found"
     assert all("resolution" in hit and "reason" in hit for hit in payload["results"]), (
         "step 2: each hit explains itself"
     )
 
     # 3. Ambiguity is reported as data, not as an exception.
-    payload = json.loads(_answer(root, "Circle", "callers"))
+    payload = _answer(root, "Circle", "callers")
     assert "ambiguous" in payload["error"], "step 3: ambiguity is reported"
     assert len(payload["candidates"]) == 2, "step 3: with both candidates"
 
     # 4. An empty answer explains what the graph covers.
-    payload = json.loads(_answer(root, "Marker", "tests_of"))
+    payload = _answer(root, "Marker", "tests_of")
     assert payload["results"] == [], "step 4: nothing tests Marker"
     assert "Java" in payload["note"], "step 4: and the note says why that may be"
 
     # 5. Neighbours accept the extra arguments.
-    payload = json.loads(_answer(root, "com.example.core.Circle", "neighbors", hops=2, kinds=None))
+    payload = _answer(root, "com.example.core.Circle", "neighbors", hops=2, kinds=None)
     assert len(payload["results"]) > 1, "step 5: a two-hop walk returns more than the origin"
+
+    # 6. Every payload is an object; a tool that encoded it into a string would double-encode it.
+    assert isinstance(payload, dict), "step 6: the answer is data, not a JSON string"
 
 
 def test_mcp_server_registers_the_graph_tools() -> None:

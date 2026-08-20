@@ -508,3 +508,69 @@ def test_cache_evict(cache: IndexCache, tmp_path: Path) -> None:
 def test_cache_evict_missing(cache: IndexCache, tmp_path: Path) -> None:
     """evict() on an unknown key is a no-op."""
     cache.evict(cache._compute_cache_key(str(tmp_path)))  # should not raise
+
+
+def _double_encoding_complaint(name: str, result: Any) -> str | None:
+    """Return why one tool result is JSON hidden inside a JSON string, or None when it is clean."""
+    content, structured = result
+    text = content[0].text
+    try:
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        decoded = None
+    if isinstance(decoded, str):
+        return f"{name}: the text content is a JSON string holding {decoded[:40]!r}"
+    if isinstance(structured, dict) and isinstance(structured.get("result"), str):
+        inner = structured["result"]
+        try:
+            json.loads(inner)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return f"{name}: structured content carries JSON encoded as a string"
+    return None
+
+
+@pytest.mark.anyio
+async def test_no_tool_returns_json_inside_a_json_string(
+    cache: IndexCache,
+    mock_embedder: FakeEmbedder,
+    graph_fixture_root: Path,
+    graph_cache: Path,
+) -> None:
+    """Every registered tool hands its answer over once: text stays text, JSON stays an object."""
+    bad = ([MagicMock(text=json.dumps(json.dumps({"root": "x"})))], {"result": json.dumps({"root": "x"})})
+    assert _double_encoding_complaint("stub", bad) is not None, "the check itself recognises the shape it hunts"
+
+    root = str(graph_fixture_root)
+    dupes_root = str(Path(__file__).parent / "fixtures" / "dedup_lanes")
+    calls: list[tuple[str, dict[str, Any]]] = [
+        ("search", {"query": "circle", "repo": root}),
+        ("find_related", {"file_path": "src/main/java/com/example/core/Circle.java", "line": 5, "repo": root}),
+        ("graph_definition", {"symbol": "Shape", "repo": root}),
+        ("graph_callers", {"symbol": "Helpers.twice", "repo": root}),
+        ("graph_implementations", {"symbol": "Shape", "repo": root}),
+        ("graph_tests_of", {"symbol": "com.example.core.Circle", "repo": root}),
+        ("graph_neighbors", {"symbol": "com.example.core.Circle", "repo": root}),
+        ("outline", {"target": "Shape", "repo": root}),
+        ("signatures", {"symbol": "Helpers.twice", "repo": root}),
+        ("explain", {"query": "circle area", "repo": root, "budget": 400}),
+        ("home", {"description": "compute the area of a shape", "repo": root}),
+        ("dupes", {"repo": dupes_root, "kind": "exact"}),
+        ("dupes", {"repo": dupes_root, "kind": "exact", "format": "json"}),
+    ]
+
+    with (
+        patch("zemble.index.index.load_embedder", return_value=mock_embedder),
+        patch("zemble.index_cache.save_index_to_cache"),
+    ):
+        server = create_server(cache)
+        registered = {tool.name for tool in await server.list_tools()}
+        assert registered <= {name for name, _ in calls}, "every registered tool is covered by this test"
+        complaints = []
+        for name, args in calls:
+            result = await server.call_tool(name, args)
+            assert result[0], f"{name} answered with no content at all"
+            complaint = _double_encoding_complaint(name, result)
+            if complaint is not None:
+                complaints.append(complaint)
+    assert complaints == [], "no tool may make its client parse JSON out of JSON"

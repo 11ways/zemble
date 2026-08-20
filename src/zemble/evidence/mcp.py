@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -79,13 +78,11 @@ def _signatures_here(repo: str, symbol: str) -> dict[str, Any]:
         provider.close()
 
 
-def _as_json(payload: dict[str, Any], key: str) -> str:
-    """Render an outline or signatures payload the way the tool's callers expect it."""
+def _as_payload(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return an outline or signatures payload as an object, never as a JSON string."""
     if "error" in payload:
-        return json.dumps(
-            {"error": payload["error"], "candidates": [c["qualified_name"] for c in payload["candidates"]]}
-        )
-    return json.dumps(payload[key])
+        return {"error": payload["error"], "candidates": [c["qualified_name"] for c in payload["candidates"]]}
+    return payload[key]
 
 
 def register_evidence_tools(
@@ -149,7 +146,7 @@ def register_evidence_tools(
         ],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
         members: Annotated[str | None, Field(description="Only show members whose name matches this pattern.")] = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         """List what a Java file or type declares, signatures only, for a few hundred tokens.
 
         Use this before reading a file: it shows every member with its line range, so
@@ -158,13 +155,13 @@ def register_evidence_tools(
         payload = await _remote("outline", {"path": repo, "target": target, "members": members})
         if payload is None:
             payload = await asyncio.to_thread(_outline_here, repo, target, members)
-        return _as_json(payload, "outline")
+        return _as_payload(payload, "outline")
 
     @server.tool()
     async def signatures(
         symbol: Annotated[str, Field(description="A simple name, a qualified name, or `Type.member`.")],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
-    ) -> str:
+    ) -> dict[str, Any]:
         """Show a Java symbol's signature and the call sites the graph resolved exactly.
 
         Cheaper than `graph_callers` when all you need is whether something is used
@@ -173,7 +170,7 @@ def register_evidence_tools(
         payload = await _remote("signatures", {"path": repo, "symbol": symbol})
         if payload is None:
             payload = await asyncio.to_thread(_signatures_here, repo, symbol)
-        return _as_json(payload, "signatures")
+        return _as_payload(payload, "signatures")
 
 
 __all__ = ["DEFAULT_MCP_BUDGET", "register_evidence_tools"]

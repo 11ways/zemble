@@ -280,9 +280,30 @@ def test_mcp_server_registers_the_dupes_tool() -> None:
     # 2. The tools that were there before still are.
     assert {"search", "find_related", "graph_definition"} <= tools, "step 2: nothing was replaced"
 
-    # 3. It answers with the same JSON the CLI prints.
-    payload = json.loads(asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact"}))[1]["result"])
-    assert payload["class_counts"]["exact"] == 2, "step 3: the tool returns the ranked classes"
+    # 3. By default it answers with the text report the CLI prints, not with JSON in a string.
+    content, structured = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact"}))
+    text = content[0].text
+    assert text.startswith("Analyzed "), "step 3: the default format is the CLI's own report"
+    assert structured["result"] == text, "step 3: the text is handed over once, unencoded"
+
+    # 4. `brief` trims it to one line per class, still as text.
+    brief = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact", "brief": True}))[0][0].text
+    assert "-- EXACT --" not in brief and "#1  exact " in brief, "step 4: brief is the header and the class lines"
+
+    # 5. `format="json"` returns the structured object itself, never a JSON string.
+    content, structured = asyncio.run(
+        server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact", "format": "json"})
+    )
+    payload = structured["result"]
+    assert isinstance(payload, dict), "step 5: the JSON form is an object on the wire"
+    assert payload["class_counts"]["exact"] == 2, "step 5: the tool returns the ranked classes"
+    assert json.loads(content[0].text) == payload, "step 5: the text content is that object, encoded once"
+
+    # 6. The lane and exclude arguments reach the scan.
+    lane_only = asyncio.run(
+        server.call_tool("dupes", {"repo": str(LANES), "kind": "exact", "lane": "test", "format": "json"})
+    )[1]["result"]
+    assert {clone["lane"] for clone in lane_only["classes"]} == {"test"}, "step 6: --lane is available over MCP"
 
 
 def _by_lane(report, lane: Lane) -> list:
