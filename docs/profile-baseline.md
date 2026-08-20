@@ -1,7 +1,7 @@
 # Query profile baseline (unchanged upstream retrieval)
 
 Workspace: `/home/skerit/projects/javaweb` (the whole multi-repo tree).
-Index: 15,958 files, 181,912 chunks, 474 MB under `~/.cache/zemble`.
+Index: 15,958 files, 181,912 chunks, 474 MB under `~/.cache/zemble`. (These totals predate the workspace `.zembleignore`; the same tree now indexes as ~6.4k files / ~74k chunks. See docs/profile-loadtime.md for the current numbers.)
 Build: 156.3 s to index + 1.4 s to write (10-core CPU, `potion-code-16M-v2`).
 
 Measured with `benchmarks/profile_query.py` (phase timers around the same calls
