@@ -132,6 +132,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["--tb=short", "--strict-markers", "--cov=zemble", "--cov-report=term-missing"]
+markers = ["slow: end-to-end tests over a real workspace; deselect with -m 'not slow'"]
 
 [tool.coverage.run]
 relative_files = true

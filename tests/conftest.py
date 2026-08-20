@@ -1,6 +1,7 @@
 import hashlib
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -125,3 +126,29 @@ class FakeEmbedder:
 def mock_embedder() -> FakeEmbedder:
     """A deterministic 256-dimensional embedder."""
     return FakeEmbedder()
+
+
+@pytest.fixture
+def graph_fixture_root() -> Path:
+    """The miniature Java workspace used by the symbol graph tests."""
+    return Path(__file__).parent / "fixtures" / "graph"
+
+
+@pytest.fixture
+def graph_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the zemble cache at a throwaway folder so graph builds are isolated."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(cache))
+    return cache
+
+
+@pytest.fixture
+def built_graph(graph_fixture_root: Path, graph_cache: Path) -> Any:
+    """A freshly built graph over the fixture workspace, with a provider open on it."""
+    from zemble.graph import SqliteGraphProvider, build_graph
+
+    build_graph(str(graph_fixture_root))
+    provider = SqliteGraphProvider(str(graph_fixture_root))
+    yield provider
+    provider.close()
