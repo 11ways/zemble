@@ -262,6 +262,21 @@ Indexes are cached to disk automatically on the first search. On subsequent runs
 
 If you would like to use another model, you can set your `ZEMBLE_MODEL_NAME` environment variable to a local path or Hugging Face repository. This path is read verbatim, and should contain a [`Model2Vec`](https://github.com/MinishLab/model2vec) compatible model. This is particularly useful if you can't access Hugging Face at runtime.
 
+### Using an API embedder
+
+Zemble can also embed through the Voyage API or any OpenAI-compatible
+`/v1/embeddings` endpoint (Ollama, LM Studio, vLLM, OpenAI), selected with a
+single spec string on `--embedder` or in `ZEMBLE_EMBEDDER`:
+
+```bash
+zemble search "auth flow" ./my-project --embedder voyage:voyage-code-4@256
+zemble search "auth flow" ./my-project --embedder openai:http://localhost:11434/v1#nomic-embed-text
+```
+
+Embeddings from API providers are cached by content hash, so unchanged code is
+never paid for twice. See [docs/embedders.md](docs/embedders.md) for the full
+spec grammar, environment variables, cache location and cost notes.
+
 ## Acknowledgements
 
 Thanks to [Greptile](https://greptile.com) for providing free access to their AI code review platform.
