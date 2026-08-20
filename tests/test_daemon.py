@@ -371,6 +371,72 @@ def test_autostart_spawns_a_daemon_and_stop_removes_it(monkeypatch: pytest.Monke
     assert not socket_path().exists(), "the daemon cleaned up after itself"
 
 
+def test_cli_search_falls_back_when_the_daemon_is_unavailable(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CLI prints one stderr line and answers in-process when the daemon cannot be reached."""
+    from zemble import cli
+
+    def _refuse(*args: Any, **kwargs: Any) -> Any:
+        raise DaemonUnavailable("not running (ENOENT)")
+
+    monkeypatch.setattr(client, "call", _refuse)
+    fake_index = MagicMock()
+    fake_index.search.return_value = []
+    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: fake_index)
+    monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
+
+    cli._run_search(str(tmp_project), "anything", 5, [ContentType.CODE], None)
+    captured = capsys.readouterr()
+    assert "daemon unavailable (not running (ENOENT)); running in-process" in captured.err, "one honest line"
+    assert '"error": "No results found."' in captured.out, "the in-process answer was printed"
+
+
+def test_cli_search_uses_the_daemon_when_it_answers(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A daemon answer is printed verbatim and no index is built in this process."""
+    from zemble import cli
+
+    monkeypatch.setattr(client, "call", lambda cmd, args, **kwargs: {"query": "q", "results": [{"file_path": "a.py"}]})
+    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: pytest.fail("must not build in-process"))
+
+    cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None)
+    assert '"file_path": "a.py"' in capsys.readouterr().out, "the daemon's payload was printed"
+
+
+def test_cli_skips_the_daemon_for_an_embedder_override(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The daemon holds one embedder, so an explicit --embedder is answered in-process silently."""
+    from zemble import cli
+
+    monkeypatch.setattr(client, "call", lambda *args, **kwargs: pytest.fail("must not ask the daemon"))
+    fake_index = MagicMock()
+    fake_index.search.return_value = []
+    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: fake_index)
+    monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
+
+    cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None, embedder="model2vec:other")
+    assert "daemon unavailable" not in capsys.readouterr().err, "an override is not a daemon failure"
+
+
+def test_cli_no_daemon_flag_is_silent(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--no-daemon answers in-process without reporting a daemon failure."""
+    from zemble import cli
+
+    monkeypatch.setattr(client, "call", lambda *args, **kwargs: pytest.fail("must not ask the daemon"))
+    fake_index = MagicMock()
+    fake_index.search.return_value = []
+    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: fake_index)
+    monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
+
+    cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None, no_daemon=True)
+    assert "daemon unavailable" not in capsys.readouterr().err, "an opt-out is not a failure"
+
+
 def test_daemon_status_command_reports_no_daemon(capsys: pytest.CaptureFixture[str]) -> None:
     """`zemble daemon status` without a daemon exits non-zero and says why."""
     from zemble.daemon.cli import main

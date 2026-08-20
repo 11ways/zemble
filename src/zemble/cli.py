@@ -10,6 +10,7 @@ from shutil import rmtree
 from typing import Literal
 
 from zemble.cache import cache_key, resolve_cache_folder, save_index_to_cache
+from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
@@ -38,12 +39,18 @@ _CLI_DISPATCH_ARGS = frozenset(
         "graph",
         "dupes",
         *EVIDENCE_COMMANDS,
+        "daemon",
     }
 )
 _CLEAR_CHOICE = Literal["all", "index", "savings", "orphans"]
 
 #: Subcommands that own their own runner and return an exit code.
-_SUBCOMMAND_RUNNERS = {"graph": run_graph, "dupes": run_dupes, **dict.fromkeys(EVIDENCE_COMMANDS, run_evidence)}
+_SUBCOMMAND_RUNNERS = {
+    "graph": run_graph,
+    "dupes": run_dupes,
+    "daemon": run_daemon,
+    **dict.fromkeys(EVIDENCE_COMMANDS, run_evidence),
+}
 
 _SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
 
@@ -84,8 +91,12 @@ def _add_embedder_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
-def _run_stats(path: str, content: list[ContentType], embedder: str | None = None) -> None:
+def _run_stats(path: str, content: list[ContentType], embedder: str | None = None, no_daemon: bool = False) -> None:
     """Handle the `stats` subcommand: report what an index holds and which embedder built it."""
+    remote = _via_daemon("stats", {"path": path, "content": [c.value for c in content]}, no_daemon, embedder)
+    if remote is not None:
+        print(json.dumps(remote))
+        return
     index = _load_index(path, content, embedder)
     stats = index.stats
     print(
@@ -166,6 +177,41 @@ def _resolve_content(content: list[str], include_text_files: bool) -> list[Conte
     return [ContentType(c) for c in content]
 
 
+def _add_daemon_arg(p: argparse.ArgumentParser) -> None:
+    """Add --no-daemon to a subparser."""
+    p.add_argument(
+        "--no-daemon",
+        action="store_true",
+        help="Answer in this process instead of through the warm daemon (also: ZEMBLE_DAEMON=0).",
+    )
+
+
+def _via_daemon(cmd: str, args: dict[str, object], no_daemon: bool, embedder: str | None) -> dict | None:
+    """Try to answer one command from the warm daemon.
+
+    :param cmd: Daemon command name.
+    :param args: Command arguments.
+    :param no_daemon: Whether the user asked for the in-process path.
+    :param embedder: An explicit embedder spec, which the daemon does not serve.
+    :return: The daemon's result, or None when this process must answer itself.
+    """
+    from zemble.daemon import client
+    from zemble.daemon.protocol import DaemonError
+
+    if no_daemon:
+        # An explicit opt-out is not a failure: no fallback line is printed for it.
+        client.disable_for_this_process("--no-daemon")
+        return None
+    if embedder is not None:
+        # The daemon holds one embedder, the environment default; an override is answered here.
+        return None
+    try:
+        return client.call(cmd, args)
+    except DaemonError as exc:
+        print(f"daemon unavailable ({exc}); running in-process", file=sys.stderr)
+        return None
+
+
 def _load_index(path: str, content: list[ContentType], embedder: str | None = None) -> ZembleIndex:
     """Build an index from a local path or git URL, exiting on FileNotFoundError or a bad embedder spec.
 
@@ -188,8 +234,24 @@ def _run_search(
     content: list[ContentType],
     max_snippet_lines: int | None,
     embedder: str | None = None,
+    no_daemon: bool = False,
 ) -> None:
     """Handle the `search` subcommand."""
+    remote = _via_daemon(
+        "search",
+        {
+            "path": path,
+            "query": query,
+            "top_k": top_k,
+            "content": [c.value for c in content],
+            "max_snippet_lines": max_snippet_lines,
+        },
+        no_daemon,
+        embedder,
+    )
+    if remote is not None:
+        print(json.dumps(remote))
+        return
     index = _load_index(path, content, embedder)
     results = index.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines)
     out = format_results(query, results, max_snippet_lines) if results else {"error": "No results found."}
@@ -205,8 +267,28 @@ def _run_find_related(
     content: list[ContentType],
     max_snippet_lines: int | None,
     embedder: str | None = None,
+    no_daemon: bool = False,
 ) -> None:
     """Handle the `find-related` subcommand."""
+    remote = _via_daemon(
+        "find_related",
+        {
+            "path": path,
+            "file_path": file_path,
+            "line": line,
+            "top_k": top_k,
+            "content": [c.value for c in content],
+            "max_snippet_lines": max_snippet_lines,
+        },
+        no_daemon,
+        embedder,
+    )
+    if remote is not None:
+        if remote.get("chunk_missing"):
+            print(f"No chunk found at {file_path}:{line}.", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(remote))
+        return
     index = _load_index(path, content, embedder)
     chunk = resolve_chunk(index.chunks, file_path, line)
     if chunk is None:
@@ -306,11 +388,13 @@ def _cli_main() -> None:
     )
     _add_content_args(search_p)
     _add_embedder_arg(search_p)
+    _add_daemon_arg(search_p)
 
     stats_p = sub.add_parser("stats", help="Show what an index contains, including its embedder and dimensions.")
     stats_p.add_argument("path", nargs="?", default=".", help="Local path or git URL (default: current directory).")
     _add_content_args(stats_p)
     _add_embedder_arg(stats_p)
+    _add_daemon_arg(stats_p)
 
     clear_p = sub.add_parser("clear", help="Clear the index cache.")
     clear_p.add_argument(
@@ -333,12 +417,14 @@ def _cli_main() -> None:
     )
     _add_content_args(related_p)
     _add_embedder_arg(related_p)
+    _add_daemon_arg(related_p)
 
     sub.add_parser("savings", help="Show token savings and usage stats.")
 
     add_graph_parser(sub)
     add_dupes_parser(sub)
     add_evidence_parser(sub)
+    add_daemon_parser(sub)
 
     install_p = sub.add_parser("install", help="Configure zemble across coding agents.")
     uninstall_p = sub.add_parser("uninstall", help="Remove zemble configuration from coding agents.")
@@ -389,9 +475,10 @@ def _cli_main() -> None:
             _resolve_content(args.content, args.include_text_files),
             args.max_snippet_lines,
             args.embedder,
+            args.no_daemon,
         )
     elif args.command == "stats":
-        _run_stats(args.path, _resolve_content(args.content, args.include_text_files), args.embedder)
+        _run_stats(args.path, _resolve_content(args.content, args.include_text_files), args.embedder, args.no_daemon)
     elif args.command == "find-related":
         _run_find_related(
             args.path,
@@ -401,4 +488,5 @@ def _cli_main() -> None:
             _resolve_content(args.content, args.include_text_files),
             args.max_snippet_lines,
             args.embedder,
+            args.no_daemon,
         )
