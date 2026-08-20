@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import multiprocessing
 import os
 import time
 from collections import defaultdict
@@ -18,6 +17,7 @@ from zemble.dedup.structure import check_pair
 from zemble.dedup.units import extract_units
 from zemble.embedding.base import Embedder
 from zemble.index.file_walker import walk_files
+from zemble.parallel import pool_context
 
 _WORKER_CHUNK = 60
 _MAX_FILE_BYTES = 2_000_000
@@ -118,7 +118,12 @@ def collect_units(root: Path, options: DupeOptions) -> tuple[list[Unit], int]:
         for batch in batches:
             units.extend(_extract_batch((batch, extract_options)))
         return units, len(scan.jobs)
-    context = multiprocessing.get_context("spawn" if os.name == "nt" else "fork")
+    context = pool_context()
+    if context is None:
+        # No start method is safe here (see zemble.parallel): extract in this process.
+        for batch in batches:
+            units.extend(_extract_batch((batch, extract_options)))
+        return units, len(scan.jobs)
     with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
         for result in pool.map(_extract_batch, ((batch, extract_options) for batch in batches)):
             units.extend(result)

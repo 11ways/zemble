@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import multiprocessing
 import os
 import sqlite3
 import time
@@ -27,6 +26,7 @@ from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol, SymbolKind
 from zemble.graph.resolve import FileContext, Resolver
 from zemble.index.file_walker import walk_files
 from zemble.index.files import detect_language, get_extensions
+from zemble.parallel import pool_context
 from zemble.types import ContentType
 
 logger = logging.getLogger(__name__)
@@ -265,14 +265,15 @@ def _extract_serial(jobs: Sequence[tuple[str, str]]) -> list[FileExtraction]:
 def _extract_many(jobs: Sequence[tuple[str, str]], workers: int) -> list[FileExtraction]:
     """Extract a batch of files, using a process pool when the batch is large enough.
 
-    `fork` is preferred where the platform has it: the other start methods re-import
-    the host's `__main__`, which fails outright for an embedded or piped interpreter.
-    Any pool failure falls back to extracting in this process rather than aborting.
+    The start method comes from `zemble.parallel.pool_context` (fork only in a
+    single-threaded process, else spawn, else none); when no method is safe, or the pool
+    fails for any reason, extraction runs in this process rather than aborting.
     """
     if len(jobs) < _WORKER_CHUNK * 2 or workers <= 1:
         return _extract_serial(jobs)
-    methods = multiprocessing.get_all_start_methods()
-    context = multiprocessing.get_context("fork") if "fork" in methods else None
+    context = pool_context()
+    if context is None:
+        return _extract_serial(jobs)
     try:
         with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
             return [result for result in pool.map(_extract_one, jobs, chunksize=_WORKER_CHUNK) if result is not None]
