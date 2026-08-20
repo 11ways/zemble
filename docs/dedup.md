@@ -15,6 +15,8 @@ better answer than anything a token stream could give here.
 ```
 zemble dupes /home/skerit/projects/javaweb --kind exact,renamed --limit 20
 zemble dupes . --kind logic --min-files 2 --json
+zemble dupes . --lane production --brief
+zemble dupes . --baseline dupes-baseline.json
 ```
 
 ## The three kinds
@@ -48,6 +50,82 @@ on similarity alone**. A candidate pair (cosine >= `--logic-threshold`, from the
 Each reported pair carries its reason, e.g. `control flow identical; calls
 {addColumn, createTable, ...} shared, {addIndex} differs; 14 literals differ
 ("created_at", "email", ...)`.
+
+## Lanes: production, mixed, test
+
+Every unit is production or test code, decided by the symbol graph's own rule
+(`zemble.graph.model.is_test_path`: a `test`, `tests`, `browserTest`,
+`integrationTest` or `testFixtures` directory segment). A clone class is
+**production** when every member is production code, **test** when every member
+is test code, and **mixed** when it spans both.
+
+The report prints one section per lane -- production, then mixed, then test --
+each with the kind sections inside it, each ranked on its own. Scores are
+untouched: a 25-copy browser-test fixture constructor still scores 25000, it just
+sits in the test section where it cannot bury a two-copy production finding.
+`--lane production|mixed|test` restricts the report to one of them.
+
+That is the fix for the failure mode this report had on a whole repo: on
+zenit-cms the top exact and renamed classes were both the browser-test panel
+constructor, 125x the score of the best production class, and neither
+`--min-files` nor `--min-tokens` could separate them. `--exclude <glob>`
+(repeatable, gitignore-style, relative to the root, applied before anything is
+parsed) drops files entirely when a lane is not enough -- generated sources, a
+vendored tree.
+
+## Class keys
+
+Every clone class carries a stable key, printed as `key: exact:4c4c163666b7`:
+its kind plus the first 12 hex characters of a sha256 over the sorted set of
+`(member path, normalized stream hash)` pairs -- the exact stream for `exact`
+and `logic`, the alpha-renamed stream for `renamed`.
+
+Line numbers are deliberately not in it, so editing around a clone keeps its
+key. Adding or removing a copy *does* change it, which is what makes a stale
+suppression visible instead of silently covering a class that grew.
+
+## Suppression: `.zemble/dupes.ignore`
+
+Some duplication is deliberate (enum constructors, two bodies a driver's API
+forces apart). Commit `<root>/.zemble/dupes.ignore`, one entry per line:
+
+```
+# deliberate duplication, reviewed
+exact:4c4c163666b7  the Couchbase driver hands N1qlRows back per query type
+renamed:309a664361af  enum constructors, one per constant by design
+```
+
+Source-guard convention applies: an entry is `<key>` followed by whitespace and
+a **justification**, and an entry **without** one is itself reported as a
+violation and suppresses nothing. An entry that matches no class this run is
+reported as **stale** -- except for kinds the run did not scan, so `--kind exact`
+never declares a `renamed:` entry dead.
+
+Suppressed classes leave the report and are counted in a trailing
+`suppressed: N` line; `--show-suppressed` prints them.
+
+## Baselines
+
+```
+zemble dupes . --kind exact,renamed --save-baseline dupes-baseline.json
+# ... refactor ...
+zemble dupes . --kind exact,renamed --baseline dupes-baseline.json
+```
+
+`--save-baseline` writes every class key of the run (with its kind, lane, copies,
+score and member locations) as JSON. `--baseline` prints three sections:
+**resolved** (in the baseline, gone now), **remaining** and **new**. The exit
+code stays 0 -- this is still a report, not a gate.
+
+A suppressed class is neither new nor remaining, and is not called resolved
+either: it is still there, on purpose. A run narrowed with `--kind` or `--lane`
+only judges the entries it actually looked for.
+
+## `--brief`
+
+Header plus one line per class -- rank, kind, lane, copies x tokens, score, root
+symbol, file count and key -- and nothing else. No member paths, no reasons, so
+the output survives a pipe without losing the exit code the way `| grep` does.
 
 ## Units
 
@@ -84,12 +162,36 @@ overlapping window lengths of one copied run into the single widest one.
 | `--logic-threshold` | 0.92 | Cosine a logic candidate needs |
 | `--logic-top-k` | 10 | Embedding neighbours considered per body |
 | `--paths` | whole root | Restrict the scan to these paths |
+| `--exclude` | none | Gitignore-style pattern dropped before parsing (repeatable) |
+| `--lane` | `all` | Report one lane: `production`, `mixed`, `test` |
+| `--brief` | off | Header plus one line per class |
+| `--show-suppressed` | off | Also print the classes the ignore file took out |
+| `--save-baseline` | off | Write this run's class keys to a file |
+| `--baseline` | off | Report resolved / remaining / new against a saved baseline |
 | `--embedder` | env default | Embedder spec used by `--kind logic` |
 | `--jobs` | up to 8 | Extraction worker processes |
 | `--json` | off | Machine-readable output |
 
-The MCP tool is `dupes(repo, kind, paths, limit, min_files)` and returns the same
-JSON. Neither surface needs a daemon or an index.
+## The MCP tool
+
+`dupes(repo, kind, paths, exclude, lane, limit, min_files, format, brief)`.
+
+`format="text"` (the default) returns the report exactly as the CLI prints it,
+as a plain string; `brief=true` trims it to the class lines. `format="json"`
+returns the structured object itself -- FastMCP encodes it once, so a client
+never has to parse JSON out of a JSON string. Neither surface needs a daemon or
+an index.
+
+The `--kind all` text report is roughly a third of the tokens the JSON form
+costs, and the per-pair reasons are collapsed to one reason per class in the
+JSON whenever every pair agreed.
+
+## Cost, measured on one repo
+
+zenit-cms (270 Java files, 52 950 units of which 1670 are bodies):
+`--kind exact,renamed` 6.5 s, `--kind logic --no-windows` 1.9 s of which 0.9 s
+embedding with the local potion-code-16M-v2 model. Lanes: 10 production classes,
+0 mixed, 54 test.
 
 ## Cost, measured on the javaweb workspace
 
@@ -112,6 +214,9 @@ Every class below was opened in the source and classified.
 
 | # | Kind | Class | Verdict |
 | --- | --- | --- | --- |
+(Measured before lanes existed: every "test scaffolding" verdict below is now
+sectioned under TEST, and the production classes are what the report leads with.)
+
 | 1 | exact | 19 copies of the `ActivityPanel(String slug, PanelPeer peer)` fixture constructor across zenit-cms browser tests | Genuine. Test scaffolding copied per test class; one shared fixture panel would remove all 19. |
 | 2 | exact | 12 copies of a 7-statement window inside `createAdministrator` in zenit-auth tests | Genuine, and the same code as #3: a shared test helper is missing. |
 | 3 | exact | 11 copies of `createUser(String email)` in zenit-auth tests (`Row` + 5 `set` + `save`) | Genuine. A `AuthTestUsers.create(...)` helper is the fix. |

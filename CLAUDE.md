@@ -68,6 +68,9 @@ overwrite each other. Never tune on individual eval queries.
 - Vocabularies have one home (enum/sealed type, exhaustive dispatch); unknown members
   fail closed. Ranking must stay bit-identical across refactors that are not meant
   to change it (prove it with the benchmark).
+- MCP tools return their payload as an object (or as plain text), never as a
+  `json.dumps` string from a `-> str` signature: that makes the client parse JSON
+  out of JSON. `tests/test_mcp.py` fails the build when one does.
 - Defaults are local/offline/no key. Hosted providers (Voyage) are opt-in via env;
   `docs/comparison.md` carries the recommendation.
 - Secrets: `VOYAGE_API_KEY` lives in `~/.config/zemble/env` (mode 600) on the dev
