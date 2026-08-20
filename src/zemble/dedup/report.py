@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
-from zemble.dedup.model import CloneClass, CloneKind, DupeReport
+from collections.abc import Sequence
+
+from zemble.dedup.baseline import Baseline, BaselineDiff, diff_baseline
+from zemble.dedup.ignore import IGNORE_RELATIVE_PATH
+from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Lane
 
 _SECTION_TITLES = {
     CloneKind.EXACT: "EXACT",
     CloneKind.RENAMED: "RENAMED (alpha-renamed: only declared locals differ)",
     CloneKind.LOGIC: "LOGIC (embedding candidates that passed the structural check)",
+}
+
+_LANE_TITLES = {
+    Lane.PRODUCTION: "PRODUCTION (every copy outside a test source set)",
+    Lane.MIXED: "MIXED (production and test copies of the same code)",
+    Lane.TEST: "TEST (test scaffolding only)",
 }
 
 
@@ -21,42 +31,123 @@ def _header(report: DupeReport) -> str:
     )
 
 
+def _head_line(index: int, clone: CloneClass, *, with_kind: bool) -> str:
+    """Render a clone class's one-line summary."""
+    head = clone.members[0]
+    label = f"{clone.kind.value} {clone.lane.value}  " if with_kind else ""
+    return (
+        f"#{index}  {label}{len(clone.members)} copies x {clone.tokens} tokens (score {clone.score})  "
+        f"root: {head.kind} {head.name}  files: {clone.files}  key: {clone.key}"
+    )
+
+
 def _class_lines(index: int, clone: CloneClass) -> list[str]:
     """Render one clone class the way the reference report does."""
-    head = clone.members[0]
-    lines = [
-        f"#{index}  {len(clone.members)} copies x {clone.tokens} tokens (score {clone.score})  "
-        f"root: {head.kind} {head.name}  files: {clone.files}"
-    ]
+    lines = [_head_line(index, clone, with_kind=False)]
     lines.extend(f"    {member.location}" for member in clone.members)
     lines.extend(f"    reason: {reason}" for reason in clone.reasons)
     return lines
 
 
-def format_report(report: DupeReport, limit: int = 25) -> str:
+def _preamble(report: DupeReport) -> list[str]:
+    """The header, the run's notes and any ignore-file violation."""
+    lines = [_header(report)]
+    lines.extend(f"  note: {note}" for note in report.notes)
+    lines.extend(f"  ignore-file violation: {problem}" for problem in report.ignore_problems)
+    return lines
+
+
+def _trailer(report: DupeReport, show_suppressed: bool) -> list[str]:
+    """The suppressed count, and the suppressed classes themselves when asked for."""
+    if not report.suppressed:
+        return []
+    lines = ["", f"suppressed: {len(report.suppressed)} (justified in {IGNORE_RELATIVE_PATH})"]
+    if show_suppressed:
+        lines.append("")
+        for index, clone in enumerate(report.suppressed, start=1):
+            lines.append(_head_line(index, clone, with_kind=True))
+    return lines
+
+
+def _brief_lines(classes: Sequence[CloneClass]) -> list[str]:
+    """Render every class as one line, lane-major, for a report that will be piped."""
+    return [_head_line(index, clone, with_kind=True) for index, clone in enumerate(_ordered(classes), start=1)]
+
+
+def _ordered(classes: Sequence[CloneClass]) -> list[CloneClass]:
+    """Order classes the way the sections print them: lane first, then kind, then rank."""
+    lanes = list(Lane)
+    kinds = list(CloneKind)
+    return sorted(classes, key=lambda clone: (lanes.index(clone.lane), kinds.index(clone.kind), -clone.score))
+
+
+def format_report(report: DupeReport, limit: int = 25, *, brief: bool = False, show_suppressed: bool = False) -> str:
     """Render a full report as text.
+
+    Sections are lane-major: production duplication first, then the mixed classes, then the
+    test-only scaffolding, so copied fixtures can never outrank a production finding.
 
     :param report: The report to print.
     :param limit: Clone classes printed per section.
+    :param brief: Print one line per class, with no members and no reasons.
+    :param show_suppressed: Also print the classes the ignore file took out.
     :return: The report text.
     """
-    lines = [_header(report)]
-    for note in report.notes:
-        lines.append(f"  note: {note}")
-    for kind in CloneKind:
-        classes = report.of_kind(kind)
-        if not classes:
+    lines = _preamble(report)
+    if brief:
+        lines.extend(_brief_lines(report.classes))
+        lines.extend(_trailer(report, show_suppressed))
+        return "\n".join(lines).rstrip() + "\n"
+    for lane in Lane:
+        if not any(clone.lane is lane for clone in report.classes):
             continue
-        lines.extend(["", f"== {_SECTION_TITLES[kind]} =="])
-        if len(classes) > limit:
-            lines.append(f"  showing the top {limit} of {len(classes)}")
-        lines.append("")
-        for index, clone in enumerate(classes[:limit], start=1):
-            lines.extend(_class_lines(index, clone))
+        lines.extend(["", f"== {_LANE_TITLES[lane]} =="])
+        for kind in CloneKind:
+            classes = report.section(lane, kind)
+            if not classes:
+                continue
+            lines.extend(["", f"-- {_SECTION_TITLES[kind]} --"])
+            if len(classes) > limit:
+                lines.append(f"  showing the top {limit} of {len(classes)}")
             lines.append("")
-    if len(lines) == 1:
-        lines.append("")
-        lines.append("No duplication found.")
+            for index, clone in enumerate(classes[:limit], start=1):
+                lines.extend(_class_lines(index, clone))
+                lines.append("")
+    if not report.classes:
+        lines.extend(["", "No duplication found."])
+    lines.extend(_trailer(report, show_suppressed))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def format_baseline_diff(report: DupeReport, baseline: Baseline, *, limit: int = 25) -> str:
+    """Render a run against a baseline: what is gone, what is left and what is new.
+
+    :param report: The run in hand.
+    :param baseline: The saved run to compare against.
+    :param limit: Classes printed per section.
+    :return: The diff text.
+    """
+    difference: BaselineDiff = diff_baseline(report, baseline)
+    lines = _preamble(report)
+    lines.append(
+        f"  baseline: {len(baseline.entries)} class(es); {len(difference.resolved)} resolved, "
+        f"{len(difference.remaining)} remaining, {len(difference.new)} new"
+    )
+    lines.extend(["", "== RESOLVED (in the baseline, gone now) =="])
+    if not difference.resolved:
+        lines.append("  none")
+    for index, entry in enumerate(difference.resolved[:limit], start=1):
+        lines.append(
+            f"#{index}  {entry.kind} {entry.lane}  {entry.copies} copies (score {entry.score})  "
+            f"was: {entry.root_symbol}  key: {entry.key}"
+        )
+    for title, classes in (("REMAINING (in the baseline, still here)", difference.remaining), ("NEW", difference.new)):
+        lines.extend(["", f"== {title} =="])
+        if not classes:
+            lines.append("  none")
+        for index, clone in enumerate(_ordered(classes)[:limit], start=1):
+            lines.append(_head_line(index, clone, with_kind=True))
+    lines.extend(_trailer(report, False))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -69,8 +160,12 @@ def report_json(report: DupeReport, limit: int = 25) -> dict[str, object]:
     """
     payload = report.to_dict()
     capped = []
-    for kind in CloneKind:
-        capped.extend(clone.to_dict() for clone in report.of_kind(kind)[:limit])
+    for lane in Lane:
+        for kind in CloneKind:
+            capped.extend(clone.to_dict() for clone in report.section(lane, kind)[:limit])
     payload["classes"] = capped
     payload["class_counts"] = {kind.value: len(report.of_kind(kind)) for kind in CloneKind}
+    payload["lane_counts"] = {
+        lane.value: len([clone for clone in report.classes if clone.lane is lane]) for lane in Lane
+    }
     return payload

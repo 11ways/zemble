@@ -9,11 +9,13 @@ from __future__ import annotations
 import argparse
 import json
 
+from zemble.dedup.baseline import load_baseline, save_baseline
 from zemble.dedup.detect import DupeOptions, find_duplication
-from zemble.dedup.model import CloneKind
-from zemble.dedup.report import format_report, report_json
+from zemble.dedup.model import CloneKind, Lane
+from zemble.dedup.report import format_baseline_diff, format_report, report_json
 
 _KIND_CHOICES = [kind.value for kind in CloneKind] + ["all"]
+_LANE_CHOICES = [lane.value for lane in Lane] + ["all"]
 
 
 def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
@@ -46,6 +48,29 @@ def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
         "--logic-top-k", type=int, default=10, help="Embedding neighbours considered per unit (default: 10)."
     )
     parser.add_argument("--paths", nargs="+", default=None, metavar="PATH", help="Restrict the scan to these paths.")
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help="Gitignore-style pattern, relative to the root, dropped before parsing (repeatable).",
+    )
+    parser.add_argument(
+        "--lane",
+        default="all",
+        choices=_LANE_CHOICES,
+        help="Report only one lane: production, mixed, test, or all (default: all).",
+    )
+    parser.add_argument("--brief", action="store_true", help="Header plus one line per class, nothing else.")
+    parser.add_argument(
+        "--show-suppressed", action="store_true", help="Also print the classes the ignore file took out."
+    )
+    parser.add_argument(
+        "--baseline", default=None, metavar="FILE", help="Report resolved/remaining/new against a saved baseline."
+    )
+    parser.add_argument(
+        "--save-baseline", default=None, metavar="FILE", help="Write this run's clone class keys as a baseline."
+    )
     parser.add_argument("--embedder", default=None, metavar="SPEC", help="Embedder spec used by `--kind logic`.")
     parser.add_argument("--jobs", type=int, default=None, help="Extraction worker processes (default: up to 8).")
     parser.add_argument("--json", action="store_true", help="Print machine-readable output.")
@@ -80,14 +105,28 @@ def run_dupes(args: argparse.Namespace) -> int:
         logic_top_k=args.logic_top_k,
         embedder=args.embedder,
         paths=tuple(args.paths or ()),
+        exclude=tuple(args.exclude or ()),
+        lane=None if args.lane == "all" else Lane(args.lane),
         jobs=args.jobs,
     )
     try:
         report = find_duplication(args.path, options)
     except FileNotFoundError as error:
         raise SystemExit(str(error)) from None
+    if args.save_baseline:
+        written = save_baseline(args.save_baseline, report)
+        print(f"Wrote {len(report.classes)} clone class key(s) to {written}")
     if args.json:
         print(json.dumps(report_json(report, args.limit), indent=2))
+    elif args.baseline:
+        try:
+            baseline = load_baseline(args.baseline)
+        except ValueError as error:
+            raise SystemExit(str(error)) from None
+        print(format_baseline_diff(report, baseline, limit=args.limit), end="")
     else:
-        print(format_report(report, args.limit), end="")
+        print(
+            format_report(report, args.limit, brief=args.brief, show_suppressed=args.show_suppressed),
+            end="",
+        )
     return 0

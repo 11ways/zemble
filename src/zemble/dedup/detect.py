@@ -11,8 +11,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from pathspec import GitIgnoreSpec
 
-from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Unit
+from zemble.dedup.ignore import IgnoreFile, apply_ignores
+from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Lane, PairReason, Unit
 from zemble.dedup.structure import check_pair
 from zemble.dedup.units import extract_units
 from zemble.embedding.base import Embedder
@@ -38,6 +40,12 @@ class DupeOptions:
     logic_top_k: int = 10
     embedder: str | None = None
     paths: tuple[str, ...] = ()
+    #: Gitignore-style patterns, relative to the root, dropped before anything is parsed.
+    exclude: tuple[str, ...] = ()
+    #: Which lane to report; None reports production, mixed and test sections in that order.
+    lane: Lane | None = None
+    #: Whether `<root>/.zemble/dupes.ignore` is honoured.
+    use_ignore_file: bool = True
     jobs: int | None = None
 
     @property
@@ -53,12 +61,20 @@ class _Scan:
     jobs: list[tuple[str, str]] = field(default_factory=list)
 
 
-def _scan(root: Path, paths: Sequence[str]) -> _Scan:
-    """Walk the workspace for Java files, honouring an optional path restriction."""
+def _excluder(patterns: Sequence[str]) -> GitIgnoreSpec | None:
+    """Compile --exclude patterns into one gitignore spec matched against root-relative paths."""
+    return GitIgnoreSpec.from_lines(patterns) if patterns else None
+
+
+def _scan(root: Path, paths: Sequence[str], exclude: Sequence[str] = ()) -> _Scan:
+    """Walk the workspace for Java files, honouring a path restriction and exclude patterns."""
     scan = _Scan()
     selected = [Path(path).resolve() for path in paths]
+    excluded = _excluder(exclude)
     for file_path in walk_files(root, extensions=[".java"]):
         if selected and not any(_is_under(file_path, choice) for choice in selected):
+            continue
+        if excluded is not None and excluded.match_file(file_path.relative_to(root).as_posix()):
             continue
         try:
             if file_path.stat().st_size > _MAX_FILE_BYTES:
@@ -104,7 +120,7 @@ def collect_units(root: Path, options: DupeOptions) -> tuple[list[Unit], int]:
     :param options: The run's options.
     :return: The units and the number of files read.
     """
-    scan = _scan(root, options.paths)
+    scan = _scan(root, options.paths, options.exclude)
     extract_options: dict[str, object] = {
         "min_tokens": options.min_tokens,
         "min_statements": options.min_statements,
@@ -141,7 +157,7 @@ def _group(units: Iterable[Unit], key: str) -> list[list[Unit]]:
     return [members for members in buckets.values() if len(members) > 1]
 
 
-def _clone_class(kind: CloneKind, members: Sequence[Unit], reasons: Sequence[str] = ()) -> CloneClass:
+def _clone_class(kind: CloneKind, members: Sequence[Unit], reasons: Sequence[PairReason] = ()) -> CloneClass:
     """Build a clone class from its members, ordered by location."""
     ordered = tuple(sorted(members, key=lambda unit: (unit.file_path, unit.start_line)))
     return CloneClass(
@@ -244,7 +260,7 @@ def logic_classes(
     vectors = embedder.embed_documents([unit.text or "" for unit in candidates])
     embedded = time.perf_counter() - started
     finder = _UnionFind(len(candidates))
-    reasons: dict[tuple[int, int], str] = {}
+    reasons: dict[tuple[int, int], PairReason] = {}
     pairs = 0
     for left, right, _similarity in _neighbour_pairs(candidates, vectors, options.logic_threshold, options.logic_top_k):
         one, other = candidates[left], candidates[right]
@@ -255,7 +271,7 @@ def logic_classes(
             continue
         pairs += 1
         finder.union(left, right)
-        reasons[(left, right)] = f"{one.location} ~ {other.location}: {verdict.reason}"
+        reasons[(left, right)] = PairReason(left=one.location, right=other.location, reason=verdict.reason)
     groups: dict[int, list[int]] = defaultdict(list)
     for index in range(len(candidates)):
         groups[finder.find(index)].append(index)
@@ -346,6 +362,15 @@ def find_duplication(
         found, notes = logic_classes(units, options, embedder)
         classes.extend(rank(found, options.min_files))
         report.notes.extend(notes)
+    if options.use_ignore_file:
+        scanned = [kind.value for kind in options.kinds]
+        suppression = apply_ignores(classes, IgnoreFile.load(root_path), scanned)
+        classes = list(suppression.kept)
+        report.suppressed = list(suppression.suppressed)
+        report.ignore_problems = list(suppression.problems)
+    if options.lane is not None:
+        classes = [clone for clone in classes if clone.lane is options.lane]
+        report.suppressed = [clone for clone in report.suppressed if clone.lane is options.lane]
     report.classes = classes
     report.elapsed_seconds = time.perf_counter() - started
     return report
