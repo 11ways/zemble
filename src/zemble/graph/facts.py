@@ -880,6 +880,15 @@ class FactsOverlay:
         return set(self.edges)
 
     @property
+    def fresh_sources(self) -> set[str]:
+        """Every DECLARED source file whose content still hashes to what the facts describe.
+
+        Not the same set as `covered_files`: a generated Hawkeye class is a fresh declared
+        source whose edges land on the template it was compiled from, never on itself.
+        """
+        return {path for loaded in self.files for path in loaded.fresh_files}
+
+    @property
     def declared_files(self) -> set[str]:
         """Every source file any facts file mentions, fresh or stale."""
         return {path for loaded in self.files for path in loaded.sources}
@@ -890,8 +899,8 @@ class FactsOverlay:
             "facts_files": len(self.files),
             "errors": [{"path": path, "error": message} for path, message in self.errors],
             "files_declared": len(self.declared_files),
-            "files_fresh": len(self.covered_files),
-            "files_stale": len(self.declared_files) - len(self.covered_files),
+            "files_fresh": len(self.fresh_sources),
+            "files_stale": len(self.declared_files) - len(self.fresh_sources),
             "edges": sum(len(edges) for edges in self.edges.values()),
             "external_targets": self.external_targets,
             "skipped": self.bucket_counts(),

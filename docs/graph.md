@@ -187,6 +187,16 @@ wrote is `EXACT`; a name match alone is `UNIQUE_NAME`; several overloads sharing
 one key are `AMBIGUOUS`. Arity is deliberately not compared: a template function's
 Java method may take a leading `RenderContext` the call site never writes.
 
+*Calls can be **exact facts** instead.* When a javac emitter has written facts about
+the class a template was compiled into, those facts are mapped back onto the
+template through Hawkeye's source maps and REPLACE the extracted call edges of that
+template: the compiler already knew which method each call site reaches, and the
+edge is then graded `EXACT` with `source = zemble-javac-facts` and the generated
+member it was written about kept on the edge. A template's other edges - what it
+extends, renders and references - stay the extractor's, because the generated class
+knows nothing about them. The mapping, its freshness rule and its limits are in
+`docs/graph-facts.md`.
+
 ### Honest limits
 
 - **A tag's region ends where the next one begins.** Its closing `} %}` cannot be
