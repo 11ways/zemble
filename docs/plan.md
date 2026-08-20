@@ -58,7 +58,7 @@ API). Kept only if it beats the heuristics on the hard subset.
 
 ## Status (2026-08-20)
 
-Every step 0-6 shipped on `main`; step 7 is being measured. Linear history,
+Every step 0-6 and step 8 (`home`) shipped on `main`; step 7 (reranker) is being measured. Linear history,
 one agent branch per step, rebased in. Numbers below are from the docs each
 step wrote; the eval sets are the upstream 63-repo benchmark and the javaweb
 local set (benchmarks/local, 80 queries).
@@ -72,6 +72,7 @@ local set (benchmarks/local, 80 queries).
 | 4 | Java symbol graph (tree-sitter, two-pass resolver with EXACT/UNIQUE_NAME/AMBIGUOUS/UNRESOLVED, sqlite, `GraphProvider` seam), CLI `zemble graph *`, 5 MCP tools | whole workspace 33 s, 101k symbols / 923k edges; queries < 12 ms; six CLAUDE.md facts asserted |
 | 5 | `explain` (tiered budgeted bundles, degrade-before-drop), `outline`, `signatures`; CLI + MCP | bundles draw level with search hit rate only at 3000 tokens (tier 0 IS the search set; the graph hop found something search missed in 1/80); `outline` is the token saver (~150-300 tokens per class) |
 | 6 | `zemble dupes`: exact / alpha-renamed / logic clone classes over Java bodies + statement windows, zenit-dev-shaped report, MCP tool | workspace exact+renamed 45 s; first real finding: `trimToNull`-family copied 9x across 5 repos; detector false positive (`this.f = f` ctors) found and fixed |
+| 8 | `zemble home` (config-driven `.zemble/home.toml`: module order, forbidden deps, declared-home table, skills, rules; existing mechanisms + candidate homes + verdict + checklist; CLI/MCP/daemon) | 61 paraphrased capability rows: declared home ranked #1 in 90% (77% with the table lane off), top-3 93%; ~0.3 s per answer |
 | B1 | columnar BM25 (CSR + vectorized scoring), mmap vectors, columnar lazy chunks, precomputed symbol-definition table, scandir walker, lazy imports | cold query 7.0 s -> 1.0 s, warm symbol 379 -> 17 ms, NL 95 -> 16 ms; ranking bit-identical on both sets |
 
 Open: Voyage benchmark (needs a key); `.hwk` template extractor for the graph
