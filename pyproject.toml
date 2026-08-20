@@ -98,6 +98,7 @@ target-version = "py310"
 "src/zemble/evidence/cli.py" = ["T20"]
 "src/zemble/home/cli.py" = ["T20"]
 "src/zemble/daemon/cli.py" = ["T20"]
+"src/zemble/embedding/cli.py" = ["T20"]
 "src/zemble/installer/*.py" = ["T20", "E501"]
 
 [tool.ruff.lint]

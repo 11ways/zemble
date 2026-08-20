@@ -35,6 +35,9 @@ def load_static_model(model_path: str) -> "StaticModel":
 class Model2VecEmbedder:
     """Embeds through a local static model; documents and queries are treated identically."""
 
+    #: Runs on this machine: free, offline, never budget-gated.
+    is_remote = False
+
     def __init__(self, model_path: str) -> None:
         """Initialise the embedder.
 
@@ -59,6 +62,11 @@ class Model2VecEmbedder:
     def dimensions(self) -> int:
         """The model's vector width."""
         return int(self.model.dim)
+
+    @property
+    def declared_dimensions(self) -> int | None:
+        """The width, if the model is already loaded; loading one just to report a width is not worth it."""
+        return None if self._model is None else int(self._model.dim)
 
     def embed_documents(self, texts: list[str]) -> EmbeddingMatrix:
         """Embed documents.

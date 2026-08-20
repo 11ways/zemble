@@ -1,6 +1,7 @@
 import argparse
 import io
 import json
+import os
 import re
 import sys
 import warnings
@@ -12,6 +13,8 @@ from typing import Literal
 from zemble.cache import cache_key, resolve_cache_folder, save_index_to_cache
 from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
+from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser, run_embed_status
+from zemble.embedding.pricing import CONFIRM_ENV, EmbeddingBudgetExceeded
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
@@ -43,6 +46,7 @@ _CLI_DISPATCH_ARGS = frozenset(
         "dupes",
         *EVIDENCE_COMMANDS,
         *HOME_COMMANDS,
+        *EMBED_STATUS_COMMANDS,
         "daemon",
     }
 )
@@ -55,6 +59,7 @@ _SUBCOMMAND_RUNNERS = {
     "daemon": run_daemon,
     **dict.fromkeys(EVIDENCE_COMMANDS, run_evidence),
     **dict.fromkeys(HOME_COMMANDS, run_home),
+    **dict.fromkeys(EMBED_STATUS_COMMANDS, run_embed_status),
 }
 
 _SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
@@ -183,6 +188,24 @@ def _resolve_content(content: list[str], include_text_files: bool) -> list[Conte
     return [ContentType(c) for c in content]
 
 
+def _add_confirm_arg(p: argparse.ArgumentParser) -> None:
+    """Add -y/--yes: the command-line half of the paid-embedding budget guard."""
+    p.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        # Its own dest: `install --yes` means something else entirely and must not confirm a bill.
+        dest="confirm_embedding",
+        help=f"Embed whatever this build costs, past the token budget (also: {CONFIRM_ENV}=1).",
+    )
+
+
+def _apply_embedding_confirmation(args: argparse.Namespace) -> None:
+    """Turn --yes into the environment variable the budget guard reads, its one source of truth."""
+    if getattr(args, "confirm_embedding", False):
+        os.environ[CONFIRM_ENV] = "1"
+
+
 def _add_daemon_arg(p: argparse.ArgumentParser) -> None:
     """Add --no-daemon to a subparser."""
     p.add_argument(
@@ -228,7 +251,7 @@ def _load_index(path: str, content: list[ContentType], embedder: str | None = No
     """
     try:
         return _build_index(path, content, embedder)
-    except (FileNotFoundError, EmbedderSpecError) as e:
+    except (FileNotFoundError, EmbedderSpecError, EmbeddingBudgetExceeded) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
@@ -408,12 +431,14 @@ def _cli_main() -> None:
     )
     _add_content_args(search_p)
     _add_embedder_arg(search_p)
+    _add_confirm_arg(search_p)
     _add_daemon_arg(search_p)
 
     stats_p = sub.add_parser("stats", help="Show what an index contains, including its embedder and dimensions.")
     stats_p.add_argument("path", nargs="?", default=".", help="Local path or git URL (default: current directory).")
     _add_content_args(stats_p)
     _add_embedder_arg(stats_p)
+    _add_confirm_arg(stats_p)
     _add_daemon_arg(stats_p)
 
     clear_p = sub.add_parser("clear", help="Clear the index cache.")
@@ -437,6 +462,7 @@ def _cli_main() -> None:
     )
     _add_content_args(related_p)
     _add_embedder_arg(related_p)
+    _add_confirm_arg(related_p)
     _add_daemon_arg(related_p)
 
     sub.add_parser("savings", help="Show token savings and usage stats.")
@@ -445,6 +471,7 @@ def _cli_main() -> None:
     add_dupes_parser(sub)
     add_evidence_parser(sub)
     add_home_parser(sub)
+    add_embed_status_parser(sub)
     add_daemon_parser(sub)
 
     install_p = sub.add_parser("install", help="Configure zemble across coding agents.")
@@ -472,6 +499,8 @@ def _cli_main() -> None:
         )
 
     args = parser.parse_args()
+
+    _apply_embedding_confirmation(args)
 
     runner = _SUBCOMMAND_RUNNERS.get(args.command)
     if runner is not None:

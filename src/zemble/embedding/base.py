@@ -29,6 +29,11 @@ class Embedder(Protocol):
         """The width of the vectors this embedder returns."""
         ...
 
+    @property
+    def is_remote(self) -> bool:
+        """Whether embedding through this costs a round trip and money."""
+        ...
+
     def embed_documents(self, texts: list[str]) -> EmbeddingMatrix:
         """Embed indexable content.
 
@@ -51,3 +56,21 @@ def normalize_rows(vectors: EmbeddingMatrix) -> EmbeddingMatrix:
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     normalized: EmbeddingMatrix = vectors / np.where(norms == 0.0, 1.0, norms)
     return normalized.astype(np.float32, copy=False)
+
+
+def is_remote(embedder: object) -> bool:
+    """Return whether an embedder is a paid, remote one.
+
+    An embedder that does not declare itself is treated as paid: the budget guard fails
+    closed, and being asked to confirm a free embed is cheaper than an unasked bill.
+    """
+    return bool(getattr(embedder, "is_remote", True))
+
+
+def declared_dimensions(embedder: object) -> int | None:
+    """Return the vector width already known, or None when only a request or a model load could tell.
+
+    Reading ``dimensions`` on a remote embedder whose model has no documented width sends a
+    probe request, which a pre-flight report must never do.
+    """
+    return getattr(embedder, "declared_dimensions", None)

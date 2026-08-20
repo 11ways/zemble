@@ -190,6 +190,37 @@ def get_validated_cache(
     return index_path
 
 
+def load_manifest_for_incremental(
+    path: str, embedder_id: str, content: Sequence[ContentType], capsules: CapsuleOptions | None = None
+) -> dict[str, FileManifestEntry] | None:
+    """Load only the file manifest of a compatible cached index.
+
+    The mtimes alone answer what a build would reuse, at the cost of one small JSON read
+    instead of loading every chunk and the whole vector matrix.
+
+    :param path: Source path used to locate the cached index.
+    :param embedder_id: The normalized spec string of the requested embedder.
+    :param content: Content types the cached index must support.
+    :param capsules: The requested context-capsule configuration.
+    :return: The manifest, or None when there is no reusable index.
+    """
+    try:
+        persistence_path = PersistencePath.from_path(find_index_from_cache_folder(path, content))
+        if persistence_path.non_existing():
+            return None
+        with open(persistence_path.metadata, encoding="utf-8") as f:
+            metadata = json.load(f)
+        if not _metadata_matches(metadata, embedder_id, content, CapsuleOptions.resolve(capsules).key):
+            return None
+        raw_manifest = metadata.get("files")
+        if not raw_manifest:
+            return None
+        return {indexed_path: FileManifestEntry(**entry) for indexed_path, entry in raw_manifest.items()}
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        logger.debug("Unable to read the cached manifest for %s", path, exc_info=True)
+        return None
+
+
 def load_previous_for_incremental(
     path: str, embedder_id: str, content: Sequence[ContentType], capsules: CapsuleOptions | None = None
 ) -> PreviousIndex | None:
@@ -202,20 +233,10 @@ def load_previous_for_incremental(
     :return: Previous index state, or None if the cache is unavailable or invalid.
     """
     try:
-        index_path = find_index_from_cache_folder(path, content)
-        persistence_path = PersistencePath.from_path(index_path)
-        if persistence_path.non_existing():
+        manifest = load_manifest_for_incremental(path, embedder_id, content, capsules)
+        if manifest is None:
             return None
-
-        with open(persistence_path.metadata, encoding="utf-8") as f:
-            metadata = json.load(f)
-        if not _metadata_matches(metadata, embedder_id, content, CapsuleOptions.resolve(capsules).key):
-            return None
-
-        raw_manifest = metadata.get("files")
-        if not raw_manifest:
-            return None
-        manifest = {indexed_path: FileManifestEntry(**entry) for indexed_path, entry in raw_manifest.items()}
+        persistence_path = PersistencePath.from_path(find_index_from_cache_folder(path, content))
 
         chunks = list(load_chunks(persistence_path.chunks))
 

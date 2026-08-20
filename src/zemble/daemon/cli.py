@@ -158,6 +158,8 @@ def _status(as_json: bool) -> int:
             f"  {entry['root']} [{','.join(entry['content'])}] {entry['chunks']} chunks, "
             f"{entry['files']} files, {entry['embedder']}{'  (' + ', '.join(flags) + ')' if flags else ''}"
         )
+        if entry.get("last_error"):
+            print(f"    rebuild refused: {entry['last_error']['refused']}")
     for entry in status["building"]:
         print(f"  {entry['root']} [{','.join(entry['content'])}] building...")
     for root in status["pending_reindex"]:

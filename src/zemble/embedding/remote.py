@@ -36,10 +36,18 @@ class HttpEmbedder:
         self.total_tokens = 0
         self.request_count = 0
 
+    #: Every HTTP provider is a paid round trip, so the budget guard applies to all of them.
+    is_remote = True
+
     @property
     def model_id(self) -> str:
         """The normalized spec string."""
         raise NotImplementedError
+
+    @property
+    def declared_dimensions(self) -> int | None:
+        """The width already known from the spec or the model table; None means only a probe knows."""
+        return self._dimensions
 
     @property
     def dimensions(self) -> int:

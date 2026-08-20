@@ -29,6 +29,7 @@ from zemble.daemon.protocol import (
     socket_path,
 )
 from zemble.daemon.watch import IgnoreRules, RootWatcher
+from zemble.embedding.pricing import BUDGET_ENV, EmbeddingBudgetExceeded
 from zemble.graph.facts import matches_facts_glob
 from zemble.index import ZembleIndex
 from zemble.index.create import create_index_from_path
@@ -150,6 +151,8 @@ class Daemon:
         self.pending: set[CacheKey] = set()
         self.rebuilding: set[CacheKey] = set()
         self.last_rebuild: dict[CacheKey, dict[str, Any]] = {}
+        #: Why a root's last rebuild did not happen, e.g. a refused paid embed. Kept until one succeeds.
+        self.last_error: dict[CacheKey, dict[str, Any]] = {}
         self._persisted_at: dict[CacheKey, float] = {}
         self.started_at = time.time()
         self.last_request_at = time.monotonic()
@@ -202,6 +205,7 @@ class Daemon:
             logger.info("stopped watching %s", cache_key[0])
         self.locks.pop(cache_key, None)
         self._persisted_at.pop(cache_key, None)
+        self.last_error.pop(cache_key, None)
 
     # -- rebuilding ---------------------------------------------------------
 
@@ -235,7 +239,15 @@ class Daemon:
                 current = next((index for key, index in self.cache.loaded() if key == cache_key), None)
                 if current is None:
                     return {"skipped": "not loaded"}
-                index, counts = await asyncio.to_thread(rebuild_index, current, cache_key)
+                try:
+                    index, counts = await asyncio.to_thread(rebuild_index, current, cache_key)
+                except EmbeddingBudgetExceeded as exc:
+                    # Nothing was embedded and nothing was swapped, so the index that was
+                    # serving this root before is still the one serving it now.
+                    logger.warning("refused to rebuild %s: %s", cache_key[0], exc)
+                    refusal = {"refused": str(exc), "at": time.time(), "budget_env": BUDGET_ENV}
+                    self.last_error[cache_key] = refusal
+                    return refusal
                 elapsed = time.monotonic() - started
                 self.cache.replace(cache_key, index, cooldown_seconds=elapsed * 3)
         finally:
@@ -255,6 +267,7 @@ class Daemon:
         if java_changed:
             result["graph_ms"] = await self._refresh_graph(cache_key[0])
         self.last_rebuild[cache_key] = result
+        self.last_error.pop(cache_key, None)
         return result
 
     async def _persist(self, cache_key: CacheKey, index: ZembleIndex) -> bool:
@@ -394,6 +407,7 @@ async def _cmd_status(daemon: Daemon, args: dict[str, Any]) -> Any:
                 "watching": cache_key in daemon.watchers,
                 "rebuilding": cache_key in daemon.rebuilding,
                 "last_rebuild": daemon.last_rebuild.get(cache_key),
+                "last_error": daemon.last_error.get(cache_key),
             }
         )
     building = [

@@ -1,5 +1,5 @@
-import contextlib
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +22,18 @@ from zemble.index.sparse import enrich_for_bm25
 from zemble.index.types import FileManifestEntry, PreviousIndex, make_chunk_id
 from zemble.tokens import tokenize
 from zemble.types import Chunk, ContentType, EmbeddingMatrix
+
+
+@dataclass
+class PlannedFile:
+    """One file's contribution to a build: its chunks, or the previous index's claim on them."""
+
+    indexed_path: str
+    mtime_ns: int
+    previous_entry: FileManifestEntry | None
+    reused: bool
+    chunks: list[Chunk]
+    count: int
 
 
 def _reindex_file(
@@ -58,6 +70,85 @@ def _has_same_vector_layout(
     )
 
 
+def plan_files(
+    path: Path,
+    content: ContentType | Sequence[ContentType] = (ContentType.CODE,),
+    display_root: Path | None = None,
+    previous_manifest: dict[str, FileManifestEntry] | None = None,
+    capsules: CapsuleOptions | None = None,
+    previous_chunks: Sequence[Chunk] | None = None,
+) -> Iterator[PlannedFile]:
+    """Walk a tree and chunk every file a build would index, without embedding anything.
+
+    This is the chunking half of :func:`create_index_from_path`, shared with the pre-flight
+    report so both see exactly the same files, the same capsule text and the same
+    mtime-based reuse decision.
+
+    :param path: Resolved absolute path to walk.
+    :param content: Content types to index.
+    :param display_root: If set, chunk file paths are stored relative to this root.
+    :param previous_manifest: A previous build's manifest, or None for a full build.
+    :param capsules: Context-capsule knobs; None resolves the environment override.
+    :param previous_chunks: The previous build's chunk list, when reused chunks are wanted back.
+    :return: One :class:`PlannedFile` per indexable file, in walk order.
+    """
+    resolved_capsules = CapsuleOptions.resolve(capsules)
+    normalized = (content,) if isinstance(content, ContentType) else content
+    for walked in walk_entries(path, get_extensions(normalized)):
+        try:
+            if get_file_status(walked.path, None, walked.stat) != FileStatus.VALID:
+                continue
+            indexed_path = _indexed_path(walked, path, display_root)
+            mtime_ns = walked.stat.st_mtime_ns
+            previous_entry = previous_manifest.get(indexed_path) if previous_manifest is not None else None
+
+            if previous_entry is not None and previous_entry.mtime_ns == mtime_ns:
+                reused = list(previous_chunks[previous_entry.start : previous_entry.end]) if previous_chunks else []
+                planned = PlannedFile(indexed_path, mtime_ns, previous_entry, True, reused, previous_entry.count)
+            else:
+                file_chunks = chunk_source(
+                    read_file_text(walked.path), indexed_path, detect_language(walked.path), resolved_capsules
+                )
+                planned = PlannedFile(indexed_path, mtime_ns, previous_entry, False, file_chunks, len(file_chunks))
+        except OSError:
+            continue
+        yield planned
+
+
+def _assemble_vectors(
+    total: int,
+    placements: list[tuple[int, PlannedFile]],
+    fresh_rows: list[int],
+    fresh: EmbeddingMatrix | None,
+    previous: PreviousIndex | None,
+    manifest: dict[str, FileManifestEntry],
+) -> EmbeddingMatrix:
+    """Build the vector matrix for a build, copying every reused row out of the previous index.
+
+    :param total: The number of chunks in the new index.
+    :param placements: Each planned file with the row its chunks start at.
+    :param fresh_rows: The rows that were embedded this build.
+    :param fresh: The freshly embedded vectors, in ``fresh_rows`` order, or None when none were.
+    :param previous: The previous index, or None for a full build.
+    :param manifest: The new manifest, used to decide whether the layout is unchanged.
+    :return: The full vector matrix.
+    """
+    if previous is None:
+        # A full build embeds every row, so the fresh matrix is already the whole thing.
+        return fresh if fresh is not None else np.empty((0, 0), dtype=np.float32)
+    if _has_same_vector_layout(manifest, previous.manifest):
+        embeddings = previous.vectors
+    else:
+        embeddings = np.empty((total, previous.vectors.shape[1]), dtype=np.float32)
+        for start, planned in placements:
+            if planned.reused and planned.previous_entry is not None:
+                entry = planned.previous_entry
+                embeddings[start : start + planned.count] = previous.vectors[entry.start : entry.end]
+    if fresh is not None:
+        embeddings[fresh_rows] = fresh
+    return embeddings
+
+
 def create_index_from_path(
     path: Path,
     embedder: Embedder,
@@ -80,63 +171,52 @@ def create_index_from_path(
     # PreviousIndex is consumed; mutate BM25 in place to avoid a copy.
     bm25_index = previous.bm25_index if previous is not None else BM25()
     previous_manifest = previous.manifest if previous is not None else {}
-
     resolved_capsules = CapsuleOptions.resolve(capsules)
-    normalized = (content,) if isinstance(content, ContentType) else content
-    resolved_extensions = get_extensions(normalized)
+
+    plan = list(
+        plan_files(
+            path,
+            content,
+            display_root=display_root,
+            previous_manifest=previous_manifest if previous is not None else None,
+            capsules=resolved_capsules,
+            previous_chunks=previous.chunks if previous is not None else None,
+        )
+    )
 
     chunks: list[Chunk] = []
     chunk_ids: list[str] = []
-    vector_parts: list[EmbeddingMatrix] = []
     manifest: dict[str, FileManifestEntry] = {}
-    embedding_parts: list[tuple[int, int, int]] = []
+    placements: list[tuple[int, PlannedFile]] = []
+    fresh_rows: list[int] = []
 
-    for walked in walk_entries(path, resolved_extensions):
-        file_path = walked.path
-        language = detect_language(file_path)
-        with contextlib.suppress(OSError):
-            file_status = get_file_status(file_path, None, walked.stat)
-            if file_status != FileStatus.VALID:
-                continue
-
-            indexed_path = _indexed_path(walked, path, display_root)
-            mtime_ns = walked.stat.st_mtime_ns
-            previous_entry = previous_manifest.get(indexed_path)
-
-            if previous is not None and previous_entry is not None and previous_entry.mtime_ns == mtime_ns:
-                file_chunks = previous.chunks[previous_entry.start : previous_entry.end]
-                vector_parts.append(previous.vectors[previous_entry.start : previous_entry.end])
-            else:
-                source = read_file_text(file_path)
-                file_chunks = chunk_source(source, indexed_path, language, resolved_capsules)
-                _reindex_file(bm25_index, indexed_path, file_chunks, previous_entry, resolved_capsules)
-
-                # Only the incremental path embeds per file; a full build embeds every chunk
-                # in one call below, which for a paid provider is one request instead of thousands.
-                if previous is not None:
-                    embedding_parts.append((len(vector_parts), len(chunks), len(file_chunks)))
-                    vector_parts.append(embed_chunks(embedder, file_chunks))
-
-            start = len(chunks)
-            chunks.extend(file_chunks)
-            chunk_ids.extend(make_chunk_id(indexed_path, slot) for slot in range(len(file_chunks)))
-            manifest[indexed_path] = FileManifestEntry(mtime_ns=mtime_ns, start=start, count=len(file_chunks))
-
-    for indexed_path in previous_manifest.keys() - manifest.keys():
-        _reindex_file(bm25_index, indexed_path, [], previous_manifest[indexed_path], resolved_capsules)
+    for planned in plan:
+        start = len(chunks)
+        placements.append((start, planned))
+        chunks.extend(planned.chunks)
+        chunk_ids.extend(make_chunk_id(planned.indexed_path, slot) for slot in range(planned.count))
+        manifest[planned.indexed_path] = FileManifestEntry(mtime_ns=planned.mtime_ns, start=start, count=planned.count)
+        if not planned.reused:
+            fresh_rows.extend(range(start, start + planned.count))
 
     if not chunks:
         raise ValueError(f"No supported files found under {path}.")
 
-    if previous is None:
-        embeddings = embed_chunks(embedder, chunks)
-    else:
-        if _has_same_vector_layout(manifest, previous_manifest):
-            embeddings = previous.vectors
-            for vector_part, start, count in embedding_parts:
-                embeddings[start : start + count] = vector_parts[vector_part]
-        else:
-            embeddings = np.vstack(vector_parts)
+    # AIDEV-NOTE: every changed chunk is embedded in ONE call, incremental builds included.
+    # That is what lets the caching embedder see the whole pending set at once - which is
+    # where the budget guard lives - and it costs a paid provider one batched pass instead
+    # of one request per changed file.
+    fresh = embed_chunks(embedder, [chunks[row] for row in fresh_rows]) if fresh_rows else None
+    embeddings = _assemble_vectors(len(chunks), placements, fresh_rows, fresh, previous, manifest)
+
+    # BM25 is mutated only once the vectors exist: a refused or failed embed must not leave a
+    # warm daemon's live index half-updated, and the BM25 index here IS that live object.
+    for _start, planned in placements:
+        if not planned.reused:
+            _reindex_file(bm25_index, planned.indexed_path, planned.chunks, planned.previous_entry, resolved_capsules)
+    for indexed_path in previous_manifest.keys() - manifest.keys():
+        _reindex_file(bm25_index, indexed_path, [], previous_manifest[indexed_path], resolved_capsules)
+
     bm25_index.set_doc_order(chunk_ids)
     semantic_index = SelectableBasicBackend(embeddings, BasicArgs())
 

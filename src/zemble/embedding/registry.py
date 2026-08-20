@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 from zemble.embedding.base import Embedder
 from zemble.utils import DEFAULT_MODEL_NAME
@@ -21,6 +22,16 @@ KEY_ENV_ENV = "ZEMBLE_EMBEDDER_KEY_ENV"
 SCHEMES = ("model2vec", "voyage", "openai")
 #: Families whose vectors cost money or a round trip, so they are worth a sqlite lookup.
 _CACHED_SCHEMES = frozenset({"voyage", "openai"})
+
+
+@dataclass(frozen=True)
+class ResolvedEmbedder:
+    """An embedder together with the two strings the cache and the price table are keyed by."""
+
+    spec: str
+    embedder: Embedder
+    scheme: str
+    family: str
 
 
 class EmbedderSpecError(ValueError):
@@ -103,6 +114,23 @@ def caching_enabled() -> bool:
     return os.environ.get(CACHE_ENV, "1").strip().lower() not in {"0", "false", "no"}
 
 
+def build_embedder(spec: str) -> ResolvedEmbedder:
+    """Build an embedder from a spec and keep its scheme and cache family alongside it.
+
+    The family (scheme plus model, no dimensions) is what the sqlite cache file and the
+    price table are keyed by, and neither can be recovered from an :class:`Embedder`.
+
+    :param spec: The spec string.
+    :return: The embedder and its keys.
+    """
+    embedder, scheme, family = _build(spec)
+    if scheme in _CACHED_SCHEMES and caching_enabled():
+        from zemble.embedding.cache import CachingEmbedder
+
+        embedder = CachingEmbedder(embedder, family)
+    return ResolvedEmbedder(spec=spec, embedder=embedder, scheme=scheme, family=family)
+
+
 def parse_embedder_spec(spec: str) -> Embedder:
     """Turn a spec string into a ready embedder, wrapping remote providers in the content-hash cache.
 
@@ -115,12 +143,7 @@ def parse_embedder_spec(spec: str) -> Embedder:
     :param spec: The spec string.
     :return: An embedder.
     """
-    embedder, scheme, family = _build(spec)
-    if scheme in _CACHED_SCHEMES and caching_enabled():
-        from zemble.embedding.cache import CachingEmbedder
-
-        return CachingEmbedder(embedder, family)
-    return embedder
+    return build_embedder(spec).embedder
 
 
 def resolve_embedder_spec(spec: str | None = None) -> str:

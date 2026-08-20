@@ -253,6 +253,50 @@ async def test_watcher_rebuild_makes_a_new_file_searchable(tmp_project: Path) ->
 
 
 @pytest.mark.anyio
+async def test_a_refused_paid_rebuild_leaves_the_old_index_serving(
+    tmp_project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rebuild the budget refuses keeps the previous index alive, and says so in status."""
+    from tests.embedding.test_pricing import PricedEmbedder
+    from zemble.embedding.cache import CachingEmbedder
+
+    daemon = server.Daemon(watch=False)
+    daemon.cache._embedder = CachingEmbedder(PricedEmbedder(dimensions=8), "voyage:voyage-4-lite", tmp_path)
+    daemon.cache._model_ready.set()
+
+    # 1. The initial build is affordable and serves the tree.
+    cache_key, index = await daemon.index_for({"path": str(tmp_project)})
+    assert index.search("authenticate"), "step 1: the root is being served"
+
+    # 2. A change arrives with no budget left: the rebuild is refused before anything is embedded.
+    (tmp_project / "extra.py").write_text("def brand_new_helper():\n    return 7\n", encoding="utf-8")
+    monkeypatch.setenv("ZEMBLE_EMBED_BUDGET_TOKENS", "1")
+    outcome = await daemon.rebuild(cache_key)
+    assert "refused" in outcome, f"step 2: the rebuild must report a refusal, got {outcome}"
+    assert "--yes" in outcome["refused"], "step 2: the refusal names a way out"
+
+    # 3. The index from before the refusal is still the one answering queries.
+    served = await daemon.cache.get(str(tmp_project))
+    assert served.search("authenticate"), "step 3: the previous index still answers"
+    assert "extra.py" not in {result.chunk.file_path for result in served.search("brand_new_helper")}, (
+        "step 3: and it is the PREVIOUS index, not a half-built swap"
+    )
+
+    # 4. Status carries the refusal for that root.
+    status = await server._cmd_status(daemon, {})
+    entry = next(item for item in status["indexes"] if item["root"] == cache_key[0])
+    assert entry["last_error"]["refused"] == outcome["refused"], "step 4: status shows the refused rebuild"
+
+    # 5. With budget again, the same rebuild succeeds and the refusal is cleared.
+    monkeypatch.delenv("ZEMBLE_EMBED_BUDGET_TOKENS")
+    result = await daemon.rebuild(cache_key)
+    assert result["added"] == 1, f"step 5: the deferred change is picked up, got {result}"
+    assert cache_key not in daemon.last_error, "step 5: a successful rebuild clears the refusal"
+    swapped = (await daemon.cache.get(str(tmp_project))).search("brand_new_helper")
+    assert swapped[0].chunk.file_path == "extra.py", "step 5: the new file is now the best match"
+
+
+@pytest.mark.anyio
 async def test_rebuild_of_an_unloaded_root_is_a_no_op(tmp_project: Path) -> None:
     """Rebuilding a root that is not resident does nothing rather than building it."""
     daemon = _daemon_with_fake_embedder(watch=False)

@@ -11,7 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
-from zemble.embedding.base import Embedder, EmbeddingMatrix, normalize_rows
+from zemble.embedding.base import Embedder, EmbeddingMatrix, declared_dimensions, is_remote, normalize_rows
+from zemble.embedding.pricing import check_budget, estimate_tokens, format_cost, price_per_million
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,30 @@ class EmbeddingCache:
         sliced = np.frombuffer(wider[0], dtype=np.float32)[:dims]
         return normalize_rows(sliced.reshape(1, -1))[0]
 
+    def covered(self, digests: list[str], dims: int) -> set[str]:
+        """Return which of these text hashes already have a usable vector at this width.
+
+        A wider vector counts: :meth:`get` slices it. One pass over the primary key instead
+        of two queries per text, because a pre-flight asks this about every chunk in a tree.
+
+        :param digests: The text hashes to look up.
+        :param dims: The requested width.
+        :return: The subset of ``digests`` that would be a cache hit.
+        """
+        if not digests:
+            return set()
+        with self._lock:
+            self._connection.execute("CREATE TEMP TABLE IF NOT EXISTS wanted (digest TEXT PRIMARY KEY)")
+            self._connection.execute("DELETE FROM wanted")
+            self._connection.executemany(
+                "INSERT OR IGNORE INTO wanted (digest) VALUES (?)", [(digest,) for digest in digests]
+            )
+            rows = self._connection.execute(
+                "SELECT w.digest FROM wanted w JOIN embeddings e ON e.text_sha256 = w.digest WHERE e.dims >= ?",
+                (dims,),
+            ).fetchall()
+        return {row[0] for row in rows}
+
     def put_many(self, rows: list[tuple[str, int, np.ndarray]]) -> None:
         """Store vectors, ignoring any key another process wrote first.
 
@@ -150,6 +175,38 @@ class CachingEmbedder:
         """The wrapped embedder's vector width."""
         return self.inner.dimensions
 
+    @property
+    def is_remote(self) -> bool:
+        """Whether the wrapped embedder is a paid one; caching does not change who pays."""
+        return is_remote(self.inner)
+
+    @property
+    def declared_dimensions(self) -> int | None:
+        """The wrapped embedder's width, when it is known without a request."""
+        return declared_dimensions(self.inner)
+
+    def _announce(self, texts: list[str]) -> None:
+        """Refuse or announce a paid embed of the whole pending set, before the first slice is sent.
+
+        This is the one point in a build where the uncached set is known, so it is the one
+        place the budget is checked: every surface (CLI, MCP, daemon) reaches a build through
+        here, and a per-slice check would compare 512 chunks against a whole build's budget.
+
+        :param texts: The uncached texts about to be embedded.
+        :raises EmbeddingBudgetExceeded: If the estimate exceeds the budget.
+        """
+        if not texts or not self.is_remote:
+            return
+        tokens = estimate_tokens(texts)
+        check_budget(self.model_id, self.cache.family, len(texts), tokens)
+        logger.info(
+            "embedding %d uncached chunk(s), ~%d tokens, ~%s with %s",
+            len(texts),
+            tokens,
+            format_cost(tokens, price_per_million(self.cache.family)),
+            self.model_id,
+        )
+
     def embed_documents(self, texts: list[str]) -> EmbeddingMatrix:
         """Embed documents, calling the provider only for texts not already stored.
 
@@ -178,6 +235,8 @@ class CachingEmbedder:
                 continue
             first_position[digest] = position
             missing_positions.append(position)
+
+        self._announce([texts[position] for position in missing_positions])
 
         for start in range(0, len(missing_positions), FLUSH_EVERY):
             slice_positions = missing_positions[start : start + FLUSH_EVERY]
