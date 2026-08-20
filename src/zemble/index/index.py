@@ -14,6 +14,7 @@ import numpy.typing as npt
 import orjson
 
 from zemble.cache import get_validated_cache, load_previous_for_incremental
+from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.embedding.base import Embedder
 from zemble.embedding.registry import load_embedder
 from zemble.index.bm25 import BM25
@@ -75,6 +76,7 @@ class ZembleIndex:
         content: ContentType | Sequence[ContentType] = _DEFAULT_CONTENT,
         loaded_from_disk: bool = False,
         manifest: dict[str, FileManifestEntry] | None = None,
+        capsules: CapsuleOptions | None = None,
     ) -> None:
         """Initialize a ZembleIndex. Should be created with from_path or from_git.
 
@@ -86,6 +88,7 @@ class ZembleIndex:
         :param content: Content type used when indexing; controls the search pipeline.
         :param loaded_from_disk: Whether the index was loaded from disk (cache hit); controls CLI messaging.
         :param manifest: File modification times and chunk ranges used for incremental reindexing.
+        :param capsules: The context-capsule configuration this index's chunks were built with.
         """
         self.embedder = embedder
         self.chunks: list[Chunk] = chunks
@@ -97,6 +100,7 @@ class ZembleIndex:
         self._file_mapping, self._language_mapping = self._populate_mapping()
         self.loaded_from_disk: bool = loaded_from_disk
         self._manifest: dict[str, FileManifestEntry] = manifest or {}
+        self._capsules: CapsuleOptions = CapsuleOptions.resolve(capsules)
 
     def _populate_mapping(self) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
         """Build (file → chunk indices, language → chunk indices) mappings, in that order."""
@@ -151,6 +155,7 @@ class ZembleIndex:
         include_text_files: bool | None = None,
         model_path: str | None = None,
         embedder: Embedder | str | None = None,
+        capsules: CapsuleOptions | None = None,
     ) -> ZembleIndex:
         """Create and index a ZembleIndex from a directory.
 
@@ -159,6 +164,7 @@ class ZembleIndex:
         :param include_text_files: Deprecated. Pass a content sequence directly instead.
         :param model_path: Legacy alias for ``embedder="model2vec:<name>"``.
         :param embedder: An embedder or spec string. If None, the environment default is used.
+        :param capsules: Context-capsule knobs; None resolves the environment override, else the defaults.
         :return: An indexed ZembleIndex. Chunk file paths are relative to ``path``.
         :raises FileNotFoundError: If `path` does not exist.
         :raises NotADirectoryError: If `path` exists but is not a directory.
@@ -171,22 +177,31 @@ class ZembleIndex:
 
         normalized = _apply_include_text_files(content, include_text_files)
         resolved = resolve_embedder(embedder, model_path)
-        cache_path = get_validated_cache(str(path), resolved.model_id, normalized)
+        resolved_capsules = CapsuleOptions.resolve(capsules)
+        cache_path = get_validated_cache(str(path), resolved.model_id, normalized, resolved_capsules)
         if cache_path:
             return cls.load_from_disk(cache_path, embedder=resolved)
 
         path = path.resolve()
-        previous = load_previous_for_incremental(str(path), resolved.model_id, normalized)
+        previous = load_previous_for_incremental(str(path), resolved.model_id, normalized, resolved_capsules)
         bm25_index, semantic_index, chunks, manifest = create_index_from_path(
             path,
             embedder=resolved,
             content=normalized,
             display_root=path,
             previous=previous,
+            capsules=resolved_capsules,
         )
 
         return ZembleIndex(
-            resolved, bm25_index, semantic_index, chunks, root=path, content=normalized, manifest=manifest
+            resolved,
+            bm25_index,
+            semantic_index,
+            chunks,
+            root=path,
+            content=normalized,
+            manifest=manifest,
+            capsules=resolved_capsules,
         )
 
     @classmethod
@@ -217,8 +232,9 @@ class ZembleIndex:
         """
         normalized = _apply_include_text_files(content, include_text_files)
         resolved = resolve_embedder(embedder, model_path)
+        resolved_capsules = CapsuleOptions.resolve()
         cache_key = f"{url}@{ref}" if ref else url
-        cache_path = get_validated_cache(cache_key, resolved.model_id, normalized)
+        cache_path = get_validated_cache(cache_key, resolved.model_id, normalized, resolved_capsules)
         if cache_path:
             return cls.load_from_disk(cache_path, embedder=resolved)
 
@@ -242,6 +258,7 @@ class ZembleIndex:
                 embedder=resolved,
                 content=normalized,
                 display_root=resolved_path,
+                capsules=resolved_capsules,
             )
 
             return ZembleIndex(
@@ -252,6 +269,7 @@ class ZembleIndex:
                 root=resolved_path,
                 content=normalized,
                 manifest=manifest,
+                capsules=resolved_capsules,
             )
 
     def find_related(
@@ -266,8 +284,10 @@ class ZembleIndex:
         """
         target = source.chunk if isinstance(source, SearchResult) else source
         selector = self._get_selector_vector(filter_languages=[target.language]) if target.language else None
+        # The seed is embedded exactly as the indexed chunks were, capsule included, so the
+        # comparison stays inside one text convention.
         results = _search_semantic(
-            target.content, self.embedder, self._semantic_index, self.chunks, top_k + 1, selector
+            embedding_text(target), self.embedder, self._semantic_index, self.chunks, top_k + 1, selector
         )
         results = [r for r in results if r.chunk != target][:top_k]
         save_search_stats(results, CallType.FIND_RELATED, self._file_sizes, max_snippet_lines)
@@ -388,6 +408,7 @@ class ZembleIndex:
             content=content,
             loaded_from_disk=True,
             manifest=manifest,
+            capsules=CapsuleOptions.from_key(metadata.get("capsules", "")),
         )
 
     def save(self, path: Path | str) -> None:
@@ -413,6 +434,7 @@ class ZembleIndex:
             "content_type": list(x.value for x in self._content),
             "chunk_size": _DESIRED_CHUNK_LENGTH_CHARS,
             "cache_version": CACHE_FORMAT_VERSION,
+            "capsules": self._capsules.key,
             "files": self._manifest,
         }
         with open(persistence_paths.metadata, "wb") as f:

@@ -19,6 +19,7 @@ from zemble.cache import (
     resolve_cache_folder,
     save_index_to_cache,
 )
+from zemble.chunking.capsule import CapsuleOptions
 from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
 from zemble.index.types import CACHE_FORMAT_VERSION
 from zemble.types import ContentType
@@ -145,6 +146,7 @@ def _write_metadata(
     file_paths: list[str] | None = None,
     chunk_size: int | None = None,
     cache_version: int | None = None,
+    capsules: str | None = None,
 ) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "chunks.json").write_text("[]")
@@ -159,6 +161,7 @@ def _write_metadata(
                 "files": {file_path: {} for file_path in file_paths or []},
                 "chunk_size": chunk_size if chunk_size is not None else _DESIRED_CHUNK_LENGTH_CHARS,
                 "cache_version": cache_version if cache_version is not None else CACHE_FORMAT_VERSION,
+                "capsules": capsules if capsules is not None else CapsuleOptions().key,
             }
         )
     )
@@ -218,6 +221,7 @@ def test_get_validated_cache_reads_utf8_metadata_with_non_ascii_file_paths(tmp_p
                 "files": {non_ascii_path: {}},
                 "chunk_size": _DESIRED_CHUNK_LENGTH_CHARS,
                 "cache_version": CACHE_FORMAT_VERSION,
+                "capsules": CapsuleOptions().key,
             },
             ensure_ascii=False,
         ),
@@ -244,10 +248,15 @@ def test_get_validated_cache_reads_utf8_metadata_with_non_ascii_file_paths(tmp_p
         ("chunk_size", _DESIRED_CHUNK_LENGTH_CHARS + 100),
         ("cache_version", None),
         ("cache_version", CACHE_FORMAT_VERSION - 1),
+        ("capsules", None),
+        ("capsules", "off"),
     ],
 )
-def test_get_validated_cache_format_mismatch_returns_none(field: str, value: int | None, tmp_path: Path) -> None:
-    """Missing or stale persistence-format metadata forces a rebuild."""
+def test_get_validated_cache_format_mismatch_returns_none(field: str, value: object, tmp_path: Path) -> None:
+    """Missing or stale persistence-format metadata forces a rebuild.
+
+    A capsule change is part of that format: it rewrites the embedding text of every chunk.
+    """
     index_path = tmp_path / "index"
     _write_metadata(index_path, "model2vec:my/model", ["code"], float("inf"))
     metadata_path = index_path / "metadata.json"

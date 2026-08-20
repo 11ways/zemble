@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import orjson
 
+from zemble.chunking.capsule import CapsuleOptions
 from zemble.index.bm25 import BM25
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.file_walker import walk_files
@@ -103,7 +104,7 @@ def save_index_to_cache(index: "ZembleIndex", path: str) -> None:
         index.save(find_index_from_cache_folder(path, index.content))
 
 
-def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[ContentType]) -> bool:
+def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[ContentType], capsule_key: str) -> bool:
     """Return True if the stored metadata is compatible with the requested parameters.
 
     A cache built with a different embedder is never reused silently: mixing vector spaces
@@ -112,6 +113,7 @@ def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[Conten
     :param metadata: The stored metadata document.
     :param embedder_id: The normalized spec string of the requested embedder.
     :param content: The requested content types.
+    :param capsule_key: The requested context-capsule configuration.
     :return: Whether the cache can be reused.
     """
     from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS  # avoid circular import at module level
@@ -122,6 +124,8 @@ def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[Conten
         # treat that as a mismatch so old caches are transparently rebuilt in the current format.
         chunk_size_ok = metadata.get("chunk_size") == _DESIRED_CHUNK_LENGTH_CHARS
         version_ok = metadata.get("cache_version") == CACHE_FORMAT_VERSION
+        # A capsule change rewrites embedding text, so a differently built index is never reused.
+        capsule_ok = metadata.get("capsules") == capsule_key
         stored_embedder = metadata["embedder"]
         if version_ok and stored_embedder != embedder_id:
             if (stored_embedder, embedder_id) in _REPORTED_EMBEDDER_MISMATCHES:
@@ -133,17 +137,20 @@ def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[Conten
                 embedder_id,
             )
             return False
-        return set(content_type) == set(content) and chunk_size_ok and version_ok
+        return set(content_type) == set(content) and chunk_size_ok and version_ok and capsule_ok
     except (KeyError, ValueError):
         return False
 
 
-def get_validated_cache(path: str, embedder_id: str, content: Sequence[ContentType]) -> Path | None:
+def get_validated_cache(
+    path: str, embedder_id: str, content: Sequence[ContentType], capsules: CapsuleOptions | None = None
+) -> Path | None:
     """Validates the cache folder and returns the index path.
 
     :param path: Source path or git URL the index was built from.
     :param embedder_id: The normalized spec string of the requested embedder.
     :param content: The requested content types.
+    :param capsules: The requested context-capsule configuration.
     :return: The reusable index path, or None if it must be rebuilt.
     """
     index_path = find_index_from_cache_folder(path, content)
@@ -156,7 +163,7 @@ def get_validated_cache(path: str, embedder_id: str, content: Sequence[ContentTy
 
     with open(persistence_path.metadata, encoding="utf-8") as f:
         metadata = json.load(f)
-    if not _metadata_matches(metadata, embedder_id, content):
+    if not _metadata_matches(metadata, embedder_id, content, CapsuleOptions.resolve(capsules).key):
         return None
 
     if is_git_url(str(path)):
@@ -182,12 +189,15 @@ def get_validated_cache(path: str, embedder_id: str, content: Sequence[ContentTy
     return index_path
 
 
-def load_previous_for_incremental(path: str, embedder_id: str, content: Sequence[ContentType]) -> PreviousIndex | None:
+def load_previous_for_incremental(
+    path: str, embedder_id: str, content: Sequence[ContentType], capsules: CapsuleOptions | None = None
+) -> PreviousIndex | None:
     """Load compatible index state for incremental reuse.
 
     :param path: Source path used to locate the cached index.
     :param embedder_id: The normalized spec string of the requested embedder.
     :param content: Content types the cached index must support.
+    :param capsules: The requested context-capsule configuration.
     :return: Previous index state, or None if the cache is unavailable or invalid.
     """
     try:
@@ -198,7 +208,7 @@ def load_previous_for_incremental(path: str, embedder_id: str, content: Sequence
 
         with open(persistence_path.metadata, encoding="utf-8") as f:
             metadata = json.load(f)
-        if not _metadata_matches(metadata, embedder_id, content):
+        if not _metadata_matches(metadata, embedder_id, content, CapsuleOptions.resolve(capsules).key):
             return None
 
         raw_manifest = metadata.get("files")

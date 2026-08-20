@@ -6,6 +6,7 @@ import numpy as np
 from vicinity.backends.basic import BasicArgs
 
 from zemble.chunking import chunk_source
+from zemble.chunking.capsule import CapsuleOptions
 from zemble.embedding.base import Embedder
 from zemble.index.bm25 import BM25
 from zemble.index.dense import SelectableBasicBackend, embed_chunks
@@ -28,13 +29,14 @@ def _reindex_file(
     indexed_path: str,
     file_chunks: list[Chunk],
     previous_entry: FileManifestEntry | None,
+    capsules: CapsuleOptions,
 ) -> None:
     """Replace a file's BM25 postings: remove its old slots (if any), then add its new ones."""
     if previous_entry is not None:
         for slot in range(previous_entry.count):
             bm25_index.remove_document(make_chunk_id(indexed_path, slot))
     for slot, chunk in enumerate(file_chunks):
-        bm25_index.add_document(make_chunk_id(indexed_path, slot), tokenize(enrich_for_bm25(chunk)))
+        bm25_index.add_document(make_chunk_id(indexed_path, slot), tokenize(enrich_for_bm25(chunk, capsules.in_bm25)))
 
 
 def _has_same_vector_layout(
@@ -55,6 +57,7 @@ def create_index_from_path(
     content: ContentType | Sequence[ContentType] = (ContentType.CODE,),
     display_root: Path | None = None,
     previous: PreviousIndex | None = None,
+    capsules: CapsuleOptions | None = None,
 ) -> tuple[BM25, SelectableBasicBackend, list[Chunk], dict[str, FileManifestEntry]]:
     """Create an index from a resolved directory, optionally reusing a previous index's unchanged files.
 
@@ -63,6 +66,7 @@ def create_index_from_path(
     :param content: Content types to index.
     :param display_root: If set, chunk file paths are stored relative to this root.
     :param previous: A previously built index to reuse unchanged files' chunks/embeddings/postings from.
+    :param capsules: Context-capsule knobs; None resolves the environment override, else the defaults.
     :raises ValueError: if no items were found, no index can be created.
     :return: A BM25 index, semantic index, list of chunks, and file manifest.
     """
@@ -70,6 +74,7 @@ def create_index_from_path(
     bm25_index = previous.bm25_index if previous is not None else BM25()
     previous_manifest = previous.manifest if previous is not None else {}
 
+    resolved_capsules = CapsuleOptions.resolve(capsules)
     normalized = (content,) if isinstance(content, ContentType) else content
     resolved_extensions = get_extensions(normalized)
 
@@ -95,8 +100,8 @@ def create_index_from_path(
                 vector_parts.append(previous.vectors[previous_entry.start : previous_entry.end])
             else:
                 source = read_file_text(file_path)
-                file_chunks = chunk_source(source, indexed_path, language)
-                _reindex_file(bm25_index, indexed_path, file_chunks, previous_entry)
+                file_chunks = chunk_source(source, indexed_path, language, resolved_capsules)
+                _reindex_file(bm25_index, indexed_path, file_chunks, previous_entry, resolved_capsules)
 
                 # Only the incremental path embeds per file; a full build embeds every chunk
                 # in one call below, which for a paid provider is one request instead of thousands.
@@ -110,7 +115,7 @@ def create_index_from_path(
             manifest[indexed_path] = FileManifestEntry(mtime_ns=mtime_ns, start=start, count=len(file_chunks))
 
     for indexed_path in previous_manifest.keys() - manifest.keys():
-        _reindex_file(bm25_index, indexed_path, [], previous_manifest[indexed_path])
+        _reindex_file(bm25_index, indexed_path, [], previous_manifest[indexed_path], resolved_capsules)
 
     if not chunks:
         raise ValueError(f"No supported files found under {path}.")

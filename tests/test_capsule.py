@@ -1,8 +1,10 @@
 import textwrap
+from pathlib import Path
 
 import orjson
 import pytest
 
+from tests.conftest import FakeEmbedder
 from zemble.chunking import chunk_source
 from zemble.chunking.capsule import (
     DEFAULT_LEVEL,
@@ -15,6 +17,7 @@ from zemble.chunking.capsule import (
 )
 from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
 from zemble.chunking.core import chunk_with_tree
+from zemble.index import ZembleIndex
 from zemble.types import Chunk
 
 JAVA_SOURCE = textwrap.dedent(
@@ -254,3 +257,59 @@ def test_chunk_without_context_loads_from_an_older_dict() -> None:
         {"content": "body", "file_path": "a.py", "start_line": 1, "end_line": 1, "language": "python"}
     )
     assert restored.context == ""
+
+
+def test_index_with_capsules_returns_original_content(tmp_path: Path, mock_embedder: FakeEmbedder) -> None:
+    """End to end: capsules reach the embedder, but search results carry the untouched source."""
+    (tmp_path / "Greeter.java").write_text(
+        textwrap.dedent(
+            """\
+            package com.example.greeting;
+
+            public class Greeter {
+                public String greet(String name) {
+                    return "hello " + name;
+                }
+            }
+            """
+        )
+    )
+    index = ZembleIndex.from_path(
+        tmp_path, embedder=mock_embedder, capsules=CapsuleOptions(CapsuleLevel.FULL, in_bm25=True)
+    )
+
+    embedded = [text for call in mock_embedder.document_calls for text in call]
+    assert any("package com.example.greeting" in text and "class Greeter" in text for text in embedded)
+    assert all(chunk.context for chunk in index.chunks)
+
+    results = index.search("greet", top_k=5)
+    assert results
+    for result in results:
+        assert result.chunk.context not in result.chunk.content
+        assert result.chunk.content in (tmp_path / "Greeter.java").read_text()
+
+    # The capsule is a BM25 signal too: the package name appears in no chunk body.
+    assert any("Greeter.java" in result.chunk.file_path for result in index.search("greeting package", top_k=5))
+
+
+def test_find_related_embeds_the_seed_with_its_capsule(tmp_path: Path, mock_embedder: FakeEmbedder) -> None:
+    """The seed chunk is embedded the way the index embedded it, so both sides share one convention."""
+    (tmp_path / "Greeter.java").write_text(
+        textwrap.dedent(
+            """\
+            package com.example.greeting;
+
+            public class Greeter {
+                public String greet(String name) {
+                    return "hello " + name;
+                }
+            }
+            """
+        )
+    )
+    index = ZembleIndex.from_path(tmp_path, embedder=mock_embedder, capsules=CapsuleOptions(CapsuleLevel.FULL))
+    seed = index.chunks[0]
+    mock_embedder.query_calls.clear()
+    index.find_related(seed, top_k=3)
+    assert mock_embedder.query_calls == [[embedding_text(seed)]]
+    assert seed.context and seed.context in mock_embedder.query_calls[0][0]

@@ -8,12 +8,13 @@ from vicinity.backends.basic import CosineBasicBackend
 from vicinity.datatypes import QueryResult
 from vicinity.utils import normalize
 
+from zemble.chunking.capsule import embedding_text
 from zemble.embedding.base import Embedder
 from zemble.types import Chunk
 
 
 def embed_chunks(embedder: Embedder, chunks: list[Chunk]) -> npt.NDArray[np.float32]:
-    """Embed chunk contents as documents.
+    """Embed chunk contents as documents, each prefixed by its context capsule when it has one.
 
     :param embedder: The embedder to use.
     :param chunks: The chunks to embed.
@@ -21,7 +22,7 @@ def embed_chunks(embedder: Embedder, chunks: list[Chunk]) -> npt.NDArray[np.floa
     """
     if not chunks:
         return np.empty((0, embedder.dimensions), dtype=np.float32)
-    return embedder.embed_documents([chunk.content for chunk in chunks])
+    return embedder.embed_documents([embedding_text(chunk) for chunk in chunks])
 
 
 class SelectableBasicBackend(CosineBasicBackend):
