@@ -1,0 +1,9 @@
+{# The localized markdown body is resolved through the render locale chain and
+   converted via zenit core's SAFE renderer: source HTML is escaped and unsafe
+   URLs dropped, so raw-print ({%=) of the result is safe for untrusted
+   editors. Markdown.render turns a chain miss (null) into "". #}
+{% declare widget: WidgetInstance %}
+
+<div class="widget widget-markdown">
+    {%= Markdown.render(Widget.localizedConfig(widget.config, "body")) %}
+</div>

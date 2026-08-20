@@ -116,7 +116,9 @@ def _reason(symbol: Symbol, edge: Edge, depth: int = 1, *, outgoing: bool = Fals
     """Build the one-line sentence explaining why a hit is in the answer.
 
     An edge an external tool wrote names that tool instead of a resolution grade: the
-    grade is always `exact` there, and which tool said so is the part worth reading.
+    grade is always `exact` there, and which tool said so is the part worth reading. An edge
+    that reached its source through a source map also names the generated member it was
+    written about, because "this template calls it" is only half the story a reader needs.
     """
     table = _VERBS_OUT if outgoing else _VERBS
     verb = table.get(edge.kind, edge.kind.value)
@@ -125,6 +127,8 @@ def _reason(symbol: Symbol, edge: Edge, depth: int = 1, *, outgoing: bool = Fals
         phrase = f"ambiguous, {len(edge.candidates)} candidates"
     if edge.source != TREE_SITTER_SOURCE:
         phrase = edge.source
+    if edge.origin_ref:
+        phrase = f"{phrase} via {edge.origin_ref}"
     depth_note = f", depth {depth}" if depth > 1 else ""
     return f"{verb} {display_name(symbol)} (line {edge.line}, {phrase}{depth_note})"
 

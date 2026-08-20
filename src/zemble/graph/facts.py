@@ -26,6 +26,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from zemble.graph.generated import GeneratedMapping, GeneratedSourceMapper
 from zemble.graph.model import (
     CALLABLE_KINDS,
     TYPE_KINDS,
@@ -135,6 +136,7 @@ class SkipBucket(Enum):
 
     OUTSIDE_INDEX = ("source_outside_index", "source outside the index")
     SOURCE_IGNORED = ("source_ignored", "source ignored by the index")
+    GENERATED_NO_TEMPLATE = ("generated_no_template", "generated (no template)")
     STALE = ("stale", "stale")
     UNMAPPED = ("unmapped", "unmapped")
 
@@ -163,6 +165,10 @@ class FactsFile:
     size: int = 0
     #: Facts this file's own parse already threw away, with the bucket that says why.
     skipped: list[SkippedFact] = field(default_factory=list)
+    #: The `.hwk` templates this file's generated-source facts were mapped back onto. They
+    #: are edges this facts file owns just as much as the ones it declares by path, so they
+    #: are re-resolved with it when it moves.
+    template_paths: set[str] = field(default_factory=set)
 
     @property
     def fresh_files(self) -> list[str]:
@@ -807,8 +813,34 @@ class FactsOverlay:
     edges: dict[str, list[Edge]] = field(default_factory=dict)
     #: Workspace-relative source path -> the tools whose fresh facts cover it.
     tools: dict[str, set[str]] = field(default_factory=dict)
+    #: Maps generated Hawkeye Java back onto templates; None when nothing needed it.
+    generated: GeneratedSourceMapper | None = None
+    #: Covered file -> the edge kinds the overlay owns for it. Absent means all four.
+    owned_kinds: dict[str, frozenset[EdgeKind]] = field(default_factory=dict)
+    #: How many generated-source facts were mapped back onto a template.
+    generated_mapped: int = 0
     #: Source path -> the prefix that keeps it out of the index, or "" when it is indexed.
     _ignored_prefixes: dict[str, str] = field(default_factory=dict, repr=False)
+    #: Covered file -> the identities of the edges already collected for it.
+    _edge_keys: dict[str, set[tuple]] = field(default_factory=dict, repr=False)
+
+    def kinds_owned(self, file_path: str) -> frozenset[EdgeKind]:
+        """Return the edge kinds whose extracted edges this file's facts replace.
+
+        A Java file's facts own all four kinds, because the emitter compiled the file itself.
+        A template's do not: they arrive through a source map from the class the template was
+        compiled INTO, which knows what the compiled code calls and nothing about what the
+        template extends or renders - so only `CALLS` is replaced there, and the extractor
+        keeps the rest. A file with no fresh facts owns nothing and keeps every edge it had.
+        """
+        if file_path not in self.edges:
+            return frozenset()
+        return self.owned_kinds.get(file_path, OVERLAY_KINDS)
+
+    @property
+    def template_targets(self) -> set[str]:
+        """The templates that carry mapped edges, which are not declared by any `file` line."""
+        return {path for path, kinds in self.owned_kinds.items() if kinds != OVERLAY_KINDS}
 
     @property
     def unmapped(self) -> list[SkippedFact]:
@@ -864,6 +896,8 @@ class FactsOverlay:
             "external_targets": self.external_targets,
             "skipped": self.bucket_counts(),
             "unmapped": self.bucket_counts()[SkipBucket.UNMAPPED.value],
+            "generated_mapped": self.generated_mapped,
+            "generated_templates": len(self.template_targets),
         }
 
 
@@ -876,6 +910,7 @@ def load_overlay(root: Path, symbols: Iterable[Symbol]) -> FactsOverlay:
     """
     overlay = FactsOverlay(root=root)
     symbol_list = list(symbols)
+    overlay.generated = GeneratedSourceMapper(root, symbol_list)
     for path in discover_facts_files(root):
         try:
             loaded = load_facts_file(path, root)
@@ -927,21 +962,129 @@ def _map_file(overlay: FactsOverlay, loaded: FactsFile, mapper: RefMapper, lines
         if not source.fresh:
             _record_stale(overlay, loaded, source)
             continue
-        collected = overlay.edges.setdefault(source.path, [])
+        if overlay.generated is not None and overlay.generated.recognises(source.path):
+            _map_generated_source(overlay, loaded, source, mapper)
+            continue
         overlay.tools.setdefault(source.path, set()).add(loaded.header.tool)
-        seen = {_edge_key(edge) for edge in collected}
         for payload in source.facts:
             kind = _EDGE_KIND_BY_FACT.get(str(payload.get("t")))
             if kind is None:
                 continue
             edge = _edge_from_fact(payload, kind, source, loaded, mapper, overlay, lines)
-            if edge is None:
-                continue
-            key = _edge_key(edge)
-            if key in seen:
-                continue
-            seen.add(key)
-            collected.append(edge)
+            if edge is not None:
+                _collect(overlay, source.path, edge)
+
+
+def _collect(overlay: FactsOverlay, file_path: str, edge: Edge) -> bool:
+    """Add an edge to the file it belongs to, dropping one two facts files both wrote."""
+    collected = overlay.edges.setdefault(file_path, [])
+    seen = overlay._edge_keys.setdefault(file_path, set())  # noqa: SLF001 - same module
+    key = _edge_key(edge)
+    if key in seen:
+        return False
+    seen.add(key)
+    collected.append(edge)
+    return True
+
+
+def _map_generated_source(overlay: FactsOverlay, loaded: FactsFile, source: SourceFacts, mapper: RefMapper) -> None:
+    """Map one generated Hawkeye class's facts back onto the template it was compiled from.
+
+    Only `call` facts make the trip. A generated class's supertypes and overrides are facts
+    about `CompiledTemplate` machinery, not about the template: attributing them to the
+    template symbol would put `extends CompiledTemplate` where the template's own
+    `{% extends %}` belongs, so they are counted instead of invented.
+    """
+    assert overlay.generated is not None  # noqa: S101 - guarded by the caller
+    for payload in source.facts:
+        kind = _EDGE_KIND_BY_FACT.get(str(payload.get("t")))
+        if kind is None:
+            continue
+        if kind is not EdgeKind.CALLS:
+            _record_generated_skip(overlay, loaded, source, kind, "only calls map back through a template source map")
+            continue
+        line = payload.get("line")
+        mapped = overlay.generated.resolve(source.path, line if isinstance(line, int) else 0)
+        if not mapped.mapped:
+            bucket = SkipBucket.STALE if mapped.stale else SkipBucket.GENERATED_NO_TEMPLATE
+            _record_generated_skip(overlay, loaded, source, kind, mapped.reason, bucket=bucket)
+            continue
+        edge = _template_edge(payload, mapped, loaded, mapper, overlay, source)
+        if edge is None:
+            continue
+        template_path = mapped.template_path or ""
+        overlay.owned_kinds[template_path] = frozenset({EdgeKind.CALLS})
+        overlay.tools.setdefault(template_path, set()).add(loaded.header.tool)
+        loaded.template_paths.add(template_path)
+        # Counted per FACT, not per edge: several generated call sites collapse onto one
+        # template line, and the count answers "how much did the source map recover".
+        overlay.generated_mapped += 1
+        _collect(overlay, template_path, edge)
+
+
+def _template_edge(
+    payload: dict,
+    mapped: GeneratedMapping,
+    loaded: FactsFile,
+    mapper: RefMapper,
+    overlay: FactsOverlay,
+    source: SourceFacts,
+) -> Edge | None:
+    """Build the template's call edge from a fact about the class it was compiled into."""
+    to_ref = payload.get("to")
+    from_ref = payload.get("from")
+    if not isinstance(to_ref, str) or not isinstance(from_ref, str):
+        loaded.orphan_facts += 1
+        return None
+    target = mapper.map_ref(to_ref)
+    if target.unmapped:
+        overlay.skipped.append(
+            SkippedFact(
+                bucket=SkipBucket.UNMAPPED,
+                subject=to_ref,
+                reason=target.reason,
+                fact_kind=EdgeKind.CALLS.value,
+                facts_file=loaded.relative_path,
+                source_path=source.path,
+            )
+        )
+        return None
+    if target.external:
+        overlay.external_targets += 1
+    parsed = parse_java_ref(to_ref)
+    return Edge(
+        src_id=mapped.symbol_id or "",
+        dst_name=target.dst_name,
+        kind=EdgeKind.CALLS,
+        line=mapped.line,
+        dst_id=target.symbol_id,
+        resolution=Resolution.EXACT if target.symbol_id else Resolution.UNRESOLVED,
+        arity=len(parsed.params) if parsed.params is not None else -1,
+        is_new=parsed.is_constructor,
+        source=loaded.header.tool,
+        origin_ref=from_ref,
+    )
+
+
+def _record_generated_skip(
+    overlay: FactsOverlay,
+    loaded: FactsFile,
+    source: SourceFacts,
+    kind: EdgeKind,
+    reason: str,
+    bucket: SkipBucket = SkipBucket.GENERATED_NO_TEMPLATE,
+) -> None:
+    """Count one generated-source fact that never reached a template."""
+    overlay.skipped.append(
+        SkippedFact(
+            bucket=bucket,
+            subject=source.path,
+            reason=reason,
+            fact_kind=kind.value,
+            facts_file=loaded.relative_path,
+            source_path=source.path,
+        )
+    )
 
 
 def _record_stale(overlay: FactsOverlay, loaded: FactsFile, source: SourceFacts) -> None:

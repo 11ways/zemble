@@ -270,6 +270,10 @@ def _print_facts_status(
         f"{skipped_total} skipped fact(s)"
     )
     print("  skipped facts: " + ", ".join(f"{bucket['label']} {bucket['count']}" for bucket in buckets))
+    print(
+        f"  generated-source facts mapped to templates: {stats['generated_mapped']} "
+        f"({stats['generated_templates']} templates)"
+    )
     print("  edges by source: " + (", ".join(f"{name} {count}" for name, count in sorted(by_source.items())) or "none"))
     for bucket, label in (("with_facts", "calls in covered files"), ("without_facts", "calls elsewhere")):
         grades = calls[bucket]

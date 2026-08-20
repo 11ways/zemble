@@ -1,0 +1,10 @@
+{% tag DemoPanel {
+
+    public title: String = ""
+
+    template {
+        <section class="demo-panel">
+            <demo-card heading={% Markdown.render(title{:}) %}></demo-card>
+        </section>
+    }
+} %}

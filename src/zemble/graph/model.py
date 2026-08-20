@@ -130,6 +130,10 @@ class Edge:
     # Who produced this edge: "tree-sitter" for zemble's own extractor, else the `tool`
     # name of the facts file that replaced it (see `zemble.graph.facts`).
     source: str = "tree-sitter"
+    # The ref the emitter actually wrote, when the edge did not start where it is now: a fact
+    # about generated Hawkeye code mapped back onto its template keeps the generated member
+    # here, so a reader can see the detour the source map made.
+    origin_ref: str | None = None
 
 
 @dataclass

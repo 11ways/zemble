@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from zemble.cache import find_index_from_cache_folder
-from zemble.graph.facts import OVERLAY_KINDS, TREE_SITTER_SOURCE, FactsOverlay, load_overlay
+from zemble.graph.facts import TREE_SITTER_SOURCE, FactsOverlay, load_overlay
 from zemble.graph.hwk import extract_hwk_file
 from zemble.graph.java import FileExtraction, FileImports, extract_java_file
 from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol, SymbolKind
@@ -31,7 +31,7 @@ from zemble.types import ContentType
 
 logger = logging.getLogger(__name__)
 
-GRAPH_FORMAT_VERSION = 3
+GRAPH_FORMAT_VERSION = 4
 GRAPH_DB_NAME = "graph.sqlite"
 #: The languages an extractor exists for, in the order they were added.
 GRAPH_LANGUAGES = ("java", "hwk")
@@ -57,12 +57,12 @@ CREATE TABLE IF NOT EXISTS symbols (
 CREATE TABLE IF NOT EXISTS edges (
     src_id TEXT, dst_id TEXT, dst_name TEXT, kind TEXT, line INTEGER,
     resolution TEXT, candidates TEXT, arity INTEGER, receiver TEXT,
-    receiver_type TEXT, is_new INTEGER, file_path TEXT, source TEXT
+    receiver_type TEXT, is_new INTEGER, file_path TEXT, source TEXT, origin_ref TEXT
 );
 CREATE TABLE IF NOT EXISTS facts_status (
     path TEXT PRIMARY KEY, tool TEXT, tool_version TEXT, generated_at TEXT, language TEXT,
     mtime_ns INTEGER, size INTEGER, files_declared INTEGER, files_fresh INTEGER,
-    files_stale INTEGER, unmapped INTEGER, paths TEXT
+    files_stale INTEGER, unmapped INTEGER, paths TEXT, template_paths TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified ON symbols(qualified_name);
@@ -138,6 +138,11 @@ def _migrate(connection: sqlite3.Connection) -> None:
     edge_columns = {row["name"] for row in connection.execute("PRAGMA table_info(edges)")}
     if "source" not in edge_columns:
         connection.execute("ALTER TABLE edges ADD COLUMN source TEXT")
+    if "origin_ref" not in edge_columns:
+        connection.execute("ALTER TABLE edges ADD COLUMN origin_ref TEXT")
+    status_columns = {row["name"] for row in connection.execute("PRAGMA table_info(facts_status)")}
+    if "template_paths" not in status_columns:
+        connection.execute("ALTER TABLE facts_status ADD COLUMN template_paths TEXT")
     symbol_columns = {row["name"] for row in connection.execute("PRAGMA table_info(symbols)")}
     if "annotation_args" not in symbol_columns:
         connection.execute("ALTER TABLE symbols ADD COLUMN annotation_args TEXT")
@@ -202,6 +207,28 @@ def symbol_from_row(row: sqlite3.Row) -> Symbol:
     )
 
 
+#: The edge columns `_edge_row` produces, in order. Named in the INSERT so a column added
+#: later is a compile-time-obvious edit here rather than a positional mismatch at runtime.
+_EDGE_COLUMNS = (
+    "src_id",
+    "dst_id",
+    "dst_name",
+    "kind",
+    "line",
+    "resolution",
+    "candidates",
+    "arity",
+    "receiver",
+    "receiver_type",
+    "is_new",
+    "file_path",
+    "source",
+    "origin_ref",
+)
+_EDGE_COLUMNS_SQL = ", ".join(_EDGE_COLUMNS)
+_EDGE_PLACEHOLDERS = ",".join("?" * len(_EDGE_COLUMNS))
+
+
 def _edge_row(edge: Edge) -> tuple:
     """Flatten an edge into a database row."""
     return (
@@ -218,6 +245,7 @@ def _edge_row(edge: Edge) -> tuple:
         int(edge.is_new),
         edge.src_id.split("#", 1)[0],
         edge.source,
+        edge.origin_ref,
     )
 
 
@@ -236,6 +264,7 @@ def edge_from_row(row: sqlite3.Row) -> Edge:
         receiver_type=row["receiver_type"],
         is_new=bool(row["is_new"]),
         source=row["source"] or TREE_SITTER_SOURCE,
+        origin_ref=row["origin_ref"],
     )
 
 
@@ -548,11 +577,14 @@ def _resolve_pass(
 
     target_symbols = [symbol for symbol in symbols if symbol.file_path in targets]
     # A covered file's overrides come from its facts; deriving them again would double them.
-    derived = resolver.derive_overrides([symbol for symbol in target_symbols if not overlay.covers(symbol.file_path)])
+    derived = resolver.derive_overrides(
+        [symbol for symbol in target_symbols if EdgeKind.OVERRIDES not in overlay.kinds_owned(symbol.file_path)]
+    )
     derived += resolver.derive_tests(target_symbols)
     derived += resolver.derive_exercises(pending)
     connection.executemany(
-        "INSERT INTO edges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [_edge_row(edge) for edge in pending + derived]
+        f"INSERT INTO edges ({_EDGE_COLUMNS_SQL}) VALUES ({_EDGE_PLACEHOLDERS})",  # noqa: S608
+        [_edge_row(edge) for edge in pending + derived],
     )
     _write_facts_status(connection, overlay)
 
@@ -576,6 +608,7 @@ def _reset(edge: Edge) -> Edge:
     edge.resolution = Resolution.UNRESOLVED
     edge.candidates = []
     edge.source = TREE_SITTER_SOURCE
+    edge.origin_ref = None
     return edge
 
 
@@ -584,11 +617,12 @@ def _apply_overlay(pending: list[Edge], overlay: FactsOverlay, targets: set[str]
 
     Replacement is per FILE, never per edge: mixing a tool's edges with the extractor's
     would mean an answer no one could grade. A file the facts do not cover, or whose
-    content moved on since they were written, keeps every extracted edge it had.
+    content moved on since they were written, keeps every extracted edge it had. Which KINDS
+    a file's facts own is the overlay's call: a template reached through a Hawkeye source map
+    yields only its calls, because the generated class knows nothing about what the template
+    extends or renders.
     """
-    kept = [
-        edge for edge in pending if not (edge.kind in OVERLAY_KINDS and overlay.covers(edge.src_id.split("#", 1)[0]))
-    ]
+    kept = [edge for edge in pending if edge.kind not in overlay.kinds_owned(edge.src_id.split("#", 1)[0])]
     for file_path in sorted(overlay.covered_files & targets):
         kept.extend(overlay.edges[file_path])
     return kept
@@ -599,10 +633,15 @@ def _facts_targets(connection: sqlite3.Connection, overlay: FactsOverlay) -> set
 
     A facts file that appeared, changed or vanished invalidates every source file it
     declares - now or last time - even though none of those files was itself edited.
+
+    A template reached through a Hawkeye source map is always in the set, whether or not the
+    facts file moved: whether its facts still apply is decided by comparing its modification
+    time with the generated class's, and a build cannot see that a `touch` flipped the answer.
     """
     previous = {row["path"]: row for row in connection.execute("SELECT * FROM facts_status")}
     current = {loaded.relative_path: loaded for loaded in overlay.files}
-    moved: set[str] = set()
+    moved: set[str] = {path for loaded in current.values() for path in loaded.template_paths}
+    moved |= {path for row in previous.values() for path in json.loads(row["template_paths"] or "[]")}
     for path, loaded in current.items():
         row = previous.get(path)
         if row is None or (row["mtime_ns"], row["size"]) != (loaded.mtime_ns, loaded.size):
@@ -633,7 +672,8 @@ def _write_facts_status(connection: sqlite3.Connection, overlay: FactsOverlay) -
             len(loaded.stale_files),
             unmapped_per_file.get(loaded.relative_path, 0),
             json.dumps(sorted(loaded.sources)),
+            json.dumps(sorted(loaded.template_paths)),
         )
         for loaded in overlay.files
     ]
-    connection.executemany("INSERT OR REPLACE INTO facts_status VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    connection.executemany("INSERT OR REPLACE INTO facts_status VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
