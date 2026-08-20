@@ -143,7 +143,7 @@ def _load_completed(out_path: Path) -> dict[str, RepoResult]:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark ColGREP on the semble benchmark suite.")
+    parser = argparse.ArgumentParser(description="Benchmark ColGREP on the zemble benchmark suite.")
     add_filter_args(parser, verbose=True)
     parser.add_argument(
         "--no-code-only",

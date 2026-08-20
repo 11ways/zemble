@@ -1,6 +1,6 @@
-# Contributing to semble
+# Contributing to zemble
 
-Thanks for your interest in semble. This document explains how contributions work and what we expect.
+Thanks for your interest in zemble. This document explains how contributions work and what we expect.
 
 ## tl;dr
 
@@ -14,7 +14,7 @@ Thanks for your interest in semble. This document explains how contributions wor
 Our libraries are small and focused by design. We care a lot about keeping it that way. Before you invest time writing code, please open an issue describing:
 
 - What problem you're solving
-- Why it belongs in semble (as opposed to a wrapper or separate tool)
+- Why it belongs in zemble (as opposed to a wrapper or separate tool)
 - What API or behaviour change it would involve, if any
 - A minimal (code) example of how it would work
 
@@ -37,7 +37,7 @@ This applies to small PRs (e.g. bug fixes and documentation updates) as well.  A
 ## Opening a good issue
 
 If you found a bug, include:
-- semble version (`pip show semble`)
+- zemble version (`pip show zemble`)
 - Python version
 - A minimal reproducible example
 - What you expected vs. what happened

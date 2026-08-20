@@ -6,18 +6,18 @@ import orjson
 import pytest
 from model2vec import StaticModel
 
-from semble import SembleIndex
-from semble.index.create import create_index_from_path
-from semble.index.files import _MAX_FILE_BYTES, FileStatus, get_file_status
-from semble.types import ContentType
 from tests.conftest import make_chunk
+from zemble import ZembleIndex
+from zemble.index.create import create_index_from_path
+from zemble.index.files import _MAX_FILE_BYTES, FileStatus, get_file_status
+from zemble.types import ContentType
 
 
 @pytest.fixture
-def indexed_index(mock_model: Any, tmp_project: Path) -> SembleIndex:
-    """SembleIndex built from tmp_project."""
-    with patch("semble.index.index.load_model", return_value=(mock_model, "")):
-        return SembleIndex.from_path(tmp_project)
+def indexed_index(mock_model: Any, tmp_project: Path) -> ZembleIndex:
+    """ZembleIndex built from tmp_project."""
+    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
+        return ZembleIndex.from_path(tmp_project)
 
 
 @pytest.mark.parametrize(
@@ -39,15 +39,15 @@ def test_index_markdown_inclusion(
 
 def test_include_text_files_deprecated(mock_model: Any, tmp_project: Path) -> None:
     """include_text_files=True warns and expands to all content types; False warns and resets to code-only."""
-    from semble.index.index import _ALL_CONTENT, _DEFAULT_CONTENT
+    from zemble.index.index import _ALL_CONTENT, _DEFAULT_CONTENT
 
-    with patch("semble.index.index.load_model", return_value=(mock_model, "")):
+    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
         with pytest.warns(DeprecationWarning, match="include_text_files is deprecated"):
-            idx = SembleIndex.from_path(tmp_project, include_text_files=True)
+            idx = ZembleIndex.from_path(tmp_project, include_text_files=True)
         assert idx._content == _ALL_CONTENT
 
         with pytest.warns(DeprecationWarning, match="include_text_files is deprecated"):
-            idx = SembleIndex.from_path(tmp_project, include_text_files=False)
+            idx = ZembleIndex.from_path(tmp_project, include_text_files=False)
         assert idx._content == _DEFAULT_CONTENT
 
 
@@ -55,12 +55,12 @@ def test_from_git_include_text_files_deprecated(mock_model: Any, tmp_project: Pa
     """from_git raises DeprecationWarning when include_text_files is passed."""
     fake_result = MagicMock()
     fake_result.returncode = 0
-    with patch("semble.index.index.load_model", return_value=(mock_model, "")):
+    with patch("zemble.index.index.load_model", return_value=(mock_model, "")):
         with patch("subprocess.run", return_value=fake_result):
-            with patch("semble.index.index.create_index_from_path") as mock_create:
+            with patch("zemble.index.index.create_index_from_path") as mock_create:
                 mock_create.return_value = (MagicMock(), MagicMock(), [make_chunk("x = 1", "f.py")], {})
                 with pytest.warns(DeprecationWarning, match="include_text_files is deprecated"):
-                    SembleIndex.from_git("https://example.com/repo", include_text_files=True)
+                    ZembleIndex.from_git("https://example.com/repo", include_text_files=True)
 
 
 def test_index_empty_returns_zero_chunks(mock_model: StaticModel, tmp_path: Path) -> None:
@@ -83,7 +83,7 @@ def test_tiny_invalid_utf8_file_status_does_not_crash(tmp_path: Path) -> None:
     assert get_file_status(path, None) is FileStatus.VALID
 
 
-def test_index_language_counts(indexed_index: SembleIndex) -> None:
+def test_index_language_counts(indexed_index: ZembleIndex) -> None:
     """Language breakdown in stats includes python with at least one chunk."""
     stats = indexed_index.stats
     assert indexed_index.content == (ContentType.CODE,)
@@ -95,14 +95,14 @@ def test_index_language_counts(indexed_index: SembleIndex) -> None:
     "query",
     [("authenticate token"), ("authenticate"), ("authentication")],
 )
-def test_search_modes(indexed_index: SembleIndex, query: str) -> None:
+def test_search_modes(indexed_index: ZembleIndex, query: str) -> None:
     """Each search mode returns a valid list of at most top_k results."""
     results = indexed_index.search(query, top_k=3)
     assert isinstance(results, list)
     assert len(results) <= 3
 
 
-def test_search_constraints(indexed_index: SembleIndex) -> None:
+def test_search_constraints(indexed_index: ZembleIndex) -> None:
     """search: top_k is respected; no duplicate chunks are returned."""
     assert len(indexed_index.search("function", top_k=1)) <= 1
 
@@ -110,19 +110,19 @@ def test_search_constraints(indexed_index: SembleIndex) -> None:
     assert len(results) == len(set(r.chunk for r in results))
 
 
-def test_search_with_filter_paths_does_not_crash(indexed_index: SembleIndex) -> None:
+def test_search_with_filter_paths_does_not_crash(indexed_index: ZembleIndex) -> None:
     """Filtered search works regardless of where the selected chunk lives in the corpus."""
     target_path = indexed_index.chunks[-1].file_path
     results = indexed_index.search("function", top_k=3, filter_paths=[target_path])
     assert all(r.chunk.file_path == target_path for r in results)
 
 
-def test_search_without_reranking(indexed_index: SembleIndex) -> None:
+def test_search_without_reranking(indexed_index: ZembleIndex) -> None:
     """Filtered search works regardless of where the selected chunk lives in the corpus."""
-    with patch("semble.search.rerank_topk") as mock:
+    with patch("zemble.search.rerank_topk") as mock:
         indexed_index.search("function", top_k=3, rerank=False)
         mock.assert_not_called()
-    with patch("semble.search.rerank_topk") as mock:
+    with patch("zemble.search.rerank_topk") as mock:
         indexed_index.search("function", top_k=3, rerank=True)
         mock.assert_called()
 
@@ -140,14 +140,14 @@ def test_search_rerank_default_by_content_type(
     mock_model: Any, content: list[ContentType], expect_rerank: bool
 ) -> None:
     """Reranking is on by default when code is indexed, off for non-code-only content."""
-    index = SembleIndex(mock_model, MagicMock(), MagicMock(), [make_chunk("x = 1", "f.py")], "", content=content)
-    with patch("semble.index.index.search", return_value=[]) as mock_search:
+    index = ZembleIndex(mock_model, MagicMock(), MagicMock(), [make_chunk("x = 1", "f.py")], "", content=content)
+    with patch("zemble.index.index.search", return_value=[]) as mock_search:
         index.search("function", top_k=3)
     assert mock_search.call_args.kwargs["rerank"] == expect_rerank
 
 
 @pytest.mark.parametrize("query", ["", "   ", "\n\n"])
-def test_search_empty_query_returns_empty(indexed_index: SembleIndex, query: str) -> None:
+def test_search_empty_query_returns_empty(indexed_index: ZembleIndex, query: str) -> None:
     """Empty / whitespace-only queries return [] across all modes."""
     assert indexed_index.search(query) == []
 
@@ -166,12 +166,12 @@ def test_compute_file_sizes(
     """_compute_file_sizes deduplicates paths and silently skips missing files."""
     for name, content in disk_files.items():
         (tmp_path / name).write_text(content)
-    index = SembleIndex.__new__(SembleIndex)
+    index = ZembleIndex.__new__(ZembleIndex)
     index.chunks = [make_chunk("c", p) for p in chunk_paths]
     assert index._compute_file_sizes(tmp_path) == expected
 
 
-def test_find_related(indexed_index: SembleIndex) -> None:
+def test_find_related(indexed_index: ZembleIndex) -> None:
     """find_related returns related chunks for a Chunk or SearchResult seed."""
     chunk = indexed_index.chunks[0]
     via_chunk = indexed_index.find_related(chunk, top_k=3)
@@ -186,24 +186,24 @@ def test_find_related(indexed_index: SembleIndex) -> None:
     ]
 
 
-def test_roundtrip(tmp_path: Path, indexed_index: SembleIndex) -> None:
+def test_roundtrip(tmp_path: Path, indexed_index: ZembleIndex) -> None:
     """Test that saving and loading a folder leads to the same data."""
     assert indexed_index.chunks[0].to_dict()["location"] == indexed_index.chunks[0].location
     indexed_index.save(tmp_path)
     assert "location" not in orjson.loads((tmp_path / "chunks.json").read_bytes())[0]
     with patch.object(StaticModel, "from_pretrained"):
-        index_2 = SembleIndex.load_from_disk(tmp_path)
+        index_2 = ZembleIndex.load_from_disk(tmp_path)
     assert index_2.chunks == indexed_index.chunks
     assert index_2._root == indexed_index._root
 
 
-def test_load_save_roundtrip_preserves_manifest(tmp_path: Path, indexed_index: SembleIndex) -> None:
+def test_load_save_roundtrip_preserves_manifest(tmp_path: Path, indexed_index: ZembleIndex) -> None:
     """load_from_disk followed by save must preserve the incremental manifest."""
     save_a = tmp_path / "a"
     save_b = tmp_path / "b"
     indexed_index.save(save_a)
     with patch.object(StaticModel, "from_pretrained"):
-        loaded = SembleIndex.load_from_disk(save_a)
+        loaded = ZembleIndex.load_from_disk(save_a)
     loaded.save(save_b)
     import json
 
@@ -213,10 +213,10 @@ def test_load_save_roundtrip_preserves_manifest(tmp_path: Path, indexed_index: S
     assert len(manifest_b) > 0
 
 
-def test_load_non_existent(tmp_path: Path, indexed_index: SembleIndex) -> None:
+def test_load_non_existent(tmp_path: Path, indexed_index: ZembleIndex) -> None:
     """Test that saving and loading a folder leads to the same data."""
     with pytest.raises(FileNotFoundError):
-        SembleIndex.load_from_disk(tmp_path / "temp")
+        ZembleIndex.load_from_disk(tmp_path / "temp")
 
 
 def test_load_from_disk_missing_files_reports_them(tmp_path: Path) -> None:
@@ -227,7 +227,7 @@ def test_load_from_disk_missing_files_reports_them(tmp_path: Path) -> None:
     (index_dir / "chunks.json").write_text("[]")
 
     with pytest.raises(FileNotFoundError, match="Missing:") as exc_info:
-        SembleIndex.load_from_disk(index_dir)
+        ZembleIndex.load_from_disk(index_dir)
 
     error_msg = str(exc_info.value)
     # The three missing files should all appear in the error message.
@@ -240,10 +240,10 @@ def test_load_from_disk_missing_files_reports_them(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("corruption", "message"),
-    [("version", "SembleIndex.from_path"), ("counts", "inconsistent document counts")],
+    [("version", "ZembleIndex.from_path"), ("counts", "inconsistent document counts")],
 )
 def test_load_from_disk_rejects_incompatible_state(
-    corruption: str, message: str, tmp_path: Path, indexed_index: SembleIndex
+    corruption: str, message: str, tmp_path: Path, indexed_index: ZembleIndex
 ) -> None:
     """Incompatible persistence metadata and component counts are rejected."""
     indexed_index.save(tmp_path)
@@ -257,23 +257,23 @@ def test_load_from_disk_rejects_incompatible_state(
     path.write_bytes(orjson.dumps(data))
 
     with pytest.raises(ValueError, match=message):
-        SembleIndex.load_from_disk(tmp_path)
+        ZembleIndex.load_from_disk(tmp_path)
 
 
 def test_from_path_uses_cache_when_valid(tmp_project: Path) -> None:
     """from_path returns the cached index directly when get_validated_cache hits."""
-    fake_cached = MagicMock(spec=SembleIndex)
-    with patch("semble.index.index.get_validated_cache", return_value=tmp_project / "cache"):
-        with patch.object(SembleIndex, "load_from_disk", return_value=fake_cached):
-            result = SembleIndex.from_path(tmp_project)
+    fake_cached = MagicMock(spec=ZembleIndex)
+    with patch("zemble.index.index.get_validated_cache", return_value=tmp_project / "cache"):
+        with patch.object(ZembleIndex, "load_from_disk", return_value=fake_cached):
+            result = ZembleIndex.from_path(tmp_project)
     assert result is fake_cached
 
 
 @pytest.mark.parametrize("ref", [None, "v1.0"])
 def test_from_git_uses_cache_when_valid(ref: str | None) -> None:
     """from_git uses the cache for both URL-only and URL@ref cache keys."""
-    fake_cached = MagicMock(spec=SembleIndex)
-    with patch("semble.index.index.get_validated_cache", return_value=Path("/cache")):
-        with patch.object(SembleIndex, "load_from_disk", return_value=fake_cached):
-            result = SembleIndex.from_git("https://github.com/org/repo.git", ref=ref)
+    fake_cached = MagicMock(spec=ZembleIndex)
+    with patch("zemble.index.index.get_validated_cache", return_value=Path("/cache")):
+        with patch.object(ZembleIndex, "load_from_disk", return_value=fake_cached):
+            result = ZembleIndex.from_git("https://github.com/org/repo.git", ref=ref)
     assert result is fake_cached

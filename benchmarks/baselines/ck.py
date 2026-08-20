@@ -143,7 +143,7 @@ def _run_repo(spec: RepoSpec, tasks: list[Task], *, verbose: bool) -> RepoResult
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark ck on the semble benchmark suite.")
+    parser = argparse.ArgumentParser(description="Benchmark ck on the zemble benchmark suite.")
     add_filter_args(parser, verbose=True)
     return parser.parse_args()
 

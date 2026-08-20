@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-BENCH_ROOT = Path.home() / ".cache" / "semble-bench"
+BENCH_ROOT = Path.home() / ".cache" / "zemble-bench"
 BENCHMARKS_DIR = Path(__file__).parent
 ANNOTATIONS_DIR = BENCHMARKS_DIR / "annotations"
 REPOS_PATH = BENCHMARKS_DIR / "repos.json"

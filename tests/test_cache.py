@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from semble.cache import (
+from zemble.cache import (
     _get_valid_user_cache_dir,
     _linux_cache_dir,
     _windows_cache_dir,
@@ -18,9 +18,9 @@ from semble.cache import (
     resolve_cache_folder,
     save_index_to_cache,
 )
-from semble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
-from semble.index.types import CACHE_FORMAT_VERSION
-from semble.types import ContentType
+from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
+from zemble.index.types import CACHE_FORMAT_VERSION
+from zemble.types import ContentType
 
 
 def test_find_index_from_cache_folder_local_path(tmp_path: Path) -> None:
@@ -50,20 +50,20 @@ def test_find_index_from_cache_folder_git_url() -> None:
 def test_windows_cache_dir_env(env: dict[str, str], expected_base: str) -> None:
     """_windows_cache_dir prefers LOCALAPPDATA, falls back to APPDATA."""
     with patch.dict("os.environ", env, clear=True):
-        assert _windows_cache_dir("semble") == Path(expected_base) / "semble" / "Cache"
+        assert _windows_cache_dir("zemble") == Path(expected_base) / "zemble" / "Cache"
 
 
 def test_linux_cache_dir_with_xdg() -> None:
     """_linux_cache_dir uses XDG_CACHE_HOME when set."""
     with patch.dict("os.environ", {"XDG_CACHE_HOME": "/xdg"}, clear=True):
-        assert _linux_cache_dir("semble") == Path("/xdg") / "semble"
+        assert _linux_cache_dir("zemble") == Path("/xdg") / "zemble"
 
 
 @pytest.mark.parametrize(
     ("fn", "expected_rel"),
     [
-        (_windows_cache_dir, Path("AppData") / "Local" / "semble" / "Cache"),
-        (_linux_cache_dir, Path(".cache") / "semble"),
+        (_windows_cache_dir, Path("AppData") / "Local" / "zemble" / "Cache"),
+        (_linux_cache_dir, Path(".cache") / "zemble"),
     ],
 )
 def test_cache_dir_no_env(fn: object, expected_rel: Path) -> None:
@@ -71,13 +71,13 @@ def test_cache_dir_no_env(fn: object, expected_rel: Path) -> None:
     home = Path("/fake/home")
     with patch.dict("os.environ", {}, clear=True):
         with patch("pathlib.Path.home", return_value=home):
-            assert fn("semble") == home / expected_rel  # type: ignore[operator]
+            assert fn("zemble") == home / expected_rel  # type: ignore[operator]
 
 
 def test_save_index_to_cache(tmp_path: Path) -> None:
     """A freshly built index is saved under its cache key."""
     index = MagicMock(loaded_from_disk=False, content=(ContentType.DOCS,))
-    with patch("semble.cache.find_index_from_cache_folder", return_value=tmp_path / "index") as mock_find:
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=tmp_path / "index") as mock_find:
         save_index_to_cache(index, "repo")
     mock_find.assert_called_once_with("repo", (ContentType.DOCS,))
     index.save.assert_called_once_with(tmp_path / "index")
@@ -86,9 +86,9 @@ def test_save_index_to_cache(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("platform", "mock_target", "expected"),
     [
-        ("win32", "semble.cache._windows_cache_dir", Path("/win")),
-        ("linux", "semble.cache._linux_cache_dir", Path("/linux")),
-        ("darwin", "semble.cache._macos_cache_dir", Path("/macos")),
+        ("win32", "zemble.cache._windows_cache_dir", Path("/win")),
+        ("linux", "zemble.cache._linux_cache_dir", Path("/linux")),
+        ("darwin", "zemble.cache._macos_cache_dir", Path("/macos")),
     ],
 )
 def test_resolve_cache_folder(platform: str, mock_target: str, expected: Path) -> None:
@@ -100,22 +100,22 @@ def test_resolve_cache_folder(platform: str, mock_target: str, expected: Path) -
         patch("pathlib.Path.mkdir"),
     ):
         result = resolve_cache_folder()
-    mock_fn.assert_called_once_with("semble")
+    mock_fn.assert_called_once_with("zemble")
     assert result == expected
 
 
 def test_get_valid_user_cache_dir_relative_path() -> None:
-    """_get_valid_user_cache_dir returns None when SEMBLE_CACHE_LOCATION is a relative path."""
-    with patch.dict("os.environ", {"SEMBLE_CACHE_LOCATION": "relative/path"}):
-        with patch("semble.cache.logger") as mock_logger:
+    """_get_valid_user_cache_dir returns None when ZEMBLE_CACHE_LOCATION is a relative path."""
+    with patch.dict("os.environ", {"ZEMBLE_CACHE_LOCATION": "relative/path"}):
+        with patch("zemble.cache.logger") as mock_logger:
             assert _get_valid_user_cache_dir() is None
         mock_logger.warning.assert_called_once()
 
 
-def test_resolve_cache_folder_semble_cache_location(tmp_path: Path) -> None:
-    """SEMBLE_CACHE_LOCATION takes precedence over all platform-specific helpers."""
+def test_resolve_cache_folder_zemble_cache_location(tmp_path: Path) -> None:
+    """ZEMBLE_CACHE_LOCATION takes precedence over all platform-specific helpers."""
     custom = tmp_path / "custom_cache"
-    with patch.dict("os.environ", {"SEMBLE_CACHE_LOCATION": str(custom)}):
+    with patch.dict("os.environ", {"ZEMBLE_CACHE_LOCATION": str(custom)}):
         result = resolve_cache_folder()
     assert result == custom
     assert custom.exists()
@@ -125,12 +125,12 @@ def test_clear_cache(tmp_path: Path) -> None:
     """clear_cache removes every content variant and is a no-op when none exist."""
     cache_dir = tmp_path / "repo"
     index_path = cache_dir / "index"
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         clear_cache("/some/path")  # no-op: path doesn't exist yet
     index_path.mkdir(parents=True)
     docs_path = cache_dir / "index-docs"
     docs_path.mkdir()
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         clear_cache("/some/path")
     assert not index_path.exists()
     assert not docs_path.exists()
@@ -165,12 +165,12 @@ def _write_metadata(
 
 def test_get_validated_cache_invalid_index(tmp_path: Path) -> None:
     """Returns None when the index directory is missing or incomplete."""
-    with patch("semble.cache.find_index_from_cache_folder", return_value=tmp_path / "missing"):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=tmp_path / "missing"):
         assert get_validated_cache("/path", None, [ContentType.CODE]) is None
 
     index_path = tmp_path / "index"
     index_path.mkdir()
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         assert get_validated_cache("/path", None, [ContentType.CODE]) is None
 
 
@@ -192,7 +192,7 @@ def test_get_validated_cache_metadata_mismatch(
     """Returns None when stored model or content type doesn't match the request."""
     index_path = tmp_path / "index"
     _write_metadata(index_path, stored_model, stored_content, 0.0)
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         assert get_validated_cache("/path", req_model, req_content) is None
 
 
@@ -230,7 +230,7 @@ def test_get_validated_cache_reads_utf8_metadata_with_non_ascii_file_paths(tmp_p
             kwargs["encoding"] = "cp936"
         return real_open(file, mode, *args, **kwargs)
 
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         with patch("builtins.open", side_effect=open_with_cp936_default):
             result = get_validated_cache("https://github.com/org/repo.git", "my/model", [ContentType.DOCS])
     assert result == index_path
@@ -256,7 +256,7 @@ def test_get_validated_cache_format_mismatch_returns_none(field: str, value: int
     else:
         metadata[field] = value
     metadata_path.write_text(json.dumps(metadata))
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         assert get_validated_cache("/path", "my/model", [ContentType.CODE]) is None
 
 
@@ -268,7 +268,7 @@ def test_get_validated_cache_legacy_metadata_returns_none(tmp_path: Path) -> Non
     (index_path / "bm25_index").write_text("")
     (index_path / "semantic_index").write_text("")
     (index_path / "metadata.json").write_text(json.dumps({"model_path": "my/model", "time": 0.0}))
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         assert get_validated_cache("/path", "my/model", [ContentType.CODE]) is None
 
 
@@ -276,8 +276,8 @@ def test_get_validated_cache_resolves_default_model(tmp_path: Path) -> None:
     """When model_path is None, resolve_model_name() is used for comparison."""
     index_path = tmp_path / "index"
     _write_metadata(index_path, "default/model", ["code"], 0.0)
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
-        with patch("semble.cache.resolve_model_name", return_value="other/model"):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
+        with patch("zemble.cache.resolve_model_name", return_value="other/model"):
             assert get_validated_cache("/path", None, [ContentType.CODE]) is None
 
 
@@ -286,7 +286,7 @@ def test_get_validated_cache_git_url_returns_immediately(tmp_path: Path) -> None
     index_path = tmp_path / "index"
     _write_metadata(index_path, "my/model", ["code"], 0.0)
     url = "https://github.com/org/repo.git"
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         result = get_validated_cache(url, "my/model", [ContentType.CODE])
     assert result == index_path
 
@@ -311,9 +311,9 @@ def test_get_validated_cache_mtime(
     stored_files = ["src.py"] if walk_result == "stale" else []
     _write_metadata(index_path, "my/model", ["code"], write_time, file_paths=stored_files)
 
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
-        with patch("semble.cache.get_extensions", return_value={".py"}):
-            with patch("semble.cache.walk_files", return_value=files):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
+        with patch("zemble.cache.get_extensions", return_value={".py"}):
+            with patch("zemble.cache.walk_files", return_value=files):
                 result = get_validated_cache(str(tmp_path), "my/model", [ContentType.CODE])
     assert result == (index_path if expected == "index" else None)
 
@@ -337,7 +337,7 @@ def test_get_validated_cache_manifest_mismatch(
         p.write_text("a")
         walk_return.append(p)
     _write_metadata(index_path, "my/model", ["code"], float("inf"), file_paths=stored_files)
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
-        with patch("semble.cache.walk_files", return_value=walk_return):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
+        with patch("zemble.cache.walk_files", return_value=walk_return):
             result = get_validated_cache(str(tmp_path), "my/model", [ContentType.CODE])
     assert result is None

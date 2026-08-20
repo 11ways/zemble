@@ -40,7 +40,7 @@ class RepoResult:
 
 
 def _project_name(repo: str) -> str:
-    return f"semble-bench-{_PROJECT_NAME_RE.sub('-', repo)}"
+    return f"zemble-bench-{_PROJECT_NAME_RE.sub('-', repo)}"
 
 
 def _run_cli(args: list[str], *, timeout: int) -> dict | None:
@@ -149,7 +149,7 @@ def _run_repo(spec: RepoSpec, tasks: list[Task], *, verbose: bool) -> RepoResult
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark codebase-memory-mcp on the semble benchmark suite.")
+    parser = argparse.ArgumentParser(description="Benchmark codebase-memory-mcp on the zemble benchmark suite.")
     add_filter_args(parser, verbose=True)
     return parser.parse_args()
 

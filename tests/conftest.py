@@ -7,7 +7,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from semble.types import Chunk
+from zemble.types import Chunk
 
 
 def make_chunk(content: str, file_path: str = "src/module.py") -> Chunk:

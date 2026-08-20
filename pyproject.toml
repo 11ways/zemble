@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "semble"
+name = "zemble"
 description = "Fast and Accurate Code Search for Agents"
 authors = [{name = "Thomas van Dongen", email = "thomasvdongen@proton.me"}, { name = "Stéphan Tulkens", email = "stephantul@gmail.com"}]
 readme = { file = "README.md", content-type = "text/markdown" }
@@ -57,12 +57,10 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/MinishLab/semble"
-"Bug Reports" = "https://github.com/MinishLab/semble/issues"
-"Source" = "https://github.com/MinishLab/semble"
+"Upstream" = "https://github.com/MinishLab/semble"
 
 [project.scripts]
-semble = "semble.cli:main"
+zemble = "zemble.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -70,16 +68,16 @@ license-files = ["LICENSE*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["semble*"]
+include = ["zemble*"]
 
 [tool.setuptools.package-data]
-semble = ["py.typed", "agents/*.md", "agents/*.toml"]
+zemble = ["py.typed", "agents/*.md", "agents/*.toml"]
 
 [tool.setuptools_scm]
 # can be empty if no extra settings are needed, presence enables setuptools_scm
 
 [tool.setuptools.dynamic]
-version = {attr = "semble.version.__version__"}
+version = {attr = "zemble.version.__version__"}
 
 [tool.ruff]
 exclude = [".venv/"]
@@ -89,8 +87,8 @@ target-version = "py310"
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN"]
 "benchmarks/*.py" = ["T20"]
-"src/semble/cli.py" = ["T20", "E501"]
-"src/semble/installer/*.py" = ["T20", "E501"]
+"src/zemble/cli.py" = ["T20", "E501"]
+"src/zemble/installer/*.py" = ["T20", "E501"]
 
 [tool.ruff.lint]
 select = [
@@ -133,7 +131,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--tb=short", "--strict-markers", "--cov=semble", "--cov-report=term-missing"]
+addopts = ["--tb=short", "--strict-markers", "--cov=zemble", "--cov-report=term-missing"]
 
 [tool.coverage.run]
 relative_files = true

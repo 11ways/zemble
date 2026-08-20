@@ -205,7 +205,7 @@ def _build_summary(results: list[RepoResult]) -> dict:
     avg_index = sum(r.index_ms for r in results) / len(results)
     return {
         "tool": "grepai",
-        "note": "nomic-embed-text via Ollama (137 M params, ~8× larger than semble's potion-code-16M)",
+        "note": "nomic-embed-text via Ollama (137 M params, ~8× larger than zemble's potion-code-16M)",
         "repos": [
             {
                 "repo": r.repo,
@@ -228,7 +228,7 @@ def _write_results(results: list[RepoResult], path: Path) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark grepai on the semble benchmark suite.")
+    parser = argparse.ArgumentParser(description="Benchmark grepai on the zemble benchmark suite.")
     parser.add_argument("--repo", action="append", default=[], help="Limit to one or more repo names.")
     parser.add_argument("--language", action="append", default=[], help="Limit to one or more languages.")
     parser.add_argument("--verbose", action="store_true", help="Print per-query results.")

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from semble.index.files import (
+from zemble.index.files import (
     _CODE_LANGUAGES,
     _CONFIG_LANGUAGES,
     _DATA_LANGUAGES,
@@ -10,7 +10,7 @@ from semble.index.files import (
     detect_language,
     get_extensions,
 )
-from semble.types import ContentType
+from zemble.types import ContentType
 
 
 def test_detect_language() -> None:

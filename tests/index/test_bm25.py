@@ -5,7 +5,7 @@ import numpy as np
 import orjson
 import pytest
 
-from semble.index.bm25 import BM25
+from zemble.index.bm25 import BM25
 
 
 def _build(docs: dict[str, list[str]]) -> BM25:

@@ -16,17 +16,17 @@ from benchmarks.data import (
     summarize_modes,
 )
 from benchmarks.run_benchmark import RepoResult, evaluate
-from semble import SembleIndex
-from semble.utils import DEFAULT_MODEL_NAME
+from zemble import ZembleIndex
+from zemble.utils import DEFAULT_MODEL_NAME
 
 # alpha=None  → raw mode, input depends on query
 # alpha=0.0   → hybrid pipeline, BM25-only input
 # alpha=1.0   → hybrid pipeline, semantic-only input
 _MODE_PARAMS: dict[str, tuple[float | None, bool]] = {
-    "semble-bm25": (0.0, True),
-    "semble-semantic": (1.0, True),
-    "semble-auto": (None, True),
-    "semble-balanced": (0.5, True),
+    "zemble-bm25": (0.0, True),
+    "zemble-semantic": (1.0, True),
+    "zemble-auto": (None, True),
+    "zemble-balanced": (0.5, True),
     "unranked-bm25": (0.0, False),
     "unranked-semantic": (1.0, False),
     "unranked-auto": (None, False),
@@ -59,7 +59,7 @@ def _bench(
             print(f"\n--- {repo} ---", file=sys.stderr)
 
         started = time.perf_counter()
-        index = SembleIndex.from_path(spec.benchmark_dir)
+        index = ZembleIndex.from_path(spec.benchmark_dir)
         index_ms = (time.perf_counter() - started) * 1000
 
         for mode, (alpha, rerank) in sorted(_MODE_PARAMS.items()):
@@ -93,13 +93,13 @@ def _bench(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="semble ablation benchmarks.")
+    parser = argparse.ArgumentParser(description="zemble ablation benchmarks.")
     add_filter_args(parser, verbose=True)
     return parser.parse_args()
 
 
 def main() -> None:
-    """Run the semble ablation benchmarks."""
+    """Run the zemble ablation benchmarks."""
     args = _parse_args()
 
     repo_specs, tasks = load_filtered_tasks(args.repo or None, args.language or None)
@@ -128,7 +128,7 @@ def main() -> None:
         )
 
     summary = {
-        "tool": "semble-ablations",
+        "tool": "zemble-ablations",
         "model": DEFAULT_MODEL_NAME,
         "by_mode": summarize_modes(results, modes),
         "repos": [asdict(r) for r in results],
@@ -136,7 +136,7 @@ def main() -> None:
     print(json.dumps(summary, indent=2))
 
     if not args.repo and not args.language:
-        out = save_results("semble-ablations", summary)
+        out = save_results("zemble-ablations", summary)
         print(f"\nResults saved to {out}", file=sys.stderr)
 
 

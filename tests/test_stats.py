@@ -6,10 +6,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from semble.cli import _cli_main
-from semble.stats import _use_color, build_savings_summary, format_savings_report, save_search_stats
-from semble.types import CallType, SearchResult
 from tests.conftest import make_chunk
+from zemble.cli import _cli_main
+from zemble.stats import _use_color, build_savings_summary, format_savings_report, save_search_stats
+from zemble.types import CallType, SearchResult
 
 
 def _make_stats_record(ts: float, call: str = "search", snippet_chars: int = 1_000, file_chars: int = 20_000) -> str:
@@ -21,14 +21,14 @@ def test_save_search_stats(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     chunk = make_chunk("hello", "src/foo.py")
     result = SearchResult(chunk=chunk, score=0.9)
     stats_file = tmp_path / "stats.jsonl"
-    monkeypatch.setattr("semble.stats._get_stats_file", lambda: stats_file)
+    monkeypatch.setattr("zemble.stats._get_stats_file", lambda: stats_file)
     save_search_stats([result, result], CallType.SEARCH, {"src/foo.py": 42})
     assert json.loads(stats_file.read_text())["file_chars"] == 42
 
     mock_path = MagicMock()
     mock_path.parent.mkdir.return_value = None
     mock_path.open.side_effect = OSError("no write")
-    monkeypatch.setattr("semble.stats._get_stats_file", lambda: mock_path)
+    monkeypatch.setattr("zemble.stats._get_stats_file", lambda: mock_path)
     save_search_stats([result], CallType.SEARCH, {"src/foo.py": 42})  # must not raise
 
 
@@ -40,7 +40,7 @@ def test_savings_no_file(tmp_path: Path) -> None:
 def test_no_color_disables_color_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """NO_COLOR disables colors regardless of its value."""
     monkeypatch.setenv("NO_COLOR", "")
-    with patch("semble.stats.sys.stdout.isatty", return_value=True):
+    with patch("zemble.stats.sys.stdout.isatty", return_value=True):
         assert not _use_color()
 
 
@@ -75,7 +75,7 @@ def test_savings_do_not_subtract_unknown_baselines(tmp_path: Path) -> None:
     assert summary.buckets["All time"].saved_chars == 400
     assert "~100 tokens" in format_savings_report(path=stats_file)
 
-    with patch("semble.stats._get_stats_file", lambda: stats_file):
+    with patch("zemble.stats._get_stats_file", lambda: stats_file):
         summary = build_savings_summary(path=None)
         assert summary.buckets["All time"].saved_chars == 400
         assert "~100 tokens" in format_savings_report(path=stats_file)
@@ -92,8 +92,8 @@ def test_savings_cli_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Savings subcommand dispatches to format_savings_report."""
-    monkeypatch.setattr(sys, "argv", ["semble", "savings"])
-    monkeypatch.setattr("semble.stats._get_stats_file", lambda: tmp_path / "nonexistent.jsonl")
+    monkeypatch.setattr(sys, "argv", ["zemble", "savings"])
+    monkeypatch.setattr("zemble.stats._get_stats_file", lambda: tmp_path / "nonexistent.jsonl")
     _cli_main()
     assert "No stats yet" in capsys.readouterr().out
 

@@ -5,21 +5,21 @@ from dataclasses import replace
 
 import pytest
 
-from semble.installer import run
-from semble.installer.agents import (
+from zemble.installer import run
+from zemble.installer.agents import (
     _STDIO_SERVER_CONFIG,
     AGENTS,
     INSTRUCTIONS,
-    SEMBLE_END,
-    SEMBLE_PIN,
-    SEMBLE_START,
+    ZEMBLE_END,
+    ZEMBLE_PIN,
+    ZEMBLE_START,
     IntegrationType,
     _opencode_mcp_path,
     _vscode_mcp_path,
     is_detected,
-    semble_pin,
+    zemble_pin,
 )
-from semble.installer.config import (
+from zemble.installer.config import (
     _CODEX_MCP_BLOCK,
     _CODEX_MCP_HEADER,
     _json5_parser,
@@ -30,7 +30,7 @@ from semble.installer.config import (
     remove_toml_block,
     replace_or_append_marked,
 )
-from semble.installer.installer import (
+from zemble.installer.installer import (
     _INTEGRATIONS,
     _apply_instructions,
     _apply_mcp,
@@ -40,10 +40,10 @@ from semble.installer.installer import (
     merge_mcp,
     remove_mcp,
 )
-from semble.version import __version__
+from zemble.version import __version__
 
-_BLOCK = f"{SEMBLE_START}\n## Semble\nsome instructions\n{SEMBLE_END}\n"
-_BLOCK_V2 = f"{SEMBLE_START}\n## Semble\nupdated instructions\n{SEMBLE_END}\n"
+_BLOCK = f"{ZEMBLE_START}\n## Zemble\nsome instructions\n{ZEMBLE_END}\n"
+_BLOCK_V2 = f"{ZEMBLE_START}\n## Zemble\nupdated instructions\n{ZEMBLE_END}\n"
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ def claude_agent(tmp_path):
         config_dir=tmp_path / ".claude",
         mcp=replace(a.mcp, path=tmp_path / ".claude.json"),
         instructions_path=tmp_path / ".claude" / "CLAUDE.md",
-        subagent_path=tmp_path / ".claude" / "agents" / "semble-search.md",
+        subagent_path=tmp_path / ".claude" / "agents" / "zemble-search.md",
     )
 
 
@@ -68,8 +68,8 @@ def run_setup(monkeypatch, tmp_path, claude_agent):
         mcp=replace(cursor.mcp, path=tmp_path / "cursor.json"),
         subagent_path=tmp_path / "cursor_subagent.md",
     )
-    monkeypatch.setattr("semble.installer.installer.AGENTS", [claude_agent, cursor])
-    monkeypatch.setattr("semble.installer.installer._checkbox", lambda _p, items: [v for _, v, _ in items])
+    monkeypatch.setattr("zemble.installer.installer.AGENTS", [claude_agent, cursor])
+    monkeypatch.setattr("zemble.installer.installer._checkbox", lambda _p, items: [v for _, v, _ in items])
     return monkeypatch
 
 
@@ -77,17 +77,17 @@ def test_merge_mcp_creates_fresh_file(claude_agent):
     """merge_mcp writes a clean new config file when none exists."""
     assert merge_mcp(claude_agent).action == "created"
     data = json.loads(claude_agent.mcp.path.read_text())
-    assert data["mcpServers"]["semble"] == _STDIO_SERVER_CONFIG
+    assert data["mcpServers"]["zemble"] == _STDIO_SERVER_CONFIG
 
 
 def test_merge_mcp_preserves_comments_and_other_entries(claude_agent):
-    """merge_mcp adds semble while leaving existing comments and entries byte-intact."""
+    """merge_mcp adds zemble while leaving existing comments and entries byte-intact."""
     claude_agent.mcp.path.write_text('{\n  // my servers\n  "mcpServers": {\n    "other": {"command": "x"}\n  }\n}\n')
     assert merge_mcp(claude_agent).action == "updated"
     text = claude_agent.mcp.path.read_text()
     assert "// my servers" in text  # comment preserved
     assert '"other"' in text  # existing entry preserved
-    assert '"semble"' in text  # semble added
+    assert '"zemble"' in text  # zemble added
 
 
 def test_merge_mcp_adds_section_when_absent(claude_agent):
@@ -98,7 +98,7 @@ def test_merge_mcp_adds_section_when_absent(claude_agent):
     assert "// keep me" in text
     assert '"theme"' in text
     assert '"mcpServers"' in text
-    assert '"semble"' in text
+    assert '"zemble"' in text
 
 
 @pytest.mark.parametrize(
@@ -113,11 +113,11 @@ def test_merge_mcp_into_empty_object_produces_valid_json(claude_agent, initial):
 
 
 def test_merge_mcp_idempotent(claude_agent):
-    """Running merge twice adds semble once and reports unchanged the second time."""
+    """Running merge twice adds zemble once and reports unchanged the second time."""
     claude_agent.mcp.path.write_text('{\n  "mcpServers": {}\n}\n')
     assert merge_mcp(claude_agent).action == "updated"
     assert merge_mcp(claude_agent).action == "unchanged"
-    assert claude_agent.mcp.path.read_text().count('"semble":') == 1  # the member key, once
+    assert claude_agent.mcp.path.read_text().count('"zemble":') == 1  # the member key, once
 
 
 @pytest.mark.parametrize(
@@ -138,14 +138,14 @@ def test_merge_and_remove_json_member_nested_section_key(tmp_path):
     f = tmp_path / "config.json"
 
     f.write_text('{\n  "mcp": {\n    "other": true\n  }\n}\n')  # only the outer level exists
-    assert merge_json_member(f, "mcp.servers", "semble", _STDIO_SERVER_CONFIG) == "updated"
+    assert merge_json_member(f, "mcp.servers", "zemble", _STDIO_SERVER_CONFIG) == "updated"
     data = json.loads(f.read_text())
     assert data["mcp"]["other"] is True
-    assert data["mcp"]["servers"]["semble"] == _STDIO_SERVER_CONFIG
+    assert data["mcp"]["servers"]["zemble"] == _STDIO_SERVER_CONFIG
 
-    assert remove_json_member(f, "mcp.servers", "semble") == "removed"
+    assert remove_json_member(f, "mcp.servers", "zemble") == "removed"
     data = json.loads(f.read_text())
-    assert "semble" not in data["mcp"]["servers"]
+    assert "zemble" not in data["mcp"]["servers"]
     assert data["mcp"]["other"] is True
 
 
@@ -163,20 +163,20 @@ def test_merge_and_remove_json_member_nested_section_key(tmp_path):
     ],
 )
 def test_merge_mcp_writes_under_agent_key(tmp_path, agent_id, key):
-    """merge_mcp writes the semble entry under each agent's own (possibly nested) MCP key."""
+    """merge_mcp writes the zemble entry under each agent's own (possibly nested) MCP key."""
     src = next(a for a in AGENTS if a.id == agent_id)
     agent = replace(src, mcp=replace(src.mcp, path=tmp_path / "cfg.json"))
     merge_mcp(agent)
     section = json.loads((tmp_path / "cfg.json").read_text())
     for part in key.split("."):
         section = section[part]
-    assert "semble" in section
+    assert "zemble" in section
 
 
 def test_mcp_skipped_when_grammar_unavailable(claude_agent, monkeypatch):
     """When the JSON5 grammar is unavailable, merge/remove return 'skipped'."""
     claude_agent.mcp.path.write_text('{ "mcpServers": {} }')
-    monkeypatch.setattr("semble.installer.config.get_parser", lambda _: 1 / 0)
+    monkeypatch.setattr("zemble.installer.config.get_parser", lambda _: 1 / 0)
     _json5_parser.cache_clear()
     assert merge_mcp(claude_agent).action == "skipped"
     assert remove_mcp(claude_agent).action == "skipped"
@@ -186,17 +186,17 @@ def test_mcp_skipped_when_grammar_unavailable(claude_agent, monkeypatch):
 def test_merge_mcp_reparse_guard(claude_agent, monkeypatch):
     """merge_mcp reports error when the edited JSON5 fails reparse validation."""
     claude_agent.mcp.path.write_text('{\n  "mcpServers": {}\n}\n')
-    monkeypatch.setattr("semble.installer.config._reparse_ok", lambda _: False)
+    monkeypatch.setattr("zemble.installer.config._reparse_ok", lambda _: False)
     assert merge_mcp(claude_agent).action == "error"
 
 
 def test_remove_mcp_preserves_comments(claude_agent):
-    """remove_mcp deletes only semble, keeping comments and sibling entries intact."""
+    """remove_mcp deletes only zemble, keeping comments and sibling entries intact."""
     claude_agent.mcp.path.write_text(
         "{\n"
         "  // my servers\n"
         '  "mcpServers": {\n'
-        '    "semble": {"command": "uvx"},\n'
+        '    "zemble": {"command": "uvx"},\n'
         '    "other": {"command": "x"}\n'
         "  }\n"
         "}\n"
@@ -205,19 +205,19 @@ def test_remove_mcp_preserves_comments(claude_agent):
     text = claude_agent.mcp.path.read_text()
     assert "// my servers" in text
     assert '"other"' in text
-    assert '"semble"' not in text
+    assert '"zemble"' not in text
 
 
 @pytest.mark.parametrize(
     "initial",
     [
-        '{\n  "mcpServers": {\n    "other": {},\n    "semble": {}\n  }\n}\n',
-        '{\n  "mcpServers": {\n    "semble": {}  ,\n    "other": {}\n  }\n}\n',
-        '{\n  "mcpServers": {\n    "other": {},  \n    "semble": {}\n  }\n}\n',
+        '{\n  "mcpServers": {\n    "other": {},\n    "zemble": {}\n  }\n}\n',
+        '{\n  "mcpServers": {\n    "zemble": {}  ,\n    "other": {}\n  }\n}\n',
+        '{\n  "mcpServers": {\n    "other": {},  \n    "zemble": {}\n  }\n}\n',
     ],
 )
 def test_remove_mcp_no_trailing_comma(claude_agent, initial):
-    """Removing semble must not leave a trailing comma regardless of its position or whitespace."""
+    """Removing zemble must not leave a trailing comma regardless of its position or whitespace."""
     claude_agent.mcp.path.write_text(initial)
     assert remove_mcp(claude_agent).action == "removed"
     json.loads(claude_agent.mcp.path.read_text())  # raises if trailing comma or invalid
@@ -225,8 +225,8 @@ def test_remove_mcp_no_trailing_comma(claude_agent, initial):
 
 def test_remove_mcp_reparse_guard(claude_agent, monkeypatch):
     """remove_mcp reports error when the result fails reparse validation."""
-    claude_agent.mcp.path.write_text('{\n  "mcpServers": {\n    "semble": {}\n  }\n}\n')
-    monkeypatch.setattr("semble.installer.config._reparse_ok", lambda _: False)
+    claude_agent.mcp.path.write_text('{\n  "mcpServers": {\n    "zemble": {}\n  }\n}\n')
+    monkeypatch.setattr("zemble.installer.config._reparse_ok", lambda _: False)
     assert remove_mcp(claude_agent).action == "error"
 
 
@@ -235,14 +235,14 @@ def test_remove_mcp_reparse_guard(claude_agent, monkeypatch):
     [None, '{\n  "mcpServers": {"other": {}}\n}\n', '{"other": "stuff"}'],
 )
 def test_remove_mcp_not_found(claude_agent, setup):
-    """remove_mcp reports not-found when the file is missing, has no semble entry, or no mcpServers key."""
+    """remove_mcp reports not-found when the file is missing, has no zemble entry, or no mcpServers key."""
     if setup is not None:
         claude_agent.mcp.path.write_text(setup)
     assert remove_mcp(claude_agent).action == "not-found"
 
 
 def test_codex_toml_merge_and_remove(tmp_path):
-    """The Codex TOML helpers add/remove [mcp_servers.semble] while preserving other tables and keys."""
+    """The Codex TOML helpers add/remove [mcp_servers.zemble] while preserving other tables and keys."""
     f = tmp_path / "config.toml"
     f.write_text('model = "gpt-5"\n\n[mcp_servers.other]\ncommand = "x"\n')
     assert merge_toml_block(f) == "updated"
@@ -255,16 +255,16 @@ def test_codex_toml_merge_and_remove(tmp_path):
     assert remove_toml_block(f) == "removed"
     text = f.read_text()
     assert _CODEX_MCP_HEADER not in text
-    assert "[mcp_servers.other]" in text  # only the semble table is removed
+    assert "[mcp_servers.other]" in text  # only the zemble table is removed
 
 
 def test_codex_toml_merge_replaces_section_with_inline_comment(tmp_path):
-    """_merge_toml_block replaces an existing semble table even when the header has a trailing comment."""
+    """_merge_toml_block replaces an existing zemble table even when the header has a trailing comment."""
     f = tmp_path / "config.toml"
-    f.write_text('[mcp_servers.semble] # added manually\ncommand = "old"\n')
+    f.write_text('[mcp_servers.zemble] # added manually\ncommand = "old"\n')
     assert merge_toml_block(f) == "updated"
     text = f.read_text()
-    assert text.count("[mcp_servers.semble]") == 1
+    assert text.count("[mcp_servers.zemble]") == 1
 
 
 @pytest.mark.parametrize(
@@ -272,15 +272,15 @@ def test_codex_toml_merge_replaces_section_with_inline_comment(tmp_path):
     [(None, "not-found"), ("model = 'gpt-5'\n", "not-found")],
 )
 def test_remove_toml_not_found(tmp_path, setup, expected):
-    """_remove_toml_block reports not-found when the file is absent or has no semble header."""
+    """_remove_toml_block reports not-found when the file is absent or has no zemble header."""
     f = tmp_path / "config.toml"
     if setup is not None:
         f.write_text(setup)
     assert remove_toml_block(f) == expected
 
 
-def test_remove_toml_deletes_file_when_only_semble(tmp_path):
-    """_remove_toml_block unlinks the file when removing semble leaves it empty."""
+def test_remove_toml_deletes_file_when_only_zemble(tmp_path):
+    """_remove_toml_block unlinks the file when removing zemble leaves it empty."""
     f = tmp_path / "config.toml"
     merge_toml_block(f)
     remove_toml_block(f)
@@ -288,26 +288,26 @@ def test_remove_toml_deletes_file_when_only_semble(tmp_path):
 
 
 _SUB_AFTER = (
-    '[mcp_servers.semble]\ncommand = "uvx"\n\n'
-    '[mcp_servers.semble.tools.search]\napproval_mode = "approve"\n\n'
+    '[mcp_servers.zemble]\ncommand = "uvx"\n\n'
+    '[mcp_servers.zemble.tools.search]\napproval_mode = "approve"\n\n'
     '[other]\nkey = "val"\n'
 )
 _SUB_BEFORE = (
-    '[mcp_servers.semble.tools.search]\napproval_mode = "approve"\n\n'
-    '[mcp_servers.semble]\ncommand = "uvx"\n\n'
+    '[mcp_servers.zemble.tools.search]\napproval_mode = "approve"\n\n'
+    '[mcp_servers.zemble]\ncommand = "uvx"\n\n'
     '[other]\nkey = "val"\n'
 )
 
 
 @pytest.mark.parametrize("content", [_SUB_AFTER, _SUB_BEFORE])
 def test_remove_toml_strips_sub_tables(tmp_path, content):
-    """_remove_toml_block removes sub-tables like [mcp_servers.semble.tools.search], before or after the main header."""
+    """_remove_toml_block removes sub-tables like [mcp_servers.zemble.tools.search], before or after the main header."""
     f = tmp_path / "config.toml"
     f.write_text(content)
     assert remove_toml_block(f) == "removed"
     text = f.read_text()
-    assert "[mcp_servers.semble]" not in text
-    assert "[mcp_servers.semble.tools.search]" not in text
+    assert "[mcp_servers.zemble]" not in text
+    assert "[mcp_servers.zemble.tools.search]" not in text
     assert "[other]" in text
 
 
@@ -363,7 +363,7 @@ def test_apply_instructions_none():
 
 def test_apply_subagent(tmp_path):
     """_apply_subagent installs/uninstalls the sub-agent file; returns error for missing resource."""
-    dest = tmp_path / "agents" / "semble-search.md"
+    dest = tmp_path / "agents" / "zemble-search.md"
     agent = replace(next(a for a in AGENTS if a.id == "claude"), subagent_path=dest)
 
     assert _apply_subagent(agent, "install").action == "created"
@@ -378,14 +378,14 @@ def test_apply_subagent(tmp_path):
 
 def test_apply_subagent_codex_toml(tmp_path):
     """_apply_subagent writes a .toml file for codex (deriving source extension from destination)."""
-    dest = tmp_path / "agents" / "semble-search.toml"
+    dest = tmp_path / "agents" / "zemble-search.toml"
     codex = next(a for a in AGENTS if a.id == "codex")
     agent = replace(codex, subagent_path=dest)
 
     assert _apply_subagent(agent, "install").action == "created"
     assert dest.exists()
     text = dest.read_text()
-    assert 'name = "semble_search"' in text
+    assert 'name = "zemble_search"' in text
     assert "developer_instructions" in text
     assert _apply_subagent(agent, "uninstall").action == "removed"
     assert not dest.exists()
@@ -399,43 +399,43 @@ class _FakeDistribution:
         return self._direct_url if name == "direct_url.json" else None
 
 
-def test_semble_pin_matches_installed_version(monkeypatch):
-    """For a normal (non-editable) install, semble_pin() pins the mcp extra to the exact installed version."""
-    monkeypatch.setattr("semble.installer.agents.importlib.metadata.distribution", lambda name: _FakeDistribution(None))
-    assert semble_pin() == f"semble[mcp]=={__version__}"
+def test_zemble_pin_matches_installed_version(monkeypatch):
+    """For a normal (non-editable) install, zemble_pin() pins the mcp extra to the exact installed version."""
+    monkeypatch.setattr("zemble.installer.agents.importlib.metadata.distribution", lambda name: _FakeDistribution(None))
+    assert zemble_pin() == f"zemble[mcp]=={__version__}"
 
 
-def test_semble_pin_uses_local_path_for_editable_install(monkeypatch, tmp_path):
+def test_zemble_pin_uses_local_path_for_editable_install(monkeypatch, tmp_path):
     """An editable/local-directory install pins to the local source path, not the released PyPI version."""
     direct_url = json.dumps({"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
     monkeypatch.setattr(
-        "semble.installer.agents.importlib.metadata.distribution", lambda name: _FakeDistribution(direct_url)
+        "zemble.installer.agents.importlib.metadata.distribution", lambda name: _FakeDistribution(direct_url)
     )
-    assert semble_pin() == f"{tmp_path}[mcp]"
+    assert zemble_pin() == f"{tmp_path}[mcp]"
 
 
-def test_semble_pin_uses_git_commit_for_non_editable_git_install(monkeypatch):
+def test_zemble_pin_uses_git_commit_for_non_editable_git_install(monkeypatch):
     """A non-editable `pip install git+URL` pins to the exact commit, since it may not match any PyPI release."""
     direct_url = json.dumps(
         {
-            "url": "https://github.com/example/semble.git",
+            "url": "https://github.com/example/zemble.git",
             "vcs_info": {"vcs": "git", "commit_id": "abc123", "requested_revision": "main"},
         }
     )
     monkeypatch.setattr(
-        "semble.installer.agents.importlib.metadata.distribution", lambda name: _FakeDistribution(direct_url)
+        "zemble.installer.agents.importlib.metadata.distribution", lambda name: _FakeDistribution(direct_url)
     )
-    assert semble_pin() == "git+https://github.com/example/semble.git@abc123#egg=semble[mcp]"
+    assert zemble_pin() == "git+https://github.com/example/zemble.git@abc123#egg=zemble[mcp]"
 
 
-def test_semble_pin_falls_back_when_distribution_lookup_fails(monkeypatch):
-    """If the distribution metadata can't be read at all, semble_pin() falls back to the version pin."""
+def test_zemble_pin_falls_back_when_distribution_lookup_fails(monkeypatch):
+    """If the distribution metadata can't be read at all, zemble_pin() falls back to the version pin."""
 
     def _raise(name: str):
         raise importlib.metadata.PackageNotFoundError(name)
 
-    monkeypatch.setattr("semble.installer.agents.importlib.metadata.distribution", _raise)
-    assert semble_pin() == f"semble[mcp]=={__version__}"
+    monkeypatch.setattr("zemble.installer.agents.importlib.metadata.distribution", _raise)
+    assert zemble_pin() == f"zemble[mcp]=={__version__}"
 
 
 @pytest.mark.parametrize(
@@ -448,35 +448,35 @@ def test_semble_pin_falls_back_when_distribution_lookup_fails(monkeypatch):
     ],
 )
 def test_mcp_configs_pin_version(config):
-    """Every uvx-based MCP server config passes the version-pinned spec, never a bare 'semble[mcp]'."""
-    assert SEMBLE_PIN in config.get("args", ()) or SEMBLE_PIN in config.get("command", ())
+    """Every uvx-based MCP server config passes the version-pinned spec, never a bare 'zemble[mcp]'."""
+    assert ZEMBLE_PIN in config.get("args", ()) or ZEMBLE_PIN in config.get("command", ())
 
 
 def test_instructions_pin_version():
     """The instructions block's CLI fallback line is pinned, not a bare uvx invocation."""
-    assert f'"{SEMBLE_PIN}"' in INSTRUCTIONS
-    assert '"semble[mcp]"' not in INSTRUCTIONS
+    assert f'"{ZEMBLE_PIN}"' in INSTRUCTIONS
+    assert '"zemble[mcp]"' not in INSTRUCTIONS
 
 
 def test_codex_mcp_block_pins_version():
     """The Codex TOML block embeds the same version pin as the JSON-based agent configs."""
-    assert SEMBLE_PIN in _CODEX_MCP_BLOCK
+    assert ZEMBLE_PIN in _CODEX_MCP_BLOCK
 
 
 def test_apply_subagent_pins_version(tmp_path):
     """_apply_subagent rewrites the template's fallback uvx line with the version-pinned spec."""
-    dest = tmp_path / "agents" / "semble-search.md"
+    dest = tmp_path / "agents" / "zemble-search.md"
     agent = replace(next(a for a in AGENTS if a.id == "claude"), subagent_path=dest)
     _apply_subagent(agent, "install")
     text = dest.read_text()
-    assert f'"{SEMBLE_PIN}"' in text
-    assert '"semble[mcp]"' not in text
+    assert f'"{ZEMBLE_PIN}"' in text
+    assert '"zemble[mcp]"' not in text
 
 
 def test_is_detected(monkeypatch, tmp_path):
     """is_detected returns True when binary is on PATH or config dir exists."""
     agent = next(a for a in AGENTS if a.id == "claude")
-    monkeypatch.setattr("semble.installer.agents.shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr("zemble.installer.agents.shutil.which", lambda _: "/usr/bin/claude")
     assert is_detected(agent)
 
     agent_no_bin = replace(agent, binary=None, config_dir=tmp_path)
@@ -490,7 +490,7 @@ def test_checkbox(monkeypatch):
         def ask(self):
             return ["a"]
 
-    monkeypatch.setattr("semble.installer.installer.questionary.checkbox", lambda *_, **__: _Fake())
+    monkeypatch.setattr("zemble.installer.installer.questionary.checkbox", lambda *_, **__: _Fake())
     assert _checkbox("Pick:", [("Option A", "a", False)]) == ["a"]
 
 
@@ -510,7 +510,7 @@ def test_run_completes(run_setup, monkeypatch, capsys):
         def ask(self):
             return True
 
-    monkeypatch.setattr("semble.installer.installer.questionary.confirm", lambda *_, **__: _Yes())
+    monkeypatch.setattr("zemble.installer.installer.questionary.confirm", lambda *_, **__: _Yes())
     run("install")
     assert "Done!" in capsys.readouterr().out
 
@@ -522,7 +522,7 @@ def test_run_cancels(run_setup, monkeypatch):
         def ask(self):
             return False
 
-    monkeypatch.setattr("semble.installer.installer.questionary.confirm", lambda *_, **__: _No())
+    monkeypatch.setattr("zemble.installer.installer.questionary.confirm", lambda *_, **__: _No())
     with pytest.raises(SystemExit):
         run("install")
 
@@ -530,8 +530,8 @@ def test_run_cancels(run_setup, monkeypatch):
 @pytest.mark.parametrize(
     ("initial", "block", "expected", "present", "absent"),
     [
-        (None, _BLOCK, "created", [SEMBLE_START], []),
-        ("# Existing\n", _BLOCK, "updated", ["# Existing", SEMBLE_START], []),
+        (None, _BLOCK, "created", [ZEMBLE_START], []),
+        ("# Existing\n", _BLOCK, "updated", ["# Existing", ZEMBLE_START], []),
         (
             f"# Before\n\n{_BLOCK}\n# After\n",
             _BLOCK_V2,
@@ -539,7 +539,7 @@ def test_run_cancels(run_setup, monkeypatch):
             ["updated instructions", "# Before", "# After"],
             ["some instructions"],
         ),
-        (_BLOCK, _BLOCK, "unchanged", [SEMBLE_START], []),
+        (_BLOCK, _BLOCK, "unchanged", [ZEMBLE_START], []),
     ],
 )
 def test_replace_or_append_marked(tmp_path, initial, block, expected, present, absent):
@@ -559,7 +559,7 @@ def test_remove_marked_strips_block_and_deletes_empty_file(tmp_path):
     f.write_text(f"# Before\n\n{_BLOCK}\n# After\n")
     assert remove_marked(f) == "removed"
     text = f.read_text()
-    assert SEMBLE_START not in text
+    assert ZEMBLE_START not in text
     assert "# Before" in text
     assert "# After" in text
 
@@ -568,7 +568,7 @@ def test_remove_marked_strips_block_and_deletes_empty_file(tmp_path):
     assert not f.exists()
 
 
-@pytest.mark.parametrize("initial", [None, "# No semble section here\n"])
+@pytest.mark.parametrize("initial", [None, "# No zemble section here\n"])
 def test_remove_marked_not_found(tmp_path, initial):
     """remove_marked reports not-found for a missing file or one without markers."""
     f = tmp_path / "CLAUDE.md"
@@ -579,12 +579,12 @@ def test_remove_marked_not_found(tmp_path, initial):
 
 @pytest.mark.parametrize("command", ["install", "uninstall"])
 def test_cli_dispatches_to_installer_run(monkeypatch, command):
-    """`semble install` / `semble uninstall` route to installer.run with the command name."""
-    import semble.cli as cli
+    """`zemble install` / `zemble uninstall` route to installer.run with the command name."""
+    import zemble.cli as cli
 
     calls = []
-    monkeypatch.setattr("semble.installer.run", lambda mode, **kwargs: calls.append((mode, kwargs)))
-    monkeypatch.setattr(sys, "argv", ["semble", command])
+    monkeypatch.setattr("zemble.installer.run", lambda mode, **kwargs: calls.append((mode, kwargs)))
+    monkeypatch.setattr(sys, "argv", ["zemble", command])
     cli.main()
     assert calls == [(command, {"agent_ids": None, "integration_ids": None, "yes": False})]
 
@@ -592,11 +592,11 @@ def test_cli_dispatches_to_installer_run(monkeypatch, command):
 @pytest.mark.parametrize("command", ["install", "uninstall"])
 def test_cli_unattended_flags(monkeypatch, command):
     """--agent/--type/--yes flags run non-interactively without prompting."""
-    import semble.cli as cli
+    import zemble.cli as cli
 
     calls = []
-    monkeypatch.setattr("semble.installer.run", lambda mode, **kwargs: calls.append((mode, kwargs)))
-    monkeypatch.setattr(sys, "argv", ["semble", command, "--agent", "pi", "--type", "subagent", "--yes"])
+    monkeypatch.setattr("zemble.installer.run", lambda mode, **kwargs: calls.append((mode, kwargs)))
+    monkeypatch.setattr(sys, "argv", ["zemble", command, "--agent", "pi", "--type", "subagent", "--yes"])
     cli.main()
     assert calls == [(command, {"agent_ids": ["pi"], "integration_ids": [IntegrationType.SUBAGENT], "yes": True})]
     assert isinstance(calls[0][1]["integration_ids"][0], IntegrationType)
@@ -604,9 +604,9 @@ def test_cli_unattended_flags(monkeypatch, command):
 
 def test_cli_type_without_agent_errors(monkeypatch, capsys):
     """--type without --agent is rejected with a usage error."""
-    import semble.cli as cli
+    import zemble.cli as cli
 
-    monkeypatch.setattr(sys, "argv", ["semble", "install", "--type", "mcp"])
+    monkeypatch.setattr(sys, "argv", ["zemble", "install", "--type", "mcp"])
     with pytest.raises(SystemExit):
         cli.main()
     assert "--type requires --agent" in capsys.readouterr().err
@@ -614,13 +614,13 @@ def test_cli_type_without_agent_errors(monkeypatch, capsys):
 
 def test_run_unattended_skips_prompts(run_setup, monkeypatch):
     """run() with agent_ids skips both checkboxes and the confirmation prompt."""
-    from semble.installer import run
+    from zemble.installer import run
 
     def _boom(*_: object, **__: object) -> None:
         raise AssertionError("should not prompt in unattended mode")
 
-    monkeypatch.setattr("semble.installer.installer._checkbox", _boom)
-    monkeypatch.setattr("semble.installer.installer.questionary.confirm", _boom)
+    monkeypatch.setattr("zemble.installer.installer._checkbox", _boom)
+    monkeypatch.setattr("zemble.installer.installer.questionary.confirm", _boom)
     run("install", agent_ids=["claude"], yes=True)
 
 
@@ -630,7 +630,7 @@ def test_run_unattended_skips_prompts(run_setup, monkeypatch):
 )
 def test_run_unattended_empty_selection_exits(run_setup, agent_ids, integration_ids):
     """run() exits with a non-zero code instead of silently no-opping when nothing matches."""
-    from semble.installer import run
+    from zemble.installer import run
 
     with pytest.raises(SystemExit) as exc_info:
         run("install", agent_ids=agent_ids, integration_ids=integration_ids, yes=True)

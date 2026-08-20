@@ -1,17 +1,17 @@
 import pytest
 
-from semble.ranking.boosting import apply_query_boost, boost_multi_chunk_files
-from semble.ranking.penalties import rerank_topk
-from semble.ranking.weighting import resolve_alpha
 from tests.conftest import make_chunk
+from zemble.ranking.boosting import apply_query_boost, boost_multi_chunk_files
+from zemble.ranking.penalties import rerank_topk
+from zemble.ranking.weighting import resolve_alpha
 
 
 def test_rerank_topk() -> None:
     """rerank_topk: empty → []; penalise_paths=False respects raw scores; saturation decay keeps order."""
     assert rerank_topk({}, top_k=5) == []
 
-    init_chunk = make_chunk("from .auth import authenticate", "src/semble/__init__.py")
-    impl_chunk = make_chunk("def authenticate(token): ...", "src/semble/auth.py")
+    init_chunk = make_chunk("from .auth import authenticate", "src/zemble/__init__.py")
+    impl_chunk = make_chunk("def authenticate(token): ...", "src/zemble/auth.py")
     ranked = rerank_topk({init_chunk: 2.0, impl_chunk: 1.0}, top_k=2, penalise_paths=False)
     assert ranked[0][0] == init_chunk
 
@@ -24,7 +24,7 @@ def test_rerank_topk() -> None:
 @pytest.mark.parametrize(
     "penalised_path",
     [
-        "src/semble/__init__.py",  # _REEXPORT_FILENAMES
+        "src/zemble/__init__.py",  # _REEXPORT_FILENAMES
         "tests/test_auth.py",  # _TEST_FILE_RE / _TEST_DIR_RE
         "src/compat/old_api.py",  # _COMPAT_DIR_RE
         "examples/demo.py",  # _EXAMPLES_DIR_RE

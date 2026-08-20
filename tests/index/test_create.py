@@ -6,11 +6,11 @@ import numpy as np
 import orjson
 import pytest
 
-from semble.cache import load_previous_for_incremental
-from semble.index.create import create_index_from_path
-from semble.index.index import SembleIndex
-from semble.index.types import PreviousIndex, make_chunk_id
-from semble.types import ContentType
+from zemble.cache import load_previous_for_incremental
+from zemble.index.create import create_index_from_path
+from zemble.index.index import ZembleIndex
+from zemble.index.types import PreviousIndex, make_chunk_id
+from zemble.types import ContentType
 
 
 def _write_files(root: Path, files: dict[str, str]) -> None:
@@ -92,8 +92,8 @@ def _build_valid_cache(index_path: Path, mock_model: Any) -> dict:
     src = index_path.parent / "src"
     _write_files(src, {"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 2\n"})
 
-    with patch("semble.index.index.load_model", return_value=(mock_model, "my/model")):
-        SembleIndex.from_path(src).save(index_path)
+    with patch("zemble.index.index.load_model", return_value=(mock_model, "my/model")):
+        ZembleIndex.from_path(src).save(index_path)
     return orjson.loads((index_path / "metadata.json").read_bytes())
 
 
@@ -135,12 +135,12 @@ def test_load_previous_for_incremental_fails_closed(corrupt: str, tmp_path: Path
             bm25_path.write_bytes(orjson.dumps(bm25))
         elif corrupt == "corrupt_json":
             (index_path / "metadata.json").write_bytes(b"{not json")
-            with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+            with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
                 assert load_previous_for_incremental("/some/path", "my/model", [ContentType.CODE]) is None
             return
         (index_path / "metadata.json").write_bytes(orjson.dumps(metadata))
 
-    with patch("semble.cache.find_index_from_cache_folder", return_value=index_path):
+    with patch("zemble.cache.find_index_from_cache_folder", return_value=index_path):
         result = load_previous_for_incremental("/some/path", "my/model", [ContentType.CODE])
     assert result is None
 
@@ -151,8 +151,8 @@ def test_load_previous_for_incremental_happy_path(mock_model: Any, tmp_path: Pat
     _build_valid_cache(index_path, mock_model)
 
     with (
-        patch("semble.cache.find_index_from_cache_folder", return_value=index_path),
-        patch("semble.cache.resolve_model_name", return_value="my/model"),
+        patch("zemble.cache.find_index_from_cache_folder", return_value=index_path),
+        patch("zemble.cache.resolve_model_name", return_value="my/model"),
     ):
         previous = load_previous_for_incremental(str(index_path.parent / "src"), None, [ContentType.CODE])
 

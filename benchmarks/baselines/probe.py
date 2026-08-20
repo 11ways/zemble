@@ -101,7 +101,7 @@ def _evaluate_repo(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark probe on the semble benchmark suite.")
+    parser = argparse.ArgumentParser(description="Benchmark probe on the zemble benchmark suite.")
     parser.add_argument("--repo", action="append", default=[], help="Limit to one or more repo names.")
     parser.add_argument("--language", action="append", default=[], help="Limit to one or more languages.")
     parser.add_argument("--verbose", action="store_true", help="Print per-query results.")

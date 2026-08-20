@@ -15,9 +15,9 @@ from benchmarks.data import (
     save_results,
 )
 from benchmarks.metrics import ndcg_at_k, target_rank
-from semble import SembleIndex
-from semble.types import SearchResult
-from semble.utils import DEFAULT_MODEL_NAME
+from zemble import ZembleIndex
+from zemble.types import SearchResult
+from zemble.utils import DEFAULT_MODEL_NAME
 
 _LATENCY_RUNS = 5
 _DIRECT_TOP_K = 10
@@ -43,7 +43,7 @@ class RepoResult:
 
 
 def evaluate(
-    index: SembleIndex,
+    index: ZembleIndex,
     tasks: list[Task],
     *,
     verbose: bool = False,
@@ -203,7 +203,7 @@ def _bench_quality(
     for repo, tasks in sorted(repo_tasks.items()):
         spec = specs[repo]
         started = time.perf_counter()
-        index = SembleIndex.from_path(spec.benchmark_dir)
+        index = ZembleIndex.from_path(spec.benchmark_dir)
         index_ms = (time.perf_counter() - started) * 1000
         ndcg5, ndcg10, latencies, by_category, tokens = evaluate(index, tasks, verbose=verbose)
         p50, p90, p95, p99 = np.percentile(latencies, [50, 90, 95, 99]).tolist()
@@ -232,7 +232,7 @@ def _bench_quality(
 
 
 def _save_results(results: list[RepoResult]) -> None:
-    """Write results to benchmarks/results/semble-hybrid-<sha12>.json."""
+    """Write results to benchmarks/results/zemble-hybrid-<sha12>.json."""
     languages = sorted({r.language for r in results})
     by_language = {lang: [r for r in results if r.language == lang] for lang in languages}
 
@@ -258,7 +258,7 @@ def _save_results(results: list[RepoResult]) -> None:
 
     n_repos = len(results)
     output = {
-        "tool": "semble-hybrid",
+        "tool": "zemble-hybrid",
         "model": DEFAULT_MODEL_NAME,
         "summary": {
             "ndcg10": round(sum(r.ndcg10 for r in results) / n_repos, 4),
@@ -286,13 +286,13 @@ def _save_results(results: list[RepoResult]) -> None:
         "repos": [asdict(r) for r in results],
     }
 
-    out_path = save_results("semble-hybrid", output)
+    out_path = save_results("zemble-hybrid", output)
     print(f"\nResults saved to {out_path}", file=sys.stderr)
 
 
 def main() -> None:
-    """Parse arguments and run the semble hybrid benchmark."""
-    parser = argparse.ArgumentParser(description="Benchmark hybrid semble search across the pinned benchmark repos.")
+    """Parse arguments and run the zemble hybrid benchmark."""
+    parser = argparse.ArgumentParser(description="Benchmark hybrid zemble search across the pinned benchmark repos.")
     add_filter_args(parser, verbose=True)
     args = parser.parse_args()
     repo_specs, tasks = load_filtered_tasks(args.repo or None, args.language or None)

@@ -9,15 +9,15 @@ from sentence_transformers import SentenceTransformer
 
 from benchmarks.data import RepoSpec, Task, available_repo_specs, load_tasks, save_results
 from benchmarks.tools import run_colgrep_files, run_ripgrep_count
-from semble import SembleIndex
-from semble.index.bm25 import BM25
-from semble.index.create import create_index_from_path
-from semble.index.dense import load_model
-from semble.index.sparse import enrich_for_bm25
-from semble.index.types import make_chunk_id
-from semble.tokens import tokenize
-from semble.types import ContentType
-from semble.utils import DEFAULT_MODEL_NAME
+from zemble import ZembleIndex
+from zemble.index.bm25 import BM25
+from zemble.index.create import create_index_from_path
+from zemble.index.dense import load_model
+from zemble.index.sparse import enrich_for_bm25
+from zemble.index.types import make_chunk_id
+from zemble.tokens import tokenize
+from zemble.types import ContentType
+from zemble.utils import DEFAULT_MODEL_NAME
 
 _CRE_MODEL_NAME = "nomic-ai/CodeRankEmbed"
 
@@ -85,7 +85,7 @@ _UNSET = object()
 class _AsymmetricWrapper:
     """Wrap SentenceTransformer with asymmetric query/document prompts.
 
-    semble only passes use_multiprocessing during index-time calls, never at query time, so its
+    zemble only passes use_multiprocessing during index-time calls, never at query time, so its
     presence is a reliable query/document discriminator (batch size is not: single-chunk files are
     real one-element document batches).
     """
@@ -105,14 +105,14 @@ class _AsymmetricWrapper:
 def _bench_coderankembed(
     spec: RepoSpec, tasks: list[Task], model: _AsymmetricWrapper
 ) -> tuple[float, tuple[float, ...]]:
-    """Index a repo with CodeRankEmbed via semble and measure query latency; return (index_ms, latencies_ms)."""
+    """Index a repo with CodeRankEmbed via zemble and measure query latency; return (index_ms, latencies_ms)."""
     started = time.perf_counter()
     bm25_index, semantic_index, chunks, _manifest = create_index_from_path(
         spec.benchmark_dir,
         model=model,  # type: ignore[arg-type]
         content=(ContentType.CODE,),  # type: ignore[arg-type]
     )
-    index = SembleIndex(
+    index = ZembleIndex(
         model=model,  # type: ignore[arg-type]
         bm25_index=bm25_index,
         semantic_index=semantic_index,
@@ -130,10 +130,10 @@ def _bench_coderankembed(
     return index_ms, tuple(latencies)
 
 
-def _bench_semble(spec: RepoSpec, tasks: list[Task]) -> tuple[float, SembleIndex, tuple[float, ...]]:
-    """Index a repo with semble and measure query latency; return (index_ms, index, latencies_ms)."""
+def _bench_zemble(spec: RepoSpec, tasks: list[Task]) -> tuple[float, ZembleIndex, tuple[float, ...]]:
+    """Index a repo with zemble and measure query latency; return (index_ms, index, latencies_ms)."""
     started = time.perf_counter()
-    index = SembleIndex.from_path(spec.benchmark_dir, model_path=DEFAULT_MODEL_NAME)
+    index = ZembleIndex.from_path(spec.benchmark_dir, model_path=DEFAULT_MODEL_NAME)
     index_ms = (time.perf_counter() - started) * 1000
     latencies: list[float] = []
     for task in tasks:
@@ -144,11 +144,11 @@ def _bench_semble(spec: RepoSpec, tasks: list[Task]) -> tuple[float, SembleIndex
     return index_ms, index, tuple(latencies)
 
 
-def _bench_bm25(index: SembleIndex, tasks: list[Task]) -> tuple[float, tuple[float, ...]]:
+def _bench_bm25(index: ZembleIndex, tasks: list[Task]) -> tuple[float, tuple[float, ...]]:
     """Build a standalone BM25 index from already-chunked content and measure query latency.
 
-    Reuses semble's chunks (no re-parsing) but times only the BM25-specific work — building a
-    combined semble index also pays for dense embedding, which dominates and would make this
+    Reuses zemble's chunks (no re-parsing) but times only the BM25-specific work — building a
+    combined zemble index also pays for dense embedding, which dominates and would make this
     number meaningless as a "BM25 index time".
     """
     started = time.perf_counter()
@@ -241,9 +241,9 @@ def main() -> None:
     all_tasks = load_tasks(repo_specs=specs)
     repo_tasks: dict[str, list[Task]] = {repo: [t for t in all_tasks if t.repo == repo] for repo in _REPOS}
 
-    print("Loading semble model...", file=sys.stderr)
+    print("Loading zemble model...", file=sys.stderr)
     started = time.perf_counter()
-    load_model(DEFAULT_MODEL_NAME)  # warms semble's internal model cache so repo #1 isn't penalized
+    load_model(DEFAULT_MODEL_NAME)  # warms zemble's internal model cache so repo #1 isn't penalized
     print(f"  loaded in {(time.perf_counter() - started) * 1000:.0f}ms", file=sys.stderr)
 
     print("Loading CodeRankEmbed...", file=sys.stderr)
@@ -252,7 +252,7 @@ def main() -> None:
     print(f"  loaded in {(time.perf_counter() - started) * 1000:.0f}ms", file=sys.stderr)
     print(file=sys.stderr)
 
-    tools = ["semble", "bm25", "coderankembed", "colgrep", "ripgrep"]
+    tools = ["zemble", "bm25", "coderankembed", "colgrep", "ripgrep"]
 
     print(
         f"{'Repo':<22} {'Language':<14} {'Tool':<16} {'Index':>10} {'p50':>8} {'p90':>8} {'p95':>8} {'p99':>8}",
@@ -266,14 +266,14 @@ def main() -> None:
         spec = specs[repo]
         tasks = repo_tasks[repo]
 
-        index_ms, semble_index, latencies_ms = _bench_semble(spec, tasks)
+        index_ms, zemble_index, latencies_ms = _bench_zemble(spec, tasks)
         result = ToolResult(
-            repo=repo, language=spec.language, tool="semble", index_ms=index_ms, latencies_ms=latencies_ms
+            repo=repo, language=spec.language, tool="zemble", index_ms=index_ms, latencies_ms=latencies_ms
         )
         all_results.append(result)
-        print(f"{repo:<22} {spec.language:<14} {'semble':<16} {index_ms:>8.0f}ms {_fmt_stats(result)}", file=sys.stderr)
+        print(f"{repo:<22} {spec.language:<14} {'zemble':<16} {index_ms:>8.0f}ms {_fmt_stats(result)}", file=sys.stderr)
 
-        bm25_index_ms, latencies_ms = _bench_bm25(semble_index, tasks)
+        bm25_index_ms, latencies_ms = _bench_bm25(zemble_index, tasks)
         result = ToolResult(
             repo=repo, language=spec.language, tool="bm25", index_ms=bm25_index_ms, latencies_ms=latencies_ms
         )

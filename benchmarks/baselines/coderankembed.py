@@ -20,14 +20,14 @@ from benchmarks.data import (
     save_results,
 )
 from benchmarks.metrics import ndcg_at_k, target_rank
-from semble.index.create import create_index_from_path
-from semble.index.index import SembleIndex
-from semble.types import ContentType, SearchResult
+from zemble.index.create import create_index_from_path
+from zemble.index.index import ZembleIndex
+from zemble.types import ContentType, SearchResult
 
 _MODEL_NAME = "nomic-ai/CodeRankEmbed"
 _TOP_K = 10
 _LATENCY_RUNS = 3  # transformer inference is slow; keep runs low
-_ALPHA = 1.0  # SembleIndex.search()'s alpha: 1.0 = full semantic weight
+_ALPHA = 1.0  # ZembleIndex.search()'s alpha: 1.0 = full semantic weight
 
 _UNSET = object()
 
@@ -35,7 +35,7 @@ _UNSET = object()
 class _AsymmetricWrapper:
     """Wrap SentenceTransformer with asymmetric query/document prompts.
 
-    semble only passes use_multiprocessing during index-time calls, never at query time, so its
+    zemble only passes use_multiprocessing during index-time calls, never at query time, so its
     presence is a reliable query/document discriminator (batch size is not: single-chunk files are
     real one-element document batches).
     """
@@ -52,14 +52,14 @@ class _AsymmetricWrapper:
         return self._model.encode(text_list, batch_size=1)  # type: ignore[return-value]
 
 
-def _build_index(benchmark_dir: Path, model: _AsymmetricWrapper) -> SembleIndex:
-    """Build a SembleIndex using CodeRankEmbed embeddings for both BM25 enrichment and dense search."""
+def _build_index(benchmark_dir: Path, model: _AsymmetricWrapper) -> ZembleIndex:
+    """Build a ZembleIndex using CodeRankEmbed embeddings for both BM25 enrichment and dense search."""
     bm25_index, semantic_index, chunks, _manifest = create_index_from_path(
         benchmark_dir,
         model=model,  # type: ignore[arg-type]
         content=(ContentType.CODE,),  # type: ignore[arg-type]
     )
-    return SembleIndex(
+    return ZembleIndex(
         model=model,  # type: ignore[arg-type]
         bm25_index=bm25_index,
         semantic_index=semantic_index,
@@ -85,7 +85,7 @@ class RepoResult:
 
 
 def _evaluate(
-    index: SembleIndex,
+    index: ZembleIndex,
     tasks: list[Task],
     *,
     verbose: bool = False,
@@ -223,7 +223,7 @@ def _bench(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark CodeRankEmbed on the semble benchmark suite.")
+    parser = argparse.ArgumentParser(description="Benchmark CodeRankEmbed on the zemble benchmark suite.")
     add_filter_args(parser, verbose=True)
     return parser.parse_args()
 

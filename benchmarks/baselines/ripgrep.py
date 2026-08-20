@@ -66,7 +66,7 @@ def _evaluate_repo(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark ripgrep on the semble benchmark suite.")
+    parser = argparse.ArgumentParser(description="Benchmark ripgrep on the zemble benchmark suite.")
     add_filter_args(parser, verbose=True)
     parser.add_argument(
         "--no-fixed-strings",

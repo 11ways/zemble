@@ -22,13 +22,13 @@ from benchmarks.data import (
     save_results,
     target_matches_location,
 )
-from semble import SembleIndex
-from semble.index.dense import load_model
-from semble.index.file_walker import _DEFAULT_IGNORED_DIRS as DEFAULT_IGNORED_DIRS
-from semble.index.files import get_extensions
-from semble.ranking.boosting import _STOPWORDS as _SEMBLE_STOPWORDS
-from semble.types import Chunk, ContentType
-from semble.utils import DEFAULT_MODEL_NAME
+from zemble import ZembleIndex
+from zemble.index.dense import load_model
+from zemble.index.file_walker import _DEFAULT_IGNORED_DIRS as DEFAULT_IGNORED_DIRS
+from zemble.index.files import get_extensions
+from zemble.ranking.boosting import _STOPWORDS as _ZEMBLE_STOPWORDS
+from zemble.types import Chunk, ContentType
+from zemble.utils import DEFAULT_MODEL_NAME
 
 _RG_INCLUDE_GLOBS: tuple[str, ...] = tuple(f"*{ext}" for ext in get_extensions([ContentType.CODE]))
 _RG_EXCLUDE_GLOBS: tuple[str, ...] = tuple(f"!{d}" for d in DEFAULT_IGNORED_DIRS)
@@ -38,11 +38,11 @@ _EXPECTED_COST_CAP = 32_000
 _PLOT_BUDGETS = sorted({int(b) for b in np.logspace(np.log10(100), np.log10(256000), 60)})
 _TOKENIZER_NAME = "cl100k_base"
 _RG_MAX_MATCHES = 500
-_SEMBLE_TOP_K = 50
+_ZEMBLE_TOP_K = 50
 _KW_MIN_LEN = 3
 
-# Extend semble's code-ranking stopwords with broader NL query words.
-_STOPWORDS: frozenset[str] = _SEMBLE_STOPWORDS | frozenset(
+# Extend zemble's code-ranking stopwords with broader NL query words.
+_STOPWORDS: frozenset[str] = _ZEMBLE_STOPWORDS | frozenset(
     """
     but its can not no nor so yet both either neither than then
     will would could should may might been being had did will
@@ -58,13 +58,13 @@ Curve: TypeAlias = list[tuple[int, int]]
 MethodCurves: TypeAlias = list[tuple[Curve, int]]
 
 
-def _semble_units(index: SembleIndex, query: str) -> list[Chunk]:
-    """Top-K semble chunks as units, ordered by score."""
-    return [r.chunk for r in index.search(query, top_k=_SEMBLE_TOP_K)]
+def _zemble_units(index: ZembleIndex, query: str) -> list[Chunk]:
+    """Top-K zemble chunks as units, ordered by score."""
+    return [r.chunk for r in index.search(query, top_k=_ZEMBLE_TOP_K)]
 
 
 def _rg_command(pattern: str, repo_dir: Path) -> list[str]:
-    """Build the rg command line, scoped to the same code-file universe semble indexes."""
+    """Build the rg command line, scoped to the same code-file universe zemble indexes."""
     cmd = ["rg", "--json", "--fixed-strings", "--ignore-case"]
     for glob in (*_RG_EXCLUDE_GLOBS, *_RG_INCLUDE_GLOBS):
         cmd += ["--glob", glob]
@@ -156,13 +156,13 @@ def _grep_keywords_file_units(query: str, repo_dir: Path) -> list[Chunk]:
 
 
 def _retrieval_units_for_task(
-    index: SembleIndex,
+    index: ZembleIndex,
     task: Task,
     repo_dir: Path,
 ) -> list[tuple[str, list[Chunk]]]:
     """Return (method, units) pairs for a task."""
     return [
-        ("semble", _semble_units(index, task.query)),
+        ("zemble", _zemble_units(index, task.query)),
         ("grep+read", _grep_file_units(task.query, repo_dir)),
         ("grep-kw+read", _grep_keywords_file_units(task.query, repo_dir)),
     ]
@@ -219,10 +219,10 @@ def _expected_cost_at_cap(curves: MethodCurves, cap: int) -> float:
     return float(np.mean(costs)) if costs else float(cap)
 
 
-def _pairwise_reduction(semble: MethodCurves, other: MethodCurves) -> dict[str, float] | None:
+def _pairwise_reduction(zemble: MethodCurves, other: MethodCurves) -> dict[str, float] | None:
     """Median 'tokens to first hit' reduction, paired on queries where both methods hit."""
     pairs: list[tuple[int, int]] = []
-    for (s_curve, _), (o_curve, _) in zip(semble, other, strict=True):
+    for (s_curve, _), (o_curve, _) in zip(zemble, other, strict=True):
         s = _tokens_to_first_hit(s_curve)
         o = _tokens_to_first_hit(o_curve)
         if s is not None and o is not None and o > 0:
@@ -232,16 +232,16 @@ def _pairwise_reduction(semble: MethodCurves, other: MethodCurves) -> dict[str, 
     ratios = [s / o for s, o in pairs]
     return {
         "n_paired": float(len(pairs)),
-        "median_semble_tokens": float(np.median([s for s, _ in pairs])),
+        "median_zemble_tokens": float(np.median([s for s, _ in pairs])),
         "median_other_tokens": float(np.median([o for _, o in pairs])),
         "median_reduction": 1.0 - float(np.median(ratios)),
         "mean_reduction": 1.0 - float(np.mean(ratios)),
-        "semble_better_pct": sum(1 for s, o in pairs if s < o) / len(pairs),
+        "zemble_better_pct": sum(1 for s, o in pairs if s < o) / len(pairs),
     }
 
 
 def _evaluate_repo_recall(
-    index: SembleIndex,
+    index: ZembleIndex,
     tasks: list[Task],
     repo_dir: Path,
     enc: Any,
@@ -257,7 +257,7 @@ def _evaluate_repo_recall(
 
 
 _PLOT_STYLE: dict[str, dict[str, object]] = {
-    "semble": {"label": "semble", "color": "#1a5fa8", "linewidth": 2.4, "zorder": 4},
+    "zemble": {"label": "zemble", "color": "#1a5fa8", "linewidth": 2.4, "zorder": 4},
     "grep-kw+read": {"label": "ripgrep + read", "color": "#b7770d", "linewidth": 1.8, "zorder": 3},
 }
 
@@ -330,21 +330,21 @@ def _print_recall_summary(method_curves: dict[str, MethodCurves]) -> dict[str, d
 
 
 def _print_first_hit_summary(method_curves: dict[str, MethodCurves]) -> dict[str, dict[str, float]]:
-    """Print and return pairwise tokens-to-first-hit reductions vs semble."""
-    print("\nTokens to first relevant file (semble vs other, paired)", file=sys.stderr)
-    print(f"{'vs':<20} {'n':>5}  {'med-semble':>10}  {'med-other':>10}  {'med-reduce':>10}", file=sys.stderr)
+    """Print and return pairwise tokens-to-first-hit reductions vs zemble."""
+    print("\nTokens to first relevant file (zemble vs other, paired)", file=sys.stderr)
+    print(f"{'vs':<20} {'n':>5}  {'med-zemble':>10}  {'med-other':>10}  {'med-reduce':>10}", file=sys.stderr)
     print(f"{'-' * 20} {'-' * 5}  {'-' * 10}  {'-' * 10}  {'-' * 10}", file=sys.stderr)
     reductions: dict[str, dict[str, float]] = {}
     for method, curves in method_curves.items():
-        if method == "semble":
+        if method == "zemble":
             continue
-        red = _pairwise_reduction(method_curves["semble"], curves)
+        red = _pairwise_reduction(method_curves["zemble"], curves)
         if red is None:
             continue
         reductions[method] = red
         print(
             f"{method:<20} {int(red['n_paired']):>5}  "
-            f"{red['median_semble_tokens']:>10.0f}  {red['median_other_tokens']:>10.0f}  "
+            f"{red['median_zemble_tokens']:>10.0f}  {red['median_other_tokens']:>10.0f}  "
             f"{red['median_reduction']:>10.1%}",
             file=sys.stderr,
         )
@@ -353,20 +353,20 @@ def _print_first_hit_summary(method_curves: dict[str, MethodCurves]) -> dict[str
         f"\nExpected tokens per query (first hit or {_EXPECTED_COST_CAP // 1000}k cap if no hit)",
         file=sys.stderr,
     )
-    print(f"{'Method':<20} {'expected-tokens':>15}  {'vs-semble':>10}", file=sys.stderr)
+    print(f"{'Method':<20} {'expected-tokens':>15}  {'vs-zemble':>10}", file=sys.stderr)
     print(f"{'-' * 20} {'-' * 15}  {'-' * 10}", file=sys.stderr)
-    semble_cost = _expected_cost_at_cap(method_curves["semble"], _EXPECTED_COST_CAP)
-    print(f"{'semble':<20} {semble_cost:>15.0f}", file=sys.stderr)
+    zemble_cost = _expected_cost_at_cap(method_curves["zemble"], _EXPECTED_COST_CAP)
+    print(f"{'zemble':<20} {zemble_cost:>15.0f}", file=sys.stderr)
     for method, curves in method_curves.items():
-        if method == "semble":
+        if method == "zemble":
             continue
         cost = _expected_cost_at_cap(curves, _EXPECTED_COST_CAP)
-        ratio = cost / semble_cost if semble_cost > 0 else float("inf")
+        ratio = cost / zemble_cost if zemble_cost > 0 else float("inf")
         print(f"{method:<20} {cost:>15.0f}  {ratio:>9.1f}x", file=sys.stderr)
         reductions[method]["expected_cost_at_cap"] = cost
         reductions[method]["expected_cost_cap"] = float(_EXPECTED_COST_CAP)
-        reductions[method]["expected_cost_ratio_vs_semble"] = ratio
-    reductions["semble"] = {"expected_cost_at_cap": semble_cost, "expected_cost_cap": float(_EXPECTED_COST_CAP)}
+        reductions[method]["expected_cost_ratio_vs_zemble"] = ratio
+    reductions["zemble"] = {"expected_cost_at_cap": zemble_cost, "expected_cost_cap": float(_EXPECTED_COST_CAP)}
 
     return reductions
 
@@ -377,7 +377,7 @@ def run_recall(args: argparse.Namespace) -> None:
 
     print("Loading tokenizer + model...", file=sys.stderr)
     enc = tiktoken.get_encoding(_TOKENIZER_NAME)
-    load_model(DEFAULT_MODEL_NAME)  # warms semble's internal model cache
+    load_model(DEFAULT_MODEL_NAME)  # warms zemble's internal model cache
 
     method_curves: dict[str, MethodCurves] = defaultdict(list)
     print(f"\n{'Repo':<22} {'Language':<12} {'Tasks':>6} {'Time':>8}", file=sys.stderr)
@@ -385,7 +385,7 @@ def run_recall(args: argparse.Namespace) -> None:
     for repo, repo_task_list in sorted(grouped_tasks(tasks).items()):
         spec = repo_specs[repo]
         started = time.perf_counter()
-        index = SembleIndex.from_path(spec.benchmark_dir, model_path=DEFAULT_MODEL_NAME)
+        index = ZembleIndex.from_path(spec.benchmark_dir, model_path=DEFAULT_MODEL_NAME)
         per_method = _evaluate_repo_recall(index, repo_task_list, spec.benchmark_dir, enc)
         for m, lst in per_method.items():
             method_curves[m].extend(lst)
@@ -401,7 +401,7 @@ def run_recall(args: argparse.Namespace) -> None:
         "tool": "token-efficiency",
         "tokenizer": _TOKENIZER_NAME,
         "budgets": list(_BUDGETS),
-        "n_queries": len(method_curves["semble"]),
+        "n_queries": len(method_curves["zemble"]),
         "recall_at_budget": {m: {str(b): round(v, 4) for b, v in r.items()} for m, r in summary.items()},
         "first_hit_reduction": {m: {k: round(v, 4) for k, v in d.items()} for m, d in reductions.items()},
         "plot": {
@@ -433,7 +433,7 @@ def run_plot(args: argparse.Namespace) -> None:
 
 def _parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
-    parser = argparse.ArgumentParser(description="Context-efficiency benchmark: semble vs grep workflows.")
+    parser = argparse.ArgumentParser(description="Context-efficiency benchmark: zemble vs grep workflows.")
     parser.set_defaults(func=run_recall, repo=[], language=[], no_plot=False)
     sub = parser.add_subparsers(dest="mode", required=False)
 

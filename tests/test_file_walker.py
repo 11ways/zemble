@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from semble.index.file_walker import walk_files
+from zemble.index.file_walker import walk_files
 
 
 def _touch(path: Path, content: str = "x = 1\n") -> None:
@@ -12,7 +12,7 @@ def _touch(path: Path, content: str = "x = 1\n") -> None:
 
 
 @pytest.mark.parametrize(
-    ("files", "gitignore", "sembleignore", "expected"),
+    ("files", "gitignore", "zembleignore", "expected"),
     [
         # Default-ignored dirs (.venv, node_modules, .cache) are always skipped.
         (
@@ -80,15 +80,15 @@ def _touch(path: Path, content: str = "x = 1\n") -> None:
     ],
 )
 def test_walk_files_filtering(
-    tmp_path: Path, files: list[str], gitignore: str | None, sembleignore: str | None, expected: set[str]
+    tmp_path: Path, files: list[str], gitignore: str | None, zembleignore: str | None, expected: set[str]
 ) -> None:
     """Directory defaults, gitignore patterns, and negations filter the yielded files."""
     for rel in files:
         _touch(tmp_path / rel)
     if gitignore is not None:
         (tmp_path / ".gitignore").write_text(gitignore)
-    if sembleignore is not None:
-        (tmp_path / ".sembleignore").write_text(sembleignore)
+    if zembleignore is not None:
+        (tmp_path / ".zembleignore").write_text(zembleignore)
 
     found = {p.relative_to(tmp_path).as_posix() for p in walk_files(tmp_path, [".py"])}
     assert found == expected
@@ -112,7 +112,7 @@ def test_is_ignored_skips_spec_with_unrelated_base(tmp_path: Path) -> None:
     """
     from pathspec import GitIgnoreSpec
 
-    from semble.index.file_walker import IgnoreSpec, _is_ignored
+    from zemble.index.file_walker import IgnoreSpec, _is_ignored
 
     # Create two unrelated directory trees
     project_a = tmp_path / "project_a"

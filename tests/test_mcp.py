@@ -9,10 +9,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from model2vec import StaticModel
 
-from semble.mcp import _CACHE_MAX_SIZE, _IndexCache, create_server, serve
-from semble.types import Chunk, ContentType, SearchResult
-from semble.utils import format_results, is_git_url, resolve_chunk
 from tests.conftest import make_chunk
+from zemble.mcp import _CACHE_MAX_SIZE, _IndexCache, create_server, serve
+from zemble.types import Chunk, ContentType, SearchResult
+from zemble.utils import format_results, is_git_url, resolve_chunk
 
 
 def _tool_text(result: Any) -> str:
@@ -29,12 +29,12 @@ async def _call_tool(
     index_return: list[SearchResult],
     index_chunks: list[Chunk] | None = None,
 ) -> str:
-    """Patch SembleIndex.from_path with a fake index and invoke the tool, returning the text."""
+    """Patch ZembleIndex.from_path with a fake index and invoke the tool, returning the text."""
     fake_index = MagicMock()
     getattr(fake_index, index_method).return_value = index_return
     if index_chunks is not None:
         fake_index.chunks = index_chunks
-    with patch("semble.mcp.SembleIndex.from_path", return_value=fake_index):
+    with patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index):
         server = create_server(cache)
         result = await server.call_tool(tool, args)
     return _tool_text(result)
@@ -135,13 +135,13 @@ def test_format_results(max_snippet_lines: int | None, has_content: bool, conten
 async def test_index_cache_builds_and_caches(
     cache: _IndexCache, tmp_path: Path, source: str, patch_target: str
 ) -> None:
-    """_IndexCache.get() builds via the correct SembleIndex.* entrypoint and caches subsequent calls."""
+    """_IndexCache.get() builds via the correct ZembleIndex.* entrypoint and caches subsequent calls."""
     resolved_source = str(tmp_path) if source == "local_tmp_path" else source
     fake_index = MagicMock()
     with (
-        patch(f"semble.mcp.SembleIndex.{patch_target}", return_value=fake_index) as mock_build,
-        patch("semble.mcp.save_index_to_cache") as mock_save,
-        patch("semble.mcp.get_validated_cache", return_value=Path("/fake/cache")),
+        patch(f"zemble.mcp.ZembleIndex.{patch_target}", return_value=fake_index) as mock_build,
+        patch("zemble.mcp.save_index_to_cache") as mock_save,
+        patch("zemble.mcp.get_validated_cache", return_value=Path("/fake/cache")),
     ):
         first = await cache.get(resolved_source)
         second = await cache.get(resolved_source)
@@ -178,12 +178,12 @@ async def test_index_cache_staleness_check_scope(
     """Local paths are revalidated (and rebuilt when stale) on every get(); git URLs never are."""
     resolved_source = str(tmp_path) if source == "local_tmp_path" else source
     with (
-        patch(f"semble.mcp.SembleIndex.{patch_target}", return_value=MagicMock()) as mock_build,
-        patch("semble.mcp.save_index_to_cache"),
-        patch("semble.mcp.get_validated_cache", return_value=None) as mock_validate,
+        patch(f"zemble.mcp.ZembleIndex.{patch_target}", return_value=MagicMock()) as mock_build,
+        patch("zemble.mcp.save_index_to_cache"),
+        patch("zemble.mcp.get_validated_cache", return_value=None) as mock_validate,
         # Disable the cooldown: real build duration (here, just thread-dispatch overhead) would
         # otherwise sometimes exceed the gap between the two get() calls below, flaking the test.
-        patch("semble.mcp._MIN_REVALIDATE_FACTOR", 0),
+        patch("zemble.mcp._MIN_REVALIDATE_FACTOR", 0),
     ):
         await cache.get(resolved_source)
         await cache.get(resolved_source)
@@ -198,7 +198,7 @@ async def test_index_cache_skips_staleness_check_during_cooldown(cache: _IndexCa
     cache._tasks[cache_key] = asyncio.create_task(_succeed())
     await asyncio.sleep(0)  # let the task finish
     cache._revalidate_after[cache_key] = time.monotonic() + 30.0  # a build that took 10s, just finished
-    with patch("semble.mcp.get_validated_cache") as mock_validate:
+    with patch("zemble.mcp.get_validated_cache") as mock_validate:
         await cache._evict_if_stale(cache_key)
     mock_validate.assert_not_called()
 
@@ -217,7 +217,7 @@ async def test_index_cache_skips_staleness_check_for_failed_task(cache: _IndexCa
     cache_key = cache._compute_cache_key(str(tmp_path))
     cache._tasks[cache_key] = asyncio.create_task(_raise())
     await asyncio.sleep(0)  # let the task finish
-    with patch("semble.mcp.get_validated_cache") as mock_validate:
+    with patch("zemble.mcp.get_validated_cache") as mock_validate:
         await cache._evict_if_stale(cache_key)
     mock_validate.assert_not_called()
 
@@ -237,7 +237,7 @@ async def test_index_cache_does_not_evict_entry_replaced_during_validation(cache
         cache._tasks[cache_key] = replacement_task  # type: ignore[assignment]
         return None
 
-    with patch("semble.mcp.get_validated_cache", side_effect=_replace_entry_then_report_stale):
+    with patch("zemble.mcp.get_validated_cache", side_effect=_replace_entry_then_report_stale):
         await cache._evict_if_stale(cache_key)
     assert cache._tasks.get(cache_key) is replacement_task
 
@@ -254,7 +254,7 @@ async def test_index_cache_evicts_on_failure(cache: _IndexCache, tmp_path: Path)
             raise RuntimeError("build failed")
         return MagicMock()
 
-    with patch("semble.mcp.SembleIndex.from_path", side_effect=_failing_then_ok):
+    with patch("zemble.mcp.ZembleIndex.from_path", side_effect=_failing_then_ok):
         with pytest.raises(RuntimeError, match="build failed"):
             await cache.get(str(tmp_path))
         result = await cache.get(str(tmp_path))
@@ -267,8 +267,8 @@ async def test_index_cache_ignores_cache_save_failure(cache: _IndexCache, tmp_pa
     """A cache save failure must not fail the MCP request."""
     fake_index = MagicMock()
     with (
-        patch("semble.mcp.SembleIndex.from_path", return_value=fake_index),
-        patch("semble.mcp.save_index_to_cache", side_effect=RuntimeError("save failed")),
+        patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index),
+        patch("zemble.mcp.save_index_to_cache", side_effect=RuntimeError("save failed")),
     ):
         assert await cache.get(str(tmp_path)) is fake_index
 
@@ -283,7 +283,7 @@ async def test_index_cache_ignores_cache_save_failure(cache: _IndexCache, tmp_pa
 )
 async def test_tool_index_failure(cache: _IndexCache, tool: str, args: dict[str, object]) -> None:
     """Both tools return a friendly error message when indexing fails."""
-    with patch("semble.mcp.SembleIndex.from_git", side_effect=RuntimeError("clone failed")):
+    with patch("zemble.mcp.ZembleIndex.from_git", side_effect=RuntimeError("clone failed")):
         server = create_server(cache)
         result = await server.call_tool(tool, args)
     text = _tool_text(result)
@@ -364,7 +364,7 @@ async def test_search_builds_exact_content_indexes(
     tmp_project: Path,
 ) -> None:
     """MCP search lazily builds the exact requested content index."""
-    (tmp_project / "settings.toml").write_text("project = 'semble'\n")
+    (tmp_project / "settings.toml").write_text("project = 'zemble'\n")
     expected = [
         (None, {".py"}),
         ("docs", {".md"}),
@@ -373,8 +373,8 @@ async def test_search_builds_exact_content_indexes(
     ]
 
     with (
-        patch("semble.index.index.load_model", return_value=(mock_model, "/fake/model")),
-        patch("semble.mcp.save_index_to_cache"),
+        patch("zemble.index.index.load_model", return_value=(mock_model, "/fake/model")),
+        patch("zemble.mcp.save_index_to_cache"),
     ):
         server = create_server(cache)
         for content, expected_suffixes in expected:
@@ -410,7 +410,7 @@ async def test_serve_runs_stdio(
         {"side_effect": load_err} if load_err else {"return_value": (MagicMock(spec=StaticModel), "/fake/model")}
     )
     with (
-        patch("semble.mcp.load_model", **load_kwargs),
+        patch("zemble.mcp.load_model", **load_kwargs),
         patch("mcp.server.fastmcp.FastMCP.run_stdio_async", side_effect=fake_stdio) as mock_run,
     ):
         await serve()
@@ -432,7 +432,7 @@ async def test_serve_opens_stdio_before_model_loads() -> None:
         await asyncio.sleep(0.05)
 
     with (
-        patch("semble.mcp.load_model", side_effect=blocking_load_model),
+        patch("zemble.mcp.load_model", side_effect=blocking_load_model),
         patch("mcp.server.fastmcp.FastMCP.run_stdio_async", side_effect=fake_run_stdio),
     ):
         await serve()
@@ -443,7 +443,7 @@ async def test_index_cache_awaits_model(tmp_path: Path) -> None:
     """get() blocks until the model is installed, then proceeds."""
     cache = _IndexCache()  # no model yet
     fake_index = MagicMock()
-    with patch("semble.mcp.SembleIndex.from_path", return_value=fake_index):
+    with patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index):
         get_task = asyncio.create_task(cache.get(str(tmp_path)))
         await asyncio.sleep(0.01)
         assert not get_task.done(), "get() must block until the model is installed"
@@ -493,7 +493,7 @@ async def test_index_cache_lru_eviction(cache: _IndexCache, tmp_path: Path) -> N
     dirs = [tmp_path / str(i) for i in range(_CACHE_MAX_SIZE + 1)]
     for d in dirs:
         d.mkdir()
-    with patch("semble.mcp.SembleIndex.from_path", return_value=MagicMock()):
+    with patch("zemble.mcp.ZembleIndex.from_path", return_value=MagicMock()):
         for d in dirs[:_CACHE_MAX_SIZE]:
             await cache.get(str(d))
         first_key = cache._compute_cache_key(str(dirs[0]))

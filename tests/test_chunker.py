@@ -4,8 +4,8 @@ from unittest.mock import patch
 import pytest
 from semble_grammars import UnsupportedPlatformError
 
-from semble.chunking.chunking import Chunk, chunk_lines, chunk_source
-from semble.chunking.core import ChunkBoundary, _cached_get_parser, chunk
+from zemble.chunking.chunking import Chunk, chunk_lines, chunk_source
+from zemble.chunking.core import ChunkBoundary, _cached_get_parser, chunk
 
 
 @pytest.fixture(autouse=True)
@@ -33,12 +33,12 @@ def test_chunk_source_empty_string() -> None:
 
 def test_chunk_source_language() -> None:
     """Check that chunking defaults to line splitting with non-existent and None languages."""
-    with patch("semble.chunking.chunking.chunk_lines", wraps=chunk_lines) as chunk_line_spy:
+    with patch("zemble.chunking.chunking.chunk_lines", wraps=chunk_lines) as chunk_line_spy:
         assert chunk_source("hello", "foo.loki", "loki") == [
             Chunk(content="hello", file_path="foo.loki", start_line=1, end_line=1, language="loki")
         ]
         chunk_line_spy.assert_called_once()
-    with patch("semble.chunking.chunking.chunk_lines", wraps=chunk_lines) as chunk_line_spy:
+    with patch("zemble.chunking.chunking.chunk_lines", wraps=chunk_lines) as chunk_line_spy:
         assert chunk_source("1+1=3", "foo.json", None) == [
             Chunk(content="1+1=3", file_path="foo.json", start_line=1, end_line=1, language=None)
         ]
@@ -77,7 +77,7 @@ def test_core_chunk_recursive_split_and_break() -> None:
 
 def test_core_chunk_leaf_node_exceeds_desired_length() -> None:
     """core.chunk handles leaf tokens (e.g. a very long identifier) that exceed desired_length."""
-    from semble.chunking.core import chunk
+    from zemble.chunking.core import chunk
 
     long_var = "x" * 100
     code = f"{long_var} = 1\n"
@@ -92,7 +92,7 @@ def test_core_chunk_leaf_node_exceeds_desired_length() -> None:
 def test_get_parser(caplog: pytest.LogCaptureFixture) -> None:
     """Test that get parser only logs the first time."""
     _cached_get_parser.cache_clear()
-    with caplog.at_level(logging.WARNING, logger="semble.chunking.core"):
+    with caplog.at_level(logging.WARNING, logger="zemble.chunking.core"):
         _cached_get_parser("hello")
         assert len(caplog.records) == 1
         assert "not found" in caplog.records[0].message
@@ -102,8 +102,8 @@ def test_get_parser(caplog: pytest.LogCaptureFixture) -> None:
         _cached_get_parser("hello")
         assert len(caplog.records) == 0
 
-    with patch("semble.chunking.core.get_parser", side_effect=UnsupportedPlatformError):
-        with caplog.at_level(logging.WARNING, logger="semble.chunking.core"):
+    with patch("zemble.chunking.core.get_parser", side_effect=UnsupportedPlatformError):
+        with caplog.at_level(logging.WARNING, logger="zemble.chunking.core"):
             _cached_get_parser("Python")
             assert len(caplog.records) == 1
             assert "No bundled grammars for this platform" in caplog.records[0].message
@@ -112,8 +112,8 @@ def test_get_parser(caplog: pytest.LogCaptureFixture) -> None:
             _cached_get_parser("Python")
             assert len(caplog.records) == 0
 
-    with patch("semble.chunking.core.get_parser", side_effect=ValueError):
-        with caplog.at_level(logging.WARNING, logger="semble.chunking.core"):
+    with patch("zemble.chunking.core.get_parser", side_effect=ValueError):
+        with caplog.at_level(logging.WARNING, logger="zemble.chunking.core"):
             _cached_get_parser("Ruby")
             assert len(caplog.records) == 1
             assert "Uncaught exception" in caplog.records[0].message
@@ -125,14 +125,14 @@ def test_get_parser(caplog: pytest.LogCaptureFixture) -> None:
 
 def test_chunks_is_none() -> None:
     """Test that chunk returns None when parser is not available."""
-    with patch("semble.chunking.core._cached_get_parser", lambda x: None):
+    with patch("zemble.chunking.core._cached_get_parser", lambda x: None):
         chunks = chunk("x = 1", "python", 10)
         assert chunks is None
 
 
 def test_unsupported_platform_error() -> None:
     """Test that chunk returns None when the current platform has no bundled grammars."""
-    with patch("semble.chunking.core.get_parser", side_effect=UnsupportedPlatformError):
+    with patch("zemble.chunking.core.get_parser", side_effect=UnsupportedPlatformError):
         chunks = chunk("x = 1", "python", 10)
         assert chunks is None
 
@@ -142,7 +142,7 @@ def test_chunker_deep_string(caplog: pytest.LogCaptureFixture) -> None:
     deep_string = "abs(0)\n"
     for _ in range(10000):
         deep_string = f"abs({deep_string})\n"
-    with caplog.at_level(logging.WARNING, logger="semble.chunking.core"):
+    with caplog.at_level(logging.WARNING, logger="zemble.chunking.core"):
         chunks = chunk_source(deep_string, "deep_string.py", "python")
         assert chunks is not None
         assert len(caplog.records) == 1

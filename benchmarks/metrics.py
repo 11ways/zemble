@@ -1,7 +1,7 @@
 import math
 
 from benchmarks.data import Target, path_matches, target_matches_location
-from semble.types import SearchResult
+from zemble.types import SearchResult
 
 
 def dcg(relevances: list[int]) -> float:

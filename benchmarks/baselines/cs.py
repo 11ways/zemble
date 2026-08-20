@@ -67,7 +67,7 @@ def main() -> None:
     """Run the cs (Code Spelunker) baseline benchmark."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Benchmark cs (Code Spelunker) on the semble benchmark suite.")
+    parser = argparse.ArgumentParser(description="Benchmark cs (Code Spelunker) on the zemble benchmark suite.")
     add_filter_args(parser, verbose=True)
     args = parser.parse_args()
 

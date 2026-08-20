@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 from vicinity.backends.basic import BasicArgs
 
-from semble.index.dense import SelectableBasicBackend
+from zemble.index.dense import SelectableBasicBackend
 
 
 def test_save_load_roundtrip(tmp_path: Path) -> None:

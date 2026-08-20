@@ -7,12 +7,12 @@ import pytest
 from model2vec import StaticModel
 from vicinity.backends.basic import BasicArgs
 
-from semble.index.bm25 import BM25
-from semble.index.dense import SelectableBasicBackend, embed_chunks, load_model
-from semble.search import _search_bm25, _search_semantic, _sort_top_k, search
-from semble.tokens import tokenize
-from semble.types import Chunk
 from tests.conftest import make_chunk
+from zemble.index.bm25 import BM25
+from zemble.index.dense import SelectableBasicBackend, embed_chunks, load_model
+from zemble.search import _search_bm25, _search_semantic, _sort_top_k, search
+from zemble.tokens import tokenize
+from zemble.types import Chunk
 
 
 def _build_bm25(chunks: list[Chunk]) -> BM25:
@@ -149,7 +149,7 @@ def test_load_model(model_path: str | None, expected_call_arg: str, incomplete_c
     fake_model = MagicMock(spec=StaticModel)
     side_effect = [ValueError("Could not find expected model files"), fake_model] if incomplete_cache else None
     with patch(
-        "semble.index.dense.StaticModel.from_pretrained", return_value=fake_model, side_effect=side_effect
+        "zemble.index.dense.StaticModel.from_pretrained", return_value=fake_model, side_effect=side_effect
     ) as mock_fp:
         result, _ = load_model(model_path)
     assert result is fake_model

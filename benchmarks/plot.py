@@ -64,7 +64,7 @@ _METHODS: list[_Method] = [
     {
         "name": "BM25",
         "ndcg10": 0.673,
-        "index_ms": 46.6,  # standalone BM25 build time, not shared with semble's dense index
+        "index_ms": 46.6,  # standalone BM25 build time, not shared with zemble's dense index
         "query_p50_ms": 0.17,  # standalone bm25_index.get_scores() + top-k sort, not hybrid search()
         "color": "#3a9e7e",
         "params_m": 0,
@@ -94,7 +94,7 @@ _METHODS: list[_Method] = [
         "params_m": 137,
     },
     {
-        "name": "semble",
+        "name": "zemble",
         "ndcg10": 0.8544,
         "index_ms": 518.2,
         "query_p50_ms": 0.91,
@@ -109,7 +109,7 @@ _CBRT_LABEL_DELTA_COLD = 2.0
 _CBRT_LABEL_DELTA_WARM = 0.2
 
 # Frontier methods per mode.
-# Cold: incumbent prior-art curve (ripgrep → BM25 → ColGREP → CodeRankEmbed); semble floats above it.
+# Cold: incumbent prior-art curve (ripgrep → BM25 → ColGREP → CodeRankEmbed); zemble floats above it.
 # Warm: BM25 dominates ripgrep (faster and higher NDCG), so incumbent curve is BM25 → CodeRankEmbed.
 _FRONTIER_NAMES: dict[str, set[str]] = {
     "cold": {"ripgrep", "BM25", "ColGREP", "CodeRankEmbed"},
@@ -207,7 +207,7 @@ def _make_plot(out_path: Path, *, warm: bool = False) -> None:
             y,
             m["name"],
             fontsize=8.5,
-            fontweight="bold" if m["name"] == "semble" else "normal",
+            fontweight="bold" if m["name"] == "zemble" else "normal",
             color=m["color"],
             ha="left",
             va="center",

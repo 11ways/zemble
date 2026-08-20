@@ -1,6 +1,6 @@
 # Benchmarks
 
-Quality and speed benchmarks for `semble`.
+Quality and speed benchmarks for `zemble`.
 
 - [Main results](#main-results)
 - [Token efficiency](#token-efficiency)
@@ -17,7 +17,7 @@ Quality and speed across all methods.
 
 | Method               |   NDCG@10 |      Index |   Query p50 |
 | -------------------- | --------: | ---------: | ----------: |
-| **semble**           | **0.854** | **518 ms** | **0.91 ms** |
+| **zemble**           | **0.854** | **518 ms** | **0.91 ms** |
 | CodeRankEmbed        |     0.839 |      116 s |       16 ms |
 | ColGREP              |     0.693 |      5.4 s |      122 ms |
 | BM25                 |     0.673 |      47 ms |     0.17 ms |
@@ -32,13 +32,13 @@ Quality and speed across all methods.
 | :-----------------------------------------------------------------: | :-----------------------------------------------------------------: |
 |          _Time to first result (index + query) vs NDCG@10_          |             _Query latency on a warm index vs NDCG@10_              |
 
-semble matches the NDCG@10 of the 137M-param CodeRankEmbed while winning index time by ~220x and query latency by ~17x.
+zemble matches the NDCG@10 of the 137M-param CodeRankEmbed while winning index time by ~220x and query latency by ~17x.
 
 NDCG@10 is averaged across all queries. Speed numbers use one repo per language, CPU only: cold-start index time and warm query p50 (median across 5 consecutive runs).
 
 ## Token efficiency
 
-Coding agents (Claude Code, OpenCode, etc.) typically find code by running `grep` on keywords and reading the matched files. We model that workflow and compare it against semble's chunk retrieval across our full benchmark of 1251 queries.
+Coding agents (Claude Code, OpenCode, etc.) typically find code by running `grep` on keywords and reading the matched files. We model that workflow and compare it against zemble's chunk retrieval across our full benchmark of 1251 queries.
 
 ![Token efficiency: recall vs. retrieved tokens](../assets/images/token_efficiency.png)
 
@@ -49,7 +49,7 @@ For each query: tokens consumed at first relevant hit, or 32k if the method neve
 | Method              | Expected tokens |       Savings |
 | ------------------- | --------------: | ------------: |
 | ripgrep + read file |          45,587 |      baseline |
-| **semble**          |         **348** | **99% fewer** |
+| **zemble**          |         **348** | **99% fewer** |
 
 ### Recall at fixed token budgets
 
@@ -57,13 +57,13 @@ A relevant file is "covered" once any retrieved unit comes from it.
 
 | Method              |       500 |        1k |        2k |        4k |        8k |       16k |       32k |
 | ------------------- | --------: | --------: | --------: | --------: | --------: | --------: | --------: |
-| **semble**          | **0.842** | **0.923** | **0.967** | **0.988** | **0.995** | **0.995** | **0.995** |
+| **zemble**          | **0.842** | **0.923** | **0.967** | **0.988** | **0.995** | **0.995** | **0.995** |
 | ripgrep + read file |     0.001 |     0.008 |     0.037 |     0.086 |     0.207 |     0.374 |     0.583 |
 
 <details>
 <summary>Methodology</summary>
 
-semble returns the top-50 ranked chunks. `ripgrep+read` splits the query into keywords (dropping stopwords and short words), runs `rg --fixed-strings --ignore-case` for each keyword, then reads matched files in full ranked by how many distinct keywords they contain. Both methods search the same set of file types and ignored directories. Tokens are counted with `cl100k_base` via `tiktoken`. A relevant file is "covered" once any retrieved unit overlaps its annotated span.
+zemble returns the top-50 ranked chunks. `ripgrep+read` splits the query into keywords (dropping stopwords and short words), runs `rg --fixed-strings --ignore-case` for each keyword, then reads matched files in full ranked by how many distinct keywords they contain. Both methods search the same set of file types and ignored directories. Tokens are counted with `cl100k_base` via `tiktoken`. A relevant file is "covered" once any retrieved unit overlaps its annotated span.
 
 </details>
 
@@ -71,7 +71,7 @@ semble returns the top-50 ranked chunks. `ripgrep+read` splits the query into ke
 
 NDCG@10 per language, sorted by CodeRankEmbed (CRE in the table). Best score per row is bolded.
 
-| Language    |    semble |       CRE |   ColGREP |        ck |       cbm |    grepai |     probe |        cs |   ripgrep |
+| Language    |    zemble |       CRE |   ColGREP |        ck |       cbm |    grepai |     probe |        cs |   ripgrep |
 | ----------- | --------: | --------: | --------: | --------: | --------: | --------: | --------: | --------: | --------: |
 | javascript  |     0.917 | **0.925** |     0.823 |     0.772 |     0.770 |     0.675 |     0.588 |     0.171 |     0.176 |
 | scala       |     0.909 | **0.925** |     0.765 |     0.717 |     0.704 |     0.330 |     0.392 |     0.111 |     0.180 |
@@ -98,7 +98,7 @@ cbm = [codebase-memory-mcp](#methods).
 
 ## Ablations
 
-`raw` returns retrieval scores directly; `+ ranking` feeds them through semble's hybrid ranker.
+`raw` returns retrieval scores directly; `+ ranking` feeds them through zemble's hybrid ranker.
 
 | Retrieval              |   Raw | + ranking |
 | ---------------------- | ----: | --------: |
@@ -113,9 +113,9 @@ cbm = [codebase-memory-mcp](#methods).
 | ---------------------------------- | -----------: | --------: | --------: |
 | BM25 raw                           |        0.628 |     0.676 |     0.719 |
 | potion-code-16M raw                |        0.626 |     0.666 |     0.629 |
-| semble BM25 (+ ranking)            |        0.770 |     0.819 |     0.957 |
-| semble potion-code-16M (+ ranking) |        0.757 |     0.808 |     0.943 |
-| **semble hybrid**                  |    **0.802** | **0.846** | **0.958** |
+| zemble BM25 (+ ranking)            |        0.770 |     0.819 |     0.957 |
+| zemble potion-code-16M (+ ranking) |        0.757 |     0.808 |     0.943 |
+| **zemble hybrid**                  |    **0.802** | **0.846** | **0.958** |
 
 </details>
 
@@ -148,7 +148,7 @@ cbm = [codebase-memory-mcp](#methods).
 - **[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)**: code intelligence engine that indexes a repo into a SQLite/graph store. We benchmark its `search_graph` tool in `fast` mode, which does BM25 full-text search with structural boosting.
 - **[ck](https://github.com/BeaconBay/ck)**: hybrid regex + semantic search using [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5).
 - **[CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed)**: 137M-param transformer embedding model for code retrieval, used for semantic-only dense search.
-- **[semble](https://github.com/your-repo/semble)**: this library. [potion-code-16M](https://huggingface.co/minishlab/potion-code-16M) static embeddings + BM25 + the semble reranking stack.
+- **[zemble](https://github.com/your-repo/zemble)**: this library. [potion-code-16M](https://huggingface.co/minishlab/potion-code-16M) static embeddings + BM25 + the zemble reranking stack.
 
 ## Excluded methods
 
@@ -161,17 +161,17 @@ The following tools were considered but not included in the main comparison:
 
 ## Running the benchmarks
 
-Repos are pinned in `repos.json` and cloned into `~/.cache/semble-bench`:
+Repos are pinned in `repos.json` and cloned into `~/.cache/zemble-bench`:
 
 ```bash
 uv run python -m benchmarks.sync_repos          # clone / update
 uv run python -m benchmarks.sync_repos --check  # verify only
 ```
 
-All tools run CPU-only. semble uses `minishlab/potion-code-16M`; CodeRankEmbed uses `nomic-ai/CodeRankEmbed` (137M params). The speed benchmark touches one repo per language with a cold-start index and 5 query runs per repo.
+All tools run CPU-only. zemble uses `minishlab/potion-code-16M`; CodeRankEmbed uses `nomic-ai/CodeRankEmbed` (137M params). The speed benchmark touches one repo per language with a cold-start index and 5 query runs per repo.
 
 <details>
-<summary>semble</summary>
+<summary>zemble</summary>
 
 ```bash
 uv run python -m benchmarks.run_benchmark
@@ -179,7 +179,7 @@ uv run python -m benchmarks.run_benchmark --repo fastapi --repo axios
 uv run python -m benchmarks.run_benchmark --language python
 ```
 
-Full runs write to `benchmarks/results/semble-hybrid-<sha12>.json`.
+Full runs write to `benchmarks/results/zemble-hybrid-<sha12>.json`.
 
 </details>
 
@@ -200,7 +200,7 @@ Writes to `benchmarks/results/speed-<sha12>.json`.
 ```bash
 uv run python -m benchmarks.baselines.ablations
 uv run python -m benchmarks.baselines.ablations --mode bm25
-uv run python -m benchmarks.baselines.ablations --mode semble-semantic
+uv run python -m benchmarks.baselines.ablations --mode zemble-semantic
 ```
 
 </details>
@@ -263,7 +263,7 @@ uv run python -m benchmarks.baselines.codebase_memory
 uv run python -m benchmarks.baselines.codebase_memory --repo fastapi --repo axios
 ```
 
-Each repo is indexed under a `semble-bench-<repo>` project name and deleted again after evaluation, so it doesn't collide with any projects you have indexed for real use.
+Each repo is indexed under a `zemble-bench-<repo>` project name and deleted again after evaluation, so it doesn't collide with any projects you have indexed for real use.
 
 </details>
 
