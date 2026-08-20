@@ -36,3 +36,20 @@ def file_rank(file_paths: list[str], target_path: str) -> int | None:
         if path_matches(fp, target_path):
             return i
     return None
+
+
+#: The rank cutoffs reported as hit rates beside NDCG.
+HIT_CUTOFFS = (1, 5, 10)
+
+
+def hit_at_k(relevant_ranks: list[int], k: int) -> bool:
+    """Return True when at least one relevant result landed at or above rank k.
+
+    Unlike NDCG this ignores how many relevant targets a query has: one hit inside the
+    cutoff is the whole signal, which is what "did the answer show up on screen" means.
+
+    :param relevant_ranks: 1-based ranks of the relevant results that were found.
+    :param k: The cutoff.
+    :return: True if any rank is in ``1..k``.
+    """
+    return any(1 <= rank <= k for rank in relevant_ranks)

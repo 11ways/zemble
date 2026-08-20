@@ -63,10 +63,9 @@ def _bench(
         index_ms = (time.perf_counter() - started) * 1000
 
         for mode, (alpha, rerank) in sorted(_MODE_PARAMS.items()):
-            ndcg5, ndcg10, latencies, by_category, tokens = evaluate(
-                index, tasks, alpha=alpha, verbose=verbose, rerank=rerank
-            )
-            p50, p90, p95, p99 = np.percentile(latencies, [50, 90, 95, 99]).tolist()
+            outcome = evaluate(index, tasks, alpha=alpha, verbose=verbose, rerank=rerank)
+            ndcg5, ndcg10, tokens = outcome.ndcg5, outcome.ndcg10, outcome.tokens
+            p50, p90, p95, p99 = np.percentile(outcome.latencies, [50, 90, 95, 99]).tolist()
             result = RepoResult(
                 repo=repo,
                 language=spec.language,
@@ -80,7 +79,7 @@ def _bench(
                 p95_ms=p95,
                 p99_ms=p99,
                 index_ms=index_ms,
-                by_category=by_category,
+                by_category=outcome.by_category,
             )
             results.append(result)
             print(
