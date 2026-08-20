@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from zemble.cache import get_validated_cache, save_index_to_cache
+from zemble.dedup.mcp import register_dupes_tool
 from zemble.embedding.base import Embedder
 from zemble.embedding.registry import load_embedder
 from zemble.graph.mcp import register_graph_tools
@@ -155,6 +156,7 @@ def create_server(cache: _IndexCache, default_content: Sequence[ContentType] = (
         return json.dumps(format_results(label, results, max_snippet_lines))
 
     register_graph_tools(server)
+    register_dupes_tool(server)
     return server
 
 

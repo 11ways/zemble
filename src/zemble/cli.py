@@ -13,6 +13,7 @@ from typing import Literal
 from model2vec.utils import get_package_extras
 
 from zemble.cache import cache_key, resolve_cache_folder, save_index_to_cache
+from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.index import ZembleIndex
@@ -37,9 +38,13 @@ _CLI_DISPATCH_ARGS = frozenset(
         "--version",
         "-V",
         "graph",
+        "dupes",
     }
 )
 _CLEAR_CHOICE = Literal["all", "index", "savings", "orphans"]
+
+#: Subcommands that own their own runner and return an exit code.
+_SUBCOMMAND_RUNNERS = {"graph": run_graph, "dupes": run_dupes}
 
 _SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
 
@@ -329,6 +334,7 @@ def _cli_main() -> None:
     sub.add_parser("savings", help="Show token savings and usage stats.")
 
     add_graph_parser(sub)
+    add_dupes_parser(sub)
 
     install_p = sub.add_parser("install", help="Configure zemble across coding agents.")
     uninstall_p = sub.add_parser("uninstall", help="Remove zemble configuration from coding agents.")
@@ -356,8 +362,9 @@ def _cli_main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "graph":
-        raise SystemExit(run_graph(args))
+    runner = _SUBCOMMAND_RUNNERS.get(args.command)
+    if runner is not None:
+        raise SystemExit(runner(args))
     if args.command == "savings":
         print(format_savings_report())
     elif args.command in ("install", "uninstall"):
