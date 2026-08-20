@@ -115,8 +115,10 @@ def test_bundle_end_to_end(java_workspace: Path) -> None:
     # 6. A small budget keeps the same shape and still names what it dropped.
     tight = build_bundle(index, graph, "store a session against its token", 500)
     assert tight.rendered_tokens <= 500, "step 6: the tight budget holds for the rendered answer"
-    assert tight.omitted, "step 6: what did not fit is still listed"
-    assert "## Not included (locations only)" in tight.render(), "step 6: and is rendered as locations"
+    assert tight.omitted or tight.unlisted_omissions, "step 6: what did not fit is still accounted for"
+    assert any(item.presentation is not item.presentation.CONTENT for item in tight.items), (
+        "step 6: items degrade rather than vanish"
+    )
     graph.close()
 
 

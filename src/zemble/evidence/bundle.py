@@ -590,7 +590,7 @@ def pack(
             continue
         seen.add(candidate.key)
         reserve = min(cap, sum(cost for tier, cost in floors.items() if tier > candidate.tier))
-        item = _fit(candidate, max(0, remaining - reserve))
+        item = _fit(candidate, max(0, remaining - reserve), remaining)
         if item is None:
             _omit(bundle, candidate)
             continue
@@ -648,11 +648,17 @@ def _omit(bundle: Bundle, candidate: _Candidate) -> None:
     )
 
 
-def _fit(candidate: _Candidate, remaining: int) -> BundleItem | None:
-    """Return the largest form of a candidate that fits, or None if none does."""
-    for text, presentation in _forms(candidate, remaining):
+def _fit(candidate: _Candidate, allowance: int, floor: int | None = None) -> BundleItem | None:
+    """Return the largest form of a candidate that fits, or None if none does.
+
+    The allowance is what this tier may spend on CONTENT; the floor is the whole
+    budget left. They differ because of the reserve, and a reserve that could stop
+    an item from even being NAMED would defeat degrade-before-drop.
+    """
+    limits = {Presentation.LOCATION: allowance if floor is None else floor}
+    for text, presentation in _forms(candidate, allowance):
         cost = _cost(candidate, text, presentation)
-        if cost <= remaining:
+        if cost <= limits.get(presentation, allowance):
             return BundleItem(
                 kind=candidate.kind,
                 file_path=candidate.file_path,
