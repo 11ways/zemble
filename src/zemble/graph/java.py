@@ -162,6 +162,44 @@ class _JavaExtractor:
                     annotations.append(self.text(name_node).rsplit(".", 1)[-1])
         return keywords, annotations
 
+    def _annotation_args_of(self, node: Node) -> dict[str, dict[str, str]]:
+        """Return the string-literal arguments of every annotation on a declaration.
+
+        Only literals are captured: `@HawkeyeCustomElement(tag = Microcopy.WRAPPER_TAG)` names
+        a constant whose value one file cannot know, and recording `Microcopy.WRAPPER_TAG` as
+        the tag would read as a value it never has. The single unnamed argument is keyed
+        `value`, matching how Java names it.
+        """
+        modifiers_node = next((child for child in node.children if child.type == "modifiers"), None)
+        if modifiers_node is None:
+            return {}
+        captured: dict[str, dict[str, str]] = {}
+        for child in modifiers_node.children:
+            if child.type != "annotation":
+                continue
+            name_node = child.child_by_field_name("name")
+            arguments = child.child_by_field_name("arguments")
+            if name_node is None or arguments is None:
+                continue
+            values: dict[str, str] = {}
+            for argument in arguments.named_children:
+                if argument.type == "element_value_pair":
+                    key = argument.child_by_field_name("key")
+                    literal = self._string_literal(argument.child_by_field_name("value"))
+                    if key is not None and literal is not None:
+                        values[self.text(key)] = literal
+                elif (literal := self._string_literal(argument)) is not None:
+                    values.setdefault("value", literal)
+            if values:
+                captured[self.text(name_node).rsplit(".", 1)[-1]] = values
+        return captured
+
+    def _string_literal(self, node: Node | None) -> str | None:
+        """Return a string literal node's text with its quotes removed, else None."""
+        if node is None or node.type != "string_literal":
+            return None
+        return self.text(node).strip('"')
+
     def _emit_annotations(self, node: Node, owner_id: str) -> None:
         """Emit ANNOTATED_WITH edges for every annotation on a declaration."""
         modifiers_node = next((child for child in node.children if child.type == "modifiers"), None)
@@ -329,6 +367,7 @@ class _JavaExtractor:
                 container_id=container_id,
                 modifiers=modifiers,
                 annotations=annotations,
+                annotation_args=self._annotation_args_of(node),
                 signature=self._type_signature(node, kind, name),
                 is_test=self.is_test,
             )
@@ -471,6 +510,7 @@ class _JavaExtractor:
                     container_id=owner.id,
                     modifiers=modifiers,
                     annotations=annotations,
+                    annotation_args=self._annotation_args_of(node),
                     signature=f"{self.text(type_node) if type_node else '?'} {name}",
                     is_test=self.is_test,
                 )
@@ -546,6 +586,7 @@ class _JavaExtractor:
                 container_id=owner.id,
                 modifiers=modifiers,
                 annotations=annotations,
+                annotation_args=self._annotation_args_of(node),
                 signature=self._callable_signature(node, name, parameters, return_node),
                 is_test=self.is_test,
                 param_types=param_types,

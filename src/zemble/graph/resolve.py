@@ -9,10 +9,12 @@ in the JDK or a third-party jar).
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Container, Iterable
 from dataclasses import dataclass, field
 
+from zemble.graph.hwk import TAG_MODIFIER
 from zemble.graph.java import FileImports
 from zemble.graph.model import (
     CALLABLE_KINDS,
@@ -23,12 +25,22 @@ from zemble.graph.model import (
     Symbol,
     SymbolKind,
 )
+from zemble.hwk import (
+    ELEMENT_ANNOTATION,
+    ELEMENT_TAG_ARGUMENT,
+    FUNCTION_ANNOTATION,
+    FUNCTION_NAME_ARGUMENT,
+    FUNCTION_NAMESPACE_ARGUMENT,
+    template_id_path,
+)
 
 # Suffixes and prefixes that mark a test type as covering a subject type.
 _TEST_SUFFIXES = ("Tests", "Test", "IT")
 _TEST_PREFIXES = ("Test",)
 
 _TYPE_EDGE_KINDS = frozenset({EdgeKind.EXTENDS, EdgeKind.IMPLEMENTS, EdgeKind.REFERENCES_TYPE, EdgeKind.ANNOTATED_WITH})
+_TEMPLATE_SUFFIX = ".hwk"
+_NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]")
 
 
 @dataclass
@@ -73,6 +85,11 @@ class Resolver:
         self.callables_by_simple: dict[str, list[Symbol]] = defaultdict(list)
         self.members: dict[str, list[Symbol]] = defaultdict(list)
         self.types_in_file: dict[str, list[Symbol]] = defaultdict(list)
+        self.templates_by_tag: dict[str, list[Symbol]] = defaultdict(list)
+        self.templates_by_id: dict[str, list[Symbol]] = defaultdict(list)
+        self.functions_by_key: dict[tuple[str, str], list[Symbol]] = defaultdict(list)
+        self.functions_by_name: dict[str, list[Symbol]] = defaultdict(list)
+        self.elements_by_tag: dict[str, list[Symbol]] = defaultdict(list)
         for symbol in symbols:
             self.by_id[symbol.id] = symbol
             self.by_qualified[symbol.qualified_name].append(symbol)
@@ -83,8 +100,29 @@ class Resolver:
                 self.callables_by_simple[symbol.name].append(symbol)
             if symbol.container_id is not None:
                 self.members[symbol.container_id].append(symbol)
+            self._index_hawkeye(symbol)
         self.supertypes: dict[str, list[str]] = defaultdict(list)
         self._chain_cache: dict[str, list[str]] = {}
+
+    def _index_hawkeye(self, symbol: Symbol) -> None:
+        """Index the declarations a Hawkeye template resolves against."""
+        if symbol.kind is SymbolKind.TEMPLATE:
+            if TAG_MODIFIER in symbol.modifiers:
+                self.templates_by_tag[symbol.qualified_name].append(symbol)
+            if symbol.container_id is None:
+                self.templates_by_id[template_id_path(symbol.file_path)].append(symbol)
+            return
+        if symbol.kind is SymbolKind.METHOD and FUNCTION_ANNOTATION in symbol.annotations:
+            arguments = symbol.annotation_args.get(FUNCTION_ANNOTATION, {})
+            # `name` defaults to the Java method name, `namespace` to the global one.
+            name = arguments.get(FUNCTION_NAME_ARGUMENT) or symbol.name
+            self.functions_by_name[name].append(symbol)
+            self.functions_by_key[(arguments.get(FUNCTION_NAMESPACE_ARGUMENT, ""), name)].append(symbol)
+            return
+        if symbol.kind in TYPE_KINDS:
+            tag = symbol.annotation_args.get(ELEMENT_ANNOTATION, {}).get(ELEMENT_TAG_ARGUMENT)
+            if tag:
+                self.elements_by_tag[tag].append(symbol)
 
     # ---- lookup helpers -------------------------------------------------
 
@@ -301,6 +339,10 @@ class Resolver:
 
     def _match_for(self, edge: Edge, context: FileContext) -> _Match:
         """Pick the resolution strategy for an edge kind."""
+        if _file_of(edge.src_id).endswith(_TEMPLATE_SUFFIX):
+            # A template writes template ids, element tags and function namespaces - none of
+            # which are Java names - so the Java ladder would answer every one of them wrong.
+            return self._match_for_template(edge)
         if edge.kind in _TYPE_EDGE_KINDS:
             return self.resolve_type_name(edge.dst_name, context)
         if edge.kind is EdgeKind.IMPORTS:
@@ -315,6 +357,61 @@ class Resolver:
                 return self._resolve_constructor_call(edge, context)
             return self._resolve_method_call(edge, context)
         return _UNRESOLVED
+
+    # ---- template resolution --------------------------------------------
+
+    def _match_for_template(self, edge: Edge) -> _Match:
+        """Resolve one edge written by a Hawkeye template."""
+        if edge.kind in (EdgeKind.EXTENDS, EdgeKind.IMPORTS):
+            return self._resolve_template_reference(edge.dst_name)
+        if edge.kind is EdgeKind.REFERENCES_TYPE:
+            return self._resolve_element_tag(edge.dst_name)
+        if edge.kind is EdgeKind.CALLS:
+            return self._resolve_template_call(edge)
+        return _UNRESOLVED
+
+    def _resolve_template_reference(self, written: str) -> _Match:
+        """Resolve `namespace:path/below/templates` to the template file it names.
+
+        The namespace is a build setting this extractor never reads, so it is used only to
+        narrow: a path that is unique on its own is a by-name match, and a path the namespace
+        also agrees with is exact.
+        """
+        namespace, separator, path = written.partition(":")
+        if not separator:
+            namespace, path = "", written
+        candidates = self.templates_by_id.get(path, [])
+        if not candidates:
+            return _UNRESOLVED
+        narrowed = [symbol for symbol in candidates if _namespace_matches(namespace, symbol.file_path)]
+        if len(narrowed) == 1:
+            return _Match(narrowed[0].id, Resolution.EXACT)
+        return _grade(narrowed or candidates, Resolution.UNIQUE_NAME)
+
+    def _resolve_element_tag(self, tag: str) -> _Match:
+        """Resolve a custom element tag to the class or the template that declares it.
+
+        A tag is a globally unique registration key - the Hawkeye compiler refuses a duplicate
+        - so a single declaration of it IS the one meant, and the match is exact. A hand-written
+        `@HawkeyeCustomElement` class wins over a template, because it is the implementation.
+        """
+        for declarations in (self.elements_by_tag.get(tag), self.templates_by_tag.get(tag)):
+            if declarations:
+                return _grade(declarations, Resolution.EXACT)
+        return _UNRESOLVED
+
+    def _resolve_template_call(self, edge: Edge) -> _Match:
+        """Resolve a template function call against the `@HawkeyeFunction` methods.
+
+        A call is only ever matched against a registered template function: nothing else in the
+        workspace is callable from a template, so falling back to a same-named plain Java method
+        would invent a relationship that cannot exist.
+        """
+        namespace = edge.receiver or ""
+        exact = self.functions_by_key.get((namespace, edge.dst_name))
+        if exact:
+            return _grade(exact, Resolution.EXACT)
+        return _grade(self.functions_by_name.get(edge.dst_name, []), Resolution.UNIQUE_NAME)
 
     def resolve_all(self, edges: Iterable[Edge]) -> None:
         """Resolve supertype edges first, then everything else, so call chains are usable."""
@@ -426,6 +523,19 @@ class Resolver:
                 )
             )
         return derived
+
+
+def _namespace_matches(written: str, file_path: str) -> bool:
+    """Return True when a template id's namespace agrees with the repository a file lives in.
+
+    A repository's Hawkeye namespace is its directory name with the separators dropped
+    (`zenit-cms` -> `zenitcms`), and a source set may append to it (`plumage-browsertest`), so
+    the repository's own form must be a prefix of what was written.
+    """
+    if not written:
+        return False
+    repository = _NON_ALPHANUMERIC.sub("", file_path.split("/", 1)[0].lower())
+    return bool(repository) and _NON_ALPHANUMERIC.sub("", written.lower()).startswith(repository)
 
 
 def _file_of(symbol_id: str) -> str:

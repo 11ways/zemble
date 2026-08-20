@@ -21,6 +21,7 @@ from pathlib import Path
 
 from zemble.cache import find_index_from_cache_folder
 from zemble.graph.facts import OVERLAY_KINDS, TREE_SITTER_SOURCE, FactsOverlay, load_overlay
+from zemble.graph.hwk import extract_hwk_file
 from zemble.graph.java import FileExtraction, FileImports, extract_java_file
 from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol, SymbolKind
 from zemble.graph.resolve import FileContext, Resolver
@@ -30,13 +31,15 @@ from zemble.types import ContentType
 
 logger = logging.getLogger(__name__)
 
-GRAPH_FORMAT_VERSION = 2
+GRAPH_FORMAT_VERSION = 3
 GRAPH_DB_NAME = "graph.sqlite"
-GRAPH_LANGUAGE = "java"
+#: The languages an extractor exists for, in the order they were added.
+GRAPH_LANGUAGES = ("java", "hwk")
 # Edge kinds that are computed from resolved symbols rather than extracted from source.
 # They are always recomputed for a re-resolved file, never reloaded and re-inserted.
 _DERIVED_KINDS = (EdgeKind.OVERRIDES.value, EdgeKind.TESTS.value, EdgeKind.EXERCISES.value)
-_EXTRACTOR_EXTENSIONS = frozenset({".java"})
+#: File suffix -> the extractor that reads it. A suffix absent here is skipped and counted.
+_EXTRACTORS = {".java": extract_java_file, ".hwk": extract_hwk_file}
 _WORKER_CHUNK = 40
 _MAX_FILE_BYTES = 2_000_000
 
@@ -48,7 +51,8 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS symbols (
     id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT,
     start_line INTEGER, end_line INTEGER, container_id TEXT, modifiers TEXT,
-    annotations TEXT, signature TEXT, is_test INTEGER, param_types TEXT
+    annotations TEXT, signature TEXT, is_test INTEGER, param_types TEXT,
+    annotation_args TEXT
 );
 CREATE TABLE IF NOT EXISTS edges (
     src_id TEXT, dst_id TEXT, dst_name TEXT, kind TEXT, line INTEGER,
@@ -131,9 +135,12 @@ def connect(path: str, *, read_only: bool = False) -> sqlite3.Connection:
 
 def _migrate(connection: sqlite3.Connection) -> None:
     """Add the columns a graph built by an older zemble does not have yet."""
-    columns = {row["name"] for row in connection.execute("PRAGMA table_info(edges)")}
-    if "source" not in columns:
+    edge_columns = {row["name"] for row in connection.execute("PRAGMA table_info(edges)")}
+    if "source" not in edge_columns:
         connection.execute("ALTER TABLE edges ADD COLUMN source TEXT")
+    symbol_columns = {row["name"] for row in connection.execute("PRAGMA table_info(symbols)")}
+    if "annotation_args" not in symbol_columns:
+        connection.execute("ALTER TABLE symbols ADD COLUMN annotation_args TEXT")
 
 
 def graph_exists(path: str) -> bool:
@@ -171,6 +178,7 @@ def _symbol_row(symbol: Symbol) -> tuple:
         symbol.signature,
         int(symbol.is_test),
         json.dumps(symbol.param_types),
+        json.dumps(symbol.annotation_args),
     )
 
 
@@ -190,6 +198,7 @@ def symbol_from_row(row: sqlite3.Row) -> Symbol:
         signature=row["signature"],
         is_test=bool(row["is_test"]),
         param_types=json.loads(row["param_types"]),
+        annotation_args=json.loads(row["annotation_args"] or "{}"),
     )
 
 
@@ -236,12 +245,13 @@ def edge_from_row(row: sqlite3.Row) -> Edge:
 def _extract_one(job: tuple[str, str]) -> FileExtraction | None:
     """Extract one file in a worker process, returning None when it cannot be read."""
     absolute, relative = job
+    extract = _EXTRACTORS[Path(absolute).suffix.lower()]
     try:
         source = Path(absolute).read_bytes()
     except OSError:
         return None
     try:
-        return extract_java_file(source, relative)
+        return extract(source, relative)
     except Exception:
         logger.warning("Failed to extract %s", relative, exc_info=True)
         return None
@@ -287,7 +297,7 @@ def _scan(root: Path) -> _Scan:
     for file_path in walk_files(root, extensions=get_extensions((ContentType.CODE,))):
         scan.scanned += 1
         suffix = file_path.suffix.lower()
-        if suffix not in _EXTRACTOR_EXTENSIONS:
+        if suffix not in _EXTRACTORS:
             scan.skipped[detect_language(file_path) or suffix] += 1
             continue
         try:
@@ -295,7 +305,7 @@ def _scan(root: Path) -> _Scan:
         except OSError:
             continue
         if stat.st_size > _MAX_FILE_BYTES:
-            scan.skipped["java (too large)"] += 1
+            scan.skipped[f"{suffix} (too large)"] += 1
             continue
         relative = file_path.relative_to(root).as_posix()
         scan.jobs.append((str(file_path), relative))
@@ -378,7 +388,7 @@ def _write_meta(connection: sqlite3.Connection, root: Path) -> None:
         [
             ("format_version", str(GRAPH_FORMAT_VERSION)),
             ("root", str(root)),
-            ("language", GRAPH_LANGUAGE),
+            ("language", ",".join(GRAPH_LANGUAGES)),
             ("built_at", str(time.time())),
         ],
     )
@@ -480,7 +490,7 @@ def _insert_extractions(
         )
         symbol_rows.extend(_symbol_row(symbol) for symbol in extraction.symbols)
     connection.executemany("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?)", file_rows)
-    connection.executemany("INSERT OR REPLACE INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", symbol_rows)
+    connection.executemany("INSERT OR REPLACE INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", symbol_rows)
 
 
 def _load_contexts(connection: sqlite3.Connection) -> dict[str, FileContext]:

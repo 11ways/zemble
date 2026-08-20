@@ -26,12 +26,17 @@ class SymbolKind(str, Enum):
     CONSTRUCTOR = "constructor"
     FIELD = "field"
     ENUM_CONSTANT = "enum_constant"
+    TEMPLATE = "template"
+    BLOCK = "block"
 
 
 TYPE_KINDS: frozenset[SymbolKind] = frozenset(
     {SymbolKind.CLASS, SymbolKind.INTERFACE, SymbolKind.ENUM, SymbolKind.RECORD, SymbolKind.ANNOTATION}
 )
 CALLABLE_KINDS: frozenset[SymbolKind] = frozenset({SymbolKind.METHOD, SymbolKind.CONSTRUCTOR})
+#: Kinds that name themselves: a template is displayed and looked up by its own name, never
+#: as `Owner.member`, exactly like a type declaration.
+NAMED_KINDS: frozenset[SymbolKind] = TYPE_KINDS | {SymbolKind.TEMPLATE}
 
 
 class EdgeKind(str, Enum):
@@ -88,6 +93,13 @@ class Symbol:
     # Erased parameter types, callables only. Kept out of `signature` so resolution
     # can match on arity/erasure without re-parsing the human-readable signature.
     param_types: list[str] = field(default_factory=list)
+    # String-literal arguments of each annotation, keyed by the annotation's simple name and
+    # then by element name (`value` for the single unnamed argument). Only literals are kept:
+    # an argument written through a constant is not knowable from one file, and recording the
+    # constant's name would read as a value it never has. This is what lets a registration
+    # annotation - `@HawkeyeFunction(namespace = "String", name = "presence")` - be resolved
+    # against the name a caller in another language writes.
+    annotation_args: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
     def arity(self) -> int:

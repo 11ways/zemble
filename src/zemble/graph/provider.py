@@ -13,7 +13,7 @@ from collections.abc import Iterable, Sequence
 from typing import Protocol, runtime_checkable
 
 from zemble.graph.facts import TREE_SITTER_SOURCE
-from zemble.graph.model import TYPE_KINDS, Edge, EdgeKind, Hit, Resolution, Symbol
+from zemble.graph.model import NAMED_KINDS, TYPE_KINDS, Edge, EdgeKind, Hit, Resolution, Symbol
 from zemble.graph.store import connect, edge_from_row, symbol_from_row
 
 _HIERARCHY_KINDS = (EdgeKind.EXTENDS.value, EdgeKind.IMPLEMENTS.value)
@@ -106,7 +106,7 @@ class GraphProvider(Protocol):
 
 def display_name(symbol: Symbol) -> str:
     """Return a short human label: `Type` for types, `Type.member` for members."""
-    if symbol.kind in TYPE_KINDS:
+    if symbol.kind in NAMED_KINDS:
         return symbol.name
     parts = symbol.qualified_name.rsplit(".", 2)
     return ".".join(parts[-2:]) if len(parts) >= 2 else symbol.qualified_name
@@ -207,7 +207,7 @@ class SqliteGraphProvider:
                 bucket = order["suffix"]
             else:
                 bucket = order["simple"]
-            return bucket, 0 if symbol.kind in TYPE_KINDS else 1, symbol.id
+            return bucket, 0 if symbol.kind in NAMED_KINDS else 1, symbol.id
 
         return sorted(symbols, key=rank)
 
