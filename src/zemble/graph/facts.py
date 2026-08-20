@@ -22,6 +22,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -34,6 +35,7 @@ from zemble.graph.model import (
     Symbol,
     SymbolKind,
 )
+from zemble.index.file_walker import ignored_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +125,29 @@ class SourceFacts:
     facts: list[dict] = field(default_factory=list)
 
 
+class SkipBucket(Enum):
+    """Why a fact never became an edge.
+
+    The buckets are the vocabulary the status command counts and lists by, and they are
+    deliberately separate: a fact whose source file the index does not cover is not a
+    defect of the mapper, while an unmapped ref is.
+    """
+
+    OUTSIDE_INDEX = ("source_outside_index", "source outside the index")
+    SOURCE_IGNORED = ("source_ignored", "source ignored by the index")
+    STALE = ("stale", "stale")
+    UNMAPPED = ("unmapped", "unmapped")
+
+    label: str
+
+    def __new__(cls, key: str, label: str) -> SkipBucket:
+        """Build a member whose value is its JSON key and whose label is its heading."""
+        member = object.__new__(cls)
+        member._value_ = key
+        member.label = label
+        return member
+
+
 @dataclass
 class FactsFile:
     """One parsed facts file."""
@@ -136,6 +161,8 @@ class FactsFile:
     outside_root: int = 0
     mtime_ns: int = 0
     size: int = 0
+    #: Facts this file's own parse already threw away, with the bucket that says why.
+    skipped: list[SkippedFact] = field(default_factory=list)
 
     @property
     def fresh_files(self) -> list[str]:
@@ -149,10 +176,14 @@ class FactsFile:
 
 
 @dataclass
-class UnmappedRef:
-    """A ref a facts file wrote that no workspace symbol answers to."""
+class SkippedFact:
+    """One fact that did not become an edge, in the bucket that says why."""
 
-    ref: str
+    bucket: SkipBucket
+    #: What the report groups and lists by: the ref for `UNMAPPED`, because that is what an
+    #: emitter fixes, and the source file for every bucket that is about where a fact came
+    #: from, because there the ref is a consequence and the file is the lever.
+    subject: str
     reason: str
     fact_kind: str
     facts_file: str
@@ -385,6 +416,7 @@ def _display_path(root: Path, path: Path) -> str:
 def _read_body(lines: Sequence[str], loaded: FactsFile, root: Path, facts_root: Path) -> None:
     """Group every fact under the source file it was declared for."""
     current: SourceFacts | None = None
+    outside: str | None = None
     for raw in lines:
         if not raw.strip():
             continue
@@ -399,12 +431,42 @@ def _read_body(lines: Sequence[str], loaded: FactsFile, root: Path, facts_root: 
             continue
         if kind == "file":
             current = _declare_file(payload, loaded, root, facts_root)
+            outside = str(payload.get("path", "")) if current is None else None
             continue
         target = _target_of(payload, loaded, current, root, facts_root)
         if target is None:
-            loaded.orphan_facts += 1
+            _record_unattached(payload, kind, loaded, outside, root, facts_root)
             continue
         target.facts.append(payload)
+
+
+def _record_unattached(
+    payload: dict, kind: str, loaded: FactsFile, outside: str | None, root: Path, facts_root: Path
+) -> None:
+    """Bucket a fact that landed on no source file: outside the index, or a real orphan.
+
+    A `file` line for a path outside the indexed workspace is skipped, and so is every fact
+    that follows it. Those facts are not orphans - they were declared properly, for a file
+    this workspace does not contain - so they are counted where a reader can act on them.
+    """
+    written = payload.get("path")
+    if isinstance(written, str) and written:
+        declared = written if _relative_to_workspace(root, facts_root, written) is None else None
+    else:
+        declared = outside
+    if declared is None:
+        loaded.orphan_facts += 1
+        return
+    loaded.skipped.append(
+        SkippedFact(
+            bucket=SkipBucket.OUTSIDE_INDEX,
+            subject=declared,
+            reason="the source file is outside the indexed workspace",
+            fact_kind=str(_EDGE_KIND_BY_FACT[kind].value) if kind in _EDGE_KIND_BY_FACT else kind,
+            facts_file=loaded.relative_path,
+            source_path=declared,
+        )
+    )
 
 
 def _declare_file(payload: dict, loaded: FactsFile, root: Path, facts_root: Path) -> SourceFacts | None:
@@ -737,11 +799,44 @@ class FactsOverlay:
     root: Path
     files: list[FactsFile] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
-    unmapped: list[UnmappedRef] = field(default_factory=list)
+    #: Every fact that did not become an edge, in the bucket that says why.
+    skipped: list[SkippedFact] = field(default_factory=list)
+    #: Edges kept with no `dst_id` because the target's type is a JDK or jar type.
+    external_targets: int = 0
     #: Workspace-relative source path -> the edges replacing that file's extracted ones.
     edges: dict[str, list[Edge]] = field(default_factory=dict)
     #: Workspace-relative source path -> the tools whose fresh facts cover it.
     tools: dict[str, set[str]] = field(default_factory=dict)
+    #: Source path -> the prefix that keeps it out of the index, or "" when it is indexed.
+    _ignored_prefixes: dict[str, str] = field(default_factory=dict, repr=False)
+
+    @property
+    def unmapped(self) -> list[SkippedFact]:
+        """Only the refs the workspace should have answered and did not."""
+        return [entry for entry in self.skipped if entry.bucket is SkipBucket.UNMAPPED]
+
+    def bucket_counts(self) -> dict[str, int]:
+        """How many facts each bucket holds, every bucket present even at zero."""
+        counted = {bucket.value: 0 for bucket in SkipBucket}
+        for entry in self.skipped:
+            counted[entry.bucket.value] += 1
+        return counted
+
+    def source_bucket(self, source_path: str) -> tuple[SkipBucket, str] | None:
+        """Bucket a fact by WHERE its source file lives, or None when the index covers it.
+
+        Generated code is the case this exists for: a `build/generated-sources/...` file is
+        compiled, so a javac emitter has facts about it, but the index never walked it, so
+        every ref into it is unresolvable by construction rather than by mistake.
+        """
+        prefix = self._ignored_prefixes.get(source_path)
+        if prefix is None:
+            prefix = ignored_prefix(self.root, source_path) or ""
+            self._ignored_prefixes[source_path] = prefix
+        if not prefix:
+            return None
+        named = prefix if prefix == source_path else f"{prefix}/..."
+        return SkipBucket.SOURCE_IGNORED, f"source is generated/ignored ({named})"
 
     def covers(self, file_path: str) -> bool:
         """Return whether a source file has fresh facts, so its extracted edges are dropped."""
@@ -766,7 +861,9 @@ class FactsOverlay:
             "files_fresh": len(self.covered_files),
             "files_stale": len(self.declared_files) - len(self.covered_files),
             "edges": sum(len(edges) for edges in self.edges.values()),
-            "unmapped": len(self.unmapped),
+            "external_targets": self.external_targets,
+            "skipped": self.bucket_counts(),
+            "unmapped": self.bucket_counts()[SkipBucket.UNMAPPED.value],
         }
 
 
@@ -781,7 +878,9 @@ def load_overlay(root: Path, symbols: Iterable[Symbol]) -> FactsOverlay:
     symbol_list = list(symbols)
     for path in discover_facts_files(root):
         try:
-            overlay.files.append(load_facts_file(path, root))
+            loaded = load_facts_file(path, root)
+            overlay.files.append(loaded)
+            overlay.skipped.extend(loaded.skipped)
         except FactsFormatError as error:
             overlay.errors.append((_display_path(root, path), str(error)))
             logger.warning("Ignoring facts file: %s", error)
@@ -826,6 +925,7 @@ def _map_file(overlay: FactsOverlay, loaded: FactsFile, mapper: RefMapper, lines
     """Map one facts file's fresh sources into edges, merging with any already collected."""
     for source in loaded.sources.values():
         if not source.fresh:
+            _record_stale(overlay, loaded, source)
             continue
         collected = overlay.edges.setdefault(source.path, [])
         overlay.tools.setdefault(source.path, set()).add(loaded.header.tool)
@@ -842,6 +942,26 @@ def _map_file(overlay: FactsOverlay, loaded: FactsFile, mapper: RefMapper, lines
                 continue
             seen.add(key)
             collected.append(edge)
+
+
+def _record_stale(overlay: FactsOverlay, loaded: FactsFile, source: SourceFacts) -> None:
+    """Count the edge facts a source file lost because its content moved on."""
+    classified = overlay.source_bucket(source.path)
+    bucket, reason = classified if classified is not None else (SkipBucket.STALE, source.reason)
+    for payload in source.facts:
+        kind = _EDGE_KIND_BY_FACT.get(str(payload.get("t")))
+        if kind is None:
+            continue
+        overlay.skipped.append(
+            SkippedFact(
+                bucket=bucket,
+                subject=source.path,
+                reason=reason,
+                fact_kind=kind.value,
+                facts_file=loaded.relative_path,
+                source_path=source.path,
+            )
+        )
 
 
 def _edge_key(edge: Edge) -> tuple:
@@ -866,10 +986,19 @@ def _edge_from_fact(
         return None
     origin = mapper.map_ref(from_ref)
     if origin.symbol_id is None:
-        overlay.unmapped.append(
-            UnmappedRef(
-                ref=from_ref,
-                reason=origin.reason or "the source of an edge is outside the workspace",
+        # Where the fact came FROM decides the bucket: a ref into a file the index never
+        # walked is not an unmapped ref, and counting it as one reads as a defect.
+        classified = overlay.source_bucket(source.path)
+        bucket, reason = (
+            classified
+            if classified is not None
+            else (SkipBucket.UNMAPPED, origin.reason or "the source of an edge is outside the workspace")
+        )
+        overlay.skipped.append(
+            SkippedFact(
+                bucket=bucket,
+                subject=from_ref if bucket is SkipBucket.UNMAPPED else source.path,
+                reason=reason,
                 fact_kind=kind.value,
                 facts_file=loaded.relative_path,
                 source_path=source.path,
@@ -878,9 +1007,10 @@ def _edge_from_fact(
         return None
     target = mapper.map_ref(to_ref)
     if target.unmapped:
-        overlay.unmapped.append(
-            UnmappedRef(
-                ref=to_ref,
+        overlay.skipped.append(
+            SkippedFact(
+                bucket=SkipBucket.UNMAPPED,
+                subject=to_ref,
                 reason=target.reason,
                 fact_kind=kind.value,
                 facts_file=loaded.relative_path,
@@ -888,6 +1018,8 @@ def _edge_from_fact(
             )
         )
         return None
+    if target.external:
+        overlay.external_targets += 1
     # `override`, `extends` and `implements` facts carry no line: the declaration's own
     # line is the honest answer, and is what the derived tree-sitter edges use too.
     line = payload.get("line")

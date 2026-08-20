@@ -14,6 +14,7 @@ from zemble.graph.store import build_graph, connect
 CONSUMER = "src/main/java/com/example/app/Consumer.java"
 CIRCLE = "src/main/java/com/example/core/Circle.java"
 MEASURE = "com.example.app.Consumer#measure(com.example.core.Circle)"
+GENERATED = "build/generated-sources/com/example/gen/Tpl_Page.java"
 
 
 def _workspace(source: Path, destination: Path) -> Path:
@@ -57,6 +58,11 @@ def _edges(workspace: Path, where: str) -> list[dict]:
         return [dict(row) for row in rows]
     finally:
         connection.close()
+
+
+def _bucket(payload: dict, name: str) -> dict:
+    """One skipped-fact bucket out of a `--json` status payload."""
+    return next(bucket for bucket in payload["skipped"] if bucket["bucket"] == name)
 
 
 def _run(monkeypatch: pytest.MonkeyPatch, *argv: str) -> int:
@@ -243,18 +249,60 @@ def test_facts_status_reports_what_the_graph_used(
     assert "com.example.core.Circle#nope()" in output, "step 2: the unmapped ref is listed"
     assert "calls in covered files: exact 1" in output, "step 2: covered calls are graded apart"
 
-    # 3. The JSON form carries the same numbers.
+    assert "unmapped (top 1 of 1)" in output, "step 2: and lives in the unmapped bucket"
+
+    # 3. The JSON form carries the same numbers, bucket by bucket.
     _run(monkeypatch, "graph", "facts", "status", str(workspace), "--json")
     payload = json.loads(capsys.readouterr().out)
     assert payload["files"][0]["tool"] == "javac-facts", "step 3: the file is described"
     assert payload["coverage"]["files_fresh"] == 1, "step 3: coverage counts survive"
-    assert payload["unmapped"][0]["ref"] == "com.example.core.Circle#nope()", "step 3: with the unmapped detail"
+    assert _bucket(payload, "unmapped")["top"][0]["subject"] == "com.example.core.Circle#nope()", (
+        "step 3: with the unmapped detail"
+    )
+    assert _bucket(payload, "stale")["count"] == 1, "step 3: the stale file's one fact is counted apart"
+    assert _bucket(payload, "source_ignored")["count"] == 0, "step 3: and every bucket is present, even at zero"
 
     # 4. A query over a covered file names the tool in its reason.
     _run(monkeypatch, "graph", "callers", str(workspace), "com.example.core.Circle.area", "--json")
     payload = json.loads(capsys.readouterr().out)
     reasons = [hit["reason"] for hit in payload["results"] if hit["source"] == "javac-facts"]
     assert reasons and "javac-facts" in reasons[0], "step 4: the hit says which tool resolved it"
+
+    # 5. Facts about generated code the index never walked are their own bucket, not unmapped.
+    generated = workspace / GENERATED
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    generated.write_text("package com.example.gen;\nclass Tpl_Page { void render() {} }\n", encoding="utf-8")
+    _write_facts(
+        workspace,
+        [
+            _header(),
+            {"t": "file", "path": CONSUMER, "sha256": _sha(workspace, CONSUMER)},
+            {"t": "call", "from": MEASURE, "to": "com.example.core.Circle#area()", "path": CONSUMER, "line": 7},
+            {"t": "file", "path": GENERATED, "sha256": _sha(workspace, GENERATED)},
+            {
+                "t": "call",
+                "from": "com.example.gen.Tpl_Page#render()",
+                "to": "com.example.core.Circle#area()",
+                "path": GENERATED,
+                "line": 2,
+            },
+        ],
+    )
+    _run(monkeypatch, "graph", "facts", "status", str(workspace), "--json")
+    payload = json.loads(capsys.readouterr().out)
+    ignored = _bucket(payload, "source_ignored")
+    assert ignored["count"] == 1, "step 5: the generated file's fact is bucketed by where it came from"
+    assert ignored["top"][0]["subject"] == GENERATED, "step 5: listed under the file, which is the lever"
+    assert "generated/ignored" in ignored["top"][0]["reason"], "step 5: and says so in words"
+    assert _bucket(payload, "unmapped")["count"] == 0, "step 5: it is not counted as an unmapped ref"
+
+    # 6. The human report names every bucket on its own line.
+    _run(monkeypatch, "graph", "facts", "status", str(workspace))
+    output = capsys.readouterr().out
+    assert "skipped facts: source outside the index 0, source ignored by the index 1" in output, (
+        "step 6: the headline splits the buckets"
+    )
+    assert "source ignored by the index (top 1 of 1):" in output, "step 6: with a top-N list of its own"
 
 
 def test_hierarchy_and_override_facts_replace_the_derived_ones(

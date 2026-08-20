@@ -12,7 +12,14 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from zemble.graph.facts import TREE_SITTER_SOURCE, FactsFile, FactsOverlay, facts_source_globs, load_overlay
+from zemble.graph.facts import (
+    TREE_SITTER_SOURCE,
+    FactsFile,
+    FactsOverlay,
+    SkipBucket,
+    facts_source_globs,
+    load_overlay,
+)
 from zemble.graph.model import TYPE_KINDS, EdgeKind, Hit, Symbol, SymbolKind
 from zemble.graph.provider import SqliteGraphProvider, display_name
 from zemble.graph.store import build_graph, graph_exists, symbol_from_row
@@ -65,7 +72,9 @@ def add_graph_parser(sub: argparse._SubParsersAction) -> None:
     status_p.add_argument("path", nargs="?", default=".", help="Workspace directory (default: current directory).")
     status_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
     status_p.add_argument("--no-daemon", action="store_true", help="Do not use the warm daemon.")
-    status_p.add_argument("--limit", type=int, default=20, help="How many unmapped refs to list (default: 20).")
+    status_p.add_argument(
+        "--limit", type=int, default=20, help="How many entries to list per skipped bucket (default: 20)."
+    )
 
     for command in QUERY_COMMANDS:
         query_p = graph_sub.add_parser(command, help=f"Graph query: {command}.")
@@ -162,17 +171,33 @@ def _age(seconds: float | None) -> str:
     return f"{seconds / 86400:.0f}d ago"
 
 
-def _unmapped_summary(overlay: FactsOverlay, limit: int) -> list[dict[str, object]]:
-    """Group the unmapped refs by ref and reason, most frequent first."""
-    counted: dict[tuple[str, str, str], int] = {}
-    for entry in overlay.unmapped:
-        key = (entry.ref, entry.reason, entry.fact_kind)
-        counted[key] = counted.get(key, 0) + 1
-    ordered = sorted(counted.items(), key=lambda item: (-item[1], item[0]))
-    return [
-        {"ref": ref, "reason": reason, "fact_kind": kind, "count": count}
-        for (ref, reason, kind), count in ordered[:limit]
-    ]
+def _skipped_summary(overlay: FactsOverlay, limit: int) -> list[dict[str, object]]:
+    """Summarise every bucket of skipped facts, each with its own count and top-N list.
+
+    The buckets are always all present, at zero when nothing landed in them, because a
+    reader has to be able to tell "none of that here" from "not looked at".
+    """
+    grouped: dict[SkipBucket, dict[tuple[str, str, str], int]] = {bucket: {} for bucket in SkipBucket}
+    for entry in overlay.skipped:
+        key = (entry.subject, entry.reason, entry.fact_kind)
+        counts = grouped[entry.bucket]
+        counts[key] = counts.get(key, 0) + 1
+    summary = []
+    for bucket, counts in grouped.items():
+        ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        summary.append(
+            {
+                "bucket": bucket.value,
+                "label": bucket.label,
+                "count": sum(counts.values()),
+                "distinct": len(ordered),
+                "top": [
+                    {"subject": subject, "reason": reason, "fact_kind": kind, "count": count}
+                    for (subject, reason, kind), count in ordered[:limit]
+                ],
+            }
+        )
+    return summary
 
 
 def _facts_json(
@@ -200,7 +225,7 @@ def _facts_json(
         ],
         "errors": [{"path": path, "error": message} for path, message in overlay.errors],
         "coverage": {**overlay.stats(), "edges_by_source": by_source, "calls": calls},
-        "unmapped": _unmapped_summary(overlay, limit),
+        "skipped": _skipped_summary(overlay, limit),
     }
 
 
@@ -237,20 +262,26 @@ def _print_facts_status(
     if not overlay.files and not overlay.errors:
         print("  (none; looked for: " + ", ".join(_globs_of(overlay)) + ")")
     stats = overlay.stats()
+    buckets = _skipped_summary(overlay, limit)
+    skipped_total = sum(int(bucket["count"]) for bucket in buckets)
     print(
         f"coverage: {stats['files_fresh']} of {stats['files_declared']} declared file(s) fresh, "
-        f"{stats['edges']} fact edge(s), {stats['unmapped']} unmapped ref(s)"
+        f"{stats['edges']} fact edge(s), {stats['external_targets']} external target(s), "
+        f"{skipped_total} skipped fact(s)"
     )
+    print("  skipped facts: " + ", ".join(f"{bucket['label']} {bucket['count']}" for bucket in buckets))
     print("  edges by source: " + (", ".join(f"{name} {count}" for name, count in sorted(by_source.items())) or "none"))
     for bucket, label in (("with_facts", "calls in covered files"), ("without_facts", "calls elsewhere")):
         grades = calls[bucket]
         listed = ", ".join(f"{grade} {count}" for grade, count in sorted(grades.items())) or "none"
         print(f"  {label}: {listed}")
-    unmapped = _unmapped_summary(overlay, limit)
-    if unmapped:
-        print(f"unmapped refs (top {len(unmapped)}):")
-        for entry in unmapped:
-            print(f"  {entry['count']}x  {entry['ref']}  [{entry['fact_kind']}]  {entry['reason']}")
+    for bucket in buckets:
+        top = bucket["top"]
+        if not top:
+            continue
+        print(f"{bucket['label']} (top {len(top)} of {bucket['distinct']}):")
+        for entry in top:
+            print(f"  {entry['count']}x  {entry['subject']}  [{entry['fact_kind']}]  {entry['reason']}")
 
 
 def _globs_of(overlay: FactsOverlay) -> tuple[str, ...]:

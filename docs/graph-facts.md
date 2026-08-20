@@ -220,10 +220,32 @@ It builds the graph if needed, then reports:
   stale and why, plus anything skipped (unknown fact kinds, facts with no `file`
   line before them, files outside the workspace)
 - any facts file that was refused, and why
-- coverage: fresh files, fact edges, unmapped refs, edges by `source`, and
+- coverage: fresh files, fact edges, external targets, edges by `source`, and
   `CALLS` edges graded separately for covered files and for the rest - which is
   the number that says what the overlay bought
-- the unmapped refs, most frequent first, with the reason each one was not mapped
+- every fact that did not become an edge, split into buckets, each with its own
+  count and its own most-frequent-first list
+
+### The skipped buckets
+
+A fact that becomes no edge is counted in exactly one bucket, because the causes
+are not one thing and a single total reads as a defect when most of it is not:
+
+| Bucket | What it means | Listed by |
+| --- | --- | --- |
+| `source outside the index` | The `file` line resolved outside the indexed workspace, so nothing about it was ever extracted. | source file |
+| `source ignored by the index` | The source file is inside the workspace but the index's walk skips it - a `build/` segment, a `.gitignore`, a `.zembleignore`. Generated code is the whole of this bucket in practice. | source file |
+| `stale` | The source file's content moved on, so its facts were ignored and the extracted edges kept. | source file |
+| `unmapped` | The source file is indexed and the ref still found nothing: the type is known and the member is not, or two members match. This is the emitter's test suite. | ref |
+| external targets | Not skipped at all: the target's type is a JDK or jar type, so the edge is kept with no `dst_id` and graded `unresolved`. Counted on the coverage line. | - |
+
+The buckets are always all printed, at zero when nothing landed in them, and
+`--json` carries the same list under `skipped`. Note what the ignored bucket
+means for a Hawkeye workspace: a javac emitter compiles the generated `Tpl_*`
+classes and writes true facts about them, but the index never walked
+`build/generated-sources/...`, so every one of those calls is dropped. Mapping
+those classes back onto the `.hwk` files they were generated from, through the
+Hawkeye source maps, is the next lever on this number - a note, not a promise.
 
 ```
 $ zemble graph facts status ~/projects/app
@@ -231,11 +253,16 @@ Facts for ~/projects/app: 3 file(s) found
   module/build/zemble/common.jsonl  [javac-facts 0.1.0, java]  generated 4m ago
     118 file(s) declared, 117 fresh, 1 stale
       stale: module/src/common/java/com/example/Edited.java (content changed)
-coverage: 117 of 118 declared file(s) fresh, 4210 fact edge(s), 3 unmapped ref(s)
+coverage: 117 of 118 declared file(s) fresh, 4210 fact edge(s), 309 external target(s), 51 skipped fact(s)
+  skipped facts: source outside the index 0, source ignored by the index 44, stale 4, unmapped 3
   edges by source: javac-facts 4210, tree-sitter 18332
   calls in covered files: exact 3901, unresolved 309
   calls elsewhere: ambiguous 44, exact 812, unique_name 690, unresolved 120
-unmapped refs (top 1):
+source ignored by the index (top 1 of 1):
+  44x  module/build/generated-sources/hawkeye/Tpl_Page.java  [calls]  source is generated/ignored (module/build/...)
+stale (top 1 of 1):
+  4x  module/src/common/java/com/example/Edited.java  [calls]  content changed
+unmapped (top 1 of 1):
   3x  com.example.Gen#pick(T)  [calls]  no pick in com.example.Gen
 ```
 
@@ -255,7 +282,8 @@ unmapped refs (top 1):
 5. Write to one of the discovered locations, one file per compile task is fine,
    and write it atomically (temp file plus rename) so a half-written file is
    never read.
-6. Check your work with `zemble graph facts status <root>`: the unmapped list is
-   the emitter's test suite.
+6. Check your work with `zemble graph facts status <root>`: the **unmapped**
+   bucket is the emitter's test suite. The other buckets are about where a fact
+   came from, and an emitter cannot fix those by writing better refs.
 
 The reference emitter for Java lives in `javac-facts/`.

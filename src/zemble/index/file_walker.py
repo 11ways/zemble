@@ -174,17 +174,57 @@ def walk_entries(root: Path, extensions: Sequence[str], ignore: Sequence[str] | 
     :ytype: WalkedFile
     """
     extensions_set = frozenset(extensions)
+    yield from _walk(str(root), "", [_root_spec(root, ignore)], extensions_set)
+
+
+def _root_spec(root: Path, ignore: Sequence[str] | None = None) -> IgnoreSpec:
+    """Build the spec of always-ignored directories the walk starts from."""
     dir_patterns = list(sorted(_DEFAULT_IGNORED_DIRS)) + list(ignore or [])
     base_spec = GitIgnoreSpec.from_lines(dir_patterns, backend="simple")
     base_patterns = _prepare(base_spec)
-    spec = IgnoreSpec(
+    return IgnoreSpec(
         base=root,
         spec=base_spec,
         patterns=base_patterns,
         prefilter=_prefilter(base_patterns),
         base_offset=0,
     )
-    yield from _walk(str(root), "", [spec], extensions_set)
+
+
+def ignored_prefix(root: Path, relative_path: str, ignore: Sequence[str] | None = None) -> str | None:
+    """Return the path prefix that keeps a root-relative path out of the walk, or None.
+
+    The walk decides per directory, so the answer names the segment the descent stopped
+    at - `module/build` for anything under a build directory - rather than the file.
+
+    :param root: The walk root the path is relative to.
+    :param relative_path: A root-relative path, whether or not it exists.
+    :param ignore: Additional patterns the walk was given.
+    :return: The prefix that was ignored, or None when the walk would have reached the path.
+    """
+    specs = [_root_spec(root, ignore)]
+    segments = [segment for segment in relative_path.split("/") if segment]
+    directory = str(root)
+    walked = ""
+    for index, segment in enumerate(segments):
+        loaded = _load_ignore_for_dir(directory)
+        if loaded is not None:
+            specs = [
+                *specs,
+                IgnoreSpec(
+                    base=Path(directory),
+                    spec=loaded[0],
+                    patterns=loaded[1],
+                    prefilter=loaded[2],
+                    base_offset=len(walked) + 1 if walked else 0,
+                ),
+            ]
+        walked = f"{walked}/{segment}" if walked else segment
+        is_ignored, _bypasses = _is_ignored(walked, index < len(segments) - 1, specs)
+        if is_ignored:
+            return walked
+        directory = f"{directory}/{segment}"
+    return None
 
 
 def _is_ignored(relative_path: str, is_dir: bool, specs: list[IgnoreSpec]) -> tuple[bool, bool]:
