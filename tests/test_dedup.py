@@ -481,7 +481,15 @@ def test_baseline_journey(tmp_path: Path) -> None:
     assert not quiet_difference.new, "step 4: a suppressed class is not new"
     assert not any(entry.key == difference.new[0].key for entry in quiet_difference.resolved), "step 4: nor resolved"
 
-    # 5. A baseline written by another version is refused loudly.
+    # 5. A narrowed run never calls what it did not look for resolved.
+    everything = find_duplication(LANES, DupeOptions(kinds=(CloneKind.EXACT,)))
+    lanes_baseline = load_baseline(save_baseline(tmp_path / "lanes.json", everything))
+    production_only = find_duplication(LANES, DupeOptions(kinds=(CloneKind.EXACT,), lane=Lane.PRODUCTION))
+    assert diff_baseline(production_only, lanes_baseline).resolved == (), "step 5: a lane filter resolves nothing"
+    other_kind = find_duplication(LANES, DupeOptions(kinds=(CloneKind.RENAMED,)))
+    assert diff_baseline(other_kind, lanes_baseline).resolved == (), "step 5: a kind filter resolves nothing either"
+
+    # 6. A baseline written by another version is refused loudly.
     broken = tmp_path / "broken.json"
     broken.write_text('{"version": 99, "classes": []}')
     with pytest.raises(ValueError):

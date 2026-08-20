@@ -176,6 +176,10 @@ class DupeReport:
     min_statements: int = 0
     classes: list[CloneClass] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: The kinds this run looked for, so a baseline diff never calls an unscanned kind resolved.
+    kinds: tuple[CloneKind, ...] = tuple(CloneKind)
+    #: The lane this run was restricted to, or None when every lane was reported.
+    lane: Lane | None = None
     #: Classes a justified `.zemble/dupes.ignore` entry took out of the report.
     suppressed: list[CloneClass] = field(default_factory=list)
     #: Ignore-file violations: entries without a justification, and entries matching nothing.
@@ -199,6 +203,8 @@ class DupeReport:
             "elapsed_seconds": round(self.elapsed_seconds, 3),
             "min_tokens": self.min_tokens,
             "min_statements": self.min_statements,
+            "kinds": [kind.value for kind in self.kinds],
+            "lane": self.lane.value if self.lane is not None else None,
             "notes": list(self.notes),
             "suppressed": len(self.suppressed),
             "ignore_problems": list(self.ignore_problems),

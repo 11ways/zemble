@@ -352,6 +352,8 @@ def find_duplication(
         body_units=sum(1 for unit in units if unit.is_body),
         min_tokens=options.min_tokens,
         min_statements=options.min_statements,
+        kinds=options.kinds,
+        lane=options.lane,
     )
     classes: list[CloneClass] = []
     if CloneKind.EXACT in options.kinds:

@@ -111,11 +111,19 @@ def load_baseline(path: str | Path) -> Baseline:
     return Baseline(root=str(payload.get("root", "")), entries=tuple(entries))
 
 
+def _in_scope(entry: BaselineEntry, report: DupeReport) -> bool:
+    """Whether a run that used a --kind or --lane filter is entitled to judge a baseline entry."""
+    if entry.kind not in {kind.value for kind in report.kinds}:
+        return False
+    return report.lane is None or entry.lane == report.lane.value
+
+
 def diff_baseline(report: DupeReport, baseline: Baseline) -> BaselineDiff:
     """Compare a run against a baseline.
 
     A class suppressed by the ignore file counts as neither remaining nor new, and a baseline
     entry that is now suppressed is not called resolved either: it is still there, on purpose.
+    A run narrowed by --kind or --lane never calls the entries it did not look for resolved.
 
     :param report: The run in hand.
     :param baseline: The saved run.
@@ -123,7 +131,11 @@ def diff_baseline(report: DupeReport, baseline: Baseline) -> BaselineDiff:
     """
     current = {clone.key: clone for clone in report.classes}
     suppressed = {clone.key for clone in report.suppressed}
-    resolved = tuple(entry for entry in baseline.entries if entry.key not in current and entry.key not in suppressed)
+    resolved = tuple(
+        entry
+        for entry in baseline.entries
+        if entry.key not in current and entry.key not in suppressed and _in_scope(entry, report)
+    )
     known = baseline.keys
     remaining = tuple(clone for clone in report.classes if clone.key in known)
     new = tuple(clone for clone in report.classes if clone.key not in known)
