@@ -1,0 +1,107 @@
+[
+  {
+    "reranker": "none",
+    "passage": "-",
+    "alpha": 0.0,
+    "rerank_k": 0,
+    "ndcg10": 0.5669,
+    "p50_ms": 92.1,
+    "p90_ms": 260.4,
+    "by_kind": {
+      "architecture": 0.4163,
+      "behavioural": 0.5703,
+      "bug-report": 0.3832,
+      "consumer": 0.1467,
+      "symbol": 0.9775
+    },
+    "by_category": {
+      "architecture": 0.4163,
+      "semantic": 0.4346,
+      "symbol": 0.9775
+    }
+  },
+  {
+    "reranker": "voyage:rerank-2.5-lite",
+    "passage": "context",
+    "alpha": 0.7,
+    "rerank_k": 50,
+    "ndcg10": 0.6672,
+    "p50_ms": 541.9,
+    "p90_ms": 723.7,
+    "by_kind": {
+      "architecture": 0.4812,
+      "behavioural": 0.7019,
+      "bug-report": 0.4262,
+      "consumer": 0.492,
+      "symbol": 0.9714
+    },
+    "by_category": {
+      "architecture": 0.4812,
+      "semantic": 0.594,
+      "symbol": 0.9714
+    }
+  },
+  {
+    "reranker": "voyage:rerank-2.5-lite",
+    "passage": "context",
+    "alpha": 0.7,
+    "rerank_k": 20,
+    "ndcg10": 0.6331,
+    "p50_ms": 424.8,
+    "p90_ms": 561.9,
+    "by_kind": {
+      "architecture": 0.4416,
+      "behavioural": 0.6579,
+      "bug-report": 0.4262,
+      "consumer": 0.4,
+      "symbol": 0.9659
+    },
+    "by_category": {
+      "architecture": 0.4416,
+      "semantic": 0.5491,
+      "symbol": 0.9659
+    }
+  },
+  {
+    "reranker": "voyage:rerank-2.5",
+    "passage": "context",
+    "alpha": 0.7,
+    "rerank_k": 50,
+    "ndcg10": 0.6804,
+    "p50_ms": 570.2,
+    "p90_ms": 705.5,
+    "by_kind": {
+      "architecture": 0.484,
+      "behavioural": 0.7276,
+      "bug-report": 0.4631,
+      "consumer": 0.5,
+      "symbol": 0.9675
+    },
+    "by_category": {
+      "architecture": 0.484,
+      "semantic": 0.6182,
+      "symbol": 0.9675
+    }
+  },
+  {
+    "reranker": "voyage:rerank-2.5",
+    "passage": "context",
+    "alpha": 0.7,
+    "rerank_k": 20,
+    "ndcg10": 0.6439,
+    "p50_ms": 436.4,
+    "p90_ms": 580.5,
+    "by_kind": {
+      "architecture": 0.4567,
+      "behavioural": 0.6671,
+      "bug-report": 0.4631,
+      "consumer": 0.4,
+      "symbol": 0.9675
+    },
+    "by_category": {
+      "architecture": 0.4567,
+      "semantic": 0.5624,
+      "symbol": 0.9675
+    }
+  }
+]

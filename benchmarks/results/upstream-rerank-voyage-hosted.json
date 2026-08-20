@@ -1,0 +1,32 @@
+[
+  {
+    "reranker": "none",
+    "passage": "-",
+    "alpha": 0.0,
+    "rerank_k": 0,
+    "ndcg10": 0.8643,
+    "p50_ms": 5.2,
+    "p90_ms": 15.6,
+    "by_kind": {},
+    "by_category": {
+      "architecture": 0.8236,
+      "semantic": 0.8571,
+      "symbol": 0.9524
+    }
+  },
+  {
+    "reranker": "voyage:rerank-2.5",
+    "passage": "context",
+    "alpha": 0.7,
+    "rerank_k": 50,
+    "ndcg10": 0.8637,
+    "p50_ms": 406.2,
+    "p90_ms": 471.3,
+    "by_kind": {},
+    "by_category": {
+      "architecture": 0.794,
+      "semantic": 0.8657,
+      "symbol": 0.9512
+    }
+  }
+]

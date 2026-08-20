@@ -1,0 +1,65 @@
+{
+  "tool": "local-javaweb-zemble-hybrid-voyage-4-lite-1024",
+  "model": "voyage:voyage-4-lite@1024",
+  "summary": {
+    "ndcg10": 0.6687,
+    "tokens": 1709.0,
+    "p50_ms": 267.486,
+    "p90_ms": 279.415,
+    "p95_ms": 283.892,
+    "p99_ms": 288.203,
+    "index_ms": 269.7,
+    "by_category": {
+      "architecture": 0.5384,
+      "semantic": 0.5648,
+      "symbol": 1.0
+    },
+    "by_kind": {
+      "architecture": 0.5384,
+      "behavioural": 0.6713,
+      "bug-report": 0.6168,
+      "consumer": 0.2467,
+      "symbol": 1.0
+    }
+  },
+  "by_language": {
+    "java": {
+      "repos": 1,
+      "tokens": 1709.0,
+      "ndcg10": 0.6687,
+      "p50_ms": 267.486,
+      "p90_ms": 279.415,
+      "p95_ms": 283.892,
+      "p99_ms": 288.203,
+      "index_ms": 269.7
+    }
+  },
+  "repos": [
+    {
+      "repo": "javaweb",
+      "language": "java",
+      "mode": "auto",
+      "chunks": 73978,
+      "tokens": 1709,
+      "ndcg5": 0.6545847925638785,
+      "ndcg10": 0.6686731362209669,
+      "p50_ms": 267.48563058208674,
+      "p90_ms": 279.41460309084505,
+      "p95_ms": 283.89190286397934,
+      "p99_ms": 288.2025964721106,
+      "index_ms": 269.7103878017515,
+      "by_category": {
+        "architecture": 0.5384426194043781,
+        "semantic": 0.564826924591371,
+        "symbol": 1.0
+      },
+      "by_kind": {
+        "architecture": 0.5384426194043781,
+        "behavioural": 0.6712978046439084,
+        "bug-report": 0.6167874270842689,
+        "consumer": 0.24668922196712906,
+        "symbol": 1.0
+      }
+    }
+  ]
+}
