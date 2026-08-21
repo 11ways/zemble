@@ -11,7 +11,7 @@ from hashlib import blake2b
 
 from tree_sitter import Node
 
-from zemble.dedup.languages import LanguageProfile, node_text, profile_for
+from zemble.dedup.languages import LanguageProfile, Visibility, node_text, profile_for
 from zemble.dedup.model import Unit
 
 
@@ -107,6 +107,8 @@ def _make_unit(
     declared: frozenset[str],
     include_text: bool,
     modifiers: tuple[str, ...],
+    visibility: Visibility,
+    container_visibility: Visibility,
     tokens: list[tuple[str, str]] | None = None,
     span: tuple[int, int] | None = None,
 ) -> Unit:
@@ -133,6 +135,8 @@ def _make_unit(
         literals=tuple(literals),
         text=node_text(source, node) if include_text else None,
         modifiers=modifiers,
+        visibility=visibility,
+        container_visibility=container_visibility,
     )
 
 
@@ -158,6 +162,7 @@ def _window_units(
     profile: LanguageProfile,
     name: str,
     declared: frozenset[str],
+    container_visibility: Visibility,
     min_tokens: int,
     min_statements: int,
     max_statements: int,
@@ -183,7 +188,10 @@ def _window_units(
                 tokens = [token for run in token_runs[start : start + length] for token in run]
                 if len(tokens) < min_tokens:
                     continue
-                units.append(_WindowBuilder(window, source, file_path, profile, name, declared, tokens).build())
+                builder = _WindowBuilder(
+                    window, source, file_path, profile, name, declared, container_visibility, tokens
+                )
+                units.append(builder.build())
     return units
 
 
@@ -198,6 +206,7 @@ class _WindowBuilder:
         profile: LanguageProfile,
         name: str,
         declared: frozenset[str],
+        container_visibility: Visibility,
         tokens: list[tuple[str, str]],
     ) -> None:
         """Hold everything the window needs; :meth:`build` does the work."""
@@ -207,10 +216,11 @@ class _WindowBuilder:
         self.profile = profile
         self.name = name
         self.declared = declared
+        self.container_visibility = container_visibility
         self.tokens = tokens
 
     def build(self) -> Unit:
-        """Assemble the window's unit, merging the per-statement structural facts."""
+        """Assemble the window's unit, whose own visibility is UNKNOWN: nothing can call a window."""
         calls: list[str] = []
         literals: list[str] = []
         for statement in self.statements:
@@ -228,6 +238,8 @@ class _WindowBuilder:
             skeleton=skeleton,
             calls=tuple(sorted(set(calls))),
             literals=tuple(literals),
+            visibility=Visibility.UNKNOWN,
+            container_visibility=self.container_visibility,
         )
 
 
@@ -258,11 +270,16 @@ class _UnitExtractor:
 
     def run(self, root: Node) -> list[Unit]:
         """Extract every unit of the file, starting at its own top-level members."""
-        self._visit_members(list(root.named_children), "")
+        self._visit_members(list(root.named_children), "", Visibility.PUBLIC)
         return self.units
 
-    def _visit_members(self, nodes: list[Node], qualified: str) -> None:
-        """Emit units for a run of members, wrapper nodes folded in."""
+    def _visit_members(self, nodes: list[Node], qualified: str, container_visibility: Visibility) -> None:
+        """Emit units for a run of members, wrapper nodes folded in.
+
+        The file itself is the outermost container and is PUBLIC; every nested container
+        folds its own level into that with the narrower of the two, so a public class inside
+        a package-private one never claims to be reachable.
+        """
         members: list[Node] = []
         for node in nodes:
             if node.type in self.profile.flatten_kinds:
@@ -272,16 +289,17 @@ class _UnitExtractor:
         for member in members:
             kind = self.profile.member_kinds.get(member.type)
             if kind is not None:
-                self._emit_member(member, qualified, kind)
+                self._emit_member(member, qualified, kind, container_visibility)
                 continue
             container = self.profile.container(member, self.source)
             if container is not None:
                 inner = qualified
                 if container.name is not None:
                     inner = f"{qualified}.{container.name}" if qualified else container.name
-                self._visit_members(list(container.body.named_children), inner)
+                folded = container.visibility.narrower(container_visibility)
+                self._visit_members(list(container.body.named_children), inner, folded)
 
-    def _emit_member(self, member: Node, qualified: str, kind: str) -> None:
+    def _emit_member(self, member: Node, qualified: str, kind: str, container_visibility: Visibility) -> None:
         """Emit the unit of one member declaration, its parameters counted as declared names."""
         body = self.profile.member_body(member)
         if body is None:
@@ -305,6 +323,8 @@ class _UnitExtractor:
                     declared,
                     self.include_text,
                     self.profile.modifiers(member, self.source),
+                    self.profile.visibility(member, self.source),
+                    container_visibility,
                     tokens=tokens,
                     span=(member.start_point[0] + 1, body.end_point[0] + 1),
                 )
@@ -318,6 +338,7 @@ class _UnitExtractor:
                     self.profile,
                     name,
                     declared,
+                    container_visibility,
                     self.min_tokens,
                     self.min_statements,
                     self.max_window_statements,

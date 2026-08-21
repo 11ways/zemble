@@ -262,12 +262,25 @@ One ordered decision function, first answer wins, every step failing closed:
    `declared-type` evidence and yields `candidate-home`; no row at all yields
    `candidate-home` without a symbol.
 6. With a declaration, three checks, all of which must pass for
-   `existing-reusable-api`: visibility from the parsed modifiers (Java `public`,
-   Zig `pub`/`export`; a language with no rule is "visibility unknown"), source
-   set compatibility of every other copy's file against the declared copy's
-   file, and reachability of the declared copy's module from every other
-   member module. Any failure -> `existing-implementation-not-api`, listing all
-   of them.
+   `existing-reusable-api`: visibility, source set compatibility of every other
+   copy's file against the declared copy's file, and reachability of the
+   declared copy's module from every other member module. Any failure ->
+   `existing-implementation-not-api`, listing all of them.
+
+Visibility is two facts, both of which must be `public`: the member's own level
+and its declaring type's, the latter already folded through every enclosing type
+(a public method on a package-private class is not reusable, and the evidence
+line names the type and its level). The language profile computes both from the
+parse, so it knows the implicit rules: a Java interface or annotation member is
+public without saying so unless it is an explicit Java 9 `private` one, a nested
+type of an interface is implicitly public, and a Zig declaration is public when
+it is `pub` (or `export`) and file-private otherwise, its container included. The
+levels are one vocabulary, `zemble.dedup.languages.Visibility` (`public`,
+`protected`, `package-private`, `private`, `unknown`), they ship on every JSON
+member as `visibility` and `container_visibility`, and they are kept out of every
+hash so a visibility edit can never move a clone key. A statement window is
+`unknown`: nothing can call one. `unknown` is never reusable, which is how a new
+language fails closed until its profile places its members.
 
 ### Evidence
 
@@ -291,11 +304,10 @@ Proven: the declaration (a human wrote the row), the visibility (from the
 parse), the source-set fold (from the path), and the dependency direction (from
 `depends_on` or the Gradle build files). Not proven, and deliberately not
 claimed: that the two copies have compatible SIGNATURES, that they are
-semantically equivalent, or that the caller's context allows the call. A
-`public` verdict also does not check the declaring type's own visibility, and a
-Java interface method carries no `public` modifier, so it is reported
-restricted -- the closed direction, at the cost of some false
-`existing-implementation-not-api`.
+semantically equivalent, or that the caller's context allows the call. The
+visibility proof covers the member and its declaring types and nothing beyond
+them: a Java `public` member of a public type may still be unreachable because
+its module is not exported (JPMS) or its package is shaded, and neither is read.
 
 `home_modules` is read the way the `home` tool reads it, so the home cell must
 name its module IN BACKTICKS: a row whose home cell is prose declares no
@@ -478,7 +490,7 @@ holds no node type of any language and must stay that way. The fields:
 | `parser` | Returns the tree-sitter parser, or None when the platform lacks it. |
 | `member_kinds` | Node kind -> unit kind, for every declaration with a comparable body. |
 | `member_body`, `member_name` | Where that declaration's body and name segment are. |
-| `container` | The nested namespace a node opens (`class Foo`, `const Foo = struct`). |
+| `container` | The nested namespace a node opens (`class Foo`, `const Foo = struct`), and how far it can be reached. |
 | `flatten_kinds` | Wrapper nodes whose children are the real members. |
 | `block_kinds` | Nodes whose statement children form a statement window. |
 | `control_keywords` | Leaf kinds whose order is the control-flow skeleton. |
@@ -488,6 +500,7 @@ holds no node type of any language and must stay that way. The fields:
 | `call_names` | The names one node calls. |
 | `member_separators` | Leaf texts after which an identifier is a member and is never renamed. |
 | `modifiers` | The declaration's modifiers; reported, never hashed. |
+| `visibility` | How far one member can be called from, its declaring body's kind included. |
 | `hook_node_kinds` | The node kinds only the hooks above name, for the drift test. |
 
 `tests/test_dedup_languages.py` fails the build when a profile names a node kind

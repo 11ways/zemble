@@ -14,7 +14,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from zemble.dedup.languages import profile_for
 from zemble.dedup.model import CloneClass, CloneKind, Unit
 from zemble.home.config import ConfigError, HomeConfig
 from zemble.home.tables import DeclaredRow, RowMatchKind, load_rows, row_match_kind
@@ -58,47 +57,6 @@ def _shorten(text: str, limit: int = _TITLE_LIMIT) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class VisibilityRule:
-    """How one language spells "callable from outside the declaring file or package"."""
-
-    #: Modifiers that make a declaration reusable from another module.
-    public: frozenset[str]
-    #: Modifiers that name a restriction, in the order they are reported.
-    restricted: tuple[str, ...]
-    #: What a declaration carrying none of the above is.
-    default: str
-
-    def judge(self, modifiers: Sequence[str]) -> tuple[bool, str]:
-        """Return whether the modifiers make a member reusable, and the text saying so."""
-        if self.public & set(modifiers):
-            return True, " ".join(modifiers)
-        named = [modifier for modifier in self.restricted if modifier in modifiers]
-        return False, named[0] if named else self.default
-
-
-#: Visibility per language profile name. A language without a rule fails closed: its
-#: members are reported as "visibility unknown" and never promoted to a reusable API.
-VISIBILITY_RULES: dict[str, VisibilityRule] = {
-    "java": VisibilityRule(frozenset({"public"}), ("private", "protected"), "package-private"),
-    "zig": VisibilityRule(frozenset({"pub", "export"}), (), "not `pub`"),
-}
-
-
-def _visibility(member: Unit) -> tuple[bool, str]:
-    """Whether a clone member is callable from another module, by its parsed modifiers alone.
-
-    AIDEV-NOTE: a Java interface method carries no `public` modifier and is therefore
-    reported restricted; that is the closed direction, and widening it needs the unit
-    extractor to record the declaring container's kind, which it does not today.
-    """
-    profile = profile_for(member.file_path)
-    rule = VISIBILITY_RULES.get(profile.name) if profile is not None else None
-    if rule is None:
-        return False, "visibility unknown"
-    return rule.judge(member.modifiers)
-
-
-@dataclass(frozen=True, slots=True)
 class Evidence:
     """One kind-tagged reason a verdict is what it is, with the line the report prints."""
 
@@ -115,6 +73,21 @@ class Evidence:
         if self.capability is not None:
             payload |= {"capability": self.capability, "file": self.file, "line": self.line}
         return payload
+
+
+def visibility_evidence(member: Unit) -> Evidence:
+    """The visibility proof for one clone member: what blocks reuse, or that nothing does.
+
+    Both levels have to be PUBLIC, and the member is reported before its declaring type
+    because that is the one a reader can act on; anything a profile could not place is
+    UNKNOWN and therefore restricted, which is what keeps a new language failing closed.
+    """
+    owner = member.name.rsplit(".", 1)[0] if "." in member.name else ""
+    container = f"declaring type {owner}" if owner else "declaring type"
+    for subject, level in (("member", member.visibility), (container, member.container_visibility)):
+        if not level.is_public:
+            return Evidence(EvidenceKind.VISIBILITY, level.phrase(subject))
+    return Evidence(EvidenceKind.VISIBILITY, "public member on a public type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,8 +389,8 @@ def _reusability(
     known: bool,
 ) -> HomeVerdict:
     """Decide whether a declared member is callable from every copy, and say what blocks it."""
-    reusable, text = _visibility(member)
-    visibility = Evidence(EvidenceKind.VISIBILITY, text)
+    reusable = member.visibility.is_public and member.container_visibility.is_public
+    visibility = visibility_evidence(member)
     folds = tuple(
         Evidence(
             EvidenceKind.SOURCE_SET,
@@ -577,11 +550,10 @@ def judge_classes(root: str | Path, classes: Sequence[CloneClass]) -> tuple[dict
 
 
 __all__ = [
-    "VISIBILITY_RULES",
     "Evidence",
     "EvidenceKind",
     "HomeVerdict",
     "HomeVerdictKind",
-    "VisibilityRule",
     "judge_classes",
+    "visibility_evidence",
 ]

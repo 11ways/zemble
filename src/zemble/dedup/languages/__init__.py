@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from zemble.dedup.languages.base import Container, LanguageProfile, node_text
+from zemble.dedup.languages.base import Container, LanguageProfile, Visibility, node_text
 from zemble.dedup.languages.java import JAVA
 from zemble.dedup.languages.zig import ZIG
 
@@ -42,6 +42,7 @@ __all__ = [
     "PROFILES",
     "Container",
     "LanguageProfile",
+    "Visibility",
     "body_unit_kinds",
     "node_text",
     "profile_for",

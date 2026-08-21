@@ -6,9 +6,9 @@ import pytest
 from semble_grammars import get_language
 
 from zemble.dedup.detect import DupeOptions, find_duplication
-from zemble.dedup.languages import PROFILES, body_unit_kinds, profile_for, supported_extensions
+from zemble.dedup.languages import PROFILES, Visibility, body_unit_kinds, profile_for, supported_extensions
 from zemble.dedup.model import BODY_KINDS, WINDOW_KIND, CloneKind
-from zemble.dedup.report import format_report
+from zemble.dedup.report import format_report, report_json
 from zemble.dedup.units import extract_units
 from zemble.index.files import get_extensions
 from zemble.types import ContentType
@@ -38,6 +38,11 @@ def test_zig_journey() -> None:
     alpha = {unit.name: unit for unit in _zig_units("alpha.zig")}
     assert alpha["sumAll"].modifiers == ("pub",), "step 2: `pub` is a modifier"
     assert alpha["scaleValues"].modifiers == (), "step 2: a private function has none"
+    assert alpha["sumAll"].visibility is Visibility.PUBLIC, "step 2: and `pub` is what makes it public"
+    assert alpha["scaleValues"].visibility is Visibility.PRIVATE, "step 2: everything else is file-private"
+    assert alpha["sumAll"].container_visibility is Visibility.PUBLIC, "step 2: the file struct hides nothing"
+    assert alpha["Widget.fill"].visibility is Visibility.PUBLIC, "step 2: the member itself is `pub`"
+    assert alpha["Widget.fill"].container_visibility is Visibility.PRIVATE, "step 2: but `const Widget` is not"
 
     # 3. Calls come off both plain calls and method calls; builtins and control flow are seen.
     assert alpha["Widget.fill"].calls == ("alloc", "print"), "step 3: `alloc.alloc` calls `alloc`"
@@ -69,6 +74,16 @@ def test_zig_and_java_are_scanned_by_one_run(tmp_path: Path) -> None:
     files = {member.file_path for clone in report.classes for member in clone.members}
     assert any(path.endswith(".java") for path in files), "the Java copy is reported"
     assert any(path.endswith(".zig") for path in files), "the Zig copy is reported"
+
+
+def test_every_wire_member_carries_its_visibility() -> None:
+    """Both levels ship on every JSON member, so a reader sees what a verdict was read from."""
+    report = find_duplication(ZIG_FIXTURES, DupeOptions(kinds=(CloneKind.EXACT,), windows=False))
+    members = [member for clone in report_json(report)["classes"] for member in clone["members"]]
+    assert members, "the fixture has one exact clone class"
+    for member in members:
+        assert member["visibility"] == "public", "the cloned `pub fn` is public on the wire"
+        assert member["container_visibility"] in {"public", "private"}, "and its container's level ships too"
 
 
 def test_every_profile_names_real_grammar_nodes() -> None:

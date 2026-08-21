@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from zemble.dedup.languages.base import Container, LanguageProfile, node_text
+from zemble.dedup.languages.base import Container, LanguageProfile, Visibility, node_text
 from zemble.graph.java import java_parser
 
 _CALLABLE_KINDS = {
@@ -53,6 +53,14 @@ _LITERAL_TYPES = frozenset(
         "null_literal",
     }
 )
+#: Bodies whose every member and nested type is implicitly public (JLS 9.3, 9.4, 9.5, 9.6).
+_IMPLICITLY_PUBLIC_BODIES = frozenset({"interface_body", "annotation_type_body"})
+#: Visibility keyword -> level, in the order a modifier list is searched.
+_VISIBILITY_KEYWORDS: tuple[tuple[str, Visibility], ...] = (
+    ("private", Visibility.PRIVATE),
+    ("protected", Visibility.PROTECTED),
+    ("public", Visibility.PUBLIC),
+)
 _NAME_FIELD_DECLARATIONS = frozenset(
     {
         "formal_parameter",
@@ -88,11 +96,38 @@ def _container(node: Node, source: bytes) -> Container | None:
         if body is None:
             return None
         name = node.child_by_field_name("name")
-        return Container(body=body, name=node_text(source, name) if name is not None else "<anonymous>")
+        return Container(
+            body=body,
+            name=node_text(source, name) if name is not None else "<anonymous>",
+            visibility=_visibility(node, source),
+        )
     if node.type == "enum_constant":
         inner = next((child for child in node.named_children if child.type == "class_body"), None)
-        return Container(body=inner, name=None) if inner is not None else None
+        return Container(body=inner, name=None, visibility=Visibility.PUBLIC) if inner is not None else None
     return None
+
+
+def _declared_visibility(node: Node, source: bytes) -> Visibility:
+    """The level one declaration's own keywords spell, defaulting to package-private."""
+    modifiers = set(_modifiers(node, source))
+    for keyword, level in _VISIBILITY_KEYWORDS:
+        if keyword in modifiers:
+            return level
+    return Visibility.PACKAGE
+
+
+def _visibility(node: Node, source: bytes) -> Visibility:
+    """How far one member can be called from, the declaring body's kind included.
+
+    AIDEV-NOTE: an interface or annotation member carries no `public` keyword and is public
+    anyway; only the Java 9 `private` interface method is not, which is why the explicit
+    keyword is read first and the implicit rule only fills in for a bare declaration.
+    """
+    declared = _declared_visibility(node, source)
+    parent = node.parent
+    if parent is not None and parent.type in _IMPLICITLY_PUBLIC_BODIES and declared is not Visibility.PRIVATE:
+        return Visibility.PUBLIC
+    return declared
 
 
 def _declared_names_extra(node: Node, source: bytes) -> list[str]:
@@ -156,8 +191,11 @@ JAVA = LanguageProfile(
     declared_names_extra=_declared_names_extra,
     call_names=_call_names,
     modifiers=_modifiers,
+    visibility=_visibility,
     hook_node_kinds=frozenset(
         {
+            "annotation_type_body",
+            "interface_body",
             "class_body",
             "enum_constant",
             "explicit_constructor_invocation",

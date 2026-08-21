@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +12,8 @@ import pytest
 
 from zemble.dedup.baseline import diff_baseline, load_baseline, save_baseline
 from zemble.dedup.detect import DupeOptions, find_duplication
-from zemble.dedup.homes import VISIBILITY_RULES, Evidence, EvidenceKind, HomeVerdict, HomeVerdictKind
+from zemble.dedup.homes import Evidence, EvidenceKind, HomeVerdict, HomeVerdictKind, visibility_evidence
+from zemble.dedup.languages import PROFILES, Visibility
 from zemble.dedup.model import CloneKind, Lane
 from zemble.dedup.report import format_baseline_diff, format_report, report_json
 from zemble.dedup.structure import check_pair, edit_distance, jaccard
@@ -934,6 +936,45 @@ _ARCH_HEAD = """# Architecture
 """
 
 _JAVA_PRIVATE_BODY = _JAVA_BODY.replace("public String weave", "private String weave")
+#: The same body as an interface default method: implicitly public, with no `public` keyword.
+_JAVA_INTERFACE_BODY = _JAVA_BODY.replace("public class %s {", "public interface %s {").replace(
+    "public String weave", "default String weave"
+)
+_JAVA_PRIVATE_INTERFACE_BODY = _JAVA_INTERFACE_BODY.replace("default String weave", "private String weave")
+#: A public method whose declaring class nothing outside the package can name.
+_JAVA_PACKAGE_TYPE_BODY = _JAVA_BODY.replace("public class %s", "class %s")
+#: An implicitly public static nested class inside an interface, holding a public method.
+_JAVA_NESTED_BODY = """package %s;
+
+public interface %s {
+    class Weaving {
+        public String weave(String input) {
+            StringBuilder builder = new StringBuilder();
+            builder.append("%s");
+            builder.append(input.length());
+            builder.append(input.trim());
+            builder.append(input);
+            return builder.toString();
+        }
+    }
+}
+"""
+#: The Zig body every Zig home test clones, at file level and inside a struct. The top-level
+#: copy is TitleCase because a declared-home row only reads a backticked name as a symbol when
+#: it starts with a capital, and a file-level function has no type to hang the row off.
+_ZIG_MEMBER = """pub fn %s(items: []const u32) u32 {
+    var total: u32 = 0;
+    var index: usize = 0;
+    while (index < items.len) : (index += 1) {
+        if (items[index] > 10) {
+            total += items[index];
+        }
+    }
+    return total;
+}
+"""
+_ZIG_TOP_LEVEL = _ZIG_MEMBER % "Weave"
+_ZIG_HIDDEN_CONTAINER = "const Hidden = struct {\n" + _ZIG_MEMBER % "weave" + "};\n"
 
 
 def _declare(workspace: Path, capability: str, *, table: bool = True, toml: str = _HOME_TOML) -> None:
@@ -979,7 +1020,7 @@ def test_existing_reusable_api_from_declared_row(tmp_path: Path) -> None:
     )
     assert verdict.evidence[0].capability == capability, "step 2: the row's capability is kept whole"
     assert verdict.evidence[0].file == "ARCH.md" and verdict.evidence[0].line == 5, "step 2: and where it stands"
-    assert verdict.evidence[1].text == "public", "step 2: the visibility is read from the parsed modifiers"
+    assert verdict.evidence[1].text == "public member on a public type", "step 2: both levels are proven"
     assert verdict.evidence[2].text == "every copy's module reaches core (app: direct)", "step 2: named reachability"
     assert hash(verdict), "step 2: the verdict stays hashable, so evidence is not a bare dict"
 
@@ -1012,11 +1053,82 @@ def test_private_declared_member_is_not_a_reusable_api(tmp_path: Path) -> None:
     assert verdict.symbol == "OneShared.weave", "the mechanism is still named"
     kinds = [item.kind.value for item in verdict.evidence]
     assert kinds == ["declared-member", "visibility"], "the row and the visibility that blocks it"
-    assert verdict.evidence[1].text == "private", "the modifier itself is the evidence"
+    assert verdict.evidence[1].text == "member is private", "the level, and which of the two carries it"
     text = format_report(report)
     assert "home: existing implementation core: OneShared.weave (not a reusable API)" in text, "the head line says so"
     assert "expose it or extract the generic mechanism; do not call it as is" in text, "and what to do instead"
     assert "call or extend" not in text, "a private member is never something to call"
+
+
+def test_an_interface_method_is_public_without_saying_so(tmp_path: Path) -> None:
+    """A declared default method carries no `public` keyword and is a reusable API all the same."""
+    workspace = _existing_home_workspace(
+        tmp_path, "Weaving a string (`OneShared.weave`)", toml=_DEPENDS_TOML, body=_JAVA_INTERFACE_BODY
+    )
+    report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
+    _, verdict = _verdict_for(report, "core")
+    assert verdict is not None and verdict.kind.value == "existing-reusable-api", "an interface member is public"
+    assert verdict.evidence[1].text == "public member on a public type", "and the evidence says both levels are"
+    assert "downstream copies should call or extend it" in format_report(report), "so it is something to call"
+
+
+def test_a_private_interface_method_is_not_an_api(tmp_path: Path) -> None:
+    """Java 9's private interface method is the one interface member the implicit rule must not claim."""
+    workspace = _existing_home_workspace(
+        tmp_path, "Weaving a string (`OneShared.weave`)", toml=_DEPENDS_TOML, body=_JAVA_PRIVATE_INTERFACE_BODY
+    )
+    _, verdict = _verdict_for(find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,))), "core")
+    assert verdict is not None and verdict.kind.value == "existing-implementation-not-api", "explicit beats implicit"
+    assert verdict.evidence[1].text == "member is private", "and the member's own level is what blocks it"
+
+
+def test_a_package_private_declaring_type_blocks_a_public_member(tmp_path: Path) -> None:
+    """A public method is only reachable if its class is: the declaring type is checked too."""
+    workspace = _existing_home_workspace(
+        tmp_path, "Weaving a string (`OneShared.weave`)", toml=_DEPENDS_TOML, body=_JAVA_PACKAGE_TYPE_BODY
+    )
+    report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
+    _, verdict = _verdict_for(report, "core")
+    assert verdict is not None and verdict.kind.value == "existing-implementation-not-api", "the type blocks it"
+    assert verdict.evidence[1].text == "declaring type OneShared is package-private", "and it is named, with its level"
+    assert "call or extend" not in format_report(report), "an unreachable type is never something to call"
+
+
+def test_a_nested_type_in_an_interface_stays_public(tmp_path: Path) -> None:
+    """A nested class of an interface is implicitly public static, so its public method is reusable."""
+    workspace = _existing_home_workspace(
+        tmp_path, "Weaving a string (`Weaving.weave`)", toml=_DEPENDS_TOML, body=_JAVA_NESTED_BODY
+    )
+    _, verdict = _verdict_for(find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,))), "core")
+    assert verdict is not None and verdict.kind.value == "existing-reusable-api", "the nesting keeps it public"
+    assert verdict.symbol == "OneShared.Weaving.weave", "and the whole nested path is the mechanism"
+
+
+def _zig_workspace(tmp_path: Path, source: str, capability: str) -> Path:
+    """A core+app Zig clone under the declared dependency graph, with a row naming its member."""
+    workspace = tmp_path / "workspace"
+    for module in ("core", "app"):
+        target = workspace / module / "src" / "weave.zig"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source)
+    _declare(workspace, capability, toml=_DEPENDS_TOML)
+    return workspace
+
+
+def test_a_zig_pub_member_of_a_private_container_is_not_an_api(tmp_path: Path) -> None:
+    """`pub fn` inside a file-private struct is only public within the file that declares it."""
+    workspace = _zig_workspace(tmp_path, _ZIG_HIDDEN_CONTAINER, "Weaving (`Hidden.weave`)")
+    _, verdict = _verdict_for(find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,))), "core")
+    assert verdict is not None and verdict.kind.value == "existing-implementation-not-api", "the container blocks it"
+    assert verdict.evidence[1].text == "declaring type Hidden is private", "and the container is named"
+
+
+def test_a_zig_top_level_pub_member_is_a_reusable_api(tmp_path: Path) -> None:
+    """A `pub fn` of the file struct itself has no container to hide it."""
+    workspace = _zig_workspace(tmp_path, _ZIG_TOP_LEVEL, "Weaving (`Weave`)")
+    _, verdict = _verdict_for(find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,))), "core")
+    assert verdict is not None and verdict.kind.value == "existing-reusable-api", "nothing restricts it"
+    assert verdict.evidence[1].text == "public member on a public type", "the file itself is the public container"
 
 
 def test_unknown_dependencies_cap_a_declared_member(tmp_path: Path) -> None:
@@ -1133,11 +1245,60 @@ def test_every_verdict_kind_renders_and_ships(kind: HomeVerdictKind) -> None:
     )
 
 
-def test_every_language_declares_its_visibility() -> None:
-    """A language without a visibility rule fails closed, and adding one must not be forgotten."""
-    from zemble.dedup.languages import supported_languages
+#: One whole-body member per language, public and inside a public container, for the drift test.
+_VISIBILITY_FIXTURES: dict[str, tuple[str, str]] = {
+    "java": (
+        "Vis.java",
+        "public class Vis {\n"
+        "    public String weave(String input) {\n"
+        "        StringBuilder builder = new StringBuilder();\n"
+        "        builder.append(input.length());\n"
+        "        return builder.toString();\n"
+        "    }\n"
+        "}\n",
+    ),
+    "zig": (
+        "vis.zig",
+        "pub fn sumAll(values: []const u32) u32 {\n"
+        "    var total: u32 = 0;\n"
+        "    for (values) |value| { total += value; }\n"
+        "    return total;\n"
+        "}\n",
+    ),
+}
 
-    assert set(supported_languages()) <= set(VISIBILITY_RULES), "every scanned language spells visibility somewhere"
+
+@pytest.mark.parametrize("profile", sorted(set(PROFILES.values()), key=lambda p: p.name), ids=lambda p: p.name)
+def test_every_language_places_a_whole_body_member(profile) -> None:
+    """A language whose profile cannot place a member fails closed, and adding one must not be forgotten."""
+    from zemble.dedup.units import extract_units
+
+    assert profile.name in _VISIBILITY_FIXTURES, f"{profile.name} has no visibility fixture"
+    name, source = _VISIBILITY_FIXTURES[profile.name]
+    units = extract_units(source.encode(), f"src/{name}", windows=False, min_tokens=5)
+    bodies = [unit for unit in units if unit.is_body]
+    assert bodies, f"{profile.name}: the fixture must produce a whole-body unit"
+    for unit in bodies:
+        assert unit.visibility is Visibility.PUBLIC, f"{profile.name}: a public member is placed as public"
+        assert unit.container_visibility is Visibility.PUBLIC, f"{profile.name}: so is its public container"
+
+
+@pytest.mark.parametrize("level", list(Visibility), ids=lambda level: level.value)
+def test_the_reusability_step_handles_every_visibility(level: Visibility) -> None:
+    """Every level is judged, only PUBLIC is reusable, and the evidence names the level and its owner."""
+    member = replace(_synthetic_unit("Alpha", ()), visibility=level, container_visibility=Visibility.PUBLIC)
+    owner = replace(member, visibility=Visibility.PUBLIC, container_visibility=level)
+    reusable = level is Visibility.PUBLIC
+    assert (member.visibility.is_public and member.container_visibility.is_public) is reusable, "only public reuses"
+    assert visibility_evidence(member).kind is EvidenceKind.VISIBILITY, "the evidence is tagged as visibility"
+    if reusable:
+        assert visibility_evidence(member).text == "public member on a public type", "nothing blocks it"
+        return
+    assert visibility_evidence(member).text == level.phrase("member"), "the member is named before its type"
+    assert visibility_evidence(owner).text == level.phrase("declaring type Alpha"), "the type is named too"
+    assert ("visibility unknown" in visibility_evidence(member).text) is (level is Visibility.UNKNOWN), (
+        "an unplaceable level keeps the wording that says so"
+    )
 
 
 def test_candidate_home_without_a_declared_row(tmp_path: Path) -> None:

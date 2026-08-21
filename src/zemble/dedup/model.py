@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from zemble.dedup.languages import body_unit_kinds
+from zemble.dedup.languages import Visibility, body_unit_kinds
 from zemble.graph.model import is_test_path
 
 
@@ -74,6 +74,10 @@ class Unit:
     #: Declaration modifiers (`public`, `static`, `pub`, ...); reported, never hashed, so a
     #: visibility edit can never move a clone key.
     modifiers: tuple[str, ...] = ()
+    #: How far this member itself can be called from, as its language profile reads it.
+    visibility: Visibility = Visibility.UNKNOWN
+    #: The same for the innermost declaring type, already folded through its enclosing types.
+    container_visibility: Visibility = Visibility.UNKNOWN
 
     @property
     def location(self) -> str:
@@ -202,6 +206,8 @@ class CloneClass:
                     "tokens": member.token_count,
                     "is_test": member.is_test,
                     "modifiers": list(member.modifiers),
+                    "visibility": member.visibility.value,
+                    "container_visibility": member.container_visibility.value,
                 }
                 for member in self.members
             ],

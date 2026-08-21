@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 
 from tree_sitter import Node, Parser
 
@@ -17,6 +18,49 @@ def node_text(source: bytes, node: Node) -> str:
     return source[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
 
+class Visibility(str, Enum):
+    """How far a declaration can be called from, in every language duplication compares.
+
+    The value is both the wire spelling and the word a report prints; UNKNOWN is what a unit
+    no profile can place gets, and every consumer must treat it as restricted.
+    """
+
+    PUBLIC = "public"
+    PROTECTED = "protected"
+    PACKAGE = "package-private"
+    PRIVATE = "private"
+    UNKNOWN = "unknown"
+
+    @property
+    def is_public(self) -> bool:
+        """Whether this level alone allows a call from another module."""
+        return self is Visibility.PUBLIC
+
+    def phrase(self, subject: str) -> str:
+        """How a report names one subject's level ("member is private", "member visibility unknown")."""
+        if self is Visibility.UNKNOWN:
+            return f"{subject} visibility unknown"
+        return f"{subject} is {self.value}"
+
+    def narrower(self, other: Visibility) -> Visibility:
+        """The more restrictive of two levels, as folding a nested type through its parents needs.
+
+        AIDEV-NOTE: UNKNOWN ranks below PRIVATE on purpose, so folding an unplaceable level
+        through a public parent stays unknown instead of inheriting the parent's promise.
+        """
+        return self if _RANK[self] <= _RANK[other] else other
+
+
+#: Restriction order, most restrictive first; a level without a rank raises rather than passing.
+_RANK: dict[Visibility, int] = {
+    Visibility.UNKNOWN: 0,
+    Visibility.PRIVATE: 1,
+    Visibility.PACKAGE: 2,
+    Visibility.PROTECTED: 3,
+    Visibility.PUBLIC: 4,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class Container:
     """A declaration whose body holds further members."""
@@ -24,6 +68,8 @@ class Container:
     body: Node
     #: The segment this container adds to the qualified name, or None to keep the enclosing one.
     name: str | None = None
+    #: How far this container itself can be reached, before it is folded through its parents.
+    visibility: Visibility = Visibility.PUBLIC
 
 
 # AIDEV-NOTE: eq=False keeps the profile hashable by identity; `member_kinds` is a dict, so a
@@ -63,6 +109,8 @@ class LanguageProfile:
     call_names: Callable[[Node, bytes], list[str]]
     #: The declaration modifiers, reported but deliberately kept out of every hash.
     modifiers: Callable[[Node, bytes], tuple[str, ...]]
+    #: How far one member declaration can be called from, its declaring container's kind included.
+    visibility: Callable[[Node, bytes], Visibility]
     #: Node kinds only the hooks above name, listed so the drift test can check them too.
     hook_node_kinds: frozenset[str] = field(default_factory=frozenset)
 

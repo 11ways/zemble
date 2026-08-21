@@ -13,7 +13,7 @@ from functools import cache
 from semble_grammars import LanguageNotFoundError, UnsupportedPlatformError, get_parser
 from tree_sitter import Node, Parser
 
-from zemble.dedup.languages.base import Container, LanguageProfile, node_text
+from zemble.dedup.languages.base import Container, LanguageProfile, Visibility, node_text
 
 _MEMBER_KINDS = {
     "function_declaration": "function",
@@ -24,6 +24,8 @@ _MEMBER_KINDS = {
 _CONTAINER_TYPES = frozenset({"struct_declaration", "enum_declaration", "union_declaration", "opaque_declaration"})
 _DECLARATION_KEYWORDS = frozenset({"const", "var"})
 _MODIFIER_KEYWORDS = frozenset({"pub", "export", "extern", "inline", "noinline", "threadlocal"})
+#: Keywords that let a declaration be named from outside its file; everything else is file-private.
+_EXPORTING_KEYWORDS = frozenset({"pub", "export"})
 _CONTROL_KEYWORDS = frozenset(
     {
         "if",
@@ -85,7 +87,17 @@ def _container(node: Node, source: bytes) -> Container | None:
     if body is None:
         return None
     name = next((child for child in node.named_children if child.type == "identifier"), None)
-    return Container(body=body, name=node_text(source, name) if name is not None else "<anonymous>")
+    return Container(
+        body=body,
+        name=node_text(source, name) if name is not None else "<anonymous>",
+        visibility=_visibility(node, source),
+    )
+
+
+def _visibility(node: Node, source: bytes) -> Visibility:
+    """`pub` (or `export`) makes a declaration nameable from another file; Zig has nothing between."""
+    keywords = {node_text(source, child) for child in node.children if child.type in _EXPORTING_KEYWORDS}
+    return Visibility.PUBLIC if keywords else Visibility.PRIVATE
 
 
 def _declared_names_extra(node: Node, source: bytes) -> list[str]:
@@ -143,6 +155,7 @@ ZIG = LanguageProfile(
     declared_names_extra=_declared_names_extra,
     call_names=_call_names,
     modifiers=_modifiers,
+    visibility=_visibility,
     hook_node_kinds=frozenset(
         {
             "builtin_function",
