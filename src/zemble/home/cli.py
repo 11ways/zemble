@@ -68,10 +68,11 @@ def _daemon_args(args: argparse.Namespace) -> dict[str, Any]:
 def _in_process(args: argparse.Namespace) -> dict[str, Any]:
     """Answer in this process, building the index and the graph as needed.
 
-    A sub-directory of an indexed tree is answered from that tree, so the config and the
-    graph are read from the same root the index speaks.
+    A sub-directory of an indexed tree searches that tree's index as a view speaking paths
+    relative to the sub-directory, so its own config and graph are the ones that match.
     """
-    index, root = _load_index(args.path, args.embedder)
+    index, _source_key = _load_index(args.path, args.embedder)
+    root = args.path
     config = HomeConfig.load(root)
     ensure_graph(root)
     provider = SqliteGraphProvider(root)

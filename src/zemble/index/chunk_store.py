@@ -132,6 +132,27 @@ def file_paths_of(chunks: Sequence[Chunk]) -> list[str]:
     return columns if columns is not None else [chunk.file_path for chunk in chunks]
 
 
+def resolve_chunk(chunks: Sequence[Chunk], file_path: str, line: int) -> Chunk | None:
+    """Return the chunk of *file_path* covering *line*, or None.
+
+    Any line inside ``start_line..end_line`` resolves; on a boundary shared by two chunks the
+    one that starts there wins. The path column is read first so a persisted index only
+    builds Chunk objects for the file that was asked about.
+    """
+    file_path = file_path.replace("\\", "/")
+    fallback = None
+    for index, stored_path in enumerate(file_paths_of(chunks)):
+        if stored_path.replace("\\", "/") != file_path:
+            continue
+        chunk = chunks[index]
+        if chunk.start_line <= line <= chunk.end_line:
+            if line < chunk.end_line:
+                return chunk
+            if fallback is None:  # line == end_line: boundary; keep as fallback for end-of-file chunks
+                fallback = chunk
+    return fallback
+
+
 def languages_of(chunks: Sequence[Chunk]) -> list[str | None]:
     """Return every chunk's language, using the columns when the sequence has them."""
     columns = getattr(chunks, "languages", None)

@@ -81,7 +81,9 @@ overwrite each other. Never tune on individual eval queries.
   `daemon.log`); daemon socket `$XDG_RUNTIME_DIR/zemble/daemon.sock`. The embedding
   cache is keyed by chunk text + dims: changing capsule text means a full re-embed.
 - A path inside an already indexed root is served from that root's index, filtered to the
-  sub-tree (result paths stay ancestor-relative), and the capsule's path segment is
-  repo-relative (`<git-root name>/<inner path>`) so both roots embed the same text.
+  sub-tree. Every tool speaks paths relative to the path the caller passed (the view rebases
+  chunk paths in and out; graph, `dupes`, `explain`, `home` use that path's own graph/config),
+  and the capsule's path segment is repo-relative (`<git-root name>/<inner path>`) so both
+  roots embed the same text.
 - Upstream remote is `upstream` (MinishLab/semble); origin is `11ways/zemble`. Keep
   Semble's attribution in README, CITATION.cff and LICENSE.

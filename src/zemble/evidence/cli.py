@@ -104,13 +104,14 @@ def _daemon_args(args: argparse.Namespace) -> dict[str, Any]:
 def _in_process(args: argparse.Namespace) -> dict[str, Any]:
     """Answer one evidence subcommand in this process, building whatever it needs.
 
-    An `explain` over a sub-directory of an indexed tree is answered from that tree, so the
-    graph is opened on the same root the index speaks: both name files the same way.
+    An `explain` over a sub-directory of an indexed tree searches that tree's index as a view
+    that speaks paths relative to the sub-directory, so the graph is the sub-directory's own,
+    as it is for `outline` and `signatures`: chunks and symbols name files the same way.
     """
     index = None
     root = args.path
     if args.command == "explain":
-        index, root = _load_index(args.path, args.embedder)
+        index, _source_key = _load_index(args.path, args.embedder)
     ensure_graph(root)
     provider = SqliteGraphProvider(root)
     try:

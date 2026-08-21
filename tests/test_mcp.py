@@ -15,10 +15,11 @@ import zemble
 from tests.conftest import FakeEmbedder, make_chunk
 from zemble.daemon import client as daemon_client
 from zemble.daemon.protocol import CommandRefused, DaemonUnavailable
+from zemble.index.chunk_store import resolve_chunk
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.mcp import create_server, serve
 from zemble.types import Chunk, ContentType, SearchResult
-from zemble.utils import format_results, is_git_url, resolve_chunk
+from zemble.utils import format_results, is_git_url
 
 
 def _tool_text(result: Any) -> str:
@@ -42,6 +43,9 @@ async def _call_tool(
     getattr(fake_index, index_method).return_value = index_return
     if index_chunks is not None:
         fake_index.chunks = index_chunks
+        fake_index.chunk_at.side_effect = lambda file_path, line: resolve_chunk(index_chunks, file_path, line)
+        fake_index.chunks_of.side_effect = lambda file_path: [c for c in index_chunks if c.file_path == file_path]
+        fake_index.indexed_paths.return_value = sorted({c.file_path for c in index_chunks})
     with patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index):
         server = create_server(cache)
         result = await server.call_tool(tool, args)
@@ -339,11 +343,20 @@ async def test_tool_index_failure(cache: IndexCache, tool: str, args: dict[str, 
         ),
         pytest.param(
             "find_related",
-            {"file_path": "src/unknown.py", "line": 1, "repo": "/some/path"},
+            {"file_path": "src/foo.py", "line": 40, "repo": "/some/path"},
             "find_related",
             [],
+            [make_chunk("class Foo: pass", "src/foo.py")],
+            ["'src/foo.py' is indexed, but no chunk covers line 40", "1-1"],
+            id="find_related_line_outside_every_chunk",
+        ),
+        pytest.param(
+            "find_related",
+            {"file_path": "workspace/src/foo.py", "line": 1, "repo": "/some/path"},
+            "find_related",
             [],
-            ["No chunk found"],
+            [make_chunk("class Foo: pass", "src/foo.py")],
+            ["No indexed file matches 'workspace/src/foo.py'", "Did you mean 'src/foo.py'?", "relative to the repo"],
             id="find_related_unknown_file",
         ),
     ],

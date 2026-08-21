@@ -6,6 +6,7 @@ import tempfile
 import warnings
 from collections import OrderedDict, defaultdict
 from collections.abc import Collection, Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.embedding.base import Embedder
 from zemble.embedding.registry import load_embedder
 from zemble.index.bm25 import BM25
-from zemble.index.chunk_store import file_paths_of, languages_of, load_chunks, save_chunks
+from zemble.index.chunk_store import file_paths_of, languages_of, load_chunks, resolve_chunk, save_chunks
 from zemble.index.create import create_index_from_path
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.files import read_file_text
@@ -31,6 +32,8 @@ from zemble.rerank.registry import RerankSettings, load_reranker, resolve_rerank
 from zemble.search import _search_semantic, search
 from zemble.stats import save_search_stats
 from zemble.types import CallType, Chunk, ContentType, IndexStats, SearchResult
+
+BACKSLASH = "\\"
 
 _GIT_CLONE_TIMEOUT = int(os.environ.get("ZEMBLE_CLONE_TIMEOUT", 60))
 #: How many restricted views of one index stay resident; a caller's filter is arbitrary.
@@ -369,7 +372,8 @@ class ZembleIndex:
         :param max_snippet_lines: Lines of content to count for savings stats. None = full chunk.
         :return: Ranked list of SearchResult objects, most similar first.
         """
-        target = source.chunk if isinstance(source, SearchResult) else source
+        seed = source.chunk if isinstance(source, SearchResult) else source
+        target = self._stored(seed)
         selector = self._get_selector_vector(filter_languages=[target.language]) if target.language else None
         # The seed is embedded exactly as the indexed chunks were, capsule included, so the
         # comparison stays inside one text convention.
@@ -378,7 +382,67 @@ class ZembleIndex:
         )
         results = [r for r in results if r.chunk != target][:top_k]
         save_search_stats(results, CallType.FIND_RELATED, self._file_sizes, max_snippet_lines)
-        return results
+        return self._public(results)
+
+    def chunk_at(self, file_path: str, line: int) -> Chunk | None:
+        """Return the chunk covering ``file_path:line``, spelled as this index's callers spell paths.
+
+        Any line inside a chunk's range resolves, not only its first. The whole tree this
+        index was built from is consulted: a caller's `paths`/`exclude` filter narrows what
+        a search ANSWERS with, never which location it may be asked about.
+        """
+        chunk = resolve_chunk(self.chunks, self._stored_path(file_path), line)
+        return None if chunk is None else self._public_chunk(chunk)
+
+    def chunks_of(self, file_path: str) -> list[Chunk]:
+        """Return one file's chunks in order, in the caller's spelling; empty when the file is not indexed.
+
+        Like `chunk_at`, this consults the whole tree under the caller's root, not only what a
+        `paths`/`exclude` filter keeps, and it scans the path column: it serves error paths.
+        """
+        stored = self._stored_path(file_path)
+        return [
+            self._public_chunk(self.chunks[row])
+            for row, path in enumerate(file_paths_of(self.chunks))
+            if path == stored
+        ]
+
+    def indexed_paths(self) -> list[str]:
+        """Return every indexed file under the caller's root, in the caller's spelling, sorted."""
+        prefix = self._prefix
+        paths = {path for path in file_paths_of(self.chunks) if not prefix or path.startswith(prefix)}
+        return sorted(self._public_path(path) for path in paths)
+
+    @property
+    def _prefix(self) -> str:
+        """The routing prefix, ending in "/", that this view strips from answers; empty for a root."""
+        return (self._view.prefix or "") if self._view is not None else ""
+
+    def _public_path(self, stored: str) -> str:
+        """Map a stored chunk path to the spelling the caller sees: relative to the repo it named."""
+        prefix = self._prefix
+        return stored[len(prefix) :] if prefix and stored.startswith(prefix) else stored
+
+    def _stored_path(self, public: str) -> str:
+        """Map a caller's path to the one chunks are stored under, relative to the index root."""
+        return f"{self._prefix}{public.replace(BACKSLASH, '/').removeprefix('./')}"
+
+    def _public_chunk(self, chunk: Chunk) -> Chunk:
+        """Return *chunk* spelled for the caller; the stored object itself when nothing is stripped."""
+        public = self._public_path(chunk.file_path)
+        return chunk if public == chunk.file_path else replace(chunk, file_path=public)
+
+    def _stored(self, chunk: Chunk) -> Chunk:
+        """Return the stored twin of a chunk spelled for the caller, equal to the indexed object."""
+        if not self._prefix:
+            return chunk
+        return replace(chunk, file_path=self._stored_path(chunk.file_path))
+
+    def _public(self, results: list[SearchResult]) -> list[SearchResult]:
+        """Rebase a result list to the caller's spelling; a no-op for an index answering from its own root."""
+        if not self._prefix:
+            return results
+        return [replace(result, chunk=self._public_chunk(result.chunk)) for result in results]
 
     def _get_selector_vector(
         self, filter_languages: list[str] | None = None, filter_paths: list[str] | None = None
@@ -410,8 +474,11 @@ class ZembleIndex:
         """Return a view of this index restricted to one sub-directory, or None if it holds nothing there.
 
         The view shares this index's chunks, vectors and postings, so a search through it
-        scores and ranks exactly as the whole index does and is then filtered to the prefix;
-        result paths therefore stay relative to THIS index's root, not to the sub-directory.
+        scores and ranks exactly as the whole index does and is then filtered to the prefix.
+        The view speaks paths relative to the SUB-DIRECTORY, in and out: result paths have
+        the prefix stripped, and a path handed to `chunk_at`, `find_related` or
+        `filter_paths` is taken relative to it, so every tool answering for that directory
+        (the symbol graph, dupes) names a file the same way.
 
         :param prefix: A root-relative directory path.
         :return: The restricted view, or None when no indexed file lives under the prefix.
@@ -498,7 +565,8 @@ class ZembleIndex:
 
         resolved_rerank = (ContentType.CODE in self._content) if rerank is None else rerank
 
-        selector = self._get_selector_vector(filter_languages, filter_paths)
+        stored_paths = [self._stored_path(path) for path in filter_paths] if filter_paths else filter_paths
+        selector = self._get_selector_vector(filter_languages, stored_paths)
         results = search(
             query,
             self.embedder,
@@ -514,7 +582,7 @@ class ZembleIndex:
             rerank_settings=rerank_settings or RerankSettings.from_env(),
         )
         save_search_stats(results, CallType.SEARCH, self._file_sizes, max_snippet_lines)
-        return results
+        return self._public(results)
 
     @classmethod
     def load_from_disk(cls: type[ZembleIndex], path: Path | str, embedder: Embedder | str | None = None) -> ZembleIndex:

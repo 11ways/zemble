@@ -74,28 +74,96 @@ def test_a_subtree_view_is_the_whole_index_filtered(workspace_index: ZembleIndex
     filtered = [result for result in full if result.chunk.file_path.startswith("alpha/")]
     restricted = view.search("session token", top_k=50)
     assert [(r.chunk.file_path, r.chunk.start_line) for r in restricted] == [
-        (r.chunk.file_path, r.chunk.start_line) for r in filtered
+        (r.chunk.file_path.removeprefix("alpha/"), r.chunk.start_line) for r in filtered
     ], "same results in the same order"
     # The scores themselves are RRF ranks WITHIN the candidate pool, and the pool is the
     # selected one, exactly as `filter_languages` has always worked; only the order is a
     # promise, and it is the big index's order.
 
-    # 3. Result paths stay relative to the index root, not to the sub-directory.
-    assert all(result.chunk.file_path.startswith("alpha/") for result in restricted), "paths stay root-relative"
+    # 3. Result paths are relative to the sub-directory, the root the caller named: the same
+    #    spelling the symbol graph and `dupes` use for that directory, and joinable with it.
+    assert all(result.chunk.file_path.startswith("src/") for result in restricted), "paths are sub-directory-relative"
+    assert restricted[0].chunk.content == filtered[0].chunk.content, "only the path is rebased"
 
     # 4. Stats describe the sub-tree, not the workspace.
     assert view.stats.total_chunks < workspace_index.stats.total_chunks, "the view counts only its own chunks"
     assert view.stats.indexed_files == 2, "alpha/ holds two files"
 
     # 5. An explicit filter narrows the view further; it can never widen it past the prefix.
+    #    It is spelled relative to the sub-directory too.
     assert view.search("session token", top_k=50, filter_paths=["beta/src/store.py"]) == [], "beta is out of reach"
+    assert view.search("session token", top_k=50, filter_paths=["../beta/src/store.py"]) == [], "no escaping either"
+    only_store = view.search("session token", top_k=50, filter_paths=["src/store.py"])
+    assert only_store and all(r.chunk.file_path == "src/store.py" for r in only_store), "a sub-relative filter works"
 
     # 6. A prefix nothing was indexed under is refused rather than answered emptily.
     assert workspace_index.subtree("gamma") is None, "an empty subtree is not a view"
 
-    # 7. find_related over the view stays inside it.
-    seed = next(result.chunk for result in filtered)
-    assert all(r.chunk.file_path.startswith("alpha/") for r in view.find_related(seed, top_k=10)), "related stays in"
+    # 7. find_related over the view stays inside it, takes a seed as the view spells it, and
+    #    never hands the seed back as its own neighbour.
+    seed = restricted[0].chunk
+    related = view.find_related(seed, top_k=10)
+    assert related, "the seed has neighbours inside alpha/"
+    assert all(r.chunk.file_path.startswith("src/") for r in related), "related stays in, sub-relative"
+    assert seed not in {r.chunk for r in related}, "the seed is excluded even though only its path was rebased"
+
+
+def test_a_subtree_view_resolves_locations_in_its_own_spelling(workspace_index: ZembleIndex) -> None:
+    """A location copied out of any answer for the sub-directory resolves against the view.
+
+    The bug this guards: `dupes` and the graph name files relative to the directory the
+    caller passed, while the view used to name them relative to the ancestor, so a path
+    copied from one tool into `find_related` was reported as not indexed.
+    """
+    view = workspace_index.subtree("alpha")
+    assert view is not None
+
+    # Any line inside the chunk resolves, not only its first; the answer is sub-relative.
+    first = view.chunk_at("src/session.py", 1)
+    assert first is not None and first.file_path == "src/session.py"
+    inside = view.chunk_at("src/session.py", 2)
+    assert inside == first, "a line inside the chunk resolves to the same chunk as its first line"
+
+    # The ancestor's spelling is NOT accepted silently: one vocabulary, not two.
+    assert view.chunk_at("alpha/src/session.py", 1) is None
+    # ...but the root index, which speaks that spelling, still resolves it.
+    assert workspace_index.chunk_at("alpha/src/session.py", 1) is not None
+    assert workspace_index.chunk_at("src/session.py", 1) is None
+
+    # The view lists and describes only its own files, in its own spelling.
+    assert view.indexed_paths() == ["src/session.py", "src/store.py"]
+    assert [chunk.file_path for chunk in view.chunks_of("src/store.py")] == ["src/store.py"] * len(
+        view.chunks_of("src/store.py")
+    )
+    assert view.chunks_of("beta/src/store.py") == []
+    assert all(path.startswith(("alpha/", "beta/")) for path in workspace_index.indexed_paths())
+
+
+def test_an_unresolved_location_is_reported_as_a_path_problem(workspace_index: ZembleIndex) -> None:
+    """The error names the nearest indexed path and the spelling rule, never 'not indexed'."""
+    from zemble.utils import describe_unresolved_location, nearest_indexed_path
+
+    view = workspace_index.subtree("alpha")
+    assert view is not None
+
+    # A path in the ancestor's spelling maps to its sub-relative twin.
+    message = describe_unresolved_location(view, "alpha/src/session.py", 1)
+    assert "No indexed file matches 'alpha/src/session.py'" in message
+    assert "Did you mean 'src/session.py'?" in message
+    assert "relative to the repo you passed" in message
+
+    # A known file with a line past its last chunk lists the spans it does have.
+    message = describe_unresolved_location(view, "src/session.py", 999)
+    assert message.startswith("'src/session.py' is indexed, but no chunk covers line 999; its chunks span 1-")
+
+    # The nearest match counts shared trailing segments, needing at least the file name.
+    paths = ["src/session.py", "src/store.py", "lib/other/store.py"]
+    assert nearest_indexed_path(paths, "hawkeye/src/store.py") == "src/store.py"
+    assert nearest_indexed_path(paths, "other/store.py") == "lib/other/store.py"
+    assert nearest_indexed_path(paths, "store.py") == "lib/other/store.py", "a tie is broken by sorted order"
+    assert nearest_indexed_path(paths, "nothing.py") is None
+    assert nearest_indexed_path(paths, "") is None
+    assert "Did you mean" not in describe_unresolved_location(view, "nothing.py", 1)
 
 
 def test_a_subtree_view_is_cached_per_prefix(workspace_index: ZembleIndex) -> None:

@@ -23,7 +23,7 @@ from zemble.index import ScopeRefused, ZembleIndex
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.runtime.mcp import StaleAwareFastMCP, register_status_tool
 from zemble.types import ContentType
-from zemble.utils import format_results, is_git_url, resolve_chunk
+from zemble.utils import describe_unresolved_location, format_results, is_git_url
 
 logger = logging.getLogger(__name__)
 
@@ -213,9 +213,14 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
     async def find_related(
         file_path: Annotated[
             str,
-            Field(description="Path to the file as stored in the index (use file_path from a search result)."),
+            Field(
+                description=(
+                    "File path relative to `repo`, exactly as `search`, `dupes` and the graph tools print it "
+                    "(use `file_path` from a prior result)."
+                )
+            ),
         ],
-        line: Annotated[int, Field(description="Line number (1-indexed).")],
+        line: Annotated[int, Field(description="Any line inside the chunk (1-indexed); it need not be the first.")],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
         top_k: Annotated[int, Field(description="Number of similar chunks to return.", ge=1)] = 5,
         max_snippet_lines: Annotated[
@@ -261,12 +266,9 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             index = await _get_index(repo, cache, selected_content, paths or (), exclude or ())
         except ValueError as exc:
             return str(exc)
-        chunk = resolve_chunk(index.chunks, file_path, line)
+        chunk = index.chunk_at(file_path, line)
         if chunk is None:
-            return (
-                f"No chunk found at {file_path}:{line}. "
-                "Make sure the file is indexed and the line number is within a known chunk."
-            )
+            return {"error": describe_unresolved_location(index, file_path, line), "unresolved_location": True}
         results = index.find_related(chunk, top_k=top_k, max_snippet_lines=max_snippet_lines)
         if not results:
             return {"error": f"No related chunks found for {file_path}:{line}."}

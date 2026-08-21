@@ -42,7 +42,7 @@ from zemble.index.types import PersistencePath, PreviousIndex
 from zemble.index_cache import CacheKey, IndexCache, compute_cache_key
 from zemble.runtime.identity import identity, status_payload
 from zemble.types import ContentType
-from zemble.utils import format_results, is_git_url, resolve_chunk
+from zemble.utils import describe_unresolved_location, format_results, is_git_url
 
 logger = logging.getLogger(__name__)
 
@@ -197,9 +197,10 @@ class Daemon:
         """Resolve the requested root, returning its key and the warm index that answers it.
 
         A path inside a root the daemon already holds is answered from that root, filtered to
-        the sub-tree: the returned key names the ancestor, and the index is a view of it whose
-        result paths stay relative to the ancestor's root. `paths` and `exclude` narrow the
-        answer further, at query time; only a root with no index yet is BUILT pruned.
+        the sub-tree: the returned key names the ancestor, and the index is a view of it that
+        speaks paths relative to the REQUESTED path, as every other tool for that path does.
+        `paths` and `exclude` narrow the answer further, at query time; only a root with no
+        index yet is BUILT pruned.
 
         :param args: Request arguments carrying `path` and optional `content`, `ref`,
             `paths` and `exclude`.
@@ -517,9 +518,9 @@ async def _cmd_find_related(daemon: Daemon, args: dict[str, Any]) -> Any:
     file_path = str(args.get("file_path", ""))
     line = int(args.get("line", 0))
     max_snippet_lines = args.get("max_snippet_lines")
-    chunk = resolve_chunk(index.chunks, file_path, line)
+    chunk = index.chunk_at(file_path, line)
     if chunk is None:
-        return {"error": f"No chunk found at {file_path}:{line}.", "chunk_missing": True}
+        return {"error": describe_unresolved_location(index, file_path, line), "unresolved_location": True}
     results = await asyncio.to_thread(
         index.find_related,
         chunk,
@@ -601,16 +602,22 @@ def _root_of(args: dict[str, Any]) -> str:
 
 
 async def _cmd_explain(daemon: Daemon, args: dict[str, Any]) -> Any:
-    """Build an evidence bundle over the warm index and the daemon's own symbol graph."""
+    """Build an evidence bundle over the warm index and the daemon's own symbol graph.
+
+    The graph is the REQUESTED path's, even when the index is an ancestor's view: the view
+    already speaks paths relative to that path, which is what the graph, `outline` and
+    `dupes` for it speak, so chunks and symbols join on one spelling.
+    """
     from zemble.evidence.answers import DEFAULT_BUDGET, DEFAULT_TOP_K, explain_payload
 
-    cache_key, index = await daemon.index_for(args)
+    _cache_key, index = await daemon.index_for(args)
+    root = _root_of(args)
     query = str(args.get("query", ""))
     budget = int(args.get("budget", DEFAULT_BUDGET))
     top_k = int(args.get("top_k", DEFAULT_TOP_K))
     return await asyncio.to_thread(
         _with_graph,
-        cache_key[0],
+        root,
         lambda graph: explain_payload(index, graph, query, budget, top_k),
     )
 
@@ -639,13 +646,14 @@ async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
     from zemble.home.answers import DEFAULT_TOP_K, home_payload
     from zemble.home.config import HomeConfig
 
-    cache_key, index = await daemon.index_for(args)
+    _cache_key, index = await daemon.index_for(args)
+    root = _root_of(args)
     description = str(args.get("description", ""))
     top_k = int(args.get("top_k", DEFAULT_TOP_K))
-    config = await asyncio.to_thread(HomeConfig.load, cache_key[0])
+    config = await asyncio.to_thread(HomeConfig.load, root)
     return await asyncio.to_thread(
         _with_graph,
-        cache_key[0],
+        root,
         lambda graph: home_payload(index, graph, config, description, top_k),
     )
 

@@ -71,7 +71,7 @@ def test_cli_search(
     [
         ("with_results", ["src/bar.py", "0.8"], None, None),
         ("no_results", ["No related chunks found"], None, None),
-        ("unknown_chunk", [], "No chunk found", 1),
+        ("unknown_chunk", [], "No indexed file matches 'elsewhere/bar.py'. Did you mean 'src/bar.py'?", 1),
     ],
 )
 def test_cli_find_related(
@@ -86,9 +86,11 @@ def test_cli_find_related(
     chunk = make_chunk("class Bar: pass", "src/bar.py")
     fake_index = MagicMock()
     fake_index.filtered.return_value = fake_index
-    fake_index.chunks = [] if scenario == "unknown_chunk" else [chunk]
+    fake_index.chunk_at.return_value = None if scenario == "unknown_chunk" else chunk
+    fake_index.chunks_of.return_value = []
+    fake_index.indexed_paths.return_value = ["src/bar.py"]
     fake_index.find_related.return_value = [SearchResult(chunk=chunk, score=0.8)] if scenario == "with_results" else []
-    file_path = "unknown.py" if scenario == "unknown_chunk" else "src/bar.py"
+    file_path = "elsewhere/bar.py" if scenario == "unknown_chunk" else "src/bar.py"
     monkeypatch.setattr(sys, "argv", ["zemble", "find-related", file_path, "1", "/some/path"])
     with patch("zemble.cli.ZembleIndex.from_path", return_value=fake_index):
         if expected_exit_code is None:

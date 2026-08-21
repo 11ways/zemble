@@ -149,6 +149,9 @@ async def test_every_command_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     index = MagicMock()
     index.search.return_value = []
     index.chunks = []
+    index.chunk_at.return_value = None
+    index.chunks_of.return_value = []
+    index.indexed_paths.return_value = []
     index.content = (ContentType.CODE,)
     index.embedder.model_id = "fake:test@256"
     index.stats = IndexStats(
@@ -791,7 +794,26 @@ async def test_a_sub_path_is_served_from_the_loaded_workspace_index(tmp_path: Pa
     # 3. Its answers are the workspace index's, filtered to the sub-repo.
     payload = await server._cmd_search(daemon, {"path": str(workspace / "alpha"), "query": "session token", "top_k": 5})
     assert payload["results"], "the sub-path search answers"
-    assert all(entry["file_path"].startswith("alpha/") for entry in payload["results"]), "only alpha is returned"
+    assert all(entry["file_path"] == "session.py" for entry in payload["results"]), "alpha, spelled relative to it"
+    full = await server._cmd_search(daemon, {"path": str(workspace), "query": "session token", "top_k": 50})
+    alpha_paths = {
+        entry["file_path"].removeprefix("alpha/")
+        for entry in full["results"]
+        if entry["file_path"].startswith("alpha/")
+    }
+    assert {entry["file_path"] for entry in payload["results"]} <= alpha_paths, "only alpha is returned"
+
+    # 3b. A location copied from the sub-path's own answers resolves for find_related, and the
+    #     ancestor's spelling is reported as a path problem naming the sub-relative twin.
+    first = payload["results"][0]
+    related = await server._cmd_find_related(
+        daemon, {"path": str(workspace / "alpha"), "file_path": first["file_path"], "line": first["end_line"]}
+    )
+    assert "error" not in related or "No related" in related["error"], "the copied location resolves"
+    wrong = await server._cmd_find_related(
+        daemon, {"path": str(workspace / "alpha"), "file_path": "alpha/" + first["file_path"], "line": 1}
+    )
+    assert wrong["unresolved_location"] and f"Did you mean '{first['file_path']}'?" in wrong["error"]
 
     # 4. Status still reports exactly one index, the workspace.
     status = await server._cmd_status(daemon, {})

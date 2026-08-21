@@ -35,7 +35,7 @@ from zemble.runtime.cli import STATUS_COMMANDS, add_status_parser, run_status
 from zemble.stats import format_savings_report
 from zemble.types import ContentType
 from zemble.userenv import load_user_env
-from zemble.utils import format_results, is_git_url, resolve_chunk
+from zemble.utils import describe_unresolved_location, format_results, is_git_url
 from zemble.version import __version__
 
 _CLI_DISPATCH_ARGS = frozenset(
@@ -405,15 +405,15 @@ def _run_find_related(
         embedder,
     )
     if remote is not None:
-        if remote.get("chunk_missing"):
-            print(f"No chunk found at {file_path}:{line}.", file=sys.stderr)
+        if remote.get("unresolved_location"):
+            print(remote["error"], file=sys.stderr)
             sys.exit(1)
         print(json.dumps(remote))
         return
     index, source_key = _load_index(path, content, embedder, exclude)
-    chunk = resolve_chunk(index.chunks, file_path, line)
+    chunk = index.chunk_at(file_path, line)
     if chunk is None:
-        print(f"No chunk found at {file_path}:{line}.", file=sys.stderr)
+        print(describe_unresolved_location(index, file_path, line), file=sys.stderr)
         sys.exit(1)
     view = _filtered(index, path, paths, exclude)
     results = view.find_related(chunk, top_k=top_k, max_snippet_lines=max_snippet_lines)

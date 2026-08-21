@@ -31,7 +31,7 @@ one entry in that table. Nothing else has to change: the client is generic.
 | `ping` | Liveness plus the daemon's pid, the zemble version it runs and the revision it was started from. |
 | `status` | pid, uptime, RSS, request count, idle time, a `runtime` block (version, source root, revision, start time, `stale`, `note`), and per-index root/content/embedder/chunks/files/last-used/watching/rebuilding/last-rebuild, plus builds in flight and pending reindexes. |
 | `search` | The same payload `zemble search` and the MCP `search` tool print; honours `paths` and `exclude`. |
-| `find_related` | The same payload as `find-related`; a location that is not indexed answers `chunk_missing`. Honours `paths` and `exclude`. |
+| `find_related` | The same payload as `find-related`; a `file_path:line` that names no chunk answers `unresolved_location: true` with an error naming the nearest indexed path or the file's chunk spans. Honours `paths` and `exclude`. |
 | `stats` | What one index holds. |
 | `graph` | `command: "ensure"` guarantees a fresh symbol graph; any other name is a provider query answered through `zemble.graph.mcp.answer`. |
 | `explain` | The evidence bundle `zemble explain` and the MCP `explain` tool render, built over the warm index and the daemon's graph; honours `budget`, `top_k`, `content`, `paths` and `exclude`. |
@@ -86,9 +86,17 @@ together with a restricted view of its index.
   path-prefix chunk selector (dense `selector`, BM25 `weight_mask`) applied to every
   query - the same mechanism `find_related` already used to stay inside one language.
   Ranking is the big index's ranking, restricted to the sub-tree.
-- **Result paths stay relative to the ancestor root** (`zenit/src/Foo.java`, not
-  `src/Foo.java`). That keeps one vocabulary across search, `find_related`, the symbol
-  graph, `explain` and `outline`, all of which are answered from the same root.
+- **Paths are relative to the path the caller named** (`src/Foo.java`, not
+  `zenit/src/Foo.java`), in and out: result paths have the routing prefix stripped, and a
+  `file_path` given to `find_related`, or a `paths`/`exclude` filter, is taken relative to
+  the requested path. That is the spelling the symbol graph, `outline`, `explain` and
+  `dupes` already use for that path, so a location copied from any one tool resolves in
+  every other, and joins with the path the caller holds. `explain` and `home` therefore
+  open the REQUESTED path's graph and `home.toml`, not the ancestor's.
+- A `file_path` that resolves to no chunk is reported as an argument problem, naming the
+  nearest indexed path (`No indexed file matches 'zenit/src/Foo.java'. Did you mean
+  'src/Foo.java'?`) or, for a known file, the line spans its chunks cover; the answer
+  carries `unresolved_location: true`. Any line inside a chunk resolves, not only its first.
 - `stats` describes the sub-tree: its files, its chunks, its languages.
 - One INFO line is logged per resolution:
   `serving /work/zenit from the /work index (subtree filter)`.
