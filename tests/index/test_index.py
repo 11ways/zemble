@@ -9,7 +9,7 @@ from tests.conftest import make_chunk
 from zemble import ZembleIndex
 from zemble.index.chunk_store import save_chunks
 from zemble.index.create import create_index_from_path
-from zemble.index.files import _MAX_FILE_BYTES, FileStatus, get_file_status
+from zemble.index.files import MAX_FILE_BYTES, FileStatus, get_file_status
 from zemble.index.index import LazyFileSizes
 from zemble.types import ContentType
 
@@ -71,8 +71,8 @@ def test_index_empty_returns_zero_chunks(mock_embedder: Any, tmp_path: Path) -> 
 
 
 def test_oversized_file_is_skipped(mock_embedder: Any, tmp_path: Path) -> None:
-    """Files exceeding _MAX_FILE_BYTES are silently skipped during indexing."""
-    (tmp_path / "big.py").write_bytes(b"x" * (_MAX_FILE_BYTES + 1))
+    """Files exceeding MAX_FILE_BYTES are silently skipped during indexing."""
+    (tmp_path / "big.py").write_bytes(b"x" * (MAX_FILE_BYTES + 1))
     with pytest.raises(ValueError):  # no indexable content remains
         create_index_from_path(tmp_path, mock_embedder)
 

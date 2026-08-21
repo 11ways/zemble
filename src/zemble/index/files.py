@@ -6,7 +6,7 @@ from pathlib import Path
 
 from zemble.types import ContentType
 
-_MAX_FILE_BYTES = 1_000_000  # 1 MB max file size to read and index
+MAX_FILE_BYTES = 1_000_000  # 1 MB max file size to read and index
 _EMPTY_FILE_BYTES = 128
 _EXTENSION_TO_LANGUAGE = {
     ".4th": "forth",
@@ -504,7 +504,7 @@ def get_file_status(file_path: Path, write_time: float | None, stat: os.stat_res
         # Index invalid, file invalid
         return FileStatus.NEWER
     size = stat.st_size
-    if size > _MAX_FILE_BYTES:
+    if size > MAX_FILE_BYTES:
         # index valid, file invalid
         return FileStatus.TOO_LARGE
     if size < _EMPTY_FILE_BYTES and not read_file_text(file_path).strip():

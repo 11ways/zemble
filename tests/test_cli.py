@@ -54,6 +54,8 @@ def test_cli_search(
     """_cli_main search subcommand calls index.search and prints results."""
     chunk = make_chunk("def foo(): pass", "src/foo.py")
     fake_index = MagicMock()
+    # An unfiltered view of an index is the index itself, which is what the real one returns.
+    fake_index.filtered.return_value = fake_index
     has_results = "No results" not in expected_in_output[0]
     fake_index.search.return_value = [SearchResult(chunk=chunk, score=0.9)] if has_results else []
     monkeypatch.setattr(sys, "argv", argv)
@@ -83,6 +85,7 @@ def test_cli_find_related(
     """_cli_main find-related prints results, empty states, and missing-chunk errors."""
     chunk = make_chunk("class Bar: pass", "src/bar.py")
     fake_index = MagicMock()
+    fake_index.filtered.return_value = fake_index
     fake_index.chunks = [] if scenario == "unknown_chunk" else [chunk]
     fake_index.find_related.return_value = [SearchResult(chunk=chunk, score=0.8)] if scenario == "with_results" else []
     file_path = "unknown.py" if scenario == "unknown_chunk" else "src/bar.py"
@@ -443,3 +446,37 @@ def test_cli_clear_command(
         assert not (tmp_path / sha).exists()
     if setup_savings:
         assert not savings_file.exists()
+
+
+def test_cli_search_filters_the_results(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`--paths` and `--exclude` are parsed and applied to the index that answers."""
+    chunk = make_chunk("def foo(): pass", "src/foo.py")
+    fake_index = MagicMock()
+    view = MagicMock()
+    view.search.return_value = [SearchResult(chunk=chunk, score=0.9)]
+    fake_index.filtered.return_value = view
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["zemble", "search", "query", "/some/path", "--paths", "src", "--exclude", "vendor/", "*.min.js"],
+    )
+    with patch("zemble.cli.ZembleIndex.from_path", return_value=fake_index):
+        _cli_main()
+    fake_index.filtered.assert_called_once_with(["src"], ["vendor/", "*.min.js"])
+    assert "src/foo.py" in capsys.readouterr().out, "the filtered view answered"
+
+
+def test_cli_reports_a_daemon_refusal_without_rebuilding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal ends the command: answering it in this process would refuse identically, slowly."""
+    from zemble.daemon import client
+    from zemble.daemon.protocol import CommandRefused
+
+    def _refuse(*args: object, **kwargs: object) -> object:
+        raise CommandRefused("Refusing to index /some/path: too big")
+
+    monkeypatch.setattr(client, "call", _refuse)
+    monkeypatch.setattr(client, "_disabled_reason", None)
+    monkeypatch.delenv("ZEMBLE_DAEMON", raising=False)
+    with pytest.raises(SystemExit) as exit_code:
+        _via_daemon("search", {"path": "/some/path"}, False, None)
+    assert exit_code.value.code == 1, "the refusal is a failed command, not a fallback"

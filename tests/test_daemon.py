@@ -18,8 +18,19 @@ import pytest
 
 from tests.conftest import FakeEmbedder
 from zemble.daemon import client, server
-from zemble.daemon.protocol import CommandFailed, DaemonError, DaemonUnavailable, decode, encode, socket_path
+from zemble.daemon.protocol import (
+    CommandFailed,
+    CommandRefused,
+    DaemonError,
+    DaemonUnavailable,
+    ErrorKind,
+    decode,
+    encode,
+    error_kind,
+    socket_path,
+)
 from zemble.daemon.watch import IgnoreRules
+from zemble.embedding.pricing import BUDGET_ENV
 from zemble.index.file_walker import walk_files
 from zemble.index.files import get_extensions
 from zemble.index_cache import compute_cache_key
@@ -530,6 +541,7 @@ def test_cli_search_falls_back_when_the_daemon_is_unavailable(
 
     monkeypatch.setattr(client, "call", _refuse)
     fake_index = MagicMock()
+    fake_index.filtered.return_value = fake_index
     fake_index.search.return_value = []
     monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
     monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
@@ -561,6 +573,7 @@ def test_cli_skips_the_daemon_for_an_embedder_override(
 
     monkeypatch.setattr(client, "call", lambda *args, **kwargs: pytest.fail("must not ask the daemon"))
     fake_index = MagicMock()
+    fake_index.filtered.return_value = fake_index
     fake_index.search.return_value = []
     monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
     monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
@@ -577,6 +590,7 @@ def test_cli_no_daemon_flag_is_silent(
 
     monkeypatch.setattr(client, "call", lambda *args, **kwargs: pytest.fail("must not ask the daemon"))
     fake_index = MagicMock()
+    fake_index.filtered.return_value = fake_index
     fake_index.search.return_value = []
     monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
     monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
@@ -783,3 +797,83 @@ async def test_a_sub_path_is_served_from_the_loaded_workspace_index(tmp_path: Pa
     status = await server._cmd_status(daemon, {})
     assert [entry["root"] for entry in status["indexes"]] == [str(workspace)], "one resident index"
     daemon.shutdown()
+
+
+def _fat_workspace(root: Path, files: int = 40) -> Path:
+    """Write a workspace whose `vendored/` directory dwarfs its `src/`."""
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
+    (root / "vendored").mkdir()
+    for index in range(files):
+        (root / "vendored" / f"copy_{index}.py").write_text("x = 1\n" * 700, encoding="utf-8")
+    return root
+
+
+def _raw_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Send one request over the socket and return the decoded response line, error kind included."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.connect(str(socket_path()))
+        sock.settimeout(60)
+        with sock.makefile("rwb") as stream:
+            stream.write(encode(request))
+            stream.flush()
+            return decode(stream.readline())
+
+
+def test_a_refusal_is_not_an_outage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_embedder_load: None) -> None:
+    """A budget refusal comes back as REFUSED, so a client stops instead of rebuilding to be refused again."""
+    workspace = _fat_workspace(tmp_path / "work")
+    monkeypatch.setenv(BUDGET_ENV, "1000")
+    with running_server(watch=False, idle_minutes=0):
+        # 1. The refusal is its own error kind, not a generic failure.
+        with pytest.raises(CommandRefused) as raised:
+            client.call("search", {"path": str(workspace), "query": "anything"}, timeout=60)
+        message = str(raised.value)
+        assert "Refusing to index" in message, "1: the daemon's own refusal text is carried over the wire"
+        assert ".zembleignore" in message and "vendored/" in message, "1: with its remedies and its breakdown"
+
+        # 2. The wire says so explicitly, and an unknown kind would fail closed as a transport error.
+        response = _raw_request({"id": 1, "cmd": "search", "args": {"path": str(workspace), "query": "anything"}})
+        assert response["kind"] == ErrorKind.REFUSED.value, "2: the response is labelled a refusal"
+        assert error_kind("something-new-in-a-later-version") is ErrorKind.FAILED, "2: unknown kinds fail closed"
+
+        # 3. Excluding the fat directory answers the very same call.
+        answered = client.call(
+            "search",
+            {"path": str(workspace), "query": "app", "exclude": ["vendored/"]},
+            timeout=60,
+        )
+        assert answered["results"], "3: the pruned build answers"
+        assert all(entry["file_path"].startswith("src/") for entry in answered["results"]), "3: only src is indexed"
+
+
+def test_the_daemon_carries_paths_and_exclude(tmp_path: Path, no_embedder_load: None) -> None:
+    """`paths` and `exclude` travel the protocol and filter the warm index at query time."""
+    workspace = tmp_path / "work"
+    for area in ("src", "vendor"):
+        (workspace / area).mkdir(parents=True)
+        for index in range(3):
+            (workspace / area / f"session_{index}.py").write_text(
+                f"def {area}_session_token_{index}(user):\n    return user\n", encoding="utf-8"
+            )
+    with running_server(watch=False, idle_minutes=0):
+        whole = client.call("search", {"path": str(workspace), "query": "session token", "top_k": 6}, timeout=60)
+        assert any(entry["file_path"].startswith("vendor/") for entry in whole["results"]), "vendor is indexed"
+
+        excluded = client.call(
+            "search",
+            {"path": str(workspace), "query": "session token", "top_k": 3, "exclude": ["vendor/"]},
+            timeout=60,
+        )
+        assert len(excluded["results"]) == 3, "the top_k is still filled from the surviving candidates"
+        assert all(entry["file_path"].startswith("src/") for entry in excluded["results"]), "vendor is filtered out"
+
+        kept = client.call(
+            "search",
+            {"path": str(workspace), "query": "session token", "top_k": 6, "paths": ["vendor"]},
+            timeout=60,
+        )
+        assert all(entry["file_path"].startswith("vendor/") for entry in kept["results"]), "paths keeps only vendor"
+
+        status = client.call("status", timeout=30)
+        assert len(status["indexes"]) == 1, "one index served every filtered answer"

@@ -30,11 +30,11 @@ one entry in that table. Nothing else has to change: the client is generic.
 | --- | --- |
 | `ping` | Liveness plus the daemon's pid, the zemble version it runs and the revision it was started from. |
 | `status` | pid, uptime, RSS, request count, idle time, a `runtime` block (version, source root, revision, start time, `stale`, `note`), and per-index root/content/embedder/chunks/files/last-used/watching/rebuilding/last-rebuild, plus builds in flight and pending reindexes. |
-| `search` | The same payload `zemble search` and the MCP `search` tool print. |
-| `find_related` | The same payload as `find-related`; a location that is not indexed answers `chunk_missing`. |
+| `search` | The same payload `zemble search` and the MCP `search` tool print; honours `paths` and `exclude`. |
+| `find_related` | The same payload as `find-related`; a location that is not indexed answers `chunk_missing`. Honours `paths` and `exclude`. |
 | `stats` | What one index holds. |
 | `graph` | `command: "ensure"` guarantees a fresh symbol graph; any other name is a provider query answered through `zemble.graph.mcp.answer`. |
-| `explain` | The evidence bundle `zemble explain` and the MCP `explain` tool render, built over the warm index and the daemon's graph; honours `budget`, `top_k` and `content`. |
+| `explain` | The evidence bundle `zemble explain` and the MCP `explain` tool render, built over the warm index and the daemon's graph; honours `budget`, `top_k`, `content`, `paths` and `exclude`. |
 | `outline` | The outline of a file or a type; an ambiguous or unknown target comes back as an error payload, not a failed command. |
 | `signatures` | A symbol's signature and its exactly resolved call sites, with the same refusal shape. |
 | `refresh` | Force a rebuild check for one root (loads it first if needed). |
@@ -65,7 +65,9 @@ its snapshot.
 `IndexCache` keeps the semantics it had inside the MCP server: keyed by
 (resolved source, content types), LRU eviction, one in-flight build shared by
 concurrent callers, and a staleness re-check against the on-disk cache with a
-cooldown scaled by build time. The daemon adds an eviction callback (so an evicted
+cooldown scaled by build time. A build that was told to `exclude` paths carries a
+third key element, the digest of those patterns - and only then, so a plain build's
+key, in memory and on disk, is byte-identical to what it always was. The daemon adds an eviction callback (so an evicted
 root stops being watched), a resident-index limit, last-used timestamps, and
 `replace()` for the atomic swap a rebuild ends with.
 
@@ -95,6 +97,26 @@ together with a restricted view of its index.
 
 This is what a sub-repo request costs now: no build, no embedding, no second resident
 index. `zemble daemon status` keeps showing one index, the workspace.
+
+### Narrowing an answer: `paths` and `exclude`
+
+Both are optional on `search`, `find_related` and `explain`, both are lists of strings
+relative to the path the caller named, and both are refused as a command error if they
+are not lists of strings - an unreadable filter is never silently ignored.
+
+- On a root the daemon can already serve, they filter at **query time**: `index.filtered()`
+  builds a restricted view sharing the same chunks, vectors and postings, and the view's
+  files are dropped from the candidate set *before* the top-k is taken, so k results still
+  come back full. Views are cached per filter, bounded, and cost one pass over the chunk
+  list to build.
+- On a root with **no index at all**, `exclude` is additionally handed to the walker that
+  builds it, so an oversized tree can be indexed without its fat directories in the same
+  call that was just refused. That build is a different index of a different file set, so
+  it is keyed separately and never served as the plain index of the root.
+
+The routing prefix of a sub-path request (see below) and a caller's filter compose: the
+prefix is stripped before the filter is matched, so a caller's `paths`/`exclude` are always
+relative to the repo it named, whichever root actually answers.
 
 ### Watching
 
@@ -199,6 +221,14 @@ The daemon is an accelerator, never a requirement.
 - Any failure (cannot start, connection lost, protocol error) raises `DaemonError`,
   and the caller answers in-process after one stderr line:
   `daemon unavailable (<reason>); running in-process`.
+- **A refusal is not an outage.** A deliberate, deterministic "no" - a root too broad
+  (`ScopeRefused`) or too big for the token budget (`EmbeddingBudgetExceeded`) - is
+  answered as `{"ok": false, "kind": "refused", "error": ...}` and raises `CommandRefused`
+  (a `CommandFailed`) in the client. Callers surface it instead of falling back: the same
+  request refuses identically in this process, so a fallback would pay for a full,
+  minutes-long build only to be told the same thing. `ErrorKind` in `protocol.py` is the
+  one home for that vocabulary, and an unknown kind from a newer daemon is read as
+  `failed`, i.e. it falls back - unknown members fail closed toward the safe behaviour.
 - `--no-daemon` and `ZEMBLE_DAEMON=0` skip the daemon silently: an opt-out is not a failure.
 - `--embedder` skips it too, silently: the daemon holds one embedder (the environment
   default), and an override is answered in the calling process.

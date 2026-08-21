@@ -5,12 +5,20 @@ import os
 import re
 import sys
 import warnings
+from collections.abc import Sequence
 from importlib.util import find_spec
 from pathlib import Path
 from shutil import rmtree
 from typing import Literal
 
-from zemble.cache import cache_key, indexed_ancestor_hint, resolve_cache_folder, resolve_index_root, save_index_to_cache
+from zemble.cache import (
+    cache_key,
+    has_cached_index,
+    indexed_ancestor_hint,
+    resolve_cache_folder,
+    resolve_index_root,
+    save_index_to_cache,
+)
 from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser, run_embed_status
@@ -19,7 +27,7 @@ from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
-from zemble.index import BroadRootRefused, ZembleIndex, resolve_embedder
+from zemble.index import ScopeRefused, ZembleIndex, resolve_embedder
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
 from zemble.rerank.registry import RerankerSpecError, load_reranker
@@ -68,28 +76,34 @@ _SUBCOMMAND_RUNNERS = {
 _SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
 
 
-def _build_index(path: str, content: list[ContentType], embedder: str | None = None) -> tuple[ZembleIndex, str]:
+def _build_index(
+    path: str, content: list[ContentType], embedder: str | None = None, exclude: Sequence[str] = ()
+) -> tuple[ZembleIndex, str]:
     """Build, or route to, the index that answers a request for a path.
 
     A sub-directory of an already indexed tree is answered from that tree's index, filtered
     to the sub-directory, instead of being embedded all over again as an index of its own.
+    `exclude` prunes the walk only when this path has no index yet; an existing index is
+    filtered at query time by the caller instead, which never re-embeds anything.
 
     :param path: Local path or git URL.
     :param content: Content types to index.
     :param embedder: Embedder spec, or None for the environment default.
+    :param exclude: Gitignore-style patterns a first build must skip.
     :return: The index to answer with, and the source key it must be cached under.
     """
     if is_git_url(path):
         return ZembleIndex.from_git(path, content=content, embedder=embedder), path
     root, prefix = resolve_index_root(path, resolve_embedder(embedder).model_id, content)
-    index = ZembleIndex.from_path(root, content=content, embedder=embedder)
+    pruned = () if has_cached_index(root, content) else tuple(exclude)
+    index = ZembleIndex.from_path(root, content=content, embedder=embedder, exclude=pruned)
     if prefix is None:
         return index, root
     view = index.subtree(prefix)
     if view is not None:
         return view, root
     print(f"the {root} index holds nothing under {path}; indexing it on its own", file=sys.stderr)
-    return ZembleIndex.from_path(path, content=content, embedder=embedder), path
+    return ZembleIndex.from_path(path, content=content, embedder=embedder, exclude=tuple(exclude)), path
 
 
 def _maybe_save_index(index: ZembleIndex, path: str) -> None:
@@ -135,6 +149,36 @@ def _run_stats(path: str, content: list[ContentType], embedder: str | None = Non
         )
     )
     _maybe_save_index(index, source_key)
+
+
+def _filtered(index: ZembleIndex, path: str, paths: Sequence[str], exclude: Sequence[str]) -> ZembleIndex:
+    """Restrict an index to what `--paths` keeps and `--exclude` drops, exiting when nothing is left."""
+    view = index.filtered(paths, exclude)
+    if view is None:
+        print(f"No indexed file under {path} survives --paths/--exclude.", file=sys.stderr)
+        sys.exit(1)
+    return view
+
+
+def _add_filter_args(p: argparse.ArgumentParser) -> None:
+    """Add --paths and --exclude, the two query-time narrowings every search surface shares."""
+    p.add_argument(
+        "--paths",
+        nargs="+",
+        default=[],
+        metavar="PATH",
+        help="Only answer from these sub-paths of the root (repo-relative).",
+    )
+    p.add_argument(
+        "--exclude",
+        nargs="+",
+        default=[],
+        metavar="PATTERN",
+        help=(
+            "Gitignore-style patterns, relative to the root, dropped from the results; "
+            "on a root with no index yet they also prune the walk that builds it."
+        ),
+    )
 
 
 def _add_content_args(p: argparse.ArgumentParser) -> None:
@@ -238,9 +282,10 @@ def _via_daemon(cmd: str, args: dict[str, object], no_daemon: bool, embedder: st
     :param no_daemon: Whether the user asked for the in-process path.
     :param embedder: An explicit embedder spec, which the daemon does not serve.
     :return: The daemon's result, or None when this process must answer itself.
+    :raises SystemExit: If the daemon deliberately refused the command.
     """
     from zemble.daemon import client
-    from zemble.daemon.protocol import DaemonError
+    from zemble.daemon.protocol import CommandRefused, DaemonError
 
     if no_daemon:
         # An explicit opt-out is not a failure: no fallback line is printed for it.
@@ -254,26 +299,34 @@ def _via_daemon(cmd: str, args: dict[str, object], no_daemon: bool, embedder: st
         return None
     try:
         return client.call(cmd, args)
+    except CommandRefused as exc:
+        # A refusal is the answer, in this process too: falling back would pay for a whole
+        # build only to be refused again, which is exactly what it costs the most to repeat.
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
     except DaemonError as exc:
         print(f"daemon unavailable ({exc}); running in-process", file=sys.stderr)
         return None
 
 
-def _load_index(path: str, content: list[ContentType], embedder: str | None = None) -> tuple[ZembleIndex, str]:
+def _load_index(
+    path: str, content: list[ContentType], embedder: str | None = None, exclude: Sequence[str] = ()
+) -> tuple[ZembleIndex, str]:
     """Build or route to an index, exiting on FileNotFoundError, a bad embedder spec or a refused build.
 
     :param path: Local path or git URL.
     :param content: Content types to index.
     :param embedder: Embedder spec, or None for the environment default.
+    :param exclude: Gitignore-style patterns a first build must skip.
     :return: The index to answer with, and the source key it must be cached under.
     """
     try:
-        return _build_index(path, content, embedder)
+        return _build_index(path, content, embedder, exclude)
     except EmbeddingBudgetExceeded as e:
         hint = indexed_ancestor_hint(path, content)
         print(f"{e} {hint}" if hint else str(e), file=sys.stderr)
         sys.exit(1)
-    except (BroadRootRefused, FileNotFoundError, EmbedderSpecError) as e:
+    except (ScopeRefused, FileNotFoundError, EmbedderSpecError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
@@ -287,6 +340,8 @@ def _run_search(
     embedder: str | None = None,
     no_daemon: bool = False,
     reranker: str | None = None,
+    paths: Sequence[str] = (),
+    exclude: Sequence[str] = (),
 ) -> None:
     """Handle the `search` subcommand."""
     # An explicit --reranker cannot ride the daemon protocol, so it runs the search here
@@ -299,6 +354,8 @@ def _run_search(
             "top_k": top_k,
             "content": [c.value for c in content],
             "max_snippet_lines": max_snippet_lines,
+            "paths": list(paths),
+            "exclude": list(exclude),
         },
         no_daemon or reranker is not None,
         embedder,
@@ -306,13 +363,14 @@ def _run_search(
     if remote is not None:
         print(json.dumps(remote))
         return
-    index, source_key = _load_index(path, content, embedder)
+    index, source_key = _load_index(path, content, embedder, exclude)
     try:
         pairwise = load_reranker(reranker)
     except RerankerSpecError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
-    results = index.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines, reranker=pairwise)
+    view = _filtered(index, path, paths, exclude)
+    results = view.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines, reranker=pairwise)
     out = format_results(query, results, max_snippet_lines) if results else {"error": "No results found."}
     print(json.dumps(out))
     _maybe_save_index(index, source_key)
@@ -327,6 +385,8 @@ def _run_find_related(
     max_snippet_lines: int | None,
     embedder: str | None = None,
     no_daemon: bool = False,
+    paths: Sequence[str] = (),
+    exclude: Sequence[str] = (),
 ) -> None:
     """Handle the `find-related` subcommand."""
     remote = _via_daemon(
@@ -338,6 +398,8 @@ def _run_find_related(
             "top_k": top_k,
             "content": [c.value for c in content],
             "max_snippet_lines": max_snippet_lines,
+            "paths": list(paths),
+            "exclude": list(exclude),
         },
         no_daemon,
         embedder,
@@ -348,12 +410,13 @@ def _run_find_related(
             sys.exit(1)
         print(json.dumps(remote))
         return
-    index, source_key = _load_index(path, content, embedder)
+    index, source_key = _load_index(path, content, embedder, exclude)
     chunk = resolve_chunk(index.chunks, file_path, line)
     if chunk is None:
         print(f"No chunk found at {file_path}:{line}.", file=sys.stderr)
         sys.exit(1)
-    results = index.find_related(chunk, top_k=top_k, max_snippet_lines=max_snippet_lines)
+    view = _filtered(index, path, paths, exclude)
+    results = view.find_related(chunk, top_k=top_k, max_snippet_lines=max_snippet_lines)
     label = f"Chunks related to {file_path}:{line}"
     out = (
         format_results(label, results, max_snippet_lines)
@@ -451,6 +514,7 @@ def _cli_main() -> None:
         metavar="SPEC",
         help="Pairwise reranker over the top candidates: none (default), cross:<hf-model>, voyage:<model>.",
     )
+    _add_filter_args(search_p)
     _add_content_args(search_p)
     _add_embedder_arg(search_p)
     _add_confirm_arg(search_p)
@@ -482,6 +546,7 @@ def _cli_main() -> None:
         metavar="N",
         help="Lines of source per result (default: full chunk). 10 = signature + body, 0 = no code.",
     )
+    _add_filter_args(related_p)
     _add_content_args(related_p)
     _add_embedder_arg(related_p)
     _add_confirm_arg(related_p)
@@ -550,6 +615,8 @@ def _cli_main() -> None:
             args.embedder,
             args.no_daemon,
             args.reranker,
+            args.paths,
+            args.exclude,
         )
     elif args.command == "stats":
         _run_stats(args.path, _resolve_content(args.content, args.include_text_files), args.embedder, args.no_daemon)
@@ -563,4 +630,6 @@ def _cli_main() -> None:
             args.max_snippet_lines,
             args.embedder,
             args.no_daemon,
+            args.paths,
+            args.exclude,
         )

@@ -22,9 +22,12 @@ from zemble.daemon.protocol import (
     REVISION_FIELD,
     START_TIMEOUT_SECONDS,
     CommandFailed,
+    CommandRefused,
     DaemonUnavailable,
+    ErrorKind,
     decode,
     encode,
+    error_kind,
     log_path,
     pid_path,
     process_alive,
@@ -189,7 +192,8 @@ def call(cmd: str, args: dict[str, Any] | None = None, *, auto_start: bool = Tru
         which is what a first, index-building request needs.
     :return: The command's result.
     :raises DaemonUnavailable: If this process may not use a daemon, or none could be reached.
-    :raises CommandFailed: If the daemon reported an error for this command.
+    :raises CommandRefused: If the daemon deliberately refused the command.
+    :raises CommandFailed: If the daemon reported any other error for this command.
     """
     reason = disabled_reason()
     if reason is not None:
@@ -217,5 +221,8 @@ def call(cmd: str, args: dict[str, Any] | None = None, *, auto_start: bool = Tru
     response = decode(line)
     _warn_on_revision_mismatch(response)
     if not response.get("ok"):
-        raise CommandFailed(str(response.get("error", "unknown daemon error")))
+        message = str(response.get("error", "unknown daemon error"))
+        if error_kind(response.get("kind")) is ErrorKind.REFUSED:
+            raise CommandRefused(message)
+        raise CommandFailed(message)
     return response.get("result")

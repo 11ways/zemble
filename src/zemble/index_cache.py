@@ -13,7 +13,14 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from zemble.cache import get_validated_cache, indexed_ancestor_hint, resolve_index_root, save_index_to_cache
+from zemble.cache import (
+    exclude_digest,
+    get_validated_cache,
+    has_cached_index,
+    indexed_ancestor_hint,
+    resolve_index_root,
+    save_index_to_cache,
+)
 from zemble.embedding.base import Embedder
 from zemble.embedding.pricing import EmbeddingBudgetExceeded
 from zemble.embedding.registry import load_embedder
@@ -26,18 +33,24 @@ logger = logging.getLogger(__name__)
 CACHE_MAX_SIZE = 10  # Max number of cached indexes to keep in memory
 MIN_REVALIDATE_FACTOR = 3  # Don't recheck staleness sooner than this many times the last build's duration
 
-CacheKey = tuple[str, tuple[ContentType, ...]]
+#: (source, content), plus the exclude digest as a THIRD element only when a build pruned
+#: paths: a plain build's key is byte-identical to what it always was.
+CacheKey = tuple[str, tuple[ContentType, ...]] | tuple[str, tuple[ContentType, ...], str]
 
 
 def compute_cache_key(
     source: str,
     ref: str | None = None,
     content: Sequence[ContentType] = (ContentType.CODE,),
+    exclude: Sequence[str] = (),
 ) -> CacheKey:
     """Compute the canonical key for an exact index variant."""
     is_git = is_git_url(source)
     source_key = (f"{source}@{ref}" if ref else source) if is_git else str(Path(source).resolve())
     normalized = tuple(content_type for content_type in ContentType if content_type in content)
+    digest = exclude_digest(exclude)
+    if digest:
+        return source_key, normalized, digest
     return source_key, normalized
 
 
@@ -55,6 +68,8 @@ class IndexCache:
         self._model_ready = asyncio.Event()
         self._tasks: OrderedDict[CacheKey, asyncio.Future[ZembleIndex]] = OrderedDict()  # ordered for LRU eviction
         self._revalidate_after: dict[CacheKey, float] = {}
+        #: The exclude patterns each built key was told to prune with; the key only carries their digest.
+        self._exclude_by_key: dict[CacheKey, tuple[str, ...]] = {}
         self._max_size = max_size
         self._on_evict = on_evict
         self.last_used: dict[CacheKey, float] = {}
@@ -92,18 +107,26 @@ class IndexCache:
         source: str,
         ref: str | None = None,
         content: Sequence[ContentType] = (ContentType.CODE,),
+        exclude: Sequence[str] = (),
     ) -> CacheKey:
         """Compute the canonical key for an exact index variant."""
-        return compute_cache_key(source, ref, content)
+        return compute_cache_key(source, ref, content, exclude)
 
-    def _build_index(self, source: str, ref: str | None, embedder: Embedder, cache_key: CacheKey) -> ZembleIndex:
+    def _build_index(
+        self,
+        source: str,
+        ref: str | None,
+        embedder: Embedder,
+        cache_key: CacheKey,
+        exclude: Sequence[str] = (),
+    ) -> ZembleIndex:
         """Build an index for the given source and cache it."""
-        source_key, content = cache_key
+        source_key, content = cache_key[0], cache_key[1]
         try:
             index = (
                 ZembleIndex.from_git(source, ref=ref, embedder=embedder, content=content)
                 if is_git_url(source)
-                else ZembleIndex.from_path(source_key, embedder=embedder, content=content)
+                else ZembleIndex.from_path(source_key, embedder=embedder, content=content, exclude=exclude)
             )
         except EmbeddingBudgetExceeded as exc:
             hint = indexed_ancestor_hint(source_key, content)
@@ -115,7 +138,7 @@ class IndexCache:
         return index
 
     async def _build_tracked(
-        self, source: str, ref: str | None, embedder: Embedder, cache_key: CacheKey
+        self, source: str, ref: str | None, embedder: Embedder, cache_key: CacheKey, exclude: Sequence[str] = ()
     ) -> ZembleIndex:
         """Build an index and, for local paths, record when its staleness cooldown ends.
 
@@ -123,7 +146,7 @@ class IndexCache:
         regardless of which thread `_build_index` itself ran on.
         """
         start = time.monotonic()
-        index = await asyncio.to_thread(self._build_index, source, ref, embedder, cache_key)
+        index = await asyncio.to_thread(self._build_index, source, ref, embedder, cache_key, exclude)
         if not is_git_url(source):
             finished = time.monotonic()
             self._revalidate_after[cache_key] = finished + (finished - start) * MIN_REVALIDATE_FACTOR
@@ -183,7 +206,14 @@ class IndexCache:
             return
         if self._embedder is None:
             return
-        validated = await asyncio.to_thread(get_validated_cache, cache_key[0], self._embedder.model_id, cache_key[1])
+        validated = await asyncio.to_thread(
+            get_validated_cache,
+            cache_key[0],
+            self._embedder.model_id,
+            cache_key[1],
+            None,
+            self._exclude_by_key.get(cache_key, ()),
+        )
         # Only evict if this entry hasn't already been replaced by a concurrent caller.
         if validated is None and self._tasks.get(cache_key) is cached:
             self.evict(cache_key)
@@ -198,9 +228,10 @@ class IndexCache:
         source: str,
         ref: str | None = None,
         content: Sequence[ContentType] = (ContentType.CODE,),
+        exclude: Sequence[str] = (),
     ) -> ZembleIndex:
         """Return an index for the requested source, building and caching it on first access."""
-        _cache_key, index = await self.get_with_key(source, ref, content)
+        _cache_key, index = await self.get_with_key(source, ref, content, exclude)
         return index
 
     async def get_with_key(
@@ -208,6 +239,7 @@ class IndexCache:
         source: str,
         ref: str | None = None,
         content: Sequence[ContentType] = (ContentType.CODE,),
+        exclude: Sequence[str] = (),
     ) -> tuple[CacheKey, ZembleIndex]:
         """Return the index answering a request, and the key of the root it was built from.
 
@@ -215,32 +247,53 @@ class IndexCache:
         sub-directory, so the key names the ANCESTOR root while the index is a restricted
         view of it. Only when the ancestor holds nothing under the sub-directory does the
         sub-directory get an index of its own.
+
+        Exclude patterns are a property of a BUILD, never of a lookup: they prune the walk of
+        an index that has to be built anyway, and an index that already exists is filtered at
+        query time instead, by the caller, so no second copy of a tree is ever embedded.
         """
         embedder = await self._await_model()
+        build_exclude = self._build_exclude(source, content, exclude)
         root, prefix = await asyncio.to_thread(
             resolve_index_root, source, embedder.model_id, content, None, self.loaded_roots(content)
         )
         if prefix is None:
-            return await self._get_exact(source, ref, content)
+            return await self._get_exact(source, ref, content, build_exclude)
         cache_key, index = await self._get_exact(root, ref, content)
         view = index.subtree(prefix)
         if view is not None:
             return cache_key, view
         logger.info("the %s index holds nothing under %s; indexing it on its own", root, source)
-        return await self._get_exact(source, ref, content)
+        return await self._get_exact(source, ref, content, build_exclude)
+
+    def _build_exclude(self, source: str, content: Sequence[ContentType], exclude: Sequence[str]) -> tuple[str, ...]:
+        """Return the patterns a BUILD must honour: none, once an index of this root exists.
+
+        An existing index answers the same request by filtering at query time, which is free;
+        rebuilding it pruned would embed the whole tree a second time to answer one call.
+        """
+        if not exclude or is_git_url(source):
+            return ()
+        resolved = str(Path(source).resolve())
+        if resolved in self.loaded_roots(content) or has_cached_index(resolved, content):
+            return ()
+        return tuple(exclude)
 
     async def _get_exact(
         self,
         source: str,
         ref: str | None = None,
         content: Sequence[ContentType] = (ContentType.CODE,),
+        exclude: Sequence[str] = (),
     ) -> tuple[CacheKey, ZembleIndex]:
         """Return the index built from exactly this source, building and caching it on first access.
 
         Local paths are revalidated against the on-disk cache on every call (subject to a
         cooldown scaled by build time), so an entry is rebuilt once its files change.
         """
-        cache_key = self._compute_cache_key(source, ref, content)
+        cache_key = self._compute_cache_key(source, ref, content, exclude)
+        if exclude:
+            self._exclude_by_key[cache_key] = tuple(exclude)
         await self._evict_if_stale(cache_key)
 
         if cache_key not in self._tasks:
@@ -253,7 +306,9 @@ class IndexCache:
                     self.last_used.pop(evicted_key, None)
                     if self._on_evict is not None:
                         self._on_evict(evicted_key)
-                self._tasks[cache_key] = asyncio.create_task(self._build_tracked(source, ref, embedder, cache_key))
+                self._tasks[cache_key] = asyncio.create_task(
+                    self._build_tracked(source, ref, embedder, cache_key, exclude)
+                )
         self._tasks.move_to_end(cache_key)
         self.last_used[cache_key] = time.time()
         task = self._tasks[cache_key]

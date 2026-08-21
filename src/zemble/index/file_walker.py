@@ -148,6 +148,19 @@ def _load_ignore_for_dir(
     return loaded
 
 
+def compile_ignore(patterns: Sequence[str]) -> GitIgnoreSpec | None:
+    """Compile gitignore-style patterns into one spec matched against root-relative paths.
+
+    The one place a caller-supplied pattern list becomes a matcher, so a query-time filter
+    and a build-time exclusion answer the same question the same way.
+
+    :param patterns: Gitignore-syntax patterns, relative to the root.
+    :return: The spec, or None when there is nothing to match.
+    """
+    cleaned = [pattern for pattern in (raw.strip() for raw in patterns) if pattern]
+    return GitIgnoreSpec.from_lines(cleaned) if cleaned else None
+
+
 def walk_files(root: Path, extensions: Sequence[str], ignore: Sequence[str] | None = None) -> Iterator[Path]:
     """Yield files under root matching extensions, skipping ignored paths.
 

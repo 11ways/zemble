@@ -30,19 +30,39 @@ if TYPE_CHECKING:
     from zemble.index import ZembleIndex
 
 
-def cache_key(path: str) -> str:
-    """Compute the sha256 cache key for a local path or git URL."""
+def exclude_digest(exclude: Sequence[str]) -> str:
+    """Return the stable digest of a build's exclude patterns, or "" when it excluded nothing.
+
+    Order and repetition are irrelevant to what a walk skips, so they are irrelevant here too.
+    """
+    normalized = sorted({pattern.strip() for pattern in exclude if pattern.strip()})
+    if not normalized:
+        return ""
+    return hashlib.new("sha256", "\n".join(normalized).encode("utf-8")).hexdigest()[:16]
+
+
+def cache_key(path: str, exclude: Sequence[str] = ()) -> str:
+    """Compute the sha256 cache key for a local path or git URL.
+
+    A build told to exclude paths indexes a different tree than the same root does without
+    them, so it gets its own key - and only then: a plain build's key is what it always was.
+    """
     if is_git_url(path):
         data = path.encode("utf-8")
     else:
         normalized = Path(path).expanduser().resolve()
         data = str(normalized).encode("utf-8")
+    digest = exclude_digest(exclude)
+    if digest:
+        data += b"\x00exclude=" + digest.encode("ascii")
     return hashlib.new("sha256", data).hexdigest()
 
 
-def find_index_from_cache_folder(path: str, content: Sequence[ContentType] = (ContentType.CODE,)) -> Path:
+def find_index_from_cache_folder(
+    path: str, content: Sequence[ContentType] = (ContentType.CODE,), exclude: Sequence[str] = ()
+) -> Path:
     """Find an exact content index in the cache for a project path."""
-    cache_dir = resolve_cache_folder() / cache_key(path)
+    cache_dir = resolve_cache_folder() / cache_key(path, exclude)
     scope = "-".join(sorted({content_type.value for content_type in content}))
     return cache_dir / ("index" if scope == ContentType.CODE.value else f"index-{scope}")
 
@@ -101,9 +121,13 @@ def clear_cache(path: str) -> None:
 
 
 def save_index_to_cache(index: "ZembleIndex", path: str) -> None:
-    """Save an index to the cache folder if it was freshly built."""
+    """Save an index to the cache folder if it was freshly built.
+
+    The exclude patterns the index was built with come off the index itself, so a pruned
+    build can never be written over the plain index of the same root.
+    """
     if not index.loaded_from_disk:
-        index.save(find_index_from_cache_folder(path, index.content))
+        index.save(find_index_from_cache_folder(path, index.content, index.exclude))
 
 
 def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[ContentType], capsule_key: str) -> bool:
@@ -145,7 +169,11 @@ def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[Conten
 
 
 def get_validated_cache(
-    path: str, embedder_id: str, content: Sequence[ContentType], capsules: CapsuleOptions | None = None
+    path: str,
+    embedder_id: str,
+    content: Sequence[ContentType],
+    capsules: CapsuleOptions | None = None,
+    exclude: Sequence[str] = (),
 ) -> Path | None:
     """Validates the cache folder and returns the index path.
 
@@ -153,9 +181,10 @@ def get_validated_cache(
     :param embedder_id: The normalized spec string of the requested embedder.
     :param content: The requested content types.
     :param capsules: The requested context-capsule configuration.
+    :param exclude: Extra gitignore-style patterns the build was told to skip.
     :return: The reusable index path, or None if it must be rebuilt.
     """
-    index_path = find_index_from_cache_folder(path, content)
+    index_path = find_index_from_cache_folder(path, content, exclude)
     if not index_path.exists():
         return None
 
@@ -177,7 +206,7 @@ def get_validated_cache(
     path_as_path = Path(path).resolve()
     stored_files = metadata.get("files", {})
     current_files = set()
-    for walked in walk_entries(path_as_path, extensions=extensions):
+    for walked in walk_entries(path_as_path, extensions=extensions, ignore=list(exclude)):
         file_status = get_file_status(walked.path, write_time, walked.stat)
         if file_status == FileStatus.NEWER:
             return None
@@ -191,9 +220,11 @@ def get_validated_cache(
     return index_path
 
 
-def has_cached_index(path: str, content: Sequence[ContentType] = (ContentType.CODE,)) -> bool:
+def has_cached_index(
+    path: str, content: Sequence[ContentType] = (ContentType.CODE,), exclude: Sequence[str] = ()
+) -> bool:
     """Return whether a complete index folder exists for a path, without checking it for staleness."""
-    return not PersistencePath.from_path(find_index_from_cache_folder(path, content)).non_existing()
+    return not PersistencePath.from_path(find_index_from_cache_folder(path, content, exclude)).non_existing()
 
 
 def cached_index_compatible(
@@ -329,7 +360,11 @@ def indexed_ancestor_hint(path: str, content: Sequence[ContentType] = (ContentTy
 
 
 def load_manifest_for_incremental(
-    path: str, embedder_id: str, content: Sequence[ContentType], capsules: CapsuleOptions | None = None
+    path: str,
+    embedder_id: str,
+    content: Sequence[ContentType],
+    capsules: CapsuleOptions | None = None,
+    exclude: Sequence[str] = (),
 ) -> dict[str, FileManifestEntry] | None:
     """Load only the file manifest of a compatible cached index.
 
@@ -343,7 +378,7 @@ def load_manifest_for_incremental(
     :return: The manifest, or None when there is no reusable index.
     """
     try:
-        persistence_path = PersistencePath.from_path(find_index_from_cache_folder(path, content))
+        persistence_path = PersistencePath.from_path(find_index_from_cache_folder(path, content, exclude))
         if persistence_path.non_existing():
             return None
         with open(persistence_path.metadata, encoding="utf-8") as f:
@@ -360,7 +395,11 @@ def load_manifest_for_incremental(
 
 
 def load_previous_for_incremental(
-    path: str, embedder_id: str, content: Sequence[ContentType], capsules: CapsuleOptions | None = None
+    path: str,
+    embedder_id: str,
+    content: Sequence[ContentType],
+    capsules: CapsuleOptions | None = None,
+    exclude: Sequence[str] = (),
 ) -> PreviousIndex | None:
     """Load compatible index state for incremental reuse.
 
@@ -371,10 +410,10 @@ def load_previous_for_incremental(
     :return: Previous index state, or None if the cache is unavailable or invalid.
     """
     try:
-        manifest = load_manifest_for_incremental(path, embedder_id, content, capsules)
+        manifest = load_manifest_for_incremental(path, embedder_id, content, capsules, exclude)
         if manifest is None:
             return None
-        persistence_path = PersistencePath.from_path(find_index_from_cache_folder(path, content))
+        persistence_path = PersistencePath.from_path(find_index_from_cache_folder(path, content, exclude))
 
         chunks = list(load_chunks(persistence_path.chunks))
 

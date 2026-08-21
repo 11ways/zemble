@@ -77,6 +77,7 @@ def plan_files(
     previous_manifest: dict[str, FileManifestEntry] | None = None,
     capsules: CapsuleOptions | None = None,
     previous_chunks: Sequence[Chunk] | None = None,
+    exclude: Sequence[str] = (),
 ) -> Iterator[PlannedFile]:
     """Walk a tree and chunk every file a build would index, without embedding anything.
 
@@ -90,12 +91,13 @@ def plan_files(
     :param previous_manifest: A previous build's manifest, or None for a full build.
     :param capsules: Context-capsule knobs; None resolves the environment override.
     :param previous_chunks: The previous build's chunk list, when reused chunks are wanted back.
+    :param exclude: Extra gitignore-style patterns, relative to `path`, this build skips.
     :return: One :class:`PlannedFile` per indexable file, in walk order.
     """
     resolved_capsules = CapsuleOptions.resolve(capsules)
     normalized = (content,) if isinstance(content, ContentType) else content
     repo_paths = RepoRelativePaths()
-    for walked in walk_entries(path, get_extensions(normalized)):
+    for walked in walk_entries(path, get_extensions(normalized), ignore=list(exclude)):
         try:
             if get_file_status(walked.path, None, walked.stat) != FileStatus.VALID:
                 continue
@@ -128,6 +130,7 @@ def plan_changed_files(
     previous_manifest: dict[str, FileManifestEntry] | None = None,
     capsules: CapsuleOptions | None = None,
     previous_chunks: Sequence[Chunk] | None = None,
+    exclude: Sequence[str] = (),
 ) -> Iterator[PlannedFile]:
     """Plan a build from a known set of changed paths, without walking the tree.
 
@@ -144,6 +147,8 @@ def plan_changed_files(
     :param previous_manifest: The previous build's manifest; every entry not named as changed is reused.
     :param capsules: Context-capsule knobs; None resolves the environment override.
     :param previous_chunks: The previous build's chunk list, when reused chunks are wanted back.
+    :param exclude: The gitignore-style patterns the index was built with, which a changed path
+        still has to survive: an excluded build must not grow the paths it excluded back.
     :return: One :class:`PlannedFile` per file the new index holds.
     """
     resolved_capsules = CapsuleOptions.resolve(capsules)
@@ -160,7 +165,7 @@ def plan_changed_files(
             relative = candidate.relative_to(path).as_posix()
         except ValueError:
             continue
-        if candidate.suffix.lower() not in extensions or ignored_prefix(path, relative) is not None:
+        if candidate.suffix.lower() not in extensions or ignored_prefix(path, relative, list(exclude)) is not None:
             continue
         touched[indexed_path] = candidate
 
@@ -251,6 +256,7 @@ def create_index_from_path(
     previous: PreviousIndex | None = None,
     capsules: CapsuleOptions | None = None,
     changed_paths: Iterable[Path] | None = None,
+    exclude: Sequence[str] = (),
 ) -> tuple[BM25, SelectableBasicBackend, list[Chunk], dict[str, FileManifestEntry]]:
     """Create an index from a resolved directory, optionally reusing a previous index's unchanged files.
 
@@ -262,6 +268,7 @@ def create_index_from_path(
     :param capsules: Context-capsule knobs; None resolves the environment override, else the defaults.
     :param changed_paths: The exact paths that moved, from a watcher; None walks the whole tree.
         Only honoured together with `previous`, which is what the unnamed files are reused from.
+    :param exclude: Extra gitignore-style patterns, relative to `path`, this build skips at walk time.
     :raises ValueError: if no items were found, no index can be created.
     :return: A BM25 index, semantic index, list of chunks, and file manifest.
     """
@@ -281,6 +288,7 @@ def create_index_from_path(
                 previous_manifest=previous_manifest,
                 capsules=resolved_capsules,
                 previous_chunks=previous.chunks,
+                exclude=exclude,
             )
         )
     else:
@@ -292,6 +300,7 @@ def create_index_from_path(
                 previous_manifest=previous_manifest if previous is not None else None,
                 capsules=resolved_capsules,
                 previous_chunks=previous.chunks if previous is not None else None,
+                exclude=exclude,
             )
         )
 

@@ -25,6 +25,8 @@ def _fake_index(root: Path) -> MagicMock:
     content = (root / _CIRCLE).read_text(encoding="utf-8")
     chunk = Chunk(content=content, file_path=_CIRCLE, start_line=1, end_line=content.count("\n") + 1, language="java")
     index = MagicMock()
+    # An unfiltered view of an index is the index itself, which is what the real one returns.
+    index.filtered.return_value = index
     index.search.return_value = [SearchResult(chunk=chunk, score=0.9)]
     index._root = root
     return index

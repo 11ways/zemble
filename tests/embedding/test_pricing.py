@@ -11,6 +11,7 @@ from zemble.embedding.pricing import (
     BUDGET_ENV,
     CONFIRM_ENV,
     DEFAULT_BUDGET_TOKENS,
+    DEFAULT_LOCAL_BUDGET_TOKENS,
     FREE_SCHEMES,
     PRICES_USD_PER_MILLION_TOKENS,
     EmbeddingBudgetExceeded,
@@ -18,6 +19,7 @@ from zemble.embedding.pricing import (
     check_budget,
     estimate_cost,
     estimate_tokens,
+    exceeds_budget,
     format_cost,
     price_per_million,
 )
@@ -115,7 +117,8 @@ def test_check_budget_message(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(EmbeddingBudgetExceeded) as raised:
         check_budget("voyage:voyage-4-lite@1024", "voyage:voyage-4-lite", 3, 101)
     message = str(raised.value)
-    for fragment in ("101", "100", "voyage:voyage-4-lite@1024", "--yes", CONFIRM_ENV, BUDGET_ENV):
+    remedy_fragments = (".zembleignore", "sub-path", "--yes", CONFIRM_ENV, BUDGET_ENV)
+    for fragment in ("101", "100", "voyage:voyage-4-lite@1024", *remedy_fragments):
         assert fragment in message, f"the refusal must name {fragment}"
 
 
@@ -168,3 +171,16 @@ def test_local_embed_announces_nothing(tmp_path: Path, caplog: pytest.LogCapture
     with caplog.at_level("INFO", logger="zemble.embedding.cache"):
         embedder.embed_documents(["a" * 3600])
     assert caplog.records == [], "a local embed is not a paid embed"
+
+
+def test_the_two_lanes_have_two_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A paid build is refused on the bill, a local one on the hours, so the defaults differ."""
+    assert budget_tokens(remote=True) == DEFAULT_BUDGET_TOKENS, "the paid default is the billed one"
+    assert budget_tokens(remote=False) == DEFAULT_LOCAL_BUDGET_TOKENS, "a local build gets the work ceiling"
+    assert DEFAULT_LOCAL_BUDGET_TOKENS > DEFAULT_BUDGET_TOKENS, "a free build may do far more work than a paid one"
+    # A real multi-repo workspace (javaweb: 46.2 MB, ~12.8M tokens) is ordinary local work.
+    assert not exceeds_budget(12_800_000, remote=False), "a normal workspace is never refused locally"
+    assert exceeds_budget(12_800_000, remote=True), "the same tree is a real bill on a paid embedder"
+
+    monkeypatch.setenv(BUDGET_ENV, "500")
+    assert budget_tokens(remote=True) == budget_tokens(remote=False) == 500, "one knob governs both lanes"

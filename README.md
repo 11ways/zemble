@@ -151,9 +151,12 @@ export ZEMBLE_RERANK_K=50
 **Before a first paid index, run `zemble embed-status <path>`.** It chunks the tree the
 way a build would and reports how many chunks are already cached, how many would be
 embedded, and what those cost at the model's list price - without embedding anything or
-needing a key. A build that would spend more than `ZEMBLE_EMBED_BUDGET_TOKENS`
-(default 2,000,000) is refused before a single request, naming the estimate and how to
-proceed; see [docs/embedders.md](docs/embedders.md#cost-visibility-and-the-budget-guard).
+needing a key. A build that would spend more than `ZEMBLE_EMBED_BUDGET_TOKENS` is refused
+before a single request, naming the estimate and how to proceed. The same ceiling is
+checked once more from the walk alone, before any file is parsed, for every embedder
+including the local ones - a tree big enough to refuse is a tree big enough for the parse
+to take minutes. The default is 2,000,000 tokens for a paid embedder and 50,000,000 for a
+local one; see [docs/embedders.md](docs/embedders.md#cost-visibility-and-the-budget-guard).
 
 Put those lines in `~/.config/zemble/env` (mode 600; or point `ZEMBLE_ENV_FILE` at another
 file) and zemble loads them itself at startup for the CLI, the MCP server and the daemon;
@@ -227,6 +230,10 @@ zemble search "authentication flow" ./my-project --top-k 10 --max-snippet-lines 
 
 # Search docs or config instead of code
 zemble search "deployment guide" ./my-project --content docs   # or: config, all
+
+# Narrow to part of the tree, or drop part of it (gitignore syntax)
+zemble search "authentication flow" ./my-project --paths src/main
+zemble search "authentication flow" ./my-project --exclude "vendor/" "*.min.js"
 
 # Find code similar to a known location
 zemble find-related src/auth.py 42 ./my-project
@@ -349,14 +356,14 @@ index in RAM.
 
 | Tool | Answers |
 | --- | --- |
-| `search` | Natural-language or code query over a repo, in the `code`, `docs`, `config` or `all` lane. |
-| `find_related` | Chunks similar to a given file and line. |
+| `search` | Natural-language or code query over a repo, in the `code`, `docs`, `config` or `all` lane. Narrowable with `paths` and `exclude`. |
+| `find_related` | Chunks similar to a given file and line. Narrowable with `paths` and `exclude`. |
 | `graph_definition` | Where a symbol is declared. |
 | `graph_callers` | Who calls it, with the resolution grade and a reason per hit. |
 | `graph_implementations` | Implementations and subclasses of a type. |
 | `graph_tests_of` | Tests naming or exercising a symbol. |
 | `graph_neighbors` | An n-hop walk around a symbol, filterable by edge kind. |
-| `explain` | A budgeted evidence bundle as markdown. |
+| `explain` | A budgeted evidence bundle as markdown. Narrowable with `paths` and `exclude`. |
 | `outline` | Signature-only view of a file or a type. |
 | `signatures` | A declaration plus its exactly resolved call sites. |
 | `dupes` | Clone classes over the workspace's code (Java, Zig). |
@@ -365,6 +372,18 @@ index in RAM.
 
 An ambiguous symbol comes back as an `error` payload with a `candidates` list rather than
 as a failure. Per-agent setup is in the [installation docs](docs/installation.md#mcp-server).
+
+`paths` (repo-relative sub-paths to keep) and `exclude` (gitignore-style patterns to drop)
+mean two different things depending on whether the repo is indexed yet:
+
+- **The index exists** - both filter at *query time*. Candidates are dropped before the
+  top-k is taken, so the k results come back full, the index itself is untouched and every
+  session keeps sharing one copy of it. Ranking is bit-identical when neither is passed.
+- **The repo has no index yet** - `exclude` additionally prunes the *walk that builds it*,
+  which is how an agent recovers in-band from a build refused as too large. A pruned build
+  is cached under its own key, so it can never be served as the plain index of that root.
+
+The same two filters exist on the CLI as `--paths` and `--exclude`.
 
 ### Restart after pulling
 

@@ -22,6 +22,7 @@ from zemble.daemon import client
 from zemble.daemon.protocol import (
     DEFAULT_IDLE_MINUTES,
     DEFAULT_MAX_INDEXES,
+    ErrorKind,
     decode,
     encode,
     identity_envelope,
@@ -33,7 +34,7 @@ from zemble.daemon.protocol import (
 from zemble.daemon.watch import IgnoreRules, RootWatcher
 from zemble.embedding.pricing import BUDGET_ENV, EmbeddingBudgetExceeded
 from zemble.graph.facts import matches_facts_glob
-from zemble.index import ZembleIndex
+from zemble.index import ScopeRefused, ZembleIndex
 from zemble.index.create import create_index_from_path
 from zemble.index.files import get_extensions
 from zemble.index.symbols import SymbolDefinitions
@@ -47,6 +48,11 @@ logger = logging.getLogger(__name__)
 
 #: Handlers take the daemon and the request arguments, and return anything JSON-encodable.
 Handler = Callable[["Daemon", dict[str, Any]], Awaitable[Any]]
+
+# AIDEV-NOTE: a deterministic "no" is not an outage. Answering the same request in the
+# client's own process refuses identically, so the wire says REFUSED and the client stops
+# instead of paying for a second full build to be told the same thing.
+REFUSAL_TYPES: tuple[type[BaseException], ...] = (ScopeRefused, EmbeddingBudgetExceeded)
 
 #: Java is watched on top of the index's own extensions so the symbol graph stays fresh.
 _GRAPH_EXTENSIONS = frozenset({".java"})
@@ -67,6 +73,15 @@ def _env_int(name: str, default: int) -> int:
         logger.warning("Ignoring %s=%r: not an integer", name, raw)
         return default
     return value if value >= 0 else default
+
+
+def _patterns(raw: object) -> tuple[str, ...]:
+    """Read a wire list of paths or gitignore patterns, dropping blanks and refusing a non-list."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise ValueError("'paths' and 'exclude' must be lists of strings")
+    return tuple(item.strip() for item in raw if item.strip())
 
 
 def _content_types(raw: Sequence[str] | None) -> tuple[ContentType, ...]:
@@ -110,6 +125,7 @@ def rebuild_index(
         previous=previous,
         capsules=previous_index._capsules,
         changed_paths=changed_paths,
+        exclude=previous_index.exclude,
     )
     counts = {
         "added": len(manifest.keys() - before.keys()),
@@ -178,25 +194,32 @@ class Daemon:
         return self.locks.setdefault(cache_key, asyncio.Lock())
 
     async def index_for(self, args: dict[str, Any]) -> tuple[CacheKey, ZembleIndex]:
-        """Resolve the requested root, returning its key and warm index.
+        """Resolve the requested root, returning its key and the warm index that answers it.
 
         A path inside a root the daemon already holds is answered from that root, filtered to
         the sub-tree: the returned key names the ancestor, and the index is a view of it whose
-        result paths stay relative to the ancestor's root.
+        result paths stay relative to the ancestor's root. `paths` and `exclude` narrow the
+        answer further, at query time; only a root with no index yet is BUILT pruned.
 
-        :param args: Request arguments carrying `path` and optional `content` and `ref`.
+        :param args: Request arguments carrying `path` and optional `content`, `ref`,
+            `paths` and `exclude`.
         :return: The cache key and the index.
-        :raises ValueError: If no path was given.
+        :raises ValueError: If no path was given, or the filter keeps no indexed file.
         """
         path = _root_of(args)
         if is_git_url(str(path)) and not str(path).startswith(("https://", "http://")):
             raise ValueError(f"Only https://, http://, or local directory paths are accepted. Got: {path!r}")
         content = _content_types(args.get("content"))
         ref = args.get("ref")
+        paths = _patterns(args.get("paths"))
+        exclude = _patterns(args.get("exclude"))
         await self.cache.load_embedder_once()
-        cache_key, index = await self.cache.get_with_key(path, ref=ref, content=content)
+        cache_key, index = await self.cache.get_with_key(path, ref=ref, content=content, exclude=exclude)
         self._ensure_watcher(cache_key, index)
-        return cache_key, index
+        filtered = index.filtered(paths, exclude)
+        if filtered is None:
+            raise ValueError(f"No indexed file under {path} survives paths={list(paths)} exclude={list(exclude)}")
+        return cache_key, filtered
 
     def _ensure_watcher(self, cache_key: CacheKey, index: ZembleIndex) -> None:
         """Start watching a local root the first time it is served."""
@@ -357,8 +380,11 @@ class Daemon:
         try:
             result = await handler(self, args)
         except Exception as exc:
-            logger.warning("Command %r failed", command, exc_info=True)
-            return {"id": request_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            refused = isinstance(exc, REFUSAL_TYPES)
+            kind = ErrorKind.REFUSED if refused else ErrorKind.FAILED
+            logger.warning("Command %r %s", command, "refused" if refused else "failed", exc_info=not refused)
+            message = str(exc) if refused else f"{type(exc).__name__}: {exc}"
+            return {"id": request_id, "ok": False, "error": message, "kind": kind.value}
         finally:
             self.last_request_at = time.monotonic()
         return {"id": request_id, "ok": True, "result": result}

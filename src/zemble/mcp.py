@@ -14,12 +14,12 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from zemble.daemon import client as daemon_client
-from zemble.daemon.protocol import DaemonError
+from zemble.daemon.protocol import CommandRefused, DaemonError
 from zemble.dedup.mcp import register_dupes_tool
 from zemble.evidence.mcp import register_evidence_tools
 from zemble.graph.mcp import register_graph_tools
 from zemble.home.mcp import register_home_tool
-from zemble.index import ZembleIndex
+from zemble.index import ScopeRefused, ZembleIndex
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.runtime.mcp import StaleAwareFastMCP, register_status_tool
 from zemble.types import ContentType
@@ -34,6 +34,16 @@ _REPO_DESCRIPTION = (
 
 ContentSelection = Literal["code", "docs", "config", "all"]
 
+PATHS_DESCRIPTION = (
+    'Only answer from these sub-paths of `repo` (repo-relative, e.g. ["src/main"]). '
+    "Applied to the results, not to the index: the index itself is unchanged and shared."
+)
+EXCLUDE_DESCRIPTION = (
+    "Gitignore-style patterns, relative to `repo`, whose files are dropped before the top-k is "
+    'taken (e.g. ["vendor/", "*.min.js"]). When `repo` has no index yet, these also prune the '
+    "walk that builds it, which is how a build refused as too large is recovered from in-band."
+)
+
 #: Re-exported so `zemble.mcp` keeps naming the cache size it serves with.
 _CACHE_MAX_SIZE = CACHE_MAX_SIZE
 
@@ -44,12 +54,18 @@ async def _daemon_call(cmd: str, args: dict[str, Any]) -> Any | None:
     Several agent sessions then share one RAM copy of a workspace index instead of
     each holding its own.
 
+    A refusal is not an outage: it is re-raised so the caller reports it once, instead of
+    rebuilding the very index the daemon just refused to build and being refused again.
+
     :param cmd: Daemon command name.
     :param args: Command arguments.
     :return: The daemon's result, or None if this process must answer in-process.
+    :raises CommandRefused: If the daemon deliberately refused the command.
     """
     try:
         return await asyncio.to_thread(daemon_client.call, cmd, args)
+    except CommandRefused:
+        raise
     except DaemonError as exc:
         logger.info("daemon unavailable (%s); answering in-process", exc)
         return None
@@ -80,18 +96,37 @@ async def _answer_remotely(cmd: str, repo: str, args: dict[str, Any]) -> str | d
     refusal = unsafe_repo_reason(repo)
     if refusal is not None:
         return refusal
-    return await _daemon_call(cmd, {"path": repo, **args})
+    try:
+        return await _daemon_call(cmd, {"path": repo, **args})
+    except CommandRefused as exc:
+        return str(exc)
 
 
-async def _get_index(repo: str, cache: IndexCache, content: Sequence[ContentType]) -> ZembleIndex:
-    """Return a cached index for a repo, rejecting unsafe git transport schemes."""
+async def _get_index(
+    repo: str,
+    cache: IndexCache,
+    content: Sequence[ContentType],
+    paths: Sequence[str] = (),
+    exclude: Sequence[str] = (),
+) -> ZembleIndex:
+    """Return a cached index for a repo, rejecting unsafe git transport schemes.
+
+    `paths` and `exclude` filter the answer at query time; `exclude` additionally prunes the
+    walk when this repo has no index yet, so an oversized tree can be indexed in one call.
+    """
     reason = unsafe_repo_reason(repo)
     if reason is not None:
         raise ValueError(reason)
     try:
-        return await cache.get(repo, content=content)
+        index = await cache.get(repo, content=content, exclude=exclude)
+    except ScopeRefused as exc:
+        raise ValueError(str(exc)) from exc
     except Exception as exc:
         raise ValueError(f"Failed to index {repo!r}: {exc}") from exc
+    filtered = index.filtered(paths, exclude)
+    if filtered is None:
+        raise ValueError(f"No indexed file under {repo} survives paths={list(paths)} exclude={list(exclude)}")
+    return filtered
 
 
 def _resolve_content_selection(
@@ -141,6 +176,8 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             ContentSelection | None,
             Field(description="Content to search. Defaults to the MCP server's configured content."),
         ] = None,
+        paths: Annotated[list[str] | None, Field(description=PATHS_DESCRIPTION)] = None,
+        exclude: Annotated[list[str] | None, Field(description=EXCLUDE_DESCRIPTION)] = None,
     ) -> str | dict[str, Any]:
         """Search once with a focused query describing what the code does or its name.
 
@@ -157,12 +194,14 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
                 "top_k": top_k,
                 "max_snippet_lines": max_snippet_lines,
                 "content": [item.value for item in selected_content],
+                "paths": paths or [],
+                "exclude": exclude or [],
             },
         )
         if remote is not None:
             return remote
         try:
-            index = await _get_index(repo, cache, selected_content)
+            index = await _get_index(repo, cache, selected_content, paths or (), exclude or ())
         except ValueError as exc:
             return str(exc)
         results = index.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines)
@@ -193,6 +232,8 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             ContentSelection | None,
             Field(description="Content containing the related file. Defaults to the MCP server configuration."),
         ] = None,
+        paths: Annotated[list[str] | None, Field(description=PATHS_DESCRIPTION)] = None,
+        exclude: Annotated[list[str] | None, Field(description=EXCLUDE_DESCRIPTION)] = None,
     ) -> str | dict[str, Any]:
         """Find code similar to a known location.
 
@@ -210,12 +251,14 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
                 "top_k": top_k,
                 "max_snippet_lines": max_snippet_lines,
                 "content": [item.value for item in selected_content],
+                "paths": paths or [],
+                "exclude": exclude or [],
             },
         )
         if remote is not None:
             return remote
         try:
-            index = await _get_index(repo, cache, selected_content)
+            index = await _get_index(repo, cache, selected_content, paths or (), exclude or ())
         except ValueError as exc:
             return str(exc)
         chunk = resolve_chunk(index.chunks, file_path, line)
@@ -233,7 +276,11 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
     register_status_tool(server)
     register_graph_tools(server)
     register_dupes_tool(server)
-    register_evidence_tools(server, lambda repo, selected: _get_index(repo, cache, selected), default_content)
+    register_evidence_tools(
+        server,
+        lambda repo, selected, paths=(), exclude=(): _get_index(repo, cache, selected, paths, exclude),
+        default_content,
+    )
     register_home_tool(server, lambda repo, selected: _get_index(repo, cache, selected))
     return server
 

@@ -13,6 +13,8 @@ import pytest
 
 import zemble
 from tests.conftest import FakeEmbedder, make_chunk
+from zemble.daemon import client as daemon_client
+from zemble.daemon.protocol import CommandRefused, DaemonUnavailable
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.mcp import create_server, serve
 from zemble.types import Chunk, ContentType, SearchResult
@@ -35,6 +37,8 @@ async def _call_tool(
 ) -> str:
     """Patch ZembleIndex.from_path with a fake index and invoke the tool, returning the text."""
     fake_index = MagicMock()
+    # An unfiltered view of an index is the index itself, which is what the real one returns.
+    fake_index.filtered.return_value = fake_index
     getattr(fake_index, index_method).return_value = index_return
     if index_chunks is not None:
         fake_index.chunks = index_chunks
@@ -660,3 +664,60 @@ def test_mcp_server_exits_on_stdin_eof(tmp_path: Path) -> None:
     assert process.returncode == 0, "an EOF exit is a clean exit"
     survivors = _processes_running(str(launcher))
     assert survivors == [], f"the server left processes behind: {survivors}"
+
+@pytest.mark.anyio
+async def test_a_daemon_refusal_is_reported_once(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal is the answer: the tool reports it and never rebuilds the index it just refused."""
+
+    def _refuse(cmd: str, args: dict[str, Any], **kwargs: Any) -> Any:
+        raise CommandRefused("Refusing to index /some/path: too big. Exclude paths with .zembleignore")
+
+    monkeypatch.setattr(daemon_client, "call", _refuse)
+    monkeypatch.setattr(
+        "zemble.mcp.ZembleIndex.from_path", lambda *args, **kwargs: pytest.fail("must not build after a refusal")
+    )
+    server = create_server(cache)
+    text = _tool_text(await server.call_tool("search", {"query": "anything", "repo": "/some/path"}))
+    assert "Refusing to index" in text, "the refusal reaches the caller"
+    assert ".zembleignore" in text, "with its remedies"
+
+
+@pytest.mark.anyio
+async def test_a_daemon_outage_still_falls_back(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreachable daemon is an outage, not an answer, so this process still answers."""
+
+    def _unavailable(cmd: str, args: dict[str, Any], **kwargs: Any) -> Any:
+        raise DaemonUnavailable("not running (ENOENT)")
+
+    monkeypatch.setattr(daemon_client, "call", _unavailable)
+    fake_index = MagicMock()
+    fake_index.filtered.return_value = fake_index
+    fake_index.search.return_value = []
+    with patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index):
+        server = create_server(cache)
+        result = await server.call_tool("search", {"query": "anything", "repo": "/some/path"})
+    assert "No results found" in _tool_text(result), "the in-process answer came back"
+
+
+@pytest.mark.anyio
+async def test_search_forwards_paths_and_exclude(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both filters ride the daemon protocol, and reach the index when this process answers."""
+    sent: dict[str, Any] = {}
+
+    def _record(cmd: str, args: dict[str, Any], **kwargs: Any) -> Any:
+        sent.update(args)
+        return {"query": "q", "results": []}
+
+    monkeypatch.setattr(daemon_client, "call", _record)
+    server = create_server(cache)
+    await server.call_tool("search", {"query": "q", "repo": "/some/path", "paths": ["src"], "exclude": ["vendor/"]})
+    assert sent["paths"] == ["src"] and sent["exclude"] == ["vendor/"], "the filters went over the wire"
+
+    monkeypatch.setattr(daemon_client, "call", lambda *args, **kwargs: (_ for _ in ()).throw(DaemonUnavailable("off")))
+    fake_index = MagicMock()
+    fake_index.filtered.return_value = fake_index
+    fake_index.search.return_value = []
+    with patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index):
+        server = create_server(cache)
+        await server.call_tool("search", {"query": "q", "repo": "/some/path", "paths": ["src"], "exclude": ["v/"]})
+    fake_index.filtered.assert_called_once_with(["src"], ["v/"])

@@ -4,7 +4,7 @@ import os
 import subprocess
 import tempfile
 import warnings
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Collection, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -22,9 +22,10 @@ from zemble.index.chunk_store import file_paths_of, languages_of, load_chunks, s
 from zemble.index.create import create_index_from_path
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.files import read_file_text
-from zemble.index.scope import require_declared_scope
+from zemble.index.scope import require_affordable_scope, require_declared_scope
 from zemble.index.symbols import SymbolDefinitions, save_symbol_definitions
 from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath
+from zemble.index.view import IndexView
 from zemble.rerank.base import Reranker
 from zemble.rerank.registry import RerankSettings, load_reranker, resolve_reranker_spec
 from zemble.search import _search_semantic, search
@@ -32,6 +33,8 @@ from zemble.stats import save_search_stats
 from zemble.types import CallType, Chunk, ContentType, IndexStats, SearchResult
 
 _GIT_CLONE_TIMEOUT = int(os.environ.get("ZEMBLE_CLONE_TIMEOUT", 60))
+#: How many restricted views of one index stay resident; a caller's filter is arbitrary.
+_MAX_CACHED_VIEWS = 8
 _DEFAULT_CONTENT: tuple[ContentType, ...] = (ContentType.CODE,)
 _ALL_CONTENT: tuple[ContentType, ...] = (ContentType.CODE, ContentType.DOCS, ContentType.CONFIG)
 _INCLUDE_TEXT_FILES_DEPRECATION_MSG = (
@@ -124,7 +127,8 @@ class ZembleIndex:
         manifest: dict[str, FileManifestEntry] | None = None,
         capsules: CapsuleOptions | None = None,
         definitions: SymbolDefinitions | None = None,
-        subtree_prefix: str | None = None,
+        view: IndexView | None = None,
+        exclude: Sequence[str] = (),
     ) -> None:
         """Initialize a ZembleIndex. Should be created with from_path or from_git.
 
@@ -138,8 +142,10 @@ class ZembleIndex:
         :param manifest: File modification times and chunk ranges used for incremental reindexing.
         :param capsules: The context-capsule configuration this index's chunks were built with.
         :param definitions: Persisted symbol-definition lookup used by the rerank pass.
-        :param subtree_prefix: Restrict every answer to chunks whose file path starts with this
-            prefix; the stores stay whole, so scores and ranking are the full index's.
+        :param view: Restrict every answer to the files this view keeps; the stores stay whole,
+            so scores and ranking are the full index's and only the candidate set narrows.
+        :param exclude: The gitignore-style patterns this index was BUILT with, which are part
+            of its cache identity: a pruned build is never written over a plain one.
         """
         self.embedder = embedder
         self.chunks: Sequence[Chunk] = chunks
@@ -147,11 +153,12 @@ class ZembleIndex:
         self._semantic_index: SelectableBasicBackend = semantic_index
         self._root: Path | None = root
         self._content: tuple[ContentType, ...] = (content,) if isinstance(content, ContentType) else tuple(content)
-        self._subtree_prefix: str | None = subtree_prefix
+        self._view: IndexView | None = view
+        self._exclude: tuple[str, ...] = tuple(exclude)
         self._file_mapping, self._language_mapping = self._populate_mapping()
-        self._subtree_selector: npt.NDArray[np.int_] | None = (
+        self._view_selector: npt.NDArray[np.int_] | None = (
             np.unique([index for indices in self._file_mapping.values() for index in indices])
-            if subtree_prefix is not None
+            if view is not None
             else None
         )
         self._file_sizes: dict[str, int] = LazyFileSizes(root, self._file_mapping) if root else {}
@@ -160,8 +167,9 @@ class ZembleIndex:
         self._capsules: CapsuleOptions = CapsuleOptions.resolve(capsules)
         self._definitions: SymbolDefinitions | None = definitions
         self._reranker_cache: tuple[str, Reranker | None] | None = None
-        #: Subtree views built from this index, cached per prefix: the mapping pass is O(chunks).
-        self._subtree_views: dict[str, ZembleIndex] = {}
+        #: Views built from this index, cached per view key: the mapping pass is O(chunks).
+        #: Bounded, because a caller's filter is arbitrary and a daemon holds an index for hours.
+        self._views: OrderedDict[str, ZembleIndex] = OrderedDict()
 
     def _resolve_reranker(self, override: Reranker | None) -> Reranker | None:
         """Return the reranker to apply: an explicit one, else the environment's, built once per spec.
@@ -179,14 +187,14 @@ class ZembleIndex:
     def _populate_mapping(self) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
         """Build (file → chunk indices, language → chunk indices) mappings, in that order.
 
-        A subtree view maps only the files under its prefix; the chunk list itself stays whole
-        because every index into it is also a row of the vector matrix and a BM25 document.
+        A view maps only the files it keeps; the chunk list itself stays whole because every
+        index into it is also a row of the vector matrix and a BM25 document.
         """
         language_to_id = defaultdict(list)
         file_to_id = defaultdict(list)
-        prefix = self._subtree_prefix
+        view = self._view
         for i, (file_path, language) in enumerate(zip(file_paths_of(self.chunks), languages_of(self.chunks))):
-            if prefix is not None and not file_path.replace("\\", "/").startswith(prefix):
+            if view is not None and not view.keeps(file_path):
                 continue
             if language:
                 language_to_id[language].append(i)
@@ -201,7 +209,7 @@ class ZembleIndex:
 
         return IndexStats(
             indexed_files=len(self._file_mapping),
-            total_chunks=len(self.chunks) if self._subtree_selector is None else len(self._subtree_selector),
+            total_chunks=len(self.chunks) if self._view_selector is None else len(self._view_selector),
             languages=language_counts,
             embedder=self.embedder.model_id,
             dimensions=self.embedder.dimensions,
@@ -212,6 +220,11 @@ class ZembleIndex:
         """Return the content types covered by this index."""
         return self._content
 
+    @property
+    def exclude(self) -> tuple[str, ...]:
+        """Return the gitignore-style patterns this index was BUILT with, part of its cache identity."""
+        return self._exclude
+
     @classmethod
     def from_path(
         cls,
@@ -221,6 +234,7 @@ class ZembleIndex:
         model_path: str | None = None,
         embedder: Embedder | str | None = None,
         capsules: CapsuleOptions | None = None,
+        exclude: Sequence[str] = (),
     ) -> ZembleIndex:
         """Create and index a ZembleIndex from a directory.
 
@@ -230,9 +244,12 @@ class ZembleIndex:
         :param model_path: Legacy alias for ``embedder="model2vec:<name>"``.
         :param embedder: An embedder or spec string. If None, the environment default is used.
         :param capsules: Context-capsule knobs; None resolves the environment override, else the defaults.
+        :param exclude: Gitignore-style patterns, relative to `path`, that this build skips at
+            walk time; a build that prunes gets its own cache identity, never the plain one's.
         :return: An indexed ZembleIndex. Chunk file paths are relative to ``path``.
         :raises FileNotFoundError: If `path` does not exist.
         :raises NotADirectoryError: If `path` exists but is not a directory.
+        :raises ScopeRefused: If the root is too broad, or too big for the token budget.
         """
         path = Path(path)
         if not path.exists():
@@ -243,13 +260,15 @@ class ZembleIndex:
         normalized = _apply_include_text_files(content, include_text_files)
         resolved = resolve_embedder(embedder, model_path)
         resolved_capsules = CapsuleOptions.resolve(capsules)
-        cache_path = get_validated_cache(str(path), resolved.model_id, normalized, resolved_capsules)
+        exclude = tuple(exclude)
+        cache_path = get_validated_cache(str(path), resolved.model_id, normalized, resolved_capsules, exclude)
         if cache_path:
             return cls.load_from_disk(cache_path, embedder=resolved)
 
         require_declared_scope(path)
         path = path.resolve()
-        previous = load_previous_for_incremental(str(path), resolved.model_id, normalized, resolved_capsules)
+        require_affordable_scope(path, resolved, normalized, exclude, resolved_capsules)
+        previous = load_previous_for_incremental(str(path), resolved.model_id, normalized, resolved_capsules, exclude)
         bm25_index, semantic_index, chunks, manifest = create_index_from_path(
             path,
             embedder=resolved,
@@ -257,6 +276,7 @@ class ZembleIndex:
             display_root=path,
             previous=previous,
             capsules=resolved_capsules,
+            exclude=exclude,
         )
 
         return ZembleIndex(
@@ -268,6 +288,7 @@ class ZembleIndex:
             content=normalized,
             manifest=manifest,
             capsules=resolved_capsules,
+            exclude=exclude,
         )
 
     @classmethod
@@ -364,10 +385,10 @@ class ZembleIndex:
     ) -> npt.NDArray[np.int_] | None:
         """Create a vector of chunk indices to restrict retrieval to.
 
-        A subtree view's prefix is the floor: an explicit filter narrows it further, it never
-        widens it, so a view can only ever answer from inside its own sub-tree. A filter that
-        was asked for and matched nothing selects nothing, which is what it says; it used to
-        fall back to selecting everything.
+        A view is the floor: an explicit filter narrows it further, it never widens it, so a
+        view can only ever answer from inside what it keeps. A filter that was asked for and
+        matched nothing selects nothing, which is what it says; it used to fall back to
+        selecting everything.
         """
         selector = []
         for language in filter_languages or []:
@@ -381,9 +402,9 @@ class ZembleIndex:
             chosen = np.empty(0, dtype=np.int_)
         else:
             chosen = None
-        if self._subtree_selector is None:
+        if self._view_selector is None:
             return chosen
-        return self._subtree_selector if chosen is None else np.intersect1d(chosen, self._subtree_selector)
+        return self._view_selector if chosen is None else np.intersect1d(chosen, self._view_selector)
 
     def subtree(self, prefix: str) -> ZembleIndex | None:
         """Return a view of this index restricted to one sub-directory, or None if it holds nothing there.
@@ -392,17 +413,37 @@ class ZembleIndex:
         scores and ranks exactly as the whole index does and is then filtered to the prefix;
         result paths therefore stay relative to THIS index's root, not to the sub-directory.
 
-        :param prefix: A root-relative directory path; a trailing slash is added when missing.
+        :param prefix: A root-relative directory path.
         :return: The restricted view, or None when no indexed file lives under the prefix.
         """
-        normalized = prefix.replace("\\", "/").strip("/")
-        if not normalized:
+        return self._with_view(IndexView.build(prefix=prefix))
+
+    def filtered(self, paths: Sequence[str] = (), exclude: Sequence[str] = ()) -> ZembleIndex | None:
+        """Return a view answering only from *paths*, minus anything *exclude* matches.
+
+        Both are relative to the repo the caller asked about, which for a sub-tree view is the
+        sub-directory, not this index's root. Nothing is re-scored: the candidate set is
+        narrowed before ranking, so top_k comes back full whenever enough files survive.
+
+        :param paths: Sub-paths to keep; empty keeps everything the view already kept.
+        :param exclude: Gitignore-style patterns to drop.
+        :return: The restricted view, this index when nothing was asked for, or None when the
+            filter keeps no indexed file at all.
+        """
+        if not paths and not exclude:
             return self
-        normalized += "/"
-        cached = self._subtree_views.get(normalized)
+        current = self._view or IndexView()
+        return self._with_view(current.with_filter(paths, exclude))
+
+    def _with_view(self, view: IndexView | None) -> ZembleIndex | None:
+        """Build (or reuse) the view of this index that keeps exactly what *view* keeps."""
+        if view is None:
+            return self
+        cached = self._views.get(view.key)
         if cached is not None:
+            self._views.move_to_end(view.key)
             return cached
-        view = ZembleIndex(
+        restricted = ZembleIndex(
             self.embedder,
             self._bm25_index,
             self._semantic_index,
@@ -413,12 +454,15 @@ class ZembleIndex:
             manifest=self._manifest,
             capsules=self._capsules,
             definitions=self._definitions,
-            subtree_prefix=normalized,
+            view=view,
+            exclude=self._exclude,
         )
-        if not view._file_mapping:
+        if not restricted._file_mapping:
             return None
-        self._subtree_views[normalized] = view
-        return view
+        if len(self._views) >= _MAX_CACHED_VIEWS:
+            self._views.popitem(last=False)
+        self._views[view.key] = restricted
+        return restricted
 
     def search(
         self,
@@ -528,6 +572,7 @@ class ZembleIndex:
             manifest=manifest,
             capsules=CapsuleOptions.from_key(metadata.get("capsules", "")),
             definitions=definitions,
+            exclude=tuple(metadata.get("exclude", ())),
         )
 
     def save(self, path: Path | str) -> None:
@@ -553,6 +598,7 @@ class ZembleIndex:
             "chunk_size": _DESIRED_CHUNK_LENGTH_CHARS,
             "cache_version": CACHE_FORMAT_VERSION,
             "capsules": self._capsules.key,
+            "exclude": list(self._exclude),
             "files": self._manifest,
         }
         with open(persistence_paths.metadata, "wb") as f:

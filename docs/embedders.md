@@ -215,16 +215,69 @@ in well under a second.
 
 ### The budget
 
+The budget is enforced twice: once from the walk alone, before a single file is parsed,
+and once from the exact uncached set, before a single request is sent.
+
+#### 1. The pre-parse size guard (every embedder, local included)
+
+Before a local index is chunked, the tree is walked - the same walker a build uses, so
+the same `.gitignore`, `.zembleignore`, default-ignored directories and 1 MB file cap
+apply - and its bytes are turned into tokens at the same characters / 3.6 density. Files
+a previous index already covers unchanged are left out, because a build would reuse them
+without embedding anything, so an incremental rebuild is never refused for the size of
+the tree it already indexed. Over budget is an `OversizedRootRefused`, and **nothing is
+parsed**:
+
+```
+Refusing to index /home/me/sketerm with model2vec:minishlab/potion-code-16M-v2: 7,372
+files, 253.4 MB, ~70,386,261 estimated tokens exceeds the budget of 50,000,000 tokens.
+Nothing was parsed or embedded.
+  zig-pkg/                    6821 files  234.0 MB  (~92%)
+  src/                         461 files  17.9 MB  (~7%)
+  vendor/                       79 files   1.3 MB  (~1%)
+Exclude paths with /home/me/sketerm/.zembleignore (gitignore syntax), or point repo at a
+sub-path such as /home/me/sketerm/src, or raise ZEMBLE_EMBED_BUDGET_TOKENS / set
+ZEMBLE_EMBED_CONFIRM=1 (--yes on the CLI) in the environment of the process that builds
+(a running daemon does not see a client's environment; restart it).
+```
+
+The ceiling is `ZEMBLE_EMBED_BUDGET_TOKENS` when it is set - one knob for both lanes,
+because a caller who names a ceiling means it whatever the embedder is. Only the DEFAULT
+differs, because the two lanes are refused for different reasons: **2,000,000 tokens for a
+paid embedder** (a bill of a few tens of cents) and **50,000,000 for a local one**
+(~180 MB of source, i.e. where runaway *work* begins). A real multi-repo workspace is
+normal local work and is not refused: javaweb measures 7,130 files, 46.2 MB, ~12.8M tokens.
+The tree above, which carries thirteen copies of its own source in a package directory, is.
+
+This guard exists because the expensive half of an oversized build is the parse, not the
+embed: on a 414 MB tree, chunking took 94 s before the old post-chunk guard could refuse,
+and a local embedder was never gated at all and would have run the whole thing to
+completion. The walk itself takes 0.2 s.
+
+The byte estimate is a *lower* bound on what is embedded - a context capsule adds a
+header to every chunk, measured at +21% on this repository and +52% on the small test
+fixture tree - so this guard refuses only what is certainly over budget, and the exact
+check below still stands behind it.
+
+#### 2. The post-chunk guard (remote embedders)
+
 Before a **remote** embedder embeds a batch of uncached documents, the whole pending
 set is estimated and compared with `ZEMBLE_EMBED_BUDGET_TOKENS` (default 2,000,000,
 roughly one full javaweb index). Over budget is a loud `EmbeddingBudgetExceeded` naming
-the estimate, the price, the budget and the two ways out, and **nothing is sent**:
+the estimate, the price, the budget and the ways out, and **nothing is sent**:
 
 ```
 Refusing to embed 61,000 uncached chunk(s) with voyage:voyage-4-lite@1024: ~15,500,000
-estimated tokens (~$0.31) exceeds the budget of 2,000,000 tokens. Pass --yes (or set
-ZEMBLE_EMBED_CONFIRM=1) to embed anyway, or raise ZEMBLE_EMBED_BUDGET_TOKENS.
+estimated tokens (~$0.31) exceeds the budget of 2,000,000 tokens. Exclude paths with
+<root>/.zembleignore (gitignore syntax), or point repo at a sub-path such as <root>/src,
+or raise ZEMBLE_EMBED_BUDGET_TOKENS / set ZEMBLE_EMBED_CONFIRM=1 (--yes on the CLI) in
+the environment of the process that builds (a running daemon does not see a client's
+environment; restart it).
 ```
+
+Both refusals name the same three remedies, in the same order, from one helper: exclude
+paths, narrow the root, or raise/confirm the budget. The first two work from inside a
+tool call; the third needs the environment of whichever process builds.
 
 - The check sits in the caching embedder, at the one point where the uncached set for a
   whole build is known, so the CLI, the MCP server and the daemon all inherit it. It is
@@ -235,6 +288,15 @@ ZEMBLE_EMBED_CONFIRM=1) to embed anyway, or raise ZEMBLE_EMBED_BUDGET_TOKENS.
 - The daemon catches a refusal, logs one line, keeps the previous index serving (nothing
   is embedded and nothing is swapped) and shows it in `zemble daemon status` as the
   root's `last_error`.
+- A refusal travels the daemon protocol as `{"ok": false, "kind": "refused", ...}` and
+  raises `CommandRefused` in the client. Callers report it instead of falling back
+  in-process: the same request refuses identically in every process, and rebuilding it
+  locally only pays for the refusal twice. See "refusals versus outages" in
+  `docs/daemon.md`.
+- An agent can recover from a refusal without leaving the tool call, by passing
+  `exclude` to `search` / `find_related` / `explain`: on a root with no index yet those
+  patterns prune the walk that builds it, and the pruned build gets its own cache entry
+  so it can never be mistaken for the plain index of the same root.
 - A refusal for a path that sits inside an already-indexed tree names that tree and the
   way out, because indexing a sub-repo of an indexed workspace is almost never what was
   wanted: `/work/zenit is inside /work, which is already indexed: search /work instead,
@@ -256,7 +318,8 @@ requests for paths such as `~/projects` without blocking a declared workspace su
 
 The refusal names the root and all ways out: search a narrower project, declare the
 workspace, or deliberately override both this check and the embedding budget with
-`--yes` / `ZEMBLE_EMBED_CONFIRM=1`. A confirmed CLI request runs in-process because an
+`--yes` / `ZEMBLE_EMBED_CONFIRM=1`. It shares a base class, `ScopeRefused`, with the
+size guard above, which is what lets every surface treat both as deliberate answers. A confirmed CLI request runs in-process because an
 already-running daemon cannot inherit an environment decision made by its client.
 
 ### Prices

@@ -7,6 +7,7 @@ and watcher imports: the client half runs inside every short-lived CLI process.
 from __future__ import annotations
 
 import os
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,27 @@ START_TIMEOUT_SECONDS = 10.0
 CONNECT_TIMEOUT_SECONDS = 5.0
 
 
+class ErrorKind(StrEnum):
+    """What an error response means for the caller, and only that.
+
+    The one home for this vocabulary. A response whose kind is not listed here is read as
+    FAILED: an unknown kind must never be mistaken for a deterministic answer.
+    """
+
+    #: Something went wrong. Another process, or a retry, may well answer.
+    FAILED = "failed"
+    #: A deliberate, deterministic "no". Every process answers the same, so retrying is waste.
+    REFUSED = "refused"
+
+
+def error_kind(raw: object) -> ErrorKind:
+    """Read the kind off a response, failing closed on anything this version does not know."""
+    try:
+        return ErrorKind(raw)
+    except ValueError:
+        return ErrorKind.FAILED
+
+
 class DaemonError(Exception):
     """Base class for every daemon-related failure a caller may fall back from."""
 
@@ -33,6 +55,14 @@ class DaemonUnavailable(DaemonError):
 
 class CommandFailed(DaemonError):
     """The daemon answered, and the answer was an error."""
+
+
+class CommandRefused(CommandFailed):
+    """The daemon refused the command on purpose, and answering it here would refuse too.
+
+    A caller must surface this instead of falling back in-process: the refusal is the answer,
+    and rebuilding the same index locally only pays for the same "no" a second time.
+    """
 
 
 def _preferred_directory() -> Path:
