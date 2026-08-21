@@ -665,6 +665,7 @@ def test_mcp_server_exits_on_stdin_eof(tmp_path: Path) -> None:
     survivors = _processes_running(str(launcher))
     assert survivors == [], f"the server left processes behind: {survivors}"
 
+
 @pytest.mark.anyio
 async def test_a_daemon_refusal_is_reported_once(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
     """A refusal is the answer: the tool reports it and never rebuilds the index it just refused."""
