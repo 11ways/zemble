@@ -51,6 +51,13 @@ Each reported pair carries its reason, e.g. `control flow identical; calls
 {addColumn, createTable, ...} shared, {addIndex} differs; 14 literals differ
 ("created_at", "email", ...)`.
 
+At **3 or more copies** the per-pair reasons are aggregated instead of listed:
+one consensus line (`7 copies; control flow identical across all copies; all
+call {applyAttribute, setStringAttribute}; literals differ per copy`) followed
+only by the members that deviate from it (`outlier DominoButtonElement.apply
+also calls {toBooleanValue}`). A pair keeps the pair format: there the
+aggregate would say nothing more.
+
 ## Lanes: production, mixed, test
 
 Every unit is production or test code, decided by the symbol graph's own rule
@@ -76,18 +83,27 @@ vendored tree.
 ## Class keys
 
 Every clone class carries a stable key, printed as `key: exact:4c4c163666b7`:
-its kind plus the first 12 hex characters of a sha256 over the sorted set of
-`(member path, normalized stream hash)` pairs -- the exact stream for `exact`
-and `logic`, the alpha-renamed stream for `renamed`.
+its kind plus the first 12 hex characters of a sha256 over the sorted list of
+its members' normalized stream hashes -- the exact stream for `exact`, the
+alpha-renamed stream for `renamed` and `logic`.
 
-Line numbers are deliberately not in it, so editing around a clone keeps its
-key. Adding or removing a copy *does* change it, which is what makes a stale
-suppression visible instead of silently covering a class that grew.
+File paths and line numbers are deliberately not in it, so editing around a
+clone, **moving or renaming a file**, and **scanning from a different ancestor
+root** all keep the key -- which is what lets a repo's own ignore entries hold
+under a workspace-wide scan. Adding or removing a copy *does* change it, which
+is what makes a stale suppression visible instead of silently covering a class
+that grew; the baseline diff pairs such re-keyings up (see CHANGED below).
 
 ## Suppression: `.zemble/dupes.ignore`
 
 Some duplication is deliberate (enum constructors, two bodies a driver's API
-forces apart). Commit `<root>/.zemble/dupes.ignore`, one entry per line:
+forces apart). Commit `.zemble/dupes.ignore`, one entry per line. A scan
+honours the scanned root's file **plus every `.zemble/dupes.ignore` under a
+directory that holds scanned files**, so each repo commits its own entries and
+they hold whether that repo is scanned alone or as part of the workspace.
+(A class that gains cross-repo copies under the wider scan re-keys, so the
+repo-local entry is then reported stale -- deliberately: the justification was
+written about a smaller class.)
 
 ```
 # deliberate duplication, reviewed
@@ -113,13 +129,49 @@ zemble dupes . --kind exact,renamed --baseline dupes-baseline.json
 ```
 
 `--save-baseline` writes every class key of the run (with its kind, lane, copies,
-score and member locations) as JSON. `--baseline` prints three sections:
-**resolved** (in the baseline, gone now), **remaining** and **new**. The exit
-code stays 0 -- this is still a report, not a gate.
+score and member locations) as JSON (document version 2; version 1 files, whose
+keys included file paths, are refused loudly). `--baseline` prints four
+sections: **resolved** (in the baseline, gone now), **changed**, **remaining**
+and **new**. The exit code stays 0 -- this is still a report, not a gate.
+`--json --baseline` prints the diff as a structured object.
 
-A suppressed class is neither new nor remaining, and is not called resolved
-either: it is still there, on purpose. A run narrowed with `--kind` or `--lane`
-only judges the entries it actually looked for.
+**CHANGED** is the honest middle: content-derived keys churn on edits, so a
+class that shrank or grew shows up as one gone entry plus one new class. The
+diff pairs each new class with the gone entry of its kind sharing the most
+member files and reports `was 625 -> now 435 (score delta)` with both keys,
+instead of pretending a partial resolution is a resolution plus a regression.
+
+A suppressed class is neither new nor changed, and is not called resolved
+either -- including when it re-keyed but still spans the entry's files: it is
+still there, on purpose. A run narrowed with `--kind` or `--lane` only judges
+the entries it actually looked for.
+
+Over MCP the baseline lives at the fixed `<repo>/.zemble/dupes.baseline.json`:
+`save_baseline=true` writes it, `baseline=true` diffs against it, and one call
+may do both (the diff loads the old file before it is overwritten, so a
+refactor loop is `baseline=true, save_baseline=true` each round).
+
+## Cross-module verdicts
+
+A workspace scan finds clone classes spanning repos, but a flat list cannot say
+what to do about them: that depends on dependency direction. When the scanned
+root has a `.zemble/home.toml` (the same file `zemble home` reads: module
+`order`, module globs, `[[forbidden]]` rules), every class spanning two or more
+declared modules carries one of three verdicts, printed as a `home:` line under
+its members and as a `home` object in the JSON:
+
+- **candidate-home** -- the most core member module, when every other member may
+  depend on it: `home: candidate home zenit (spans orcono, zenit; zenit is the
+  most core member module and every other member may depend on it)`.
+- **forbidden-dep** -- a `[[forbidden]]` rule blocks some member from depending
+  on the would-be home; the rule and its `why` are quoted, plus `a shared home
+  must sit deeper than <module>`. This is the case where a naive
+  "extract a shared class" is architecturally wrong.
+- **no-shared-ancestor** -- no member module is in the declared order (sibling
+  apps): the weakest finding, labelled as such.
+
+No `home.toml` means no verdicts and no noise; a malformed one is reported as a
+note and skipped, because this is a report, never a gate.
 
 ## `--brief`
 
@@ -174,17 +226,19 @@ overlapping window lengths of one copied run into the single widest one.
 
 ## The MCP tool
 
-`dupes(repo, kind, paths, exclude, lane, limit, min_files, format, brief)`.
+`dupes(repo, kind, paths, exclude, lane, limit, min_files, format, brief,
+baseline, save_baseline)`.
 
 `format="text"` (the default) returns the report exactly as the CLI prints it,
 as a plain string; `brief=true` trims it to the class lines. `format="json"`
 returns the structured object itself -- FastMCP encodes it once, so a client
-never has to parse JSON out of a JSON string. Neither surface needs a daemon or
-an index.
+never has to parse JSON out of a JSON string. `baseline`/`save_baseline` are
+booleans against the fixed `<repo>/.zemble/dupes.baseline.json` (see
+Baselines). Neither surface needs a daemon or an index.
 
 The `--kind all` text report is roughly a third of the tokens the JSON form
-costs, and the per-pair reasons are collapsed to one reason per class in the
-JSON whenever every pair agreed.
+costs. Reasons are collapsed on both surfaces: one reason per class when every
+pair agreed, and the consensus-plus-outliers aggregate at 3+ copies.
 
 ## Cost, measured on one repo
 
