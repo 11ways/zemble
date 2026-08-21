@@ -14,12 +14,12 @@ from zemble.cache import cache_key, indexed_ancestor_hint, resolve_cache_folder,
 from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser, run_embed_status
-from zemble.embedding.pricing import CONFIRM_ENV, EmbeddingBudgetExceeded
+from zemble.embedding.pricing import CONFIRM_ENV, EmbeddingBudgetExceeded, confirmed
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
-from zemble.index import ZembleIndex, resolve_embedder
+from zemble.index import BroadRootRefused, ZembleIndex, resolve_embedder
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
 from zemble.rerank.registry import RerankerSpecError, load_reranker
@@ -240,6 +240,9 @@ def _via_daemon(cmd: str, args: dict[str, object], no_daemon: bool, embedder: st
         # An explicit opt-out is not a failure: no fallback line is printed for it.
         client.disable_for_this_process("--no-daemon")
         return None
+    if confirmed():
+        # The daemon cannot inherit a confirmation set by this short-lived client process.
+        return None
     if embedder is not None:
         # The daemon holds one embedder, the environment default; an override is answered here.
         return None
@@ -264,7 +267,7 @@ def _load_index(path: str, content: list[ContentType], embedder: str | None = No
         hint = indexed_ancestor_hint(path, content)
         print(f"{e} {hint}" if hint else str(e), file=sys.stderr)
         sys.exit(1)
-    except (FileNotFoundError, EmbedderSpecError) as e:
+    except (BroadRootRefused, FileNotFoundError, EmbedderSpecError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 

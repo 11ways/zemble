@@ -13,13 +13,15 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
+from zemble.workspace import HOME_CONFIG_RELATIVE_PATH
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10, which the package still supports
     tomllib = None  # type: ignore[assignment]
 
-#: Where a workspace declares its module map, relative to its root.
-CONFIG_RELATIVE_PATH = ".zemble/home.toml"
+#: Backwards-compatible name for the workspace declaration path.
+CONFIG_RELATIVE_PATH = HOME_CONFIG_RELATIVE_PATH
 
 #: The module name reported for a file that sits at the workspace root.
 ROOT_MODULE = "<root>"

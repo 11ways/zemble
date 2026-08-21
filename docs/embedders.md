@@ -244,6 +244,21 @@ ZEMBLE_EMBED_CONFIRM=1) to embed anyway, or raise ZEMBLE_EMBED_BUDGET_TOKENS.
 - Every paid embed logs one INFO line first:
   `embedding 812 uncached chunk(s), ~171000 tokens, ~$0.02 with voyage:voyage-4-lite@1024`.
 
+### Broad-root guard
+
+Before a new local semantic index is chunked, Zemble checks whether its root appears to
+be a container of unrelated workspaces. A Git root is an explicit project boundary, and
+a multi-repository workspace declares itself with `.zemble/home.toml`. A smaller ad-hoc
+directory remains valid, but a non-declared root containing at least eight nested Git
+repositories is refused before anything reaches the embedder. This catches accidental
+requests for paths such as `~/projects` without blocking a declared workspace such as
+`javaweb`.
+
+The refusal names the root and all ways out: search a narrower project, declare the
+workspace, or deliberately override both this check and the embedding budget with
+`--yes` / `ZEMBLE_EMBED_CONFIRM=1`. A confirmed CLI request runs in-process because an
+already-running daemon cannot inherit an environment decision made by its client.
+
 ### Prices
 
 Per million tokens, from each provider's price list. A model that is not in the table is
