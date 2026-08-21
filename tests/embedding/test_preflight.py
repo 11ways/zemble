@@ -109,7 +109,7 @@ def test_embed_status_of_a_local_embedder(tmp_project: Path) -> None:
     assert status.price_per_million_usd == 0.0, "a local embedder is free"
     assert status.estimated_usd == 0.0, "free stays free however many chunks there are"
     assert status.cache_path is None, "the sqlite vector cache is for paid providers only"
-    assert not status.would_refuse, "a local build is never budget-gated"
+    assert not status.would_refuse, "a tiny tree is far under the local work ceiling"
 
 
 def test_embed_status_json_shape(tmp_project: Path, paid_embedder: PricedEmbedder) -> None:

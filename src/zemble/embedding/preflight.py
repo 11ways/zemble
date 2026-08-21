@@ -155,8 +155,8 @@ def embed_status(
         price_per_million_usd=price,
         estimated_usd=estimate_cost(tokens, price),
         cache_path=cache_path,
-        budget_tokens=budget_tokens(),
-        would_refuse=remote and exceeds_budget(tokens),
+        budget_tokens=budget_tokens(remote),
+        would_refuse=exceeds_budget(tokens, remote),
         chunk_seconds=round(chunk_seconds, 2),
         cache_lookup_seconds=round(lookup_seconds, 2),
     )
