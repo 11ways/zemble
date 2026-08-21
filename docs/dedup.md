@@ -165,70 +165,168 @@ refactor loop is `baseline=true, save_baseline=true` each round).
 ## Cross-module verdicts
 
 A workspace scan finds clone classes spanning repos, but a flat list cannot say
-what to do about them: that depends on dependency direction. When the scanned
-root has a `.zemble/home.toml` (the same file `zemble home` reads: module
-`order`, module globs, `[[forbidden]]` rules), every class spanning two or more
-declared modules carries one of four verdicts, printed as a `home:` line under
-its members and as a `home` object in the JSON:
+what to do about them: that depends on dependency direction, visibility and
+source sets. When the scanned root has a `.zemble/home.toml` (the same file
+`zemble home` reads: module `order`, module globs, `[[forbidden]]` rules,
+`depends_on` or discovered Gradle edges, `[source_sets]`), every class spanning
+two or more declared modules carries one verdict, printed as a `home:` line
+under its members and as a `home` object in the JSON.
 
-- **existing-home** -- the most core member module already declares one of the
-  copies as a capability's home, so the mechanism EXISTS and the other copies
-  are the drift:
+### The verdicts
+
+- **existing-reusable-api** -- a declared capability row names one copy, that
+  copy is public, every other copy's source set may use its source set, and
+  every other copy's module provably reaches its module. This is the ONLY
+  verdict that says the other copies should call it:
 
   ```
-  home: existing home zenit: Texts.trimmedOrNull
-        declared by ARCH.md: Blank-safe string trimming
+  home: existing reusable API zenit: Texts.trimmedOrNull
+        declared by CLAUDE.md: Blank-safe string trimming (row names Texts.trimmedOrNull)
+        public static
+        every copy's module reaches zenit (quirkyquarters: transitive)
         downstream copies should call or extend it
   ```
 
-  The evidence line carries the row's TITLE (its capability up to the first
-  parenthesis, truncated at 100 characters): a capability cell is prose and
-  routinely runs for hundreds of characters. The JSON adds `symbol`, `location`
-  (`<file path>:<start line>` of that copy, the declaration's first line, not its
-  line range) and `evidence` (one
-  `{"kind": "declared-row", "capability", "file", "line"}` per row, with the
-  whole capability cell) to the usual `verdict` / `modules` / `home` / `detail`.
-- **candidate-home** -- the most core member module, when every other member may
-  depend on it: `home: candidate home zenit (spans orcono, zenit; zenit is the
-  most core member module and every other member may depend on it)`. This is a
-  PLACE for a new mechanism, never a claim that a reusable one is already there;
-  only `existing-home` says that.
-- **forbidden-dep** -- a `[[forbidden]]` rule blocks some member from depending
-  on the would-be home; the rule and its `why` are quoted, plus `a shared home
-  must sit deeper than <module>`. This is the case where a naive
-  "extract a shared class" is architecturally wrong.
-- **no-shared-ancestor** -- no member module is in the declared order (sibling
-  apps): the weakest finding, labelled as such.
+- **existing-implementation-not-api** -- the mechanism is declared and in the
+  right place, but it cannot be called from where the copies are: it is
+  private, package-private or protected, its source set is unreachable, or the
+  workspace declares no dependency graph at all. Every failing check is listed:
 
-`existing-home` reads the same `home_modules` the `home` tool does, so the home
-cell must name its module IN BACKTICKS: a row whose home cell is prose declares
-no module, matches no copy, and is silently no evidence -- no verdict change and
-no note. `forbidden-dep` outranks `existing-home`: when a member may not depend on the
-module that declares the mechanism, calling it is not the fix, whatever the
-table says.
+  ```
+  home: existing implementation zenit-ai: AiRecordSources.declare (not a reusable API)
+        declared by CLAUDE.md: Record sources (row names AiRecordSources.declare)
+        private
+        thoth common cannot use zenit-ai common
+        expose it or extract the generic mechanism; do not call it as is
+  ```
+
+- **candidate-home** -- a PLACE for a new mechanism, never a claim that a
+  reusable one is already there. A row that names only the copy's TYPE lands
+  here too, saying exactly what it proved:
+
+  ```
+  home: candidate home zenit-cms: ResponseCache.appendPart
+        lexically related row: Response caching + sitemap (names the type, not this member)
+        every copy's module reaches zenit-cms (quirkyquarters: direct)
+        no declared member; review before consolidating
+  ```
+
+- **siblings-need-common-home** -- no member module may depend on any other, so
+  none of them is the home; the suggested home is the module they all reach
+  (`config.nearest_common_dependency`), or nothing when the workspace declares
+  no dependencies:
+
+  ```
+  home: siblings zenit-widget, zenit-flow: renameType
+        no dependency path either way
+        shared mechanism belongs in plumage
+  ```
+
+- **forbidden-dep** -- a `[[forbidden]]` rule blocks one member module from
+  depending on another; the rule and its `why` are quoted, plus `a shared home
+  must sit deeper than <module>`. This is the case where a naive "extract a
+  shared class" is architecturally wrong.
+- **no-shared-ancestor** -- a member module is not declared in `home.toml` at
+  all (sibling apps, a checkout the workspace does not describe): the
+  architecture cannot judge code it does not know about, and the verdict names
+  the modules it could not place.
+- **review-required** -- the class is a LOGIC clone. Structural similarity is
+  not equivalence, so the answer is a lead and never an instruction: the
+  best-evidenced copy (a copy a declared row names, else the most core one) is
+  named as a *possible* existing mechanism.
+
+  ```
+  home: possible existing mechanism zenit-ai: McpServerConnection.findMeaningfulMessage (logic clone)
+        logic clone: similar control flow and call set, not the same code
+        semantic review required; structural similarity is not equivalence
+  ```
+
+### The decision order
+
+One ordered decision function, first answer wins, every step failing closed:
+
+1. A `[[forbidden]]` rule between ANY two member modules -> `forbidden-dep`. It
+   outranks every declaration: when a member may not depend on the module that
+   declares the mechanism, calling it is not the fix, whatever the table says.
+2. A member module that `home.toml` does not declare -> `no-shared-ancestor`.
+3. `kind` is `logic` -> `review-required`, never anything stronger.
+4. Dependency topology, when the workspace has a dependency graph at all: the
+   home candidates are the member modules every other member module can reach
+   (`Reachability.DIRECT` or `TRANSITIVE`), most core first. When there is no
+   such module -> `siblings-need-common-home`. When the workspace declares and
+   builds NO dependency graph, the most core member module is used as a place,
+   and the verdict is capped below `existing-reusable-api`: `order` ranks
+   modules, it never granted anyone permission to depend on anyone.
+5. Declared rows for that home module: only an exact `Type.member` row on a
+   whole-body member counts as a declaration. A bare `Type` row is recorded as
+   `declared-type` evidence and yields `candidate-home`; no row at all yields
+   `candidate-home` without a symbol.
+6. With a declaration, three checks, all of which must pass for
+   `existing-reusable-api`: visibility from the parsed modifiers (Java `public`,
+   Zig `pub`/`export`; a language with no rule is "visibility unknown"), source
+   set compatibility of every other copy's file against the declared copy's
+   file, and reachability of the declared copy's module from every other
+   member module. Any failure -> `existing-implementation-not-api`, listing all
+   of them.
+
+### Evidence
+
+Every verdict carries an `evidence` list of `{kind, text}` items, and the text
+report prints one line per item between the head line and the action line. The
+kinds are `declared-member`, `declared-type`, `visibility`, `source-set`,
+`dependency` and `clone-kind`; declared-row evidence adds `capability`, `file`
+and `line`, with the whole capability cell (the printed line carries the row's
+TITLE, its capability up to the first parenthesis, truncated at 100 characters,
+because a capability cell is prose and routinely runs for hundreds of
+characters).
+
+The JSON verdict object carries `verdict` and `kind` (the same value; `verdict`
+is the name the first readers were written against), `modules`, `home`,
+`detail`, `symbol`, `location` (`<file path>:<start line>` of the named copy),
+`suggested_home`, `evidence` and `lines` (exactly what the text report prints).
+
+### What is proven, and what is not
+
+Proven: the declaration (a human wrote the row), the visibility (from the
+parse), the source-set fold (from the path), and the dependency direction (from
+`depends_on` or the Gradle build files). Not proven, and deliberately not
+claimed: that the two copies have compatible SIGNATURES, that they are
+semantically equivalent, or that the caller's context allows the call. A
+`public` verdict also does not check the declaring type's own visibility, and a
+Java interface method carries no `public` modifier, so it is reported
+restricted -- the closed direction, at the cost of some false
+`existing-implementation-not-api`.
+
+`home_modules` is read the way the `home` tool reads it, so the home cell must
+name its module IN BACKTICKS: a row whose home cell is prose declares no
+module, matches no copy, and is silently no evidence.
 
 No `home.toml` means no verdicts and no noise; a malformed one is reported as a
 note and skipped, because this is a report, never a gate.
 
-### What counts as evidence for `existing-home`
+### What counts as a declaration
 
 Declared capability-table rows (the `[[tables]]` of `home.toml`) and nothing
 else. A copy is promoted when it is a whole body -- not a statement window --
-living in the candidate home module -- and not a synthetic member such as
+living in the home module -- and not a synthetic member such as
 `Type.<initializer>`, which nothing can call -- and a row whose `home` cell
-backticks that module names that body. Three name shapes match and no more: the exact
-`Type.member`, a `Type.member` row whose qualified tail the unit carries
-(`Outer.Texts.trimmedOrNull` is named by `Texts.trimmedOrNull`), and a bare
-`Type` row, which covers the members declared directly in that type. A row that
-names a different type's member of the same name (`Other.trimmedOrNull` against
-`Texts.trimmedOrNull`) does NOT match: symbol matching fails closed, because a
-wrong `existing-home` sends a reader to code that does something else.
+backticks that module names that body exactly. Two name shapes are a
+declaration: the exact `Type.member`, and a `Type.member` row whose qualified
+tail the unit carries (`Outer.Texts.trimmedOrNull` is named by
+`Texts.trimmedOrNull`). A bare `Type` row is NOT a declaration of its members:
+it says the row is about that class, which is a lexical relation and not a
+statement that this member is the capability's API. A row that names a
+different type's member of the same name (`Other.trimmedOrNull` against
+`Texts.trimmedOrNull`) does not match at all: symbol matching fails closed,
+because a wrong "call this" sends a reader to code that does something else.
 
 Callers, the symbol graph, embeddings and search are deliberately not consulted.
 `dupes` is a cache-free scan that must run on any checkout without an index, and
 usage is not intent: a helper twenty callers reach for is not thereby the
 declared home of anything, while a mechanism a human wrote into the table is one
-however few callers it has. Classifying a class therefore never triggers
+however few callers it has. Visibility and modifiers come from the same
+tree-sitter parse the clone detection already did, so reading them costs
+nothing and reaches no index. Classifying a class therefore never triggers
 indexing, embedding or retrieval. The tables are read once per run, and only
 once a class actually spans two declared modules: a scan with nothing to judge
 never opens them. A declared table file that is missing is then a note in the

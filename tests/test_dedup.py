@@ -11,6 +11,7 @@ import pytest
 
 from zemble.dedup.baseline import diff_baseline, load_baseline, save_baseline
 from zemble.dedup.detect import DupeOptions, find_duplication
+from zemble.dedup.homes import VISIBILITY_RULES, Evidence, EvidenceKind, HomeVerdict, HomeVerdictKind
 from zemble.dedup.model import CloneKind, Lane
 from zemble.dedup.report import format_baseline_diff, format_report, report_json
 from zemble.dedup.structure import check_pair, edit_distance, jaccard
@@ -787,12 +788,20 @@ public class %s {
 """
 
 
-def _plant_pair(workspace: Path, left: str, right: str, salt: str) -> None:
-    """Write one identical body into two module directories."""
-    for module, name in ((left, "One" + salt.title()), (right, "Two" + salt.title())):
-        target = workspace / module / "src" / f"{name}.java"
+def _plant_pair(
+    workspace: Path,
+    left: str,
+    right: str,
+    salt: str,
+    *,
+    body: str = _JAVA_BODY,
+    folds: tuple[str, str] = ("src", "src"),
+) -> None:
+    """Write one identical body into two module directories, optionally into named source sets."""
+    for module, name, fold in ((left, "One" + salt.title(), folds[0]), (right, "Two" + salt.title(), folds[1])):
+        target = workspace / module / fold / f"{name}.java"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_JAVA_BODY % (module.replace("-", ""), name, salt))
+        target.write_text(body % (module.replace("-", ""), name, salt))
 
 
 def _verdict_for(report, module: str):
@@ -887,16 +896,36 @@ def test_mcp_baseline_journey(tmp_path: Path) -> None:
     assert payload["counts"] == {"resolved": 0, "changed": 0, "remaining": 1, "new": 0}, "step 4: the buckets"
 
 
-_HOME_TOML_TABLE = (
-    _HOME_TOML
-    + """
+_TABLE_SECTION = """
 [[tables]]
 file = "ARCH.md"
 capability = "Capability"
 home = "Mechanism home"
 consumers = "Consumers"
 """
-)
+
+_HOME_TOML_TABLE = _HOME_TOML + _TABLE_SECTION
+
+#: The same three modules, with the dependency graph declared: app and widget both use
+#: core, and neither of them may reach the other.
+_DEPENDS_TOML = """
+order = ["core", "app", "widget"]
+
+[dependencies]
+source = "declared"
+
+[modules.core]
+globs = ["core/**"]
+depends_on = []
+
+[modules.app]
+globs = ["app/**"]
+depends_on = ["core"]
+
+[modules.widget]
+globs = ["widget/**"]
+depends_on = ["core"]
+"""
 
 _ARCH_HEAD = """# Architecture
 
@@ -904,77 +933,221 @@ _ARCH_HEAD = """# Architecture
 | --- | --- | --- |
 """
 
+_JAVA_PRIVATE_BODY = _JAVA_BODY.replace("public String weave", "private String weave")
 
-def _declare(workspace: Path, capability: str, *, table: bool = True) -> None:
+
+def _declare(workspace: Path, capability: str, *, table: bool = True, toml: str = _HOME_TOML) -> None:
     """Write a home.toml, and the one-row declared-home table it points at."""
     (workspace / ".zemble").mkdir(parents=True, exist_ok=True)
-    (workspace / ".zemble" / "home.toml").write_text(_HOME_TOML_TABLE if table else _HOME_TOML)
+    (workspace / ".zemble" / "home.toml").write_text(toml + _TABLE_SECTION if table else toml)
     if table:
         (workspace / "ARCH.md").write_text(f"{_ARCH_HEAD}| {capability} | `core` | `app` |\n")
 
 
-def _existing_home_workspace(tmp_path: Path, capability: str, *, table: bool = True) -> Path:
+def _existing_home_workspace(
+    tmp_path: Path,
+    capability: str,
+    *,
+    table: bool = True,
+    toml: str = _HOME_TOML,
+    body: str = _JAVA_BODY,
+    folds: tuple[str, str] = ("src", "src"),
+) -> Path:
     """A core+app clone whose core copy the table may or may not declare."""
     workspace = tmp_path / "workspace"
-    _plant_pair(workspace, "core", "app", "shared")
-    _declare(workspace, capability, table=table)
+    _plant_pair(workspace, "core", "app", "shared", body=body, folds=folds)
+    _declare(workspace, capability, table=table, toml=toml)
     return workspace
 
 
-def test_existing_home_from_declared_row(tmp_path: Path) -> None:
-    """A declared row naming the core copy turns the candidate home into an existing one."""
+def test_existing_reusable_api_from_declared_row(tmp_path: Path) -> None:
+    """A declared PUBLIC member every copy's module may reach is the one verdict that says call it."""
     capability = "Weaving a string (`OneShared.weave`)"
-    workspace = _existing_home_workspace(tmp_path, capability)
+    workspace = _existing_home_workspace(tmp_path, capability, toml=_DEPENDS_TOML)
     options = DupeOptions(kinds=(CloneKind.EXACT,))
 
     # 1. The verdict names the mechanism, not just the module.
     report = find_duplication(workspace, options)
     _, verdict = _verdict_for(report, "core")
-    assert verdict is not None and verdict.kind.value == "existing-home", "step 1: the row promotes the verdict"
+    assert verdict is not None and verdict.kind.value == "existing-reusable-api", "step 1: declared, public, reachable"
     assert verdict.home == "core" and verdict.symbol == "OneShared.weave", "step 1: the symbol is the core body"
     assert verdict.location == "core/src/OneShared.java:4", "step 1: the location is file:start_line"
 
-    # 2. The evidence is the declared row and nothing else.
-    assert [item.kind for item in verdict.evidence] == ["declared-row"], "step 2: declared rows are the evidence"
+    # 2. The evidence is the row, the visibility and the dependency proof, each kind-tagged.
+    assert [item.kind.value for item in verdict.evidence] == ["declared-member", "visibility", "dependency"], (
+        "step 2: three proofs, in the order the report prints them"
+    )
     assert verdict.evidence[0].capability == capability, "step 2: the row's capability is kept whole"
-    assert verdict.evidence[0].title == "Weaving a string", "step 2: with its short title beside it"
     assert verdict.evidence[0].file == "ARCH.md" and verdict.evidence[0].line == 5, "step 2: and where it stands"
+    assert verdict.evidence[1].text == "public", "step 2: the visibility is read from the parsed modifiers"
+    assert verdict.evidence[2].text == "every copy's module reaches core (app: direct)", "step 2: named reachability"
     assert hash(verdict), "step 2: the verdict stays hashable, so evidence is not a bare dict"
 
     # 3. Text and JSON both carry it.
     text = format_report(report)
-    assert "    home: existing home core: OneShared.weave" in text, "step 3: the head line names the mechanism"
-    assert "          declared by ARCH.md: Weaving a string" in text, (
-        "step 3: the evidence line carries the row's TITLE, indented under the head line's text"
+    assert "    home: existing reusable API core: OneShared.weave" in text, "step 3: the head line names it"
+    assert "          declared by ARCH.md: Weaving a string (row names OneShared.weave)" in text, (
+        "step 3: the evidence line carries the row's TITLE and the name that matched"
     )
     assert capability not in text, "step 3: the full capability cell stays out of the text report"
     assert "          downstream copies should call or extend it" in text, "step 3: and what to do about it"
     payload = report_json(report)
     judged = next(clone["home"] for clone in payload["classes"] if "home" in clone)
-    assert judged["verdict"] == "existing-home", "step 3: the wire agrees"
-    assert judged["symbol"] == "OneShared.weave" and judged["location"] == verdict.location, (
-        "step 3: symbol on the wire"
-    )
+    assert judged["kind"] == judged["verdict"] == "existing-reusable-api", "step 3: the wire agrees, under both names"
+    assert judged["symbol"] == "OneShared.weave" and judged["location"] == verdict.location, "step 3: symbol on wire"
     assert judged["evidence"] == [item.to_dict() for item in verdict.evidence], "step 3: evidence on the wire"
-    assert set(judged["evidence"][0]) == {"kind", "capability", "file", "line"}, "step 3: the wire shape is unchanged"
+    assert set(judged["evidence"][0]) == {"kind", "text", "capability", "file", "line"}, "step 3: declared-row shape"
+    assert set(judged["evidence"][1]) == {"kind", "text"}, "step 3: every other evidence item is kind plus line"
+    assert judged["lines"] == verdict.describe_lines(), "step 3: the rendered lines ship too"
 
 
-def test_existing_home_from_bare_class_row(tmp_path: Path) -> None:
-    """A row declaring the whole class covers the members declared in it."""
-    workspace = _existing_home_workspace(tmp_path, "Weaving a string (`OneShared`)")
-    _, verdict = _verdict_for(find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,))), "core")
-    assert verdict is not None and verdict.kind.value == "existing-home", "a bare class row promotes its member"
-    assert verdict.symbol == "OneShared.weave", "the member is still what the verdict names"
+def test_private_declared_member_is_not_a_reusable_api(tmp_path: Path) -> None:
+    """A declared mechanism nothing outside its class can call is not something to call."""
+    workspace = _existing_home_workspace(
+        tmp_path, "Weaving a string (`OneShared.weave`)", toml=_DEPENDS_TOML, body=_JAVA_PRIVATE_BODY
+    )
+    report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
+    _, verdict = _verdict_for(report, "core")
+    assert verdict is not None and verdict.kind.value == "existing-implementation-not-api", "private is not an API"
+    assert verdict.symbol == "OneShared.weave", "the mechanism is still named"
+    kinds = [item.kind.value for item in verdict.evidence]
+    assert kinds == ["declared-member", "visibility"], "the row and the visibility that blocks it"
+    assert verdict.evidence[1].text == "private", "the modifier itself is the evidence"
+    text = format_report(report)
+    assert "home: existing implementation core: OneShared.weave (not a reusable API)" in text, "the head line says so"
+    assert "expose it or extract the generic mechanism; do not call it as is" in text, "and what to do instead"
+    assert "call or extend" not in text, "a private member is never something to call"
+
+
+def test_unknown_dependencies_cap_a_declared_member(tmp_path: Path) -> None:
+    """Order is not permission: with no dependency graph, may-call-it is never proven."""
+    workspace = _existing_home_workspace(tmp_path, "Weaving a string (`OneShared.weave`)")
+    report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
+    _, verdict = _verdict_for(report, "core")
+    assert verdict is not None and verdict.kind.value == "existing-implementation-not-api", "capped, not promoted"
+    assert [item.kind.value for item in verdict.evidence] == ["declared-member", "dependency"], "the row and the gap"
+    assert "dependency reachability unknown" in verdict.evidence[1].text, "and the gap is named as unknown"
+    assert "call or extend" not in format_report(report), "an unproven dependency never says call it"
+
+
+def test_incompatible_source_sets_block_a_declared_member(tmp_path: Path) -> None:
+    """A server-fold mechanism is unreachable from a common-fold copy, however close the modules are."""
+    workspace = _existing_home_workspace(
+        tmp_path,
+        "Weaving a string (`OneShared.weave`)",
+        toml=_DEPENDS_TOML,
+        folds=("src/server/java", "src/common/java"),
+    )
+    report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
+    _, verdict = _verdict_for(report, "core")
+    assert verdict is not None and verdict.kind.value == "existing-implementation-not-api", "the fold blocks reuse"
+    folds = [item for item in verdict.evidence if item.kind.value == "source-set"]
+    assert folds and folds[0].text == "app common cannot use core server", "the incompatible pair is named"
+
+
+def test_bare_class_row_is_never_a_declaration(tmp_path: Path) -> None:
+    """A row naming the type says the row is ABOUT that class, not that this member is its API."""
+    workspace = _existing_home_workspace(tmp_path, "Weaving a string (`OneShared`)", toml=_DEPENDS_TOML)
+    report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
+    _, verdict = _verdict_for(report, "core")
+    assert verdict is not None and verdict.kind.value == "candidate-home", "a bare type declares no member"
+    assert verdict.symbol == "OneShared.weave", "the lexically related member is still named"
+    assert [item.kind.value for item in verdict.evidence] == ["declared-type", "dependency"], "tagged as a type row"
+    text = format_report(report)
+    assert "home: candidate home core: OneShared.weave" in text, "the head line stays a candidate"
+    assert "(names the type, not this member)" in text, "and says exactly what the row proved"
+    assert "call or extend" not in text, "a bare row never authorises calling anything"
+    assert "no declared member; review before consolidating" in text, "the action is review, not reuse"
+
+
+def test_siblings_need_a_common_home(tmp_path: Path) -> None:
+    """Two modules that cannot reach each other need a third one, not one of themselves."""
+    workspace = tmp_path / "workspace"
+    _plant_pair(workspace, "app", "widget", "leaky")
+    _declare(workspace, "unused", table=False, toml=_DEPENDS_TOML)
+    report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
+    _, verdict = _verdict_for(report, "widget")
+    assert verdict is not None and verdict.kind.value == "siblings-need-common-home", "neither may depend on the other"
+    assert verdict.suggested_home == "core", "the module both reach is where it belongs"
+    assert verdict.symbol == "weave", "the shared member name is what they both have"
+    text = format_report(report)
+    assert "home: siblings app, widget: weave" in text, "the head line names both siblings"
+    assert "no dependency path either way" in text, "the evidence is the missing path"
+    assert "shared mechanism belongs in core" in text, "and the answer is a third module"
+
+
+def test_logic_clones_are_a_review_lead_not_a_duplicate(tmp_path: Path) -> None:
+    """Structural similarity is not equivalence, so a logic clone never says call it."""
+    workspace = tmp_path / "workspace"
+    for module, name in (("core", "LogicA"), ("app", "LogicB")):
+        target = workspace / module / "src" / f"{name}.java"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((FIXTURES / "src" / f"{name}.java").read_text())
+    _declare(workspace, "Rendering an order (`LogicA.render`)", toml=_DEPENDS_TOML)
+    report = find_duplication(
+        workspace,
+        DupeOptions(kinds=(CloneKind.LOGIC,), windows=False, logic_threshold=0.5),
+        embedder=BagOfWordsEmbedder(),
+    )
+    _, verdict = _verdict_for(report, "core")
+    assert verdict is not None and verdict.kind.value == "review-required", "a logic clone is never stronger"
+    assert verdict.home == "core" and verdict.symbol == "LogicA.render", "the declared copy is the best evidence"
+    assert [item.kind.value for item in verdict.evidence] == ["declared-member", "clone-kind"], "the clone kind shows"
+    text = format_report(report)
+    assert "home: possible existing mechanism core: LogicA.render (logic clone)" in text, "the head line hedges"
+    assert "semantic review required; structural similarity is not equivalence" in text, "and says why"
+    assert "call or extend" not in text, "a logic clone authorises nothing"
+
+
+@pytest.mark.parametrize("kind", list(HomeVerdictKind))
+def test_every_verdict_kind_renders_and_ships(kind: HomeVerdictKind) -> None:
+    """The verdict vocabulary has one home: every member renders and reaches the wire."""
+    verdict = HomeVerdict(
+        kind,
+        ("core", "app"),
+        "core",
+        "why this happened",
+        symbol="OneShared.weave",
+        location="core/src/OneShared.java:4",
+        evidence=(Evidence(EvidenceKind.DEPENDENCY, "every copy's module reaches core (app: direct)"),),
+        suggested_home="core",
+    )
+    lines = verdict.describe_lines()
+    assert lines and all(line.strip() for line in lines), f"{kind.value} renders real lines"
+    payload = verdict.to_dict()
+    assert set(payload) == {
+        "verdict",
+        "kind",
+        "modules",
+        "home",
+        "detail",
+        "symbol",
+        "location",
+        "suggested_home",
+        "evidence",
+        "lines",
+    }, f"{kind.value} carries the whole wire shape"
+    assert payload["kind"] == payload["verdict"] == kind.value, f"{kind.value} ships under both names"
+    assert ("downstream copies should call or extend it" in lines) is (kind is HomeVerdictKind.EXISTING_REUSABLE_API), (
+        "only a proven reusable API is something to call"
+    )
+
+
+def test_every_language_declares_its_visibility() -> None:
+    """A language without a visibility rule fails closed, and adding one must not be forgotten."""
+    from zemble.dedup.languages import supported_languages
+
+    assert set(supported_languages()) <= set(VISIBILITY_RULES), "every scanned language spells visibility somewhere"
 
 
 def test_candidate_home_without_a_declared_row(tmp_path: Path) -> None:
     """Being the most core member module alone never claims a mechanism exists."""
-    workspace = _existing_home_workspace(tmp_path, "unused", table=False)
+    workspace = _existing_home_workspace(tmp_path, "unused", table=False, toml=_DEPENDS_TOML)
     report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
     _, verdict = _verdict_for(report, "core")
     assert verdict is not None and verdict.kind.value == "candidate-home", "no table, no existing home"
-    assert verdict.symbol is None and not verdict.evidence, "and no structured evidence either"
-    assert set(verdict.to_dict()) == {"verdict", "modules", "home", "detail"}, "the old wire shape is untouched"
+    assert verdict.symbol is None, "and no mechanism is named"
+    assert [item.kind.value for item in verdict.evidence] == ["dependency"], "only the topology is proven"
 
 
 def test_declared_row_near_miss_stays_candidate(tmp_path: Path) -> None:
@@ -984,7 +1157,7 @@ def test_declared_row_near_miss_stays_candidate(tmp_path: Path) -> None:
     assert verdict is not None and verdict.kind.value == "candidate-home", "symbol matching fails closed"
 
 
-def test_forbidden_dep_outranks_existing_home(tmp_path: Path) -> None:
+def test_forbidden_dep_outranks_every_declaration(tmp_path: Path) -> None:
     """A forbidden dependency is still the answer, however well declared the core copy is."""
     workspace = tmp_path / "workspace"
     _plant_pair(workspace, "app", "widget", "leaky")
@@ -1004,10 +1177,21 @@ def test_no_shared_ancestor_survives_the_table(tmp_path: Path) -> None:
     _declare(workspace, "Weaving a string (`OneOrphan.weave`)")
     _, verdict = _verdict_for(find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,))), "stray-one")
     assert verdict is not None and verdict.kind.value == "no-shared-ancestor", "no member is in the declared order"
+    assert "not declared in home.toml" in verdict.detail, "and the verdict says which modules it could not place"
+
+
+def test_one_undeclared_member_is_no_shared_ancestor(tmp_path: Path) -> None:
+    """A copy outside the declared architecture cannot be judged by it, whatever its neighbour is."""
+    workspace = tmp_path / "workspace"
+    _plant_pair(workspace, "core", "stray-one", "mixed")
+    _declare(workspace, "unused", table=False, toml=_DEPENDS_TOML)
+    _, verdict = _verdict_for(find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,))), "core")
+    assert verdict is not None and verdict.kind.value == "no-shared-ancestor", "one stray module is enough"
+    assert "stray-one is not declared" in verdict.detail, "and it is named"
 
 
 def test_missing_table_file_degrades_to_a_note(tmp_path: Path) -> None:
-    """A declared table that is not there loses the existing-home lane and nothing else."""
+    """A declared table that is not there loses the declared lane and nothing else."""
     workspace = _existing_home_workspace(tmp_path, "Weaving a string (`OneShared.weave`)")
     (workspace / "ARCH.md").unlink()
     report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
@@ -1046,8 +1230,8 @@ def test_declared_rows_do_not_move_any_key(tmp_path: Path) -> None:
     assert not suppressed.ignore_problems, "and it is not stale"
 
 
-def test_old_verdicts_keep_their_wire_shape(tmp_path: Path) -> None:
-    """The three pre-existing verdicts gain no keys, so a reader written against them still works."""
+def test_every_verdict_ships_the_same_wire_shape(tmp_path: Path) -> None:
+    """One renderer, one shape: every verdict on the wire carries the same keys."""
     workspace = tmp_path / "workspace"
     _plant_pair(workspace, "core", "app", "shared")
     _plant_pair(workspace, "app", "widget", "leaky")
@@ -1055,14 +1239,25 @@ def test_old_verdicts_keep_their_wire_shape(tmp_path: Path) -> None:
     _declare(workspace, "Weaving a string (`Nothing.matches`)")
     report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
     payload = report_json(report)
-    seen = {clone["home"]["verdict"]: set(clone["home"]) for clone in payload["classes"] if "home" in clone}
+    seen = {clone["home"]["kind"]: set(clone["home"]) for clone in payload["classes"] if "home" in clone}
     assert set(seen) == {"candidate-home", "forbidden-dep", "no-shared-ancestor"}, "no row matches, so no promotion"
     for keys in seen.values():
-        assert keys == {"verdict", "modules", "home", "detail"}, "the old verdicts carry exactly the old keys"
+        assert keys == {
+            "verdict",
+            "kind",
+            "modules",
+            "home",
+            "detail",
+            "symbol",
+            "location",
+            "suggested_home",
+            "evidence",
+            "lines",
+        }, "every verdict carries the whole shape, filled or null"
 
 
 def test_existing_home_never_indexes_or_embeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Classification is declared-row evidence only: nothing here may reach search or embeddings."""
+    """Classification is declarations, the parse and the dependency graph: never search or embeddings."""
     import zemble.embedding.registry
     import zemble.index.create
     import zemble.search
@@ -1075,10 +1270,10 @@ def test_existing_home_never_indexes_or_embeds(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(zemble.index.create, "create_index_from_path", explode)
     monkeypatch.setattr(zemble.search, "search", explode)
 
-    workspace = _existing_home_workspace(tmp_path, "Weaving a string (`OneShared.weave`)")
+    workspace = _existing_home_workspace(tmp_path, "Weaving a string (`OneShared.weave`)", toml=_DEPENDS_TOML)
     report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
     _, verdict = _verdict_for(report, "core")
-    assert verdict is not None and verdict.kind.value == "existing-home", "the verdict is reached without retrieval"
+    assert verdict is not None and verdict.kind.value == "existing-reusable-api", "reached without retrieval"
 
 
 _JAVA_INITIALIZER = """package %s;
@@ -1104,13 +1299,14 @@ def test_initializers_are_never_an_existing_home(tmp_path: Path) -> None:
         target = workspace / module / "src" / f"{name}.java"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_JAVA_INITIALIZER % (module, name))
-    _declare(workspace, "Shared builder priming (`OneInit`)")
+    _declare(workspace, "Shared builder priming (`OneInit`)", toml=_DEPENDS_TOML)
     report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
     clone, verdict = _verdict_for(report, "core")
     assert any(member.name.endswith(".<initializer>") for member in clone.members), (
         "setup: the copies are static blocks"
     )
     assert verdict is not None and verdict.kind.value == "candidate-home", "an initializer is not a mechanism"
+    assert verdict.symbol is None, "and nothing was named"
 
 
 def test_no_cross_module_class_reads_no_table(tmp_path: Path) -> None:
@@ -1128,10 +1324,12 @@ def test_no_cross_module_class_reads_no_table(tmp_path: Path) -> None:
 def test_long_capability_titles_are_truncated_in_the_text(tmp_path: Path) -> None:
     """A table cell is prose and can run for hundreds of characters; the report line cannot."""
     long_title = "Priming a shared string builder from every module that needs one " * 3
-    workspace = _existing_home_workspace(tmp_path, f"{long_title.strip()} (`OneShared.weave`)")
+    workspace = _existing_home_workspace(tmp_path, f"{long_title.strip()} (`OneShared.weave`)", toml=_DEPENDS_TOML)
     report = find_duplication(workspace, DupeOptions(kinds=(CloneKind.EXACT,)))
     line = next(line for line in format_report(report).splitlines() if "declared by ARCH.md:" in line)
-    assert line.endswith("..."), "the title is cut off"
-    assert len(line.strip()) <= len("declared by ARCH.md: ") + 100, "and the line stays readable"
+    title = line.strip().removeprefix("declared by ARCH.md: ").split(" (row names ")[0]
+    assert title.endswith("...") and len(title) <= 100, "the title is cut off at a readable length"
     _, verdict = _verdict_for(report, "core")
-    assert verdict is not None and verdict.evidence[0].title == long_title.strip(), "the whole title survives in data"
+    assert verdict is not None and verdict.evidence[0].capability.startswith(long_title.strip()), (
+        "the whole capability survives in data"
+    )
