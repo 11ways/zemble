@@ -8,11 +8,15 @@ zemble itself. A workspace without one is answered generically and told so.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+from zemble.home.deps import DependencyGraph, DependencySource, Reachability, build_graph
+from zemble.home.source_sets import SourceSet, classify, compatible
 from zemble.workspace import HOME_CONFIG_RELATIVE_PATH
 
 try:
@@ -88,11 +92,20 @@ class HomeConfig:
     """The workspace knowledge one `home` answer is allowed to rely on."""
 
     root: Path
-    #: Modules closest to the core first. Ranking is by position in this list.
+    #: Modules closest to the core first. A pure RANKING: being earlier in this list
+    #: says a module is closer to the core, never that anyone may depend on it.
     order: tuple[str, ...] = ()
     #: Module name -> the globs matching its files.
     module_globs: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
     forbidden: tuple[ForbiddenRule, ...] = ()
+    #: Module name -> the modules it declares a dependency on; overrides discovery.
+    depends_on: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
+    #: Which lanes may contribute dependency edges.
+    dependency_source: DependencySource = DependencySource.BOTH
+    #: Directories to scan for build files; empty means the whole workspace.
+    gradle_roots: tuple[str, ...] = ()
+    #: Source set -> the path globs declaring it; empty means the built-in defaults.
+    source_set_globs: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
     tables: tuple[TableSpec, ...] = ()
     skills: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
     rules: tuple[WorkspaceRule, ...] = ()
@@ -105,6 +118,10 @@ class HomeConfig:
             object.__setattr__(self, "module_globs", {})
         if self.skills is None:
             object.__setattr__(self, "skills", {})
+        if self.depends_on is None:
+            object.__setattr__(self, "depends_on", {})
+        if self.source_set_globs is None:
+            object.__setattr__(self, "source_set_globs", {})
 
     @property
     def generic(self) -> bool:
@@ -154,6 +171,40 @@ class HomeConfig:
                 return rule
         return None
 
+    @cached_property
+    def dependencies(self) -> DependencyGraph:
+        """The module dependency graph, built once from the declarations and the build files.
+
+        Built lazily because discovery walks the workspace for build files: a config that
+        is only asked for its modules never pays for it.
+        """
+        return build_graph(
+            self.root,
+            self.modules,
+            self.module_of,
+            self.depends_on,
+            forbidden=[(rule.source, rule.target) for rule in self.forbidden],
+            source=self.dependency_source,
+            gradle_roots=self.gradle_roots,
+        )
+
+    def reachable(self, consumer: str, home: str) -> Reachability:
+        """Answer whether a module may use code that lives in another one."""
+        return self.dependencies.reachable(consumer, home)
+
+    def nearest_common_dependency(self, modules: Sequence[str]) -> str | None:
+        """Return the highest-ranked module every given module may depend on, if any."""
+        return self.dependencies.nearest_common_dependency(modules, self.rank)
+
+    def source_set_of(self, file_path: str) -> SourceSet:
+        """Return the fold of a module a workspace-relative path is compiled into."""
+        patterns = {SourceSet(name): globs for name, globs in self.source_set_globs.items()}
+        return classify(file_path, patterns or None)
+
+    def source_set_compatible(self, consumer_path: str, provider_path: str) -> bool:
+        """Whether code at one path may use code at another, by their folds alone."""
+        return compatible(self.source_set_of(consumer_path), self.source_set_of(provider_path))
+
     def skills_for(self, module: str) -> tuple[str, ...]:
         """Return the skills to read before designing inside a module."""
         return self.skills.get(module, ())
@@ -167,6 +218,9 @@ class HomeConfig:
             "order": list(self.order),
             "modules": {name: list(globs) for name, globs in self.module_globs.items()},
             "forbidden": [rule.to_dict() for rule in self.forbidden],
+            "depends_on": {name: list(targets) for name, targets in self.depends_on.items()},
+            "dependency_source": self.dependency_source.value,
+            "source_sets": {name: list(globs) for name, globs in self.source_set_globs.items()},
             "tables": [table.to_dict() for table in self.tables],
             "skills": {name: list(values) for name, values in self.skills.items()},
             "rules": [rule.to_dict() for rule in self.rules],
@@ -200,19 +254,27 @@ class HomeConfig:
         # that spells it the second way cannot also have a module called "order".
         order_raw = raw.get("order", modules_section.pop("order", None))
         order = tuple(_strings(order_raw, "order", path)) if order_raw is not None else ()
-        module_globs = {
-            name: tuple(_strings(value, f"modules.{name}", path)) for name, value in modules_section.items()
-        }
+        module_globs: dict[str, tuple[str, ...]] = {}
+        depends_on: dict[str, tuple[str, ...]] = {}
+        for name, value in modules_section.items():
+            globs, declared_deps = _module_entry(value, name, path)
+            module_globs[name] = globs
+            if declared_deps is not None:
+                depends_on[name] = declared_deps
         for name in module_globs:
             if not module_globs[name]:
                 raise ConfigError(f"{path}: modules.{name} declares no globs")
+        dependency_source, gradle_roots = _dependencies(_table(raw, "dependencies", path), path)
+        source_set_globs = _source_sets(_table(raw, "source_sets", path), path)
         forbidden = tuple(_forbidden(entry, index, path) for index, entry in enumerate(_array(raw, "forbidden", path)))
         tables = tuple(_table_spec(entry, index, path) for index, entry in enumerate(_array(raw, "tables", path)))
         skills = {
             name: tuple(_strings(value, f"skills.{name}", path)) for name, value in _table(raw, "skills", path).items()
         }
         rules = tuple(_rule(entry, index, path) for index, entry in enumerate(_array(raw, "rules", path)))
-        unknown = set(raw) - {"order", "modules", "forbidden", "tables", "skills", "rules"}
+        unknown = set(raw) - {
+            "order", "modules", "forbidden", "tables", "skills", "rules", "dependencies", "source_sets"
+        }  # fmt: skip
         if unknown:
             raise ConfigError(f"{path}: unknown section(s): {', '.join(sorted(unknown))}")
         config = cls(
@@ -220,6 +282,10 @@ class HomeConfig:
             order=order,
             module_globs=module_globs,
             forbidden=forbidden,
+            depends_on=depends_on,
+            dependency_source=dependency_source,
+            gradle_roots=gradle_roots,
+            source_set_globs=source_set_globs,
             tables=tables,
             skills=skills,
             rules=rules,
@@ -233,16 +299,71 @@ def _check_names(config: HomeConfig, path: Path) -> None:
     """Refuse a config that names a module nothing else declares."""
     known = set(config.modules)
     for rule in config.forbidden:
-        for name in (rule.source, rule.target):
-            if name not in known:
-                raise ConfigError(f"{path}: forbidden rule names undeclared module {name!r}")
+        _known(rule.source, known, "forbidden rule names", path)
+        _known(rule.target, known, "forbidden rule names", path)
+    for name, targets in config.depends_on.items():
+        _known(name, known, "depends_on declared for", path)
+        for target in targets:
+            _known(target, known, f"modules.{name}.depends_on names", path)
     for name in config.skills:
-        if name not in known:
-            raise ConfigError(f"{path}: skills names undeclared module {name!r}")
+        _known(name, known, "skills names", path)
     for rule in config.rules:
         for name in rule.modules:
-            if name not in known:
-                raise ConfigError(f"{path}: rule scope names undeclared module {name!r}")
+            _known(name, known, "rule scope names", path)
+
+
+def _known(name: str, known: set[str], what: str, path: Path) -> None:
+    """Refuse one name that is not a declared module."""
+    if name not in known:
+        raise ConfigError(f"{path}: {what} undeclared module {name!r}")
+
+
+def _module_entry(value: Any, name: str, path: Path) -> tuple[tuple[str, ...], tuple[str, ...] | None]:
+    """Read one [modules] entry as its globs and, where it declares them, its dependencies.
+
+    A module is written either as its globs (`zenit = "zenit/**"`) or as a table
+    (`[modules.zenit] globs = [...]`, `depends_on = [...]`). Declaring `depends_on`, even
+    as an empty list, REPLACES Gradle discovery for that module.
+    """
+    if isinstance(value, dict):
+        unknown = set(value) - {"globs", "depends_on"}
+        if unknown:
+            raise ConfigError(f"{path}: modules.{name} has unknown key(s): {', '.join(sorted(unknown))}")
+        if "globs" not in value:
+            raise ConfigError(f"{path}: modules.{name} declares no globs")
+        globs = tuple(_strings(value["globs"], f"modules.{name}.globs", path))
+        declared = value.get("depends_on")
+        deps = tuple(_strings(declared, f"modules.{name}.depends_on", path)) if declared is not None else None
+        return globs, deps
+    return tuple(_strings(value, f"modules.{name}", path)), None
+
+
+def _dependencies(section: dict[str, Any], path: Path) -> tuple[DependencySource, tuple[str, ...]]:
+    """Read the [dependencies] section: which lanes may contribute edges, and where to scan."""
+    unknown = set(section) - {"source", "gradle_roots"}
+    if unknown:
+        raise ConfigError(f"{path}: [dependencies] has unknown key(s): {', '.join(sorted(unknown))}")
+    written = section.get("source", DependencySource.BOTH.value)
+    try:
+        source = DependencySource(written)
+    except ValueError as error:
+        allowed = ", ".join(member.value for member in DependencySource)
+        raise ConfigError(f"{path}: [dependencies] source must be one of {allowed}, got {written!r}") from error
+    roots = section.get("gradle_roots")
+    return source, tuple(_strings(roots, "dependencies.gradle_roots", path)) if roots is not None else ()
+
+
+def _source_sets(section: dict[str, Any], path: Path) -> dict[str, tuple[str, ...]]:
+    """Read the [source_sets] section, refusing a fold zemble has no name for."""
+    folds: dict[str, tuple[str, ...]] = {}
+    for name, value in section.items():
+        try:
+            fold = SourceSet(name)
+        except ValueError as error:
+            allowed = ", ".join(member.value for member in SourceSet)
+            raise ConfigError(f"{path}: [source_sets] {name!r} is not a source set ({allowed})") from error
+        folds[fold.value] = tuple(_strings(value, f"source_sets.{name}", path))
+    return folds
 
 
 def _table(raw: dict[str, Any], key: str, path: Path) -> dict[str, Any]:
@@ -319,8 +440,12 @@ __all__ = [
     "CONFIG_RELATIVE_PATH",
     "ROOT_MODULE",
     "ConfigError",
+    "DependencyGraph",
+    "DependencySource",
     "ForbiddenRule",
     "HomeConfig",
+    "Reachability",
+    "SourceSet",
     "TableSpec",
     "WorkspaceRule",
 ]

@@ -1,0 +1,3720 @@
+{
+  "tool": "home",
+  "repo": "javaweb",
+  "root": "/home/skerit/projects/javaweb",
+  "top_k": 40,
+  "chunks": 84691,
+  "index_ms": 66461.9,
+  "graph_ms": 2816.4,
+  "graph": {
+    "symbols": 103063,
+    "edges": 973826
+  },
+  "summary": {
+    "queries": 73,
+    "declared_queries": 61,
+    "negative_queries": 12,
+    "without_table": {
+      "hit_at_1": 0.738,
+      "hit_at_3": 0.885,
+      "named_home_correct": 0.721,
+      "verdict_correct": 0.521,
+      "verdict_correct_declared": 0.508,
+      "verdict_correct_negative": 0.583,
+      "extend_existing": 0.479,
+      "new_mechanism": 0.425,
+      "uncertain": 0.096,
+      "overconfident": 4,
+      "mean_ms": 283.0
+    },
+    "with_table": {
+      "hit_at_1": 0.852,
+      "hit_at_3": 0.918,
+      "named_home_correct": 0.787,
+      "verdict_correct": 0.548,
+      "verdict_correct_declared": 0.557,
+      "verdict_correct_negative": 0.5,
+      "extend_existing": 0.534,
+      "new_mechanism": 0.356,
+      "uncertain": 0.11,
+      "overconfident": 5,
+      "mean_ms": 308.6
+    }
+  },
+  "records": [
+    {
+      "title": "Platform seams",
+      "kind": "declared",
+      "query": "I need one abstraction whose implementation differs on the JVM and in the browser, installed per platform instead of branched at every call site",
+      "declared_home": "protoblast",
+      "tables": false,
+      "candidates": [
+        "protoblast",
+        "plumage",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "protoblast",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "PlatformSeam",
+      "ms": 398.5,
+      "why": ""
+    },
+    {
+      "title": "Platform seams",
+      "kind": "declared",
+      "query": "I need one abstraction whose implementation differs on the JVM and in the browser, installed per platform instead of branched at every call site",
+      "declared_home": "protoblast",
+      "tables": true,
+      "candidates": [
+        "protoblast",
+        "plumage",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "protoblast",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "PlatformSeam",
+      "ms": 236.4,
+      "why": ""
+    },
+    {
+      "title": "Test-restorable registries",
+      "kind": "declared",
+      "query": "a global registry of types that a test can snapshot and put back afterwards so tests stop leaking into each other",
+      "declared_home": "protoblast",
+      "tables": false,
+      "candidates": [
+        "hawkeye",
+        "protoblast",
+        "zenit"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "GlobalFieldRegistry",
+      "ms": 279.2,
+      "why": "protoblast is #2; hawkeye led with 12 of 30 hits"
+    },
+    {
+      "title": "Test-restorable registries",
+      "kind": "declared",
+      "query": "a global registry of types that a test can snapshot and put back afterwards so tests stop leaking into each other",
+      "declared_home": "protoblast",
+      "tables": true,
+      "candidates": [
+        "protoblast",
+        "hawkeye",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "GlobalFieldRegistry",
+      "ms": 245.0,
+      "why": ""
+    },
+    {
+      "title": "Value-keyed listener dispatch",
+      "kind": "declared",
+      "query": "notify only the subscribers interested in one key of a reactive collection instead of waking every listener",
+      "declared_home": "protoblast",
+      "tables": false,
+      "candidates": [
+        "protoblast",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "CollectionItemRef",
+      "ms": 333.0,
+      "why": ""
+    },
+    {
+      "title": "Value-keyed listener dispatch",
+      "kind": "declared",
+      "query": "notify only the subscribers interested in one key of a reactive collection instead of waking every listener",
+      "declared_home": "protoblast",
+      "tables": true,
+      "candidates": [
+        "protoblast",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "protoblast",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "CollectionItemRef",
+      "ms": 353.7,
+      "why": ""
+    },
+    {
+      "title": "Event delegation",
+      "kind": "declared",
+      "query": "one click listener on a list container instead of a listener per rendered row",
+      "declared_home": "hawkeye",
+      "tables": false,
+      "candidates": [
+        "protoblast",
+        "hawkeye",
+        "zenit"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "KeyedListenerTable",
+      "ms": 310.6,
+      "why": "hawkeye is #2; protoblast led with 14 of 35 hits"
+    },
+    {
+      "title": "Event delegation",
+      "kind": "declared",
+      "query": "one click listener on a list container instead of a listener per rendered row",
+      "declared_home": "hawkeye",
+      "tables": true,
+      "candidates": [
+        "hawkeye",
+        "protoblast",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "KeyedListenerTable",
+      "ms": 296.9,
+      "why": ""
+    },
+    {
+      "title": "Element measurement seams",
+      "kind": "declared",
+      "query": "watch an element for size changes and read or set its scroll position from template code",
+      "declared_home": "hawkeye",
+      "tables": false,
+      "candidates": [
+        "hawkeye",
+        "plumage",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "scroll-probe",
+      "ms": 138.4,
+      "why": ""
+    },
+    {
+      "title": "Element measurement seams",
+      "kind": "declared",
+      "query": "watch an element for size changes and read or set its scroll position from template code",
+      "declared_home": "hawkeye",
+      "tables": true,
+      "candidates": [
+        "hawkeye",
+        "plumage",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "scroll-probe",
+      "ms": 162.6,
+      "why": ""
+    },
+    {
+      "title": "Selection",
+      "kind": "declared",
+      "query": "a component where the user picks one active item, or checks several, with the state shared between the header and the rows",
+      "declared_home": "plumage",
+      "tables": false,
+      "candidates": [
+        "plumage",
+        "zenit-cms",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "plumage",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "accordion",
+      "ms": 157.2,
+      "why": ""
+    },
+    {
+      "title": "Selection",
+      "kind": "declared",
+      "query": "a component where the user picks one active item, or checks several, with the state shared between the header and the rows",
+      "declared_home": "plumage",
+      "tables": true,
+      "candidates": [
+        "plumage",
+        "zenit-comms",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "plumage",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "accordion",
+      "ms": 163.1,
+      "why": ""
+    },
+    {
+      "title": "Routing, HTTP, settings, assets, security SPI",
+      "kind": "declared",
+      "query": "declare an HTTP endpoint with a path, a method and a security check",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-auth"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ManageEndpoints",
+      "ms": 363.4,
+      "why": ""
+    },
+    {
+      "title": "Routing, HTTP, settings, assets, security SPI",
+      "kind": "declared",
+      "query": "declare an HTTP endpoint with a path, a method and a security check",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-auth"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ManageEndpoints",
+      "ms": 453.2,
+      "why": ""
+    },
+    {
+      "title": "Raw-value -> typed primitive coercion",
+      "kind": "declared",
+      "query": "turn a raw submitted string into an int, a boolean or a date and tell me whether it was refused or simply absent",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "HawkeyeClassCodeGenerator",
+      "ms": 369.8,
+      "why": ""
+    },
+    {
+      "title": "Raw-value -> typed primitive coercion",
+      "kind": "declared",
+      "query": "turn a raw submitted string into an int, a boolean or a date and tell me whether it was refused or simply absent",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "HawkeyeClassCodeGenerator",
+      "ms": 356.6,
+      "why": ""
+    },
+    {
+      "title": "Conditional GET",
+      "kind": "declared",
+      "query": "answer 304 when the client already has the current version of a response",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-media"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "HttpResponse",
+      "ms": 296.5,
+      "why": ""
+    },
+    {
+      "title": "Conditional GET",
+      "kind": "declared",
+      "query": "answer 304 when the client already has the current version of a response",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-media"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "HttpResponse",
+      "ms": 338.0,
+      "why": ""
+    },
+    {
+      "title": "Pagination arithmetic",
+      "kind": "declared",
+      "query": "work out the offset, the page count and what to do with a page number past the end",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "plumage"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "PageWindow",
+      "ms": 412.0,
+      "why": ""
+    },
+    {
+      "title": "Pagination arithmetic",
+      "kind": "declared",
+      "query": "work out the offset, the page count and what to do with a page number past the end",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "plumage"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "PageWindow",
+      "ms": 452.0,
+      "why": ""
+    },
+    {
+      "title": "Degrade-when-unmigrated",
+      "kind": "declared",
+      "query": "a feature whose table the host may not have migrated yet should log once and switch itself off instead of throwing on every request",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "plumage",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "OrconoActivity",
+      "ms": 253.9,
+      "why": ""
+    },
+    {
+      "title": "Degrade-when-unmigrated",
+      "kind": "declared",
+      "query": "a feature whose table the host may not have migrated yet should log once and switch itself off instead of throwing on every request",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "plumage"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "OrconoActivity",
+      "ms": 327.1,
+      "why": ""
+    },
+    {
+      "title": "Branding",
+      "kind": "declared",
+      "query": "per-tenant logo, favicon and seed colour, served as a cached stylesheet",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "plumage",
+        "zenit",
+        "zenit-cms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "plumage",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "shell",
+      "ms": 150.8,
+      "why": "zenit is #2; plumage led with 14 of 30 hits"
+    },
+    {
+      "title": "Branding",
+      "kind": "declared",
+      "query": "per-tenant logo, favicon and seed colour, served as a cached stylesheet",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "plumage",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "shell",
+      "ms": 156.2,
+      "why": ""
+    },
+    {
+      "title": "UI preference cookies",
+      "kind": "declared",
+      "query": "remember the visitor's chosen theme or timezone in a cookie that both the server and the browser read the same way",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "BrowserTimezone",
+      "ms": 485.1,
+      "why": ""
+    },
+    {
+      "title": "UI preference cookies",
+      "kind": "declared",
+      "query": "remember the visitor's chosen theme or timezone in a cookie that both the server and the browser read the same way",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "BrowserTimezone",
+      "ms": 660.0,
+      "why": ""
+    },
+    {
+      "title": "Text helpers",
+      "kind": "declared",
+      "query": "render markdown, slugify a title and print a byte size for humans",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-widget"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "Markdown",
+      "ms": 231.0,
+      "why": ""
+    },
+    {
+      "title": "Text helpers",
+      "kind": "declared",
+      "query": "render markdown, slugify a title and print a byte size for humans",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-widget"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "Markdown",
+      "ms": 273.9,
+      "why": ""
+    },
+    {
+      "title": "Dev tunnel",
+      "kind": "declared",
+      "query": "expose my local development server through a front proxy over an outbound websocket",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "plumage"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "DevTunnelClient",
+      "ms": 333.9,
+      "why": ""
+    },
+    {
+      "title": "Dev tunnel",
+      "kind": "declared",
+      "query": "expose my local development server through a front proxy over an outbound websocket",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "plumage"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "DevTunnelClient",
+      "ms": 369.9,
+      "why": ""
+    },
+    {
+      "title": "`use:` directives",
+      "kind": "declared",
+      "query": "attach reusable behaviour to an element from a template attribute instead of repeating the same boilerplate markup and listeners",
+      "declared_home": "hawkeye",
+      "tables": false,
+      "candidates": [
+        "hawkeye",
+        "protoblast",
+        "plumage"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "CompiledTemplate",
+      "ms": 255.0,
+      "why": ""
+    },
+    {
+      "title": "`use:` directives",
+      "kind": "declared",
+      "query": "attach reusable behaviour to an element from a template attribute instead of repeating the same boilerplate markup and listeners",
+      "declared_home": "hawkeye",
+      "tables": true,
+      "candidates": [
+        "hawkeye",
+        "protoblast",
+        "plumage"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "CompiledTemplate",
+      "ms": 279.8,
+      "why": ""
+    },
+    {
+      "title": "Settings editing: metadata",
+      "kind": "declared",
+      "query": "an admin screen that edits configuration keys, hides secrets and says which ones need a restart",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "FormSecrets",
+      "ms": 189.4,
+      "why": ""
+    },
+    {
+      "title": "Settings editing: metadata",
+      "kind": "declared",
+      "query": "an admin screen that edits configuration keys, hides secrets and says which ones need a restart",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "FormSecrets",
+      "ms": 197.1,
+      "why": ""
+    },
+    {
+      "title": "Session identity vs credential",
+      "kind": "declared",
+      "query": "keep the secret the browser presents separate from the id I may log or revoke by",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-auth",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "SessionStore",
+      "ms": 211.2,
+      "why": ""
+    },
+    {
+      "title": "Session identity vs credential",
+      "kind": "declared",
+      "query": "keep the secret the browser presents separate from the id I may log or revoke by",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-auth",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "SessionStore",
+      "ms": 283.8,
+      "why": ""
+    },
+    {
+      "title": "`SessionIds.forToken",
+      "kind": "declared",
+      "query": "derive the storage key of a session from the token the client presented, the same way in every store",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit-auth",
+        "zenit",
+        "zenit-oidc"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "InMemorySession",
+      "ms": 397.6,
+      "why": "zenit is #2; zenit-auth led with 16 of 36 hits"
+    },
+    {
+      "title": "`SessionIds.forToken",
+      "kind": "declared",
+      "query": "derive the storage key of a session from the token the client presented, the same way in every store",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-auth",
+        "zenit-oidc"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "InMemorySession",
+      "ms": 478.4,
+      "why": ""
+    },
+    {
+      "title": "Trusted-proxy client IP",
+      "kind": "declared",
+      "query": "get the real client address when the app runs behind a reverse proxy",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "thoth",
+        "spamservice"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ClaudeProxy",
+      "ms": 195.4,
+      "why": ""
+    },
+    {
+      "title": "Trusted-proxy client IP",
+      "kind": "declared",
+      "query": "get the real client address when the app runs behind a reverse proxy",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "thoth",
+        "spamservice"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ClaudeProxy",
+      "ms": 231.2,
+      "why": ""
+    },
+    {
+      "title": "Rate limiting",
+      "kind": "declared",
+      "query": "throttle an endpoint to so many attempts per minute per caller",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-auth"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "EventModifier",
+      "ms": 285.9,
+      "why": ""
+    },
+    {
+      "title": "Rate limiting",
+      "kind": "declared",
+      "query": "throttle an endpoint to so many attempts per minute per caller",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-auth"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "EventModifier",
+      "ms": 333.7,
+      "why": ""
+    },
+    {
+      "title": "Secure tokens/digests",
+      "kind": "declared",
+      "query": "generate a random url-safe token, hash it, and compare it without leaking timing",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "SecureTokens",
+      "ms": 308.6,
+      "why": ""
+    },
+    {
+      "title": "Secure tokens/digests",
+      "kind": "declared",
+      "query": "generate a random url-safe token, hash it, and compare it without leaking timing",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "SecureTokens",
+      "ms": 320.6,
+      "why": ""
+    },
+    {
+      "title": "API keys",
+      "kind": "declared",
+      "query": "let a user create long-lived keys for machine access, scoped narrower than the user",
+      "declared_home": "zenit-auth",
+      "tables": false,
+      "candidates": [
+        "zenit-auth",
+        "zenit",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-auth",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "InMemorySession",
+      "ms": 208.5,
+      "why": ""
+    },
+    {
+      "title": "API keys",
+      "kind": "declared",
+      "query": "let a user create long-lived keys for machine access, scoped narrower than the user",
+      "declared_home": "zenit-auth",
+      "tables": true,
+      "candidates": [
+        "zenit-auth",
+        "zenit",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-auth",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "InMemorySession",
+      "ms": 219.3,
+      "why": ""
+    },
+    {
+      "title": "Record-scoped grants / multi-tenancy",
+      "kind": "declared",
+      "query": "give one user permission on one specific record rather than on the whole model",
+      "declared_home": "zenit-auth",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "plumage",
+        "zenit-cms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "RecordGrantModel",
+      "ms": 325.6,
+      "why": "zenit-auth is not in the top 3; zenit led with 12 of 33 hits"
+    },
+    {
+      "title": "Record-scoped grants / multi-tenancy",
+      "kind": "declared",
+      "query": "give one user permission on one specific record rather than on the whole model",
+      "declared_home": "zenit-auth",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "plumage",
+        "zenit-cms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "RecordGrantModel",
+      "ms": 345.3,
+      "why": "zenit-auth is not in the top 3; zenit led with 12 of 33 hits"
+    },
+    {
+      "title": "WebSocket auth",
+      "kind": "declared",
+      "query": "require a login or a permission at websocket handshake time and revalidate it while the socket stays open",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-auth"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "WebSocketAuthenticator",
+      "ms": 350.4,
+      "why": ""
+    },
+    {
+      "title": "WebSocket auth",
+      "kind": "declared",
+      "query": "require a login or a permission at websocket handshake time and revalidate it while the socket stays open",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-auth"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "WebSocketAuthenticator",
+      "ms": 451.7,
+      "why": ""
+    },
+    {
+      "title": "Server<->browser reactive state sync",
+      "kind": "declared",
+      "query": "push a server-owned value to the browser and keep it live over one shared reconnecting socket",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "DevTunnelClient",
+      "ms": 368.8,
+      "why": ""
+    },
+    {
+      "title": "Server<->browser reactive state sync",
+      "kind": "declared",
+      "query": "push a server-owned value to the browser and keep it live over one shared reconnecting socket",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-ai"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "DevTunnelClient",
+      "ms": 360.8,
+      "why": ""
+    },
+    {
+      "title": "Principal-scoped record sources",
+      "kind": "declared",
+      "query": "restrict which rows a picker or a widget can see to the ones the logged-in user may read",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit-widget",
+        "emberglyph",
+        "plumage"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-widget",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "cms-widget-picker",
+      "ms": 242.1,
+      "why": "zenit is not in the top 3; zenit-widget led with 9 of 24 hits"
+    },
+    {
+      "title": "Principal-scoped record sources",
+      "kind": "declared",
+      "query": "restrict which rows a picker or a widget can see to the ones the logged-in user may read",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit-widget",
+        "zenit",
+        "zenit-comms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "cms-widget-picker",
+      "ms": 274.9,
+      "why": "zenit is #2; zenit-widget led with 9 of 24 hits"
+    },
+    {
+      "title": "Locale-prefixed routing + model-bound route params",
+      "kind": "declared",
+      "query": "urls prefixed with the language, and a route parameter that arrives as the loaded record",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "RouteLocales",
+      "ms": 485.0,
+      "why": ""
+    },
+    {
+      "title": "Locale-prefixed routing + model-bound route params",
+      "kind": "declared",
+      "query": "urls prefixed with the language, and a route parameter that arrives as the loaded record",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "RouteLocales",
+      "ms": 553.0,
+      "why": ""
+    },
+    {
+      "title": "Return navigation",
+      "kind": "declared",
+      "query": "send the user back where they came from after saving, without opening a redirect hole",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "AuthorizationMiddleware",
+      "ms": 256.8,
+      "why": ""
+    },
+    {
+      "title": "Return navigation",
+      "kind": "declared",
+      "query": "send the user back where they came from after saving, without opening a redirect hole",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "AuthorizationMiddleware",
+      "ms": 244.2,
+      "why": ""
+    },
+    {
+      "title": "Response caching + sitemap",
+      "kind": "declared",
+      "query": "cache a rendered public response and expose a sitemap for it",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ResponseCache",
+      "ms": 365.6,
+      "why": ""
+    },
+    {
+      "title": "Response caching + sitemap",
+      "kind": "declared",
+      "query": "cache a rendered public response and expose a sitemap for it",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ResponseCache",
+      "ms": 367.8,
+      "why": ""
+    },
+    {
+      "title": "ORM, migrations, localized fields, aggregation",
+      "kind": "declared",
+      "query": "define a model with translated fields, migrate its table and run a grouped count over it",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-media",
+        "zenit-microcopy"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "MigrationBuilder",
+      "ms": 386.6,
+      "why": ""
+    },
+    {
+      "title": "ORM, migrations, localized fields, aggregation",
+      "kind": "declared",
+      "query": "define a model with translated fields, migrate its table and run a grouped count over it",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-media",
+        "zenit-microcopy"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "MigrationBuilder",
+      "ms": 395.8,
+      "why": ""
+    },
+    {
+      "title": "Seeding: default records with DECLARED ownership",
+      "kind": "declared",
+      "query": "insert the default rows an install needs, some owned by code and some created only once",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "Model",
+      "ms": 387.2,
+      "why": ""
+    },
+    {
+      "title": "Seeding: default records with DECLARED ownership",
+      "kind": "declared",
+      "query": "insert the default rows an install needs, some owned by code and some created only once",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "Model",
+      "ms": 405.5,
+      "why": ""
+    },
+    {
+      "title": "Atomic set-based updates",
+      "kind": "declared",
+      "query": "increment a counter column for many rows in one statement instead of reading and writing each row",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "SqlDatasource",
+      "ms": 487.2,
+      "why": ""
+    },
+    {
+      "title": "Atomic set-based updates",
+      "kind": "declared",
+      "query": "increment a counter column for many rows in one statement instead of reading and writing each row",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "SqlDatasource",
+      "ms": 477.2,
+      "why": ""
+    },
+    {
+      "title": "Per-record schedules",
+      "kind": "declared",
+      "query": "let an operator schedule a recurring action on one record, in their timezone, with steps and a run history",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "plumage"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "RecordSchedules",
+      "ms": 368.7,
+      "why": ""
+    },
+    {
+      "title": "Per-record schedules",
+      "kind": "declared",
+      "query": "let an operator schedule a recurring action on one record, in their timezone, with steps and a run history",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "RecordSchedules",
+      "ms": 382.7,
+      "why": ""
+    },
+    {
+      "title": "URL acceptability",
+      "kind": "declared",
+      "query": "refuse a user-supplied url that points at localhost, a private network or carries credentials",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-comms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "UrlPolicy",
+      "ms": 212.2,
+      "why": ""
+    },
+    {
+      "title": "URL acceptability",
+      "kind": "declared",
+      "query": "refuse a user-supplied url that points at localhost, a private network or carries credentials",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-comms",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "UrlPolicy",
+      "ms": 250.7,
+      "why": ""
+    },
+    {
+      "title": "Model behaviours: optimistic locking, soft delete, publishable, revisionable, timestamps",
+      "kind": "declared",
+      "query": "add draft and published states, a version history and a trash bin to a model without hand-writing the columns",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "PageModel",
+      "ms": 312.6,
+      "why": ""
+    },
+    {
+      "title": "Model behaviours: optimistic locking, soft delete, publishable, revisionable, timestamps",
+      "kind": "declared",
+      "query": "add draft and published states, a version history and a trash bin to a model without hand-writing the columns",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "PageModel",
+      "ms": 332.3,
+      "why": ""
+    },
+    {
+      "title": "Activity log + accountability",
+      "kind": "declared",
+      "query": "record who changed what, automatically, whenever a record is saved",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-widget"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "RecordAccessPage",
+      "ms": 299.2,
+      "why": ""
+    },
+    {
+      "title": "Activity log + accountability",
+      "kind": "declared",
+      "query": "record who changed what, automatically, whenever a record is saved",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "zenit-widget"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "RecordAccessPage",
+      "ms": 312.2,
+      "why": ""
+    },
+    {
+      "title": "Record comments",
+      "kind": "declared",
+      "query": "let users leave comments on any record, edited by their author and moderated by someone else",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "orcono"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "comments-section",
+      "ms": 256.8,
+      "why": ""
+    },
+    {
+      "title": "Record comments",
+      "kind": "declared",
+      "query": "let users leave comments on any record, edited by their author and moderated by someone else",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "orcono"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "comments-section",
+      "ms": 315.4,
+      "why": ""
+    },
+    {
+      "title": "Field-level access decisions",
+      "kind": "declared",
+      "query": "hide or make read-only a single field of a form depending on who is looking at it",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit-forms",
+        "zenit",
+        "zenit-cms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "OrconoFormSpecs",
+      "ms": 351.8,
+      "why": "zenit is #2; zenit-forms led with 11 of 34 hits"
+    },
+    {
+      "title": "Field-level access decisions",
+      "kind": "declared",
+      "query": "hide or make read-only a single field of a form depending on who is looking at it",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit-forms",
+        "zenit",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "OrconoFormSpecs",
+      "ms": 396.7,
+      "why": "zenit is #2; zenit-forms led with 11 of 34 hits"
+    },
+    {
+      "title": "Forms: FormSpec/coercion/validation",
+      "kind": "declared",
+      "query": "describe a form's fields once and get coercion and validation of the submitted values from it",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-forms",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "SubmittedValueCoercion",
+      "ms": 477.7,
+      "why": ""
+    },
+    {
+      "title": "Forms: FormSpec/coercion/validation",
+      "kind": "declared",
+      "query": "describe a form's fields once and get coercion and validation of the submitted values from it",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-forms",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "SubmittedValueCoercion",
+      "ms": 470.1,
+      "why": ""
+    },
+    {
+      "title": "Typed form actions",
+      "kind": "declared",
+      "query": "post a form to a typed handler and get the validation failures back into the template without hand-written fetch code",
+      "declared_home": "hawkeye",
+      "tables": false,
+      "candidates": [
+        "hawkeye",
+        "zenit",
+        "protoblast"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "form-action-test",
+      "ms": 222.4,
+      "why": ""
+    },
+    {
+      "title": "Typed form actions",
+      "kind": "declared",
+      "query": "post a form to a typed handler and get the validation failures back into the template without hand-written fetch code",
+      "declared_home": "hawkeye",
+      "tables": true,
+      "candidates": [
+        "hawkeye",
+        "protoblast",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "form-action-test",
+      "ms": 230.9,
+      "why": ""
+    },
+    {
+      "title": "Rule trees / visual query builder",
+      "kind": "declared",
+      "query": "let a user build a filter of and/or conditions in the UI and run it as a query",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit-cms",
+        "zenit",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "FilterPredicates",
+      "ms": 224.8,
+      "why": "zenit is #2; zenit-cms led with 7 of 21 hits"
+    },
+    {
+      "title": "Rule trees / visual query builder",
+      "kind": "declared",
+      "query": "let a user build a filter of and/or conditions in the UI and run it as a query",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "FilterPredicates",
+      "ms": 284.4,
+      "why": ""
+    },
+    {
+      "title": "Record sources + data providers",
+      "kind": "declared",
+      "query": "one named, remotely queryable source of rows that a relation picker and a dashboard widget can both read",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-widget",
+        "emberglyph"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "RelationPick",
+      "ms": 202.4,
+      "why": ""
+    },
+    {
+      "title": "Record sources + data providers",
+      "kind": "declared",
+      "query": "one named, remotely queryable source of rows that a relation picker and a dashboard widget can both read",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-widget",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "RelationPick",
+      "ms": 217.7,
+      "why": ""
+    },
+    {
+      "title": "Charts",
+      "kind": "declared",
+      "query": "draw a line, bar or pie chart, plus a tiny inline sparkline",
+      "declared_home": "plumage",
+      "tables": false,
+      "candidates": [
+        "plumage",
+        "emberglyph",
+        "janeway"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "plumage",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "chart",
+      "ms": 80.1,
+      "why": ""
+    },
+    {
+      "title": "Charts",
+      "kind": "declared",
+      "query": "draw a line, bar or pie chart, plus a tiny inline sparkline",
+      "declared_home": "plumage",
+      "tables": true,
+      "candidates": [
+        "plumage",
+        "emberglyph",
+        "janeway"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "plumage",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "chart",
+      "ms": 98.7,
+      "why": ""
+    },
+    {
+      "title": "Widget trees, widget types, stored-content migrations",
+      "kind": "declared",
+      "query": "store a tree of user-composed content blocks and migrate the stored shape when a block type changes",
+      "declared_home": "zenit-widget",
+      "tables": false,
+      "candidates": [
+        "hawkeye",
+        "protoblast",
+        "zenit"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "DefaultComposer",
+      "ms": 190.0,
+      "why": "zenit-widget is not in the top 3; hawkeye led with 14 of 29 hits"
+    },
+    {
+      "title": "Widget trees, widget types, stored-content migrations",
+      "kind": "declared",
+      "query": "store a tree of user-composed content blocks and migrate the stored shape when a block type changes",
+      "declared_home": "zenit-widget",
+      "tables": true,
+      "candidates": [
+        "hawkeye",
+        "zenit-widget",
+        "zenit"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "DefaultComposer",
+      "ms": 213.9,
+      "why": "zenit-widget is #2; hawkeye led with 14 of 29 hits"
+    },
+    {
+      "title": "Surface actions + catalog negotiation + lowering",
+      "kind": "declared",
+      "query": "dispatch a button press inside rendered content back to whoever hosts that content, over web or another client",
+      "declared_home": "zenit-widget",
+      "tables": false,
+      "candidates": [
+        "hawkeye",
+        "plumage",
+        "zenit-widget"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "element-reactive-content-test",
+      "ms": 158.5,
+      "why": "zenit-widget is #3; hawkeye led with 14 of 26 hits"
+    },
+    {
+      "title": "Surface actions + catalog negotiation + lowering",
+      "kind": "declared",
+      "query": "dispatch a button press inside rendered content back to whoever hosts that content, over web or another client",
+      "declared_home": "zenit-widget",
+      "tables": true,
+      "candidates": [
+        "hawkeye",
+        "zenit-widget",
+        "plumage"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "element-reactive-content-test",
+      "ms": 376.9,
+      "why": "zenit-widget is #2; hawkeye led with 14 of 26 hits"
+    },
+    {
+      "title": "A2UI v1.0 wire adapter",
+      "kind": "declared",
+      "query": "speak the agent UI json protocol so an external renderer can draw my content and send its actions back",
+      "declared_home": "zenit-a2ui",
+      "tables": false,
+      "candidates": [
+        "zenit-a2ui",
+        "quirkyquarters",
+        "zenit-widget"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "SendMessageExecutor",
+      "ms": 153.6,
+      "why": ""
+    },
+    {
+      "title": "A2UI v1.0 wire adapter",
+      "kind": "declared",
+      "query": "speak the agent UI json protocol so an external renderer can draw my content and send its actions back",
+      "declared_home": "zenit-a2ui",
+      "tables": true,
+      "candidates": [
+        "zenit-a2ui",
+        "quirkyquarters",
+        "zenit-widget"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-a2ui",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "SendMessageExecutor",
+      "ms": 211.2,
+      "why": ""
+    },
+    {
+      "title": "Generic AI layer: LLM provider clients",
+      "kind": "declared",
+      "query": "call an llm through several providers with failover, keep a catalog of models and their prices, and expose tools over mcp",
+      "declared_home": "zenit-ai",
+      "tables": false,
+      "candidates": [
+        "zenit-ai",
+        "quirkyquarters",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-ai",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "QqMcpTools",
+      "ms": 182.5,
+      "why": ""
+    },
+    {
+      "title": "Generic AI layer: LLM provider clients",
+      "kind": "declared",
+      "query": "call an llm through several providers with failover, keep a catalog of models and their prices, and expose tools over mcp",
+      "declared_home": "zenit-ai",
+      "tables": true,
+      "candidates": [
+        "zenit-ai",
+        "quirkyquarters",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-ai",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "QqMcpTools",
+      "ms": 224.2,
+      "why": ""
+    },
+    {
+      "title": "Object storage",
+      "kind": "declared",
+      "query": "put and get bytes under an opaque key, with the backing store swappable per mount",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "protoblast",
+        "hawkeye",
+        "zenit"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "protoblast",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "MutableMapRef",
+      "ms": 388.2,
+      "why": "zenit is #3; protoblast led with 10 of 32 hits"
+    },
+    {
+      "title": "Object storage",
+      "kind": "declared",
+      "query": "put and get bytes under an opaque key, with the backing store swappable per mount",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "protoblast",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "MutableMapRef",
+      "ms": 452.2,
+      "why": ""
+    },
+    {
+      "title": "Media",
+      "kind": "declared",
+      "query": "upload an image, deduplicate it by hash and serve thumbnails and streamed renditions",
+      "declared_home": "zenit-media",
+      "tables": false,
+      "candidates": [
+        "zenit-media",
+        "zenit",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit-media",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "MediaRenditions",
+      "ms": 269.8,
+      "why": ""
+    },
+    {
+      "title": "Media",
+      "kind": "declared",
+      "query": "upload an image, deduplicate it by hash and serve thumbnails and streamed renditions",
+      "declared_home": "zenit-media",
+      "tables": true,
+      "candidates": [
+        "zenit-media",
+        "zenit",
+        "zenit-cms"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit-media",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "MediaRenditions",
+      "ms": 270.2,
+      "why": ""
+    },
+    {
+      "title": "Admin panels/resources/actions; per-record write authority",
+      "kind": "declared",
+      "query": "generate an admin list and edit screen for a model, with row actions and per-record edit rights",
+      "declared_home": "zenit-cms",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "quirkyquarters",
+        "zenit-forms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "action-permissions-edit",
+      "ms": 414.8,
+      "why": "zenit-cms is not in the top 3; zenit led with 6 of 32 hits"
+    },
+    {
+      "title": "Admin panels/resources/actions; per-record write authority",
+      "kind": "declared",
+      "query": "generate an admin list and edit screen for a model, with row actions and per-record edit rights",
+      "declared_home": "zenit-cms",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "quirkyquarters",
+        "zenit-forms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "action-permissions-edit",
+      "ms": 381.1,
+      "why": "zenit-cms is not in the top 3; zenit led with 6 of 32 hits"
+    },
+    {
+      "title": "Pages + public page routing",
+      "kind": "declared",
+      "query": "editor-managed public pages served at their own paths",
+      "declared_home": "zenit-pages",
+      "tables": false,
+      "candidates": [
+        "zenit-cms",
+        "zenit",
+        "zenit-forms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-cms",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "PageEndpoints",
+      "ms": 230.2,
+      "why": "zenit-pages is not in the top 3; zenit-cms led with 10 of 37 hits"
+    },
+    {
+      "title": "Pages + public page routing",
+      "kind": "declared",
+      "query": "editor-managed public pages served at their own paths",
+      "declared_home": "zenit-pages",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "zenit-forms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "PageEndpoints",
+      "ms": 268.5,
+      "why": "zenit-pages is not in the top 3; zenit led with 2 of 37 hits"
+    },
+    {
+      "title": "Auth, sessions, CSRF store",
+      "kind": "declared",
+      "query": "log a user in, keep the session and protect the forms against cross-site posts",
+      "declared_home": "zenit-auth",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-forms",
+        "proteus"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "UserAwareInMemorySessionStore",
+      "ms": 239.2,
+      "why": "zenit-auth is not in the top 3; zenit led with 4 of 27 hits"
+    },
+    {
+      "title": "Auth, sessions, CSRF store",
+      "kind": "declared",
+      "query": "log a user in, keep the session and protect the forms against cross-site posts",
+      "declared_home": "zenit-auth",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-forms",
+        "proteus"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "UserAwareInMemorySessionStore",
+      "ms": 286.0,
+      "why": "zenit-auth is not in the top 3; zenit led with 4 of 27 hits"
+    },
+    {
+      "title": "Offline break-glass commands",
+      "kind": "declared",
+      "query": "a command-line flag that runs one maintenance job with no http boot, authorised by shell access alone",
+      "declared_home": "zenit",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "zenit-microcopy"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ServerZenitRuntime",
+      "ms": 196.5,
+      "why": ""
+    },
+    {
+      "title": "Offline break-glass commands",
+      "kind": "declared",
+      "query": "a command-line flag that runs one maintenance job with no http boot, authorised by shell access alone",
+      "declared_home": "zenit",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-cms",
+        "zenit-microcopy"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ServerZenitRuntime",
+      "ms": 178.2,
+      "why": ""
+    },
+    {
+      "title": "Credential administration",
+      "kind": "declared",
+      "query": "an administrator sets a password for someone else, shown once, and every session of that account is dropped",
+      "declared_home": "zenit-auth",
+      "tables": false,
+      "candidates": [
+        "zenit-auth",
+        "zenit",
+        "orcono"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit-auth",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "PasswordService",
+      "ms": 396.1,
+      "why": ""
+    },
+    {
+      "title": "Credential administration",
+      "kind": "declared",
+      "query": "an administrator sets a password for someone else, shown once, and every session of that account is dropped",
+      "declared_home": "zenit-auth",
+      "tables": true,
+      "candidates": [
+        "zenit-auth",
+        "zenit",
+        "orcono"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit-auth",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "PasswordService",
+      "ms": 417.3,
+      "why": ""
+    },
+    {
+      "title": "Notifications + outbound comms",
+      "kind": "declared",
+      "query": "notify a user by mail, chat or an in-app inbox, in their own language, with retries when a transport fails",
+      "declared_home": "zenit-comms",
+      "tables": false,
+      "candidates": [
+        "zenit-comms",
+        "zenit-auth",
+        "duiventil"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit-comms",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "InMemoryMailStore",
+      "ms": 168.0,
+      "why": ""
+    },
+    {
+      "title": "Notifications + outbound comms",
+      "kind": "declared",
+      "query": "notify a user by mail, chat or an in-app inbox, in their own language, with retries when a transport fails",
+      "declared_home": "zenit-comms",
+      "tables": true,
+      "candidates": [
+        "zenit-comms",
+        "zenit-auth",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit-comms",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "InMemoryMailStore",
+      "ms": 197.3,
+      "why": ""
+    },
+    {
+      "title": "LLM call retry",
+      "kind": "declared",
+      "query": "retry a failed model call with exponential backoff and honour the provider's retry-after header",
+      "declared_home": "zenit-ai",
+      "tables": false,
+      "candidates": [
+        "zenit-ai",
+        "zenit",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit-ai",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ExponentialBackoffRetry",
+      "ms": 352.0,
+      "why": ""
+    },
+    {
+      "title": "LLM call retry",
+      "kind": "declared",
+      "query": "retry a failed model call with exponential backoff and honour the provider's retry-after header",
+      "declared_home": "zenit-ai",
+      "tables": true,
+      "candidates": [
+        "zenit-ai",
+        "zenit",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit-ai",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ExponentialBackoffRetry",
+      "ms": 378.5,
+      "why": ""
+    },
+    {
+      "title": "Visual flow graphs",
+      "kind": "declared",
+      "query": "let a user wire nodes and connections together on a canvas and run the resulting graph",
+      "declared_home": "zenit-flow",
+      "tables": false,
+      "candidates": [
+        "zenit-flow",
+        "plumage",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-flow",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "FlowDry",
+      "ms": 184.3,
+      "why": ""
+    },
+    {
+      "title": "Visual flow graphs",
+      "kind": "declared",
+      "query": "let a user wire nodes and connections together on a canvas and run the resulting graph",
+      "declared_home": "zenit-flow",
+      "tables": true,
+      "candidates": [
+        "zenit-flow",
+        "plumage",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-flow",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "FlowDry",
+      "ms": 205.7,
+      "why": ""
+    },
+    {
+      "title": "Outbound message shapes",
+      "kind": "declared",
+      "query": "one payload shape for a title, a body and a link that a chat and an inbox entry can share",
+      "declared_home": "zenit-comms",
+      "tables": false,
+      "candidates": [
+        "zenit-comms",
+        "zenit",
+        "hawkeye"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-comms",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ChannelMessage",
+      "ms": 207.5,
+      "why": ""
+    },
+    {
+      "title": "Outbound message shapes",
+      "kind": "declared",
+      "query": "one payload shape for a title, a body and a link that a chat and an inbox entry can share",
+      "declared_home": "zenit-comms",
+      "tables": true,
+      "candidates": [
+        "zenit-comms",
+        "hawkeye",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-comms",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "ChannelMessage",
+      "ms": 225.8,
+      "why": ""
+    },
+    {
+      "title": "Microcopy/i18n catalogs",
+      "kind": "declared",
+      "query": "look up a short interface string in the visitor's language, with variants per context",
+      "declared_home": "zenit-microcopy",
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "plumage",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "Languages",
+      "ms": 213.6,
+      "why": "zenit-microcopy is not in the top 3; zenit led with 5 of 24 hits"
+    },
+    {
+      "title": "Microcopy/i18n catalogs",
+      "kind": "declared",
+      "query": "look up a short interface string in the visitor's language, with variants per context",
+      "declared_home": "zenit-microcopy",
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "plumage",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "Languages",
+      "ms": 258.0,
+      "why": "zenit-microcopy is not in the top 3; zenit led with 5 of 24 hits"
+    },
+    {
+      "title": "Microcopy bundles + sync",
+      "kind": "declared",
+      "query": "ship the interface strings the browser needs as one cached bundle and refresh it when they change",
+      "declared_home": "zenit-microcopy",
+      "tables": false,
+      "candidates": [
+        "hawkeye",
+        "zenit-microcopy",
+        "protoblast"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": true,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": false,
+      "named_home": "hawkeye",
+      "named_home_correct": false,
+      "suggested_home": "hawkeye",
+      "top_mechanism": "BrowserMicrocopy",
+      "ms": 167.4,
+      "why": "zenit-microcopy is #2; hawkeye led with 6 of 29 hits"
+    },
+    {
+      "title": "Microcopy bundles + sync",
+      "kind": "declared",
+      "query": "ship the interface strings the browser needs as one cached bundle and refresh it when they change",
+      "declared_home": "zenit-microcopy",
+      "tables": true,
+      "candidates": [
+        "zenit-microcopy",
+        "hawkeye",
+        "zenit"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "EXTEND_EXISTING"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit-microcopy",
+      "named_home_correct": true,
+      "suggested_home": null,
+      "top_mechanism": "BrowserMicrocopy",
+      "ms": 155.1,
+      "why": ""
+    },
+    {
+      "title": "Absent: GPU shader pipeline",
+      "kind": "absent",
+      "query": "compile a fragment shader, upload it to the GPU and run it over an image buffer every frame",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "hawkeye",
+        "emberglyph",
+        "protoblast"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "ScreenExporter",
+      "ms": 360.7,
+      "why": ""
+    },
+    {
+      "title": "Absent: GPU shader pipeline",
+      "kind": "absent",
+      "query": "compile a fragment shader, upload it to the GPU and run it over an image buffer every frame",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "protoblast",
+        "zenit",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "ScreenExporter",
+      "ms": 392.9,
+      "why": ""
+    },
+    {
+      "title": "Absent: speech transcription",
+      "kind": "absent",
+      "query": "transcribe a recorded audio file to timestamped text and store the transcript beside the recording",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "zenit-ai",
+        "quirkyquarters"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "TranscriptionService",
+      "ms": 307.2,
+      "why": ""
+    },
+    {
+      "title": "Absent: speech transcription",
+      "kind": "absent",
+      "query": "transcribe a recorded audio file to timestamped text and store the transcript beside the recording",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-ai",
+        "quirkyquarters"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "TranscriptionService",
+      "ms": 342.7,
+      "why": ""
+    },
+    {
+      "title": "Absent: thermal label printing",
+      "kind": "absent",
+      "query": "print a shipping label on a thermal label printer attached over USB, with the printer's own escape codes",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "plumage",
+        "zenit",
+        "zenit-forms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": "plumage",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "FieldFunctions",
+      "ms": 330.4,
+      "why": ""
+    },
+    {
+      "title": "Absent: thermal label printing",
+      "kind": "absent",
+      "query": "print a shipping label on a thermal label printer attached over USB, with the printer's own escape codes",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "plumage",
+        "zenit",
+        "zenit-forms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": "plumage",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "FieldFunctions",
+      "ms": 306.7,
+      "why": ""
+    },
+    {
+      "title": "Absent: peer-to-peer file seeding",
+      "kind": "absent",
+      "query": "seed a large file to other peers over a torrent-style swarm and verify piece hashes as they arrive",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "cruiser",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "ListenerEqualityUtils",
+      "ms": 149.2,
+      "why": ""
+    },
+    {
+      "title": "Absent: peer-to-peer file seeding",
+      "kind": "absent",
+      "query": "seed a large file to other peers over a torrent-style swarm and verify piece hashes as they arrive",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "cruiser",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "ListenerEqualityUtils",
+      "ms": 192.7,
+      "why": ""
+    },
+    {
+      "title": "Absent: bluetooth pairing",
+      "kind": "absent",
+      "query": "pair with a bluetooth low energy sensor, subscribe to its characteristics and read its notifications",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "protoblast",
+        "hawkeye",
+        "zenit"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "protoblast",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "AbstractRef",
+      "ms": 173.1,
+      "why": "verdict EXTEND_EXISTING, expected NEW_MECHANISM or UNCERTAIN"
+    },
+    {
+      "title": "Absent: bluetooth pairing",
+      "kind": "absent",
+      "query": "pair with a bluetooth low energy sensor, subscribe to its characteristics and read its notifications",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "protoblast",
+        "zenit",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "protoblast",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "AbstractRef",
+      "ms": 194.7,
+      "why": "verdict EXTEND_EXISTING, expected NEW_MECHANISM or UNCERTAIN"
+    },
+    {
+      "title": "Absent: chess position evaluation",
+      "kind": "absent",
+      "query": "score a chess board position with alpha-beta search and pick the best move within a time budget",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "protoblast"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "TranslationScoring",
+      "ms": 173.3,
+      "why": ""
+    },
+    {
+      "title": "Absent: chess position evaluation",
+      "kind": "absent",
+      "query": "score a chess board position with alpha-beta search and pick the best move within a time budget",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "hawkeye",
+        "protoblast"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "UNCERTAIN",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": null,
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "TranslationScoring",
+      "ms": 192.0,
+      "why": ""
+    },
+    {
+      "title": "Sibling: flow and widget migration state",
+      "kind": "sibling",
+      "query": "one shared place to record which schema migrations the flow module and the widget module have already applied, read and written by both",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "quirkyquarters"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "FlowMigrations",
+      "ms": 417.8,
+      "why": "no shared home was suggested for two modules that cannot depend on each other"
+    },
+    {
+      "title": "Sibling: flow and widget migration state",
+      "kind": "sibling",
+      "query": "one shared place to record which schema migrations the flow module and the widget module have already applied, read and written by both",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-widget",
+        "protoblast"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "FlowMigrations",
+      "ms": 451.4,
+      "why": "no shared home was suggested for two modules that cannot depend on each other"
+    },
+    {
+      "title": "Sibling: forms and widget validation display",
+      "kind": "sibling",
+      "query": "a shared way to render a field's validation errors, used both by form fields and by the widgets that embed them",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "zenit-forms",
+        "zenit",
+        "plumage"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-forms",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "scalar",
+      "ms": 195.1,
+      "why": "verdict EXTEND_EXISTING, expected NEW_MECHANISM or UNCERTAIN"
+    },
+    {
+      "title": "Sibling: forms and widget validation display",
+      "kind": "sibling",
+      "query": "a shared way to render a field's validation errors, used both by form fields and by the widgets that embed them",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "zenit-forms",
+        "hawkeye",
+        "zenit"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit-forms",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "scalar",
+      "ms": 199.1,
+      "why": "verdict EXTEND_EXISTING, expected NEW_MECHANISM or UNCERTAIN"
+    },
+    {
+      "title": "Sibling: comms and AI outbound rate limiting",
+      "kind": "sibling",
+      "query": "one shared rate limiter that both outbound notification sending and language-model calls ask before they fire",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "zenit-comms"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "LazyRateLimiter",
+      "ms": 157.3,
+      "why": "verdict EXTEND_EXISTING, expected NEW_MECHANISM or UNCERTAIN"
+    },
+    {
+      "title": "Sibling: comms and AI outbound rate limiting",
+      "kind": "sibling",
+      "query": "one shared rate limiter that both outbound notification sending and language-model calls ask before they fire",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "zenit-comms",
+        "protoblast"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "LazyRateLimiter",
+      "ms": 161.5,
+      "why": "verdict EXTEND_EXISTING, expected NEW_MECHANISM or UNCERTAIN"
+    },
+    {
+      "title": "Lower substrate: record-source ownership registration",
+      "kind": "substrate",
+      "query": "register which module owns a record source so every consumer can look the owner up, not just the AI layer",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "plumage",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING",
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": "zenit",
+      "top_mechanism": "AiRecordSources",
+      "ms": 312.6,
+      "why": ""
+    },
+    {
+      "title": "Lower substrate: record-source ownership registration",
+      "kind": "substrate",
+      "query": "register which module owns a record source so every consumer can look the owner up, not just the AI layer",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "plumage",
+        "hawkeye"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "EXTEND_EXISTING",
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": "zenit",
+      "top_mechanism": "AiRecordSources",
+      "ms": 322.8,
+      "why": ""
+    },
+    {
+      "title": "Lexical trap: serial-port tunnel",
+      "kind": "lexical-trap",
+      "query": "tunnel a serial port from a lab instrument through the browser over a websocket, in development and in production",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "plumage"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "NEW_MECHANISM",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": true,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "DevTunnelClient",
+      "ms": 192.8,
+      "why": ""
+    },
+    {
+      "title": "Lexical trap: serial-port tunnel",
+      "kind": "lexical-trap",
+      "query": "tunnel a serial port from a lab instrument through the browser over a websocket, in development and in production",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "plumage"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "DevTunnelClient",
+      "ms": 189.6,
+      "why": "verdict EXTEND_EXISTING, expected NEW_MECHANISM or UNCERTAIN"
+    },
+    {
+      "title": "Lexical trap: browser-side object storage",
+      "kind": "lexical-trap",
+      "query": "store objects in a browser-side IndexedDB bucket so an offline page keeps working without the server",
+      "declared_home": null,
+      "tables": false,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "quirkyquarters"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "ServerZenitRuntime",
+      "ms": 551.4,
+      "why": "verdict EXTEND_EXISTING, expected NEW_MECHANISM or UNCERTAIN"
+    },
+    {
+      "title": "Lexical trap: browser-side object storage",
+      "kind": "lexical-trap",
+      "query": "store objects in a browser-side IndexedDB bucket so an offline page keeps working without the server",
+      "declared_home": null,
+      "tables": true,
+      "candidates": [
+        "zenit",
+        "protoblast",
+        "quirkyquarters"
+      ],
+      "hit_at_1": false,
+      "hit_at_3": false,
+      "verdict": "EXTEND_EXISTING",
+      "expected_verdict": [
+        "NEW_MECHANISM",
+        "UNCERTAIN"
+      ],
+      "verdict_correct": false,
+      "named_home": "zenit",
+      "named_home_correct": false,
+      "suggested_home": null,
+      "top_mechanism": "ServerZenitRuntime",
+      "ms": 527.8,
+      "why": "verdict EXTEND_EXISTING, expected NEW_MECHANISM or UNCERTAIN"
+    }
+  ]
+}

@@ -10,7 +10,7 @@ import pytest
 
 from zemble.home.config import HomeConfig
 from zemble.home.decide import Confidence, Mechanism, Verdict, decide
-from zemble.home.tables import DeclaredRow, RowMatch
+from zemble.home.tables import DeclaredRow, RowMatch, RowMatchKind
 from zemble.types import Chunk, SearchResult
 
 _CONFIG = """
@@ -239,3 +239,136 @@ def test_markdown_renders_the_sections_in_order(config: HomeConfig) -> None:
     assert "EXTEND_EXISTING" in text, "the verdict is in the markdown"
     assert "`PageWindow` in **zenit**" in text, "and so is the mechanism it names"
     assert answer.to_dict()["verdict"] == "EXTEND_EXISTING", "the JSON shape carries the same verdict"
+
+
+_SIBLINGS = """
+    order = ["protoblast", "zenit", "zenit-flow", "zenit-widget"]
+
+    [modules]
+    protoblast = "protoblast/**"
+    zenit = "zenit/**"
+
+    [modules.zenit-flow]
+    globs = ["zenit-flow/**"]
+    depends_on = ["zenit"]
+
+    [modules.zenit-widget]
+    globs = ["zenit-widget/**"]
+    depends_on = ["zenit"]
+"""
+
+
+@pytest.fixture
+def siblings(tmp_path: Path) -> HomeConfig:
+    """A workspace where two modules both depend on zenit and neither depends on the other."""
+    (tmp_path / ".zemble").mkdir()
+    (tmp_path / ".zemble" / "home.toml").write_text(textwrap.dedent(_SIBLINGS).strip() + "\n", encoding="utf-8")
+    return HomeConfig.load(tmp_path)
+
+
+def _row(capability: str, symbols: tuple[str, ...], home: str) -> DeclaredRow:
+    """One declared-home row, as the table parser would have produced it."""
+    return DeclaredRow(
+        capability=capability,
+        symbols=symbols,
+        home_modules=(home,),
+        home_names=(),
+        consumer_modules=(),
+        file="CLAUDE.md",
+        line=7,
+        raw_home=f"`{home}`",
+    )
+
+
+def test_a_sibling_mechanism_is_not_offered_for_extension(siblings: HomeConfig) -> None:
+    """Two modules with no dependency path between them get their shared substrate, not each other."""
+    hits = [hit("zenit-widget", "WidgetMigrations", 0.9), hit("zenit-flow", "FlowMigrations", 0.7)]
+    found = [
+        mechanism("zenit-widget", "WidgetMigrations", 0.9, ("zenit-cms", "quirkyquarters")),
+        mechanism("zenit-flow", "FlowMigrations", 0.7),
+    ]
+    answer = decide(siblings, "shared Flow/Widget migration state", hits, found)
+
+    assert answer.verdict is not Verdict.EXTEND_EXISTING, "extending a sibling is not an option"
+    assert answer.verdict is Verdict.NEW_MECHANISM, "the shared substrate is a new mechanism there"
+    assert answer.suggested_home == "zenit", "which is the highest-ranked module both can depend on"
+    assert answer.home == "zenit", "and that is the home the verdict names"
+    assert any(
+        "zenit-widget and zenit-flow are siblings (no dependency path); the shared mechanism belongs in zenit" in reason
+        for reason in answer.reasons
+    ), "the reason says it in one line"
+    assert answer.to_dict()["suggested_home"] == "zenit", "and the payload carries it"
+    assert "belongs in zenit" in answer.render(), "the markdown says where the shared mechanism goes"
+
+
+def test_a_mechanism_its_consumer_can_reach_is_still_extended(siblings: HomeConfig) -> None:
+    """The sibling rule only fires between modules that cannot reach each other."""
+    hits = [hit("zenit", "Migrations", 0.9), hit("zenit-flow", "FlowMigrations", 0.6)]
+    found = [mechanism("zenit", "Migrations", 0.9, ("zenit-flow", "zenit-widget"))]
+    answer = decide(siblings, "record a migration as applied", hits, found)
+    assert answer.verdict is Verdict.EXTEND_EXISTING, "zenit-flow depends on zenit, so it may use it"
+    assert answer.home == "zenit" and answer.suggested_home is None, "no suggestion is needed"
+
+
+def test_a_row_matching_on_words_alone_declares_nothing(siblings: HomeConfig) -> None:
+    """A capability row sharing vocabulary must not turn a neighbour's class into "this exists"."""
+    row = _row("Record comments on a model, including nullable authors", ("RecordComment",), "zenit-widget")
+    hits = [hit("zenit", "ActivityLog", 0.9)]
+    found = [mechanism("zenit", "ActivityLog", 0.9)]
+    answer = decide(
+        siblings,
+        "look up a record by its nullable model primary key",
+        hits,
+        found,
+        [RowMatch(row=row, score=0.6, shared=("model", "record", "nullable"))],
+    )
+    assert answer.verdict is not Verdict.EXTEND_EXISTING, "a word overlap is not a declaration"
+    assert not any(mech.strong for mech in answer.mechanisms), "and no mechanism is strong because of it"
+    assert all(mech.declared is None for mech in answer.mechanisms), "nothing was declared about these symbols"
+    assert any("lexically related row" in reason for reason in answer.reasons), "the answer says what it had"
+
+
+def test_a_row_naming_the_symbol_still_declares_it(siblings: HomeConfig) -> None:
+    """The row that writes the symbol down is still the strongest evidence there is."""
+    row = _row("Nullable primary-key lookup (`Models.byIdOrNull`)", ("Models.byIdOrNull",), "zenit")
+    hits = [hit("zenit", "Models", 0.9)]
+    found = [mechanism("zenit", "Models.byIdOrNull", 0.9)]
+    answer = decide(
+        siblings,
+        "look up a record by its nullable model primary key",
+        hits,
+        found,
+        [RowMatch(row=row, score=0.6, shared=("lookup", "nullable"))],
+    )
+    assert answer.verdict is Verdict.EXTEND_EXISTING, "the row names this exact symbol"
+    extend = answer.extend
+    assert extend is not None and extend.declared is not None, "the evidence is attached to the mechanism"
+    assert extend.declared.kind is RowMatchKind.EXACT_MEMBER, "and it is an exact-member match"
+    assert any("declared (CLAUDE.md row names `Models.byIdOrNull`)" in reason for reason in answer.reasons), (
+        "the verdict carries the evidence kind"
+    )
+
+
+def test_graph_evidence_is_named_as_such(config: HomeConfig) -> None:
+    """A strong match with no declared row says so instead of implying a declaration."""
+    hits = [hit("zenit", "PageWindow", 0.9), hit("zenit-cms", "Paging", 0.5)]
+    answer = decide(config, "paginate a list of records", hits, [mechanism("zenit", "PageWindow", 0.9, ("zenit-cms",))])
+    assert answer.verdict is Verdict.EXTEND_EXISTING, "consumer position still makes it strong"
+    assert any("evidence: graph evidence" in reason for reason in answer.reasons), "and the evidence is named"
+    assert any("no dependency information for this workspace" in reason for reason in answer.reasons), (
+        "a workspace with no dependency facts is told so rather than pretending"
+    )
+
+
+def test_a_consumer_copy_is_not_the_mechanism(siblings: HomeConfig) -> None:
+    """A strong match inside a module the demand cannot reach is a copy, not the home."""
+    hits = [
+        hit("zenit", "Records", 0.9),
+        hit("zenit", "RecordSources", 0.8),
+        hit("zenit-flow", "FlowRecordSources", 0.75),
+    ]
+    found = [mechanism("zenit-flow", "FlowRecordSources", 0.75, ("zenit-widget", "zenit-cms"))]
+    answer = decide(siblings, "register which module owns a record source", hits, found)
+    assert answer.verdict is Verdict.NEW_MECHANISM, "the copy in the consumer is not extended"
+    assert answer.home == "zenit" and answer.suggested_home == "zenit", "the demand's own module is the home"
+    assert any("cannot depend on zenit-flow" in reason for reason in answer.reasons), "and the answer says why"

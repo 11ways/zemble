@@ -132,6 +132,10 @@ def test_order_may_be_written_inside_the_modules_table(tmp_path: Path) -> None:
         ('[modules]\nzenit = "zenit/**"\n[[rules]]\ntext = "t"\nmodules = ["ghost"]', "rule scope names undeclared"),
         ("[modules]\nzenit = []", "declares no globs"),
         ("[whatever]\nx = 1", "unknown section"),
+        ('[modules.zenit]\ndepends_on = ["zenit"]', "declares no globs"),
+        ('[modules.zenit]\nglobs = ["zenit/**"]\nnope = 1', "unknown key"),
+        ('[modules]\nzenit = "zenit/**"\n[dependencies]\nsource = "guess"', "source must be one of"),
+        ('[modules]\nzenit = "zenit/**"\n[dependencies]\nnope = 1', "unknown key"),
     ],
 )
 def test_a_malformed_config_is_loud(tmp_path: Path, body: str, message: str) -> None:

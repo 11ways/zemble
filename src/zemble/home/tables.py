@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum
 from math import log
 from typing import Any
 
@@ -48,6 +49,17 @@ _STOPWORDS = frozenset(
 MIN_SHARED_WORDS = 2
 #: ... and this share of the description's matchable weight.
 MIN_MATCH_SCORE = 0.2
+
+
+class RowMatchKind(str, Enum):
+    """How a declared row's name relates to a symbol: the one home for that vocabulary."""
+
+    #: The row names this exact symbol.
+    EXACT_MEMBER = "exact_member"
+    #: The row names only the type the symbol is declared in.
+    BARE_TYPE = "bare_type"
+    #: The row names nothing about this symbol.
+    NONE = "none"
 
 
 @dataclass(frozen=True)
@@ -94,9 +106,19 @@ class RowMatch:
     score: float
     shared: tuple[str, ...]
 
+    @property
+    def lexical_score(self) -> float:
+        """The word-overlap fact alone, which never proves the row DECLARES anything."""
+        return self.score
+
     def to_dict(self) -> dict[str, Any]:
         """Render the match as JSON-ready data."""
-        return {"row": self.row.to_dict(), "score": round(self.score, 3), "shared": list(self.shared)}
+        return {
+            "row": self.row.to_dict(),
+            "score": round(self.score, 3),
+            "lexical_score": round(self.lexical_score, 3),
+            "shared": list(self.shared),
+        }
 
 
 def words(text: str) -> set[str]:
@@ -150,14 +172,19 @@ def _names_of(token: str) -> list[str]:
     return names
 
 
-def row_names_symbol(declared: str, unit_name: str) -> bool:
-    """Whether a declared table name names a file-local qualified symbol such as `Texts.trimmedOrNull`.
+def row_match_kind(declared: str, unit_name: str) -> RowMatchKind:
+    """How a declared table name relates to a file-local qualified symbol name.
 
-    Three shapes count and no more: the exact name, a `Type.member` row whose qualified
-    tail the unit carries (`Outer.Texts.trimmedOrNull` is named by `Texts.trimmedOrNull`),
-    and a bare `Type` row naming any member declared directly in that type. A row's member
-    name alone never matches, so `Other.trimmedOrNull` does not claim `Texts.trimmedOrNull`:
-    an unrecognised shape fails closed rather than guessing.
+    Three shapes count and no more: the exact name and a `Type.member` row whose qualified
+    tail the unit carries (`Outer.Texts.trimmedOrNull` is named by `Texts.trimmedOrNull`)
+    are EXACT_MEMBER, a bare `Type` row naming a member declared directly in that type is
+    BARE_TYPE, and everything else is NONE. A row's member name alone never matches, so
+    `Other.trimmedOrNull` does not claim `Texts.trimmedOrNull`: an unrecognised shape fails
+    closed rather than guessing.
+
+    The two kinds are deliberately distinct: EXACT_MEMBER is the row DECLARING this symbol,
+    while BARE_TYPE only says the row is about the class it sits in. Only the first is
+    evidence that a capability already has a declared home.
 
     AIDEV-NOTE: `zemble.home.decide._named_rows` also relates a row's `Class.member` to
     its bare `Class`, but in the OPPOSITE direction - it indexes a declared name under
@@ -166,13 +193,22 @@ def row_names_symbol(declared: str, unit_name: str) -> bool:
     are not one predicate, and merging them would change what `home` calls strong.
     """
     if not declared or not unit_name:
-        return False
+        return RowMatchKind.NONE
     if declared == unit_name:
-        return True
+        return RowMatchKind.EXACT_MEMBER
     if "." in declared:
-        return unit_name.endswith(f".{declared}")
+        return RowMatchKind.EXACT_MEMBER if unit_name.endswith(f".{declared}") else RowMatchKind.NONE
     parts = unit_name.split(".")
-    return len(parts) >= 2 and parts[-2] == declared
+    return RowMatchKind.BARE_TYPE if len(parts) >= 2 and parts[-2] == declared else RowMatchKind.NONE
+
+
+def row_names_symbol(declared: str, unit_name: str) -> bool:
+    """Whether a declared table name names a symbol at all, of either kind.
+
+    The bool-shaped view of `row_match_kind`, kept for callers that only ask "is this row
+    about this symbol"; anything weighing the ANSWER must read the kind instead.
+    """
+    return row_match_kind(declared, unit_name) is not RowMatchKind.NONE
 
 
 def load_rows(config: HomeConfig) -> list[DeclaredRow]:
@@ -336,8 +372,10 @@ __all__ = [
     "MIN_SHARED_WORDS",
     "DeclaredRow",
     "RowMatch",
+    "RowMatchKind",
     "load_rows",
     "match_rows",
+    "row_match_kind",
     "row_names_symbol",
     "symbol_names",
     "words",
