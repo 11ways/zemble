@@ -233,6 +233,9 @@ zemble find-related src/auth.py 42 ./my-project
 # What does this index hold?
 zemble stats ./my-project
 
+# Which zemble code is running here, and is the daemon on the same revision?
+zemble status
+
 # What would indexing this cost with a paid embedder? (embeds nothing)
 zemble embed-status ./my-project --embedder voyage:voyage-4-lite@1024
 ```
@@ -357,9 +360,25 @@ index in RAM.
 | `signatures` | A declaration plus its exactly resolved call sites. |
 | `dupes` | Clone classes over the workspace's Java code. |
 | `home` | Existing mechanisms, candidate homes, verdict and checklist. |
+| `status` | Which zemble code this server is running (version, source root, revision, start time) and whether the checkout moved under it. |
 
 An ambiguous symbol comes back as an `error` payload with a `candidates` list rather than
 as a failure. Per-agent setup is in the [installation docs](docs/installation.md#mcp-server).
+
+### Restart after pulling
+
+An editable install (`uv tool install --editable`, `pip install -e`) has every process
+serve the snapshot of the source it started with. An MCP server or warm daemon started
+before a pull keeps answering from the old code, silently. So:
+
+- `status` (MCP tool) and `zemble status` (CLI) report the version, revision and start
+  time of the process answering, and set `stale` once the checkout has moved under it.
+  `zemble status` also prints the daemon's identity when one is reachable.
+- A stale MCP server logs one WARNING to stderr on the next tool call, and the daemon
+  client logs one WARNING per process when the daemon runs another revision. Neither
+  refuses to answer.
+- The fix is always a restart: restart the MCP server in your agent, and
+  `zemble daemon restart` for the daemon.
 
 ## How it works
 

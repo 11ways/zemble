@@ -24,6 +24,7 @@ from zemble.daemon.protocol import (
     DEFAULT_MAX_INDEXES,
     decode,
     encode,
+    identity_envelope,
     lock_path,
     pid_path,
     runtime_directory,
@@ -38,6 +39,7 @@ from zemble.index.files import get_extensions
 from zemble.index.symbols import SymbolDefinitions
 from zemble.index.types import PersistencePath, PreviousIndex
 from zemble.index_cache import CacheKey, IndexCache, compute_cache_key
+from zemble.runtime.identity import identity, status_payload
 from zemble.types import ContentType
 from zemble.utils import format_results, is_git_url, resolve_chunk
 
@@ -375,7 +377,9 @@ class Daemon:
                     await writer.drain()
                     continue
                 response = await self.handle(request)
-                writer.write(encode(response))
+                # Every answer names the code that produced it, so a client can warn about a
+                # daemon still running the snapshot it started with (see zemble.runtime).
+                writer.write(encode({**response, **identity_envelope()}))
                 await writer.drain()
         except (ConnectionResetError, BrokenPipeError):  # pragma: no cover - client vanished
             return
@@ -410,8 +414,14 @@ class Daemon:
 
 
 async def _cmd_ping(daemon: Daemon, args: dict[str, Any]) -> Any:
-    """Answer that the daemon is alive."""
-    return {"pong": True, "pid": os.getpid()}
+    """Answer that the daemon is alive, naming the code snapshot it runs."""
+    current = identity()
+    return {
+        "pong": True,
+        "pid": os.getpid(),
+        "zemble_version": current.zemble_version,
+        "source_revision": current.source_revision,
+    }
 
 
 async def _cmd_status(daemon: Daemon, args: dict[str, Any]) -> Any:
@@ -446,10 +456,17 @@ async def _cmd_status(daemon: Daemon, args: dict[str, Any]) -> Any:
         "idle_minutes_limit": daemon.idle_minutes,
         "max_indexes": daemon.max_indexes,
         "socket": str(socket_path()),
+        "runtime": _runtime_status(),
         "indexes": indexes,
         "building": building,
         "pending_reindex": [key[0] for key in daemon.pending],
     }
+
+
+def _runtime_status() -> dict[str, Any]:
+    """Return the identity of the code this daemon runs, flattened with its staleness flag."""
+    payload = status_payload(identity())
+    return {**payload["identity"], "stale": payload["stale"], "note": payload["note"]}
 
 
 async def _cmd_search(daemon: Daemon, args: dict[str, Any]) -> Any:

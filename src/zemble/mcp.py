@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import sys
+import threading
+import time
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
@@ -16,6 +21,7 @@ from zemble.graph.mcp import register_graph_tools
 from zemble.home.mcp import register_home_tool
 from zemble.index import ZembleIndex
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
+from zemble.runtime.mcp import StaleAwareFastMCP, register_status_tool
 from zemble.types import ContentType
 from zemble.utils import format_results, is_git_url, resolve_chunk
 
@@ -101,7 +107,7 @@ def _resolve_content_selection(
 
 def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (ContentType.CODE,)) -> FastMCP:
     """Build and return a configured FastMCP server backed by the given cache."""
-    server = FastMCP(
+    server = StaleAwareFastMCP(
         "zemble",
         instructions=(
             "Instant code search for any local or remote git repository. "
@@ -224,6 +230,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
         label = f"Chunks related to {file_path}:{line}"
         return format_results(label, results, max_snippet_lines)
 
+    register_status_tool(server)
     register_graph_tools(server)
     register_dupes_tool(server)
     register_evidence_tools(server, lambda repo, selected: _get_index(repo, cache, selected), default_content)
@@ -241,5 +248,28 @@ async def serve(
     try:
         await server.run_stdio_async()
     finally:
-        if not init_task.done():
-            init_task.cancel()
+        # The stdio loop returns on stdin EOF; nothing else stops this process, so every
+        # background task started here has to be settled before the loop is torn down.
+        init_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await init_task
+        await asyncio.get_running_loop().shutdown_default_executor()
+
+
+def force_exit_if_threads_linger(timeout: float = 5.0) -> None:
+    """Leave the process even when a library thread outlives the stdio loop, naming what lingered."""
+    deadline = time.monotonic() + timeout
+    for thread in _live_threads():
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    remaining = _live_threads()
+    if not remaining:
+        return
+    logger.warning("exiting with %d live thread(s): %s", len(remaining), ", ".join(t.name for t in remaining))
+    sys.stderr.flush()
+    os._exit(0)
+
+
+def _live_threads() -> list[threading.Thread]:
+    """Return the non-daemon threads other than this one that would keep the interpreter alive."""
+    current = threading.current_thread()
+    return [t for t in threading.enumerate() if t is not current and t.is_alive() and not t.daemon]

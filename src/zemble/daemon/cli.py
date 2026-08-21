@@ -130,6 +130,19 @@ def _stop() -> int:
     return 0
 
 
+def _print_runtime(runtime: dict[str, Any]) -> None:
+    """Print which code snapshot the daemon is running, and whether the checkout moved under it."""
+    if not runtime:
+        return
+    print(
+        f"zemble {runtime.get('zemble_version', '?')}  rev {runtime.get('source_revision') or 'unknown'}  "
+        f"started {runtime.get('process_started_at', 'unknown')}"
+        f"{'  STALE' if runtime.get('stale') else ''}"
+    )
+    if runtime.get("note"):
+        print(f"  {runtime['note']}")
+
+
 def _status(as_json: bool) -> int:
     """Print what the running daemon holds."""
     try:
@@ -147,6 +160,7 @@ def _status(as_json: bool) -> int:
         f"pid {status['pid']}  up {status['uptime_seconds']:.0f}s  rss {status['rss_mb']} MB  "
         f"{status['requests']} request(s)  idle {status['idle_seconds']:.0f}s"
     )
+    _print_runtime(status.get("runtime", {}))
     print(f"socket {status['socket']}  max_indexes {status['max_indexes']}  idle_limit {status['idle_minutes_limit']}m")
     for entry in status["indexes"]:
         flags = []

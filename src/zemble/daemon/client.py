@@ -19,6 +19,7 @@ from typing import Any
 
 from zemble.daemon.protocol import (
     CONNECT_TIMEOUT_SECONDS,
+    REVISION_FIELD,
     START_TIMEOUT_SECONDS,
     CommandFailed,
     DaemonUnavailable,
@@ -35,6 +36,8 @@ from zemble.utils import is_git_url
 logger = logging.getLogger(__name__)
 
 _request_ids = count(1)
+#: Set once this process has complained about a daemon running different code.
+_warned_about_revision = False
 #: Set once a process must never talk to a daemon: the daemon itself, or --no-daemon.
 _disabled_reason: str | None = None
 
@@ -153,6 +156,29 @@ def spawn(timeout: float = START_TIMEOUT_SECONDS) -> None:
     raise DaemonUnavailable(f"did not start within {timeout:.0f}s (see {log_file})")
 
 
+def _warn_on_revision_mismatch(response: dict[str, Any]) -> None:
+    """Warn once when the answering daemon runs a different checkout revision than this process.
+
+    A mismatch is never a refusal: the daemon is an accelerator, and an older one still
+    answers correctly for everything its snapshot already knew how to do.
+    """
+    global _warned_about_revision
+    if _warned_about_revision:
+        return
+    from zemble.runtime.identity import identity
+
+    theirs = response.get(REVISION_FIELD)
+    mine = identity().source_revision
+    if theirs is None or mine is None or theirs == mine:
+        return
+    _warned_about_revision = True
+    logger.warning(
+        "zemble daemon runs revision %s, this process runs %s; run `zemble daemon restart` to match them",
+        theirs,
+        mine,
+    )
+
+
 def call(cmd: str, args: dict[str, Any] | None = None, *, auto_start: bool = True, timeout: float | None = None) -> Any:
     """Send one command to the daemon and return its result.
 
@@ -189,6 +215,7 @@ def call(cmd: str, args: dict[str, Any] | None = None, *, auto_start: bool = Tru
         raise DaemonUnavailable("daemon closed the connection without answering")
 
     response = decode(line)
+    _warn_on_revision_mismatch(response)
     if not response.get("ok"):
         raise CommandFailed(str(response.get("error", "unknown daemon error")))
     return response.get("result")

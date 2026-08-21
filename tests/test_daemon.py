@@ -585,6 +585,70 @@ def test_cli_no_daemon_flag_is_silent(
     assert "daemon unavailable" not in capsys.readouterr().err, "an opt-out is not a failure"
 
 
+def test_status_and_ping_carry_the_runtime_identity(no_embedder_load: None) -> None:
+    """A running daemon says which code snapshot it runs, on ping, on status, and on every response."""
+    from zemble.daemon.protocol import REVISION_FIELD, VERSION_FIELD
+    from zemble.runtime import identity
+
+    with running_server(watch=False, idle_minutes=0):
+        # 1. ping names the version and revision without any git work per request.
+        pong = client.call("ping", auto_start=False, timeout=10)
+        assert pong["zemble_version"] == identity().zemble_version, "ping names the version it runs"
+        assert pong["source_revision"] == identity().source_revision, "and the revision"
+
+        # 2. status carries the full identity plus the staleness verdict.
+        status = client.call("status", auto_start=False, timeout=10)
+        runtime = status["runtime"]
+        assert runtime["pid"] == identity().pid, "the in-thread daemon is this process"
+        assert runtime["source_root"] == identity().source_root
+        assert runtime["stale"] is False, "a daemon on the current checkout is not stale"
+        assert "note" in runtime, "the human note travels with the flag"
+
+        # 3. the response envelope names the answering code, which is what the client compares.
+        raw = _raw_response({"id": 99, "cmd": "ping", "args": {}})
+        assert raw[VERSION_FIELD] == identity().zemble_version
+        assert raw[REVISION_FIELD] == identity().source_revision
+
+
+def _raw_response(request: dict[str, Any]) -> dict[str, Any]:
+    """Send one request over the socket and return the undecorated response line."""
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.connect(str(socket_path()))
+    with connection, connection.makefile("rwb") as stream:
+        stream.write(encode(request))
+        stream.flush()
+        return decode(stream.readline())
+
+
+def test_client_warns_once_about_a_daemon_on_another_revision(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revision mismatch is a warning, once per process, never a refusal."""
+    from zemble.daemon.protocol import REVISION_FIELD
+
+    monkeypatch.setattr(client, "_warned_about_revision", False)
+    response = {"ok": True, "result": None, REVISION_FIELD: "0000000"}
+    with caplog.at_level("WARNING"):
+        client._warn_on_revision_mismatch(response)
+        client._warn_on_revision_mismatch(response)
+    assert sum("runs revision 0000000" in record.getMessage() for record in caplog.records) == 1, (
+        "exactly one warning per process"
+    )
+
+    monkeypatch.setattr(client, "_warned_about_revision", False)
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        client._warn_on_revision_mismatch({"ok": True, REVISION_FIELD: identity_revision()})
+    assert caplog.records == [], "a matching revision says nothing"
+
+
+def identity_revision() -> str | None:
+    """Return this process's source revision, as the client compares it."""
+    from zemble.runtime import identity
+
+    return identity().source_revision
+
+
 def test_daemon_status_command_reports_no_daemon(capsys: pytest.CaptureFixture[str]) -> None:
     """`zemble daemon status` without a daemon exits non-zero and says why."""
     from zemble.daemon.cli import main

@@ -23,6 +23,7 @@ from zemble.index import BroadRootRefused, ZembleIndex, resolve_embedder
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
 from zemble.rerank.registry import RerankerSpecError, load_reranker
+from zemble.runtime.cli import STATUS_COMMANDS, add_status_parser, run_status
 from zemble.stats import format_savings_report
 from zemble.types import ContentType
 from zemble.userenv import load_user_env
@@ -47,6 +48,7 @@ _CLI_DISPATCH_ARGS = frozenset(
         *EVIDENCE_COMMANDS,
         *HOME_COMMANDS,
         *EMBED_STATUS_COMMANDS,
+        *STATUS_COMMANDS,
         "daemon",
     }
 )
@@ -60,6 +62,7 @@ _SUBCOMMAND_RUNNERS = {
     **dict.fromkeys(EVIDENCE_COMMANDS, run_evidence),
     **dict.fromkeys(HOME_COMMANDS, run_home),
     **dict.fromkeys(EMBED_STATUS_COMMANDS, run_embed_status),
+    **dict.fromkeys(STATUS_COMMANDS, run_status),
 }
 
 _SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
@@ -178,10 +181,13 @@ def _mcp_main() -> None:
         raise SystemExit(1)
     import asyncio
 
-    from zemble.mcp import serve
+    from zemble.mcp import force_exit_if_threads_linger, serve
 
     content = _resolve_content(args.content, args.include_text_files)
     asyncio.run(serve(content))
+    # An MCP server that returned on stdin EOF must actually leave, even if a loaded library
+    # parked a non-daemon thread; a lingering server keeps serving nothing but stale code.
+    force_exit_if_threads_linger()
 
 
 def _resolve_content(content: list[str], include_text_files: bool) -> list[ContentType]:
@@ -489,6 +495,7 @@ def _cli_main() -> None:
     add_home_parser(sub)
     add_embed_status_parser(sub)
     add_daemon_parser(sub)
+    add_status_parser(sub)
 
     install_p = sub.add_parser("install", help="Configure zemble across coding agents.")
     uninstall_p = sub.add_parser("uninstall", help="Remove zemble configuration from coding agents.")

@@ -14,7 +14,6 @@ import sqlite3
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,7 +48,7 @@ from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol
 from zemble.graph.resolve import Resolver
 from zemble.index.file_walker import ignored_prefix, walk_files
 from zemble.index.files import detect_language, get_extensions
-from zemble.parallel import pool_context
+from zemble.parallel import pool_context, pooled
 from zemble.types import ContentType
 
 logger = logging.getLogger(__name__)
@@ -361,7 +360,7 @@ def _extract_many(jobs: Sequence[tuple[str, str]], workers: int) -> list[FileExt
     if context is None:
         return _extract_serial(jobs)
     try:
-        with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
+        with pooled(workers, context) as pool:
             return [result for result in pool.map(_extract_one, jobs, chunksize=_WORKER_CHUNK) if result is not None]
     except Exception:
         logger.warning("Parallel extraction unavailable; falling back to a single process", exc_info=True)

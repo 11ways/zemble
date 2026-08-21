@@ -6,7 +6,6 @@ import os
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,7 +19,7 @@ from zemble.dedup.structure import check_pair
 from zemble.dedup.units import extract_units
 from zemble.embedding.base import Embedder
 from zemble.index.file_walker import walk_files
-from zemble.parallel import pool_context
+from zemble.parallel import pool_context, pooled
 
 _WORKER_CHUNK = 60
 _MAX_FILE_BYTES = 2_000_000
@@ -141,7 +140,7 @@ def collect_units(root: Path, options: DupeOptions) -> tuple[list[Unit], int]:
         for batch in batches:
             units.extend(_extract_batch((batch, extract_options)))
         return units, len(scan.jobs)
-    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
+    with pooled(workers, context) as pool:
         for result in pool.map(_extract_batch, ((batch, extract_options) for batch in batches)):
             units.extend(result)
     return units, len(scan.jobs)

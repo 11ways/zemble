@@ -28,8 +28,8 @@ one entry in that table. Nothing else has to change: the client is generic.
 
 | Command | Answers |
 | --- | --- |
-| `ping` | Liveness plus the daemon's pid. |
-| `status` | pid, uptime, RSS, request count, idle time, and per-index root/content/embedder/chunks/files/last-used/watching/rebuilding/last-rebuild, plus builds in flight and pending reindexes. |
+| `ping` | Liveness plus the daemon's pid, the zemble version it runs and the revision it was started from. |
+| `status` | pid, uptime, RSS, request count, idle time, a `runtime` block (version, source root, revision, start time, `stale`, `note`), and per-index root/content/embedder/chunks/files/last-used/watching/rebuilding/last-rebuild, plus builds in flight and pending reindexes. |
 | `search` | The same payload `zemble search` and the MCP `search` tool print. |
 | `find_related` | The same payload as `find-related`; a location that is not indexed answers `chunk_missing`. |
 | `stats` | What one index holds. |
@@ -40,6 +40,25 @@ one entry in that table. Nothing else has to change: the client is generic.
 | `refresh` | Force a rebuild check for one root (loads it first if needed). |
 | `evict` | Drop one root from memory and stop its watcher. |
 | `shutdown` | Stop after answering. |
+
+### Which code is answering
+
+zemble is installed as an editable checkout, so every process is a snapshot of the
+source taken when it started: a daemon that came up before a pull keeps answering from
+the code it loaded, for as long as its idle window allows. The daemon therefore names
+its snapshot.
+
+- `status` carries a `runtime` block: version, source root, revision, process start
+  time, a `stale` flag (a *.py file under the loaded package changed, or HEAD moved,
+  since the daemon started) and a human `note` when it is stale.
+  `zemble daemon status` prints it, with `STALE` where it applies.
+- Every response line carries `zemble_version` and `zemble_rev`. A client whose own
+  revision differs logs one WARNING per process ("run `zemble daemon restart` to match
+  them") and then answers normally: a daemon on another revision is never refused, only
+  reported.
+- `zemble status` prints this process's identity and the daemon's side by side.
+
+`zemble daemon restart` is the fix; nothing reloads source in place.
 
 ### Index cache
 
@@ -256,5 +275,9 @@ edge read back out of sqlite for one changed file - and it is what to attack nex
   (10 s throttle) a symbol query reranks with its own scan instead. Results are the
   same, the query is slower.
 - **One embedder per daemon**, the environment default. `--embedder` is answered in-process.
+- **Staleness is reported, never enforced.** A daemon that finds itself stale keeps
+  serving; only a restart changes the code it runs. Staleness is judged from mtimes of
+  the *.py files present at startup plus the HEAD revision, so a file added after the
+  daemon started is only noticed through a moved revision.
 - **Unix sockets only.** No Windows named-pipe transport; there, everything falls back
   in-process.

@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -8,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import zemble
 from tests.conftest import FakeEmbedder, make_chunk
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.mcp import create_server, serve
@@ -510,6 +514,33 @@ def test_cache_evict_missing(cache: IndexCache, tmp_path: Path) -> None:
     cache.evict(cache._compute_cache_key(str(tmp_path)))  # should not raise
 
 
+@pytest.mark.anyio
+async def test_status_tool_returns_the_runtime_identity(cache: IndexCache) -> None:
+    """`status` answers with an object naming the code this server runs, plus its staleness."""
+    from zemble.runtime import identity
+
+    server = create_server(cache)
+    content, structured = await server.call_tool("status", {})
+    assert isinstance(structured, dict), "the tool hands back an object, not a JSON string"
+    payload = structured.get("result", structured)
+    assert payload["identity"]["pid"] == identity().pid, "the answering process names itself"
+    assert payload["identity"]["zemble_version"] == identity().zemble_version
+    assert payload["stale"] is False, "a server started from the current checkout is not stale"
+    assert content, "and it renders as content too"
+
+
+@pytest.mark.anyio
+async def test_tool_calls_probe_for_staleness(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every tool call runs the throttled staleness probe before answering."""
+    from zemble.runtime import mcp as runtime_mcp
+
+    probes: list[float | None] = []
+    monkeypatch.setattr(runtime_mcp, "warn_if_stale", lambda now=None: probes.append(now))
+    server = create_server(cache)
+    await server.call_tool("status", {})
+    assert probes == [None], "the call went through the staleness-aware server"
+
+
 def _double_encoding_complaint(name: str, result: Any) -> str | None:
     """Return why one tool result is JSON hidden inside a JSON string, or None when it is clean."""
     content, structured = result
@@ -544,6 +575,7 @@ async def test_no_tool_returns_json_inside_a_json_string(
     root = str(graph_fixture_root)
     dupes_root = str(Path(__file__).parent / "fixtures" / "dedup_lanes")
     calls: list[tuple[str, dict[str, Any]]] = [
+        ("status", {}),
         ("search", {"query": "circle", "repo": root}),
         ("find_related", {"file_path": "src/main/java/com/example/core/Circle.java", "line": 5, "repo": root}),
         ("graph_definition", {"symbol": "Shape", "repo": root}),
@@ -574,3 +606,57 @@ async def test_no_tool_returns_json_inside_a_json_string(
             if complaint is not None:
                 complaints.append(complaint)
     assert complaints == [], "no tool may make its client parse JSON out of JSON"
+
+
+_MCP_LAUNCHER = """
+import sys
+
+from zemble.cli import main
+
+sys.argv = ["zemble"]
+main()
+"""
+
+
+def _processes_running(needle: str) -> list[int]:
+    """Return the pids of every process whose command line mentions this string."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
+        except OSError:
+            continue
+        if needle in cmdline:
+            found.append(int(entry.name))
+    return found
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the survivor scan reads /proc")
+def test_mcp_server_exits_on_stdin_eof(tmp_path: Path) -> None:
+    """A stdio server whose stdin is already at EOF leaves, and leaves nothing running behind it."""
+    launcher = tmp_path / "run_mcp.py"
+    launcher.write_text(_MCP_LAUNCHER, encoding="utf-8")
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(zemble.__file__).resolve().parent.parent),
+        "HF_HUB_OFFLINE": "1",
+        "ZEMBLE_DAEMON": "0",
+    }
+    process = subprocess.Popen(
+        [sys.executable, str(launcher)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        process.communicate(timeout=60)
+    except subprocess.TimeoutExpired:  # pragma: no cover - the regression this test guards
+        process.kill()
+        process.communicate()
+        pytest.fail("the MCP server did not exit on stdin EOF")
+    assert process.returncode == 0, "an EOF exit is a clean exit"
+    survivors = _processes_running(str(launcher))
+    assert survivors == [], f"the server left processes behind: {survivors}"

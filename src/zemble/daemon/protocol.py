@@ -83,6 +83,22 @@ def log_path() -> Path:
     return resolve_cache_folder() / "daemon.log"
 
 
+#: Response envelope fields naming the code snapshot the answering daemon runs.
+VERSION_FIELD = "zemble_version"
+REVISION_FIELD = "zemble_rev"
+
+
+def identity_envelope() -> dict[str, Any]:
+    """Return the version and revision fields every daemon response carries.
+
+    Imported lazily so the client half stays free of anything heavier than the protocol.
+    """
+    from zemble.runtime.identity import identity
+
+    current = identity()
+    return {VERSION_FIELD: current.zemble_version, REVISION_FIELD: current.source_revision}
+
+
 def encode(payload: dict[str, Any]) -> bytes:
     """Encode one protocol message as a JSON line."""
     return orjson.dumps(payload) + LINE_SEPARATOR
