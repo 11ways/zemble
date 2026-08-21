@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from zemble.dedup.languages import body_unit_kinds
 from zemble.graph.model import is_test_path
 
 
@@ -26,8 +27,11 @@ class Lane(str, Enum):
     TEST = "test"
 
 
-#: Unit kinds that own a whole declaration body, as opposed to a statement window.
-BODY_KINDS = ("method", "constructor", "initializer")
+#: Unit kinds that own a whole declaration body, as opposed to a statement window. The
+#: language profiles are the home of the vocabulary; a new profile widens this by itself.
+BODY_KINDS: tuple[str, ...] = tuple(sorted(body_unit_kinds()))
+#: The one kind that is never a body: a run of consecutive statements inside one.
+WINDOW_KIND = "window"
 
 #: The normalized stream a class of each kind is keyed by. Logic classes have no stream of
 #: their own, so they are keyed by the alpha-renamed body hash of each member.
@@ -53,7 +57,7 @@ def _braced(names: list[str]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Unit:
-    """One comparable piece of Java: a whole body, or a window of statements inside one."""
+    """One comparable piece of code: a whole body, or a window of statements inside one."""
 
     file_path: str
     start_line: int
@@ -67,6 +71,9 @@ class Unit:
     calls: tuple[str, ...]
     literals: tuple[str, ...]
     text: str | None = None
+    #: Declaration modifiers (`public`, `static`, `pub`, ...); reported, never hashed, so a
+    #: visibility edit can never move a clone key.
+    modifiers: tuple[str, ...] = ()
 
     @property
     def location(self) -> str:
@@ -194,6 +201,7 @@ class CloneClass:
                     "name": member.name,
                     "tokens": member.token_count,
                     "is_test": member.is_test,
+                    "modifiers": list(member.modifiers),
                 }
                 for member in self.members
             ],
@@ -206,6 +214,12 @@ class DupeReport:
 
     root: str
     analyzed_files: int = 0
+    #: Files that were walked but whose extraction raised; a missing grammar lands here.
+    failed_files: int = 0
+    #: Up to a handful of the paths behind `failed_files`, for the note.
+    failed_examples: list[str] = field(default_factory=list)
+    #: The extensions this run walked, so an empty report can say what it was even looking for.
+    supported_extensions: tuple[str, ...] = ()
     units: int = 0
     body_units: int = 0
     elapsed_seconds: float = 0.0
@@ -246,6 +260,8 @@ class DupeReport:
         return {
             "root": self.root,
             "analyzed_files": self.analyzed_files,
+            "failed_files": self.failed_files,
+            "supported_extensions": list(self.supported_extensions),
             "units": self.units,
             "body_units": self.body_units,
             "elapsed_seconds": round(self.elapsed_seconds, 3),

@@ -306,6 +306,117 @@ def test_mcp_server_registers_the_dupes_tool() -> None:
     assert {clone["lane"] for clone in lane_only["classes"]} == {"test"}, "step 6: --lane is available over MCP"
 
 
+def test_nothing_scanned_is_never_a_clean_report(tmp_path: Path) -> None:
+    """A run that walked no supported file says what it looked for instead of "No duplication"."""
+    from zemble.dedup.mcp import _options, _run
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "notes.txt").write_text("nothing to parse here\n")
+
+    # 1. The text report refuses to call an empty scan a clean one.
+    report = find_duplication(tmp_path, DupeOptions(kinds=(CloneKind.EXACT,)))
+    text = format_report(report)
+    assert report.analyzed_files == 0, "step 1: nothing was walked"
+    assert "No duplication found." not in text, "step 1: the misleading line is gone"
+    assert f"Scanned 0 supported file(s) under {report.root}" in text, "step 1: it names the root"
+    assert "(supported: .java, .zig)" in text, "step 1: it names the extensions it walks"
+    assert "check --paths/--exclude/ignore files" in text, "step 1: it names the likely cause"
+
+    # 2. Brief mode says it too; a piped report must not read as a pass either.
+    assert "Scanned 0 supported file(s)" in format_report(report, brief=True), "step 2: brief says it as well"
+
+    # 3. The JSON form carries it machine-readably, counts and all.
+    payload = report_json(report)
+    assert payload["analyzed_files"] == 0 and payload["failed_files"] == 0, "step 3: the counts are on the wire"
+    assert payload["supported_extensions"] == [".java", ".zig"], "step 3: so are the extensions"
+    assert any("Scanned 0 supported file(s)" in note for note in payload["notes"]), "step 3: and the note"
+
+    # 4. The CLI still exits 0: this is a report, not a gate.
+    result = subprocess.run(
+        [sys.executable, "-c", _CLI_ENTRY, "dupes", str(tmp_path), "--kind", "exact"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"step 4: an empty scan is not a failure ({result.stderr[-400:]})"
+    assert "Scanned 0 supported file(s)" in result.stdout, "step 4: the refusal is on stdout"
+    assert "No duplication found." not in result.stdout, "step 4: and the misleading line is not"
+
+    # 5. MCP says the same thing, in both of its shapes.
+    options = _options("exact", "all", None, None, 1)
+    mcp_text = _run(options, str(tmp_path), 25, "text", False, False, False)
+    assert "Scanned 0 supported file(s)" in mcp_text, "step 5: the MCP text form carries it"
+    mcp_json = _run(options, str(tmp_path), 25, "json", False, False, False)
+    assert any("Scanned 0 supported file(s)" in note for note in mcp_json["notes"]), "step 5: so does the JSON"
+
+
+def test_extraction_failures_are_counted_not_swallowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file that will not parse is named in the report; a missing grammar is never a clean run."""
+    import zemble.dedup.detect as detect
+
+    (tmp_path / "src").mkdir()
+    for name in ("Alpha.java", "Beta.java"):
+        (tmp_path / "src" / name).write_text("class X { void m() { int a = 1; } }\n")
+
+    def _boom(source: bytes, file_path: str, **kwargs: object) -> list:
+        raise RuntimeError("No tree-sitter java grammar available")
+
+    monkeypatch.setattr(detect, "extract_units", _boom)
+    report = find_duplication(tmp_path, DupeOptions(kinds=(CloneKind.EXACT,), jobs=1))
+
+    # 1. The files were walked, and every one of them failed.
+    assert report.analyzed_files == 2 and report.failed_files == 2, "step 1: the failures are counted"
+    assert report.failed_examples == ["src/Alpha.java", "src/Beta.java"], "step 1: and named"
+
+    # 2. Both surfaces say so rather than reporting a clean workspace.
+    text = format_report(report)
+    assert "extraction failed for 2 file(s): src/Alpha.java, src/Beta.java" in text, "step 2: the text says it"
+    payload = report_json(report)
+    assert payload["failed_files"] == 2, "step 2: the JSON counts it"
+    assert any("extraction failed for 2 file(s)" in note for note in payload["notes"]), "step 2: and notes it"
+
+
+def test_relative_paths_resolve_against_the_scan_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--paths` and `--exclude` are root-relative, whatever directory the process happens to be in."""
+    from zemble.dedup.mcp import _options, _run
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    # 1. A root-relative --paths finds the files even though the CWD holds no such directory.
+    report = find_duplication(FIXTURES, DupeOptions(kinds=(CloneKind.EXACT,), paths=("src",)))
+    assert report.analyzed_files == 12, "step 1: `src` is resolved under the root, not under the CWD"
+
+    # 2. An absolute path keeps working exactly as before.
+    absolute = find_duplication(FIXTURES, DupeOptions(kinds=(CloneKind.EXACT,), paths=(str(FIXTURES / "src"),)))
+    assert absolute.analyzed_files == 12, "step 2: an absolute restriction is taken as given"
+
+    # 3. A path that only exists relative to the CWD selects nothing, which is the point.
+    (elsewhere / "src").mkdir()
+    (elsewhere / "src" / "Stray.java").write_text("class Stray { void m() { int a = 1; } }\n")
+    assert find_duplication(FIXTURES, DupeOptions(paths=("src",))).analyzed_files == 12, "step 3: the CWD is ignored"
+
+    # 4. --exclude is root-relative too.
+    excluded = find_duplication(FIXTURES, DupeOptions(kinds=(CloneKind.EXACT,), exclude=("src/Exact*.java",)))
+    assert excluded.analyzed_files == 10, "step 4: the exclude matched two root-relative paths"
+
+    # 5. The CLI agrees, run from that same unrelated directory.
+    result = subprocess.run(
+        [sys.executable, "-c", _CLI_ENTRY, "dupes", str(FIXTURES), "--kind", "exact", "--paths", "src", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=elsewhere,
+    )
+    assert result.returncode == 0, f"step 5: the run succeeded ({result.stderr[-400:]})"
+    assert json.loads(result.stdout)["analyzed_files"] == 12, "step 5: the CLI resolves against the root"
+
+    # 6. And so does MCP, which only ever knows the workspace.
+    payload = _run(_options("exact", "all", ["src"], None, 1), str(FIXTURES), 25, "json", False, False, False)
+    assert payload["analyzed_files"] == 12, "step 6: the MCP tool resolves against the repo"
+
+
 def _by_lane(report, lane: Lane) -> list:
     """The classes of one lane, ranked."""
     return [clone for clone in report.classes if clone.lane is lane]

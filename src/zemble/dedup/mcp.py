@@ -10,13 +10,16 @@ from pydantic import Field
 
 from zemble.dedup.baseline import BASELINE_RELATIVE_PATH, load_baseline, save_baseline
 from zemble.dedup.detect import DupeOptions, find_duplication
+from zemble.dedup.languages import supported_extensions, supported_languages
 from zemble.dedup.model import CloneKind, Lane
 from zemble.dedup.report import baseline_diff_json, format_baseline_diff, format_report, report_json
 
 if TYPE_CHECKING:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP
 
-_REPO_DESCRIPTION = "Local directory path of the workspace to scan for duplicated Java code."
+_LANGUAGES = ", ".join(supported_languages())
+_EXTENSIONS = ", ".join(supported_extensions())
+_REPO_DESCRIPTION = f"Local directory path of the workspace to scan for duplicated code ({_LANGUAGES}; {_EXTENSIONS})."
 
 DupeFormat = Literal["text", "json"]
 
@@ -87,11 +90,12 @@ def register_dupes_tool(server: FastMCP) -> None:
             Field(description="Which duplication to report: exact, renamed, logic, or all."),
         ] = "renamed",
         paths: Annotated[
-            list[str] | None, Field(description="Restrict the scan to these paths inside the workspace.")
+            list[str] | None,
+            Field(description="Restrict the scan to these paths, relative to the workspace root (or absolute)."),
         ] = None,
         exclude: Annotated[
             list[str] | None,
-            Field(description="Gitignore-style patterns, relative to the root, dropped before parsing."),
+            Field(description="Gitignore-style patterns, relative to the workspace root, dropped before parsing."),
         ] = None,
         lane: Annotated[
             str,
@@ -121,8 +125,11 @@ def register_dupes_tool(server: FastMCP) -> None:
             ),
         ] = False,
     ) -> str | dict[str, Any]:
-        """Report duplicated Java code as clone classes ranked by weight.
+        """Report duplicated code as clone classes ranked by weight.
 
+        Every supported language is scanned in one pass (the `repo` argument names them). A run
+        that walked no supported file says so instead of reporting a clean workspace, and files
+        that failed to parse are counted and named rather than silently dropped.
         `exact` matches token streams with comments and whitespace removed, `renamed` also
         normalizes locals, parameters and lambda parameters (a differing literal or field name
         never matches), and `logic` reports embedding candidates that passed a control-flow and

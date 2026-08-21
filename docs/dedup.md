@@ -1,14 +1,25 @@
 # Duplication detection
 
-`zemble dupes` reports duplicated Java code as **clone classes** ranked by
-weight, in the shape `zenit-dev duplication` prints for `.hwk` templates, so a
-reader who knows one report family recognises the other.
+`zemble dupes` reports duplicated code as **clone classes** ranked by weight,
+in the shape `zenit-dev duplication` prints for `.hwk` templates, so a reader who
+knows one report family recognises the other.
+
+**Java and Zig today** (`.java`, `.zig`); adding a language is adding one profile
+module, see [Adding a language](#adding-a-language). The report header names the
+extensions the run walked, so an empty result can never be mistaken for a clean
+workspace.
 
 It is a **report, never a gate**: the exit code is 0 however much duplication it
 finds. The only non-zero exits are a bad flag and a missing path.
 
-It is **Java only, deliberately**. `.hwk` templates are indexed and are in the
-symbol graph, but duplicated markup is `zenit-dev duplication`'s job: it matches
+It was Java-only for its first year, and that was an implementation shortcut,
+not a principle: every node type the extractor knew was hard-coded tree-sitter
+Java. Everything downstream of unit extraction -- hashing, grouping, ranking,
+lanes, ignore files, baselines, home verdicts -- was already language-neutral, so
+the fix was to lift the Java vocabulary into a profile and register a second one.
+
+`.hwk` templates stay out on purpose. They are indexed and are in the symbol
+graph, but duplicated markup is `zenit-dev duplication`'s job: it matches
 alpha-renamed `.hwk` subtrees off the Hawkeye compiler's own AST, which is a
 better answer than anything a token stream could give here.
 
@@ -263,7 +274,7 @@ overlapping window lengths of one copied run into the single widest one.
 | `--no-windows` | off | Compare whole bodies only |
 | `--logic-threshold` | 0.92 | Cosine a logic candidate needs |
 | `--logic-top-k` | 10 | Embedding neighbours considered per body |
-| `--paths` | whole root | Restrict the scan to these paths |
+| `--paths` | whole root | Restrict the scan to these paths, resolved against the scan root (absolute paths taken as given) |
 | `--exclude` | none | Gitignore-style pattern dropped before parsing (repeatable) |
 | `--lane` | `all` | Report one lane: `production`, `mixed`, `test` |
 | `--brief` | off | Header plus one line per class |
@@ -357,9 +368,46 @@ straight after `.` is a member name and is never renamed. Renamed classes fell
 from 163 to 125 and the entire family disappeared. Fixture `CtorA`/`CtorB` in
 `tests/fixtures/dedup` holds the case.
 
+## Adding a language
+
+A language is one module under `src/zemble/dedup/languages/` exporting a
+`LanguageProfile`, plus one entry in that package's `_ALL` tuple. `units.py`
+holds no node type of any language and must stay that way. The fields:
+
+| Field | What it answers |
+| --- | --- |
+| `name`, `extensions` | The grammar name and the file extensions it claims. |
+| `parser` | Returns the tree-sitter parser, or None when the platform lacks it. |
+| `member_kinds` | Node kind -> unit kind, for every declaration with a comparable body. |
+| `member_body`, `member_name` | Where that declaration's body and name segment are. |
+| `container` | The nested namespace a node opens (`class Foo`, `const Foo = struct`). |
+| `flatten_kinds` | Wrapper nodes whose children are the real members. |
+| `block_kinds` | Nodes whose statement children form a statement window. |
+| `control_keywords` | Leaf kinds whose order is the control-flow skeleton. |
+| `literal_kinds` | Nodes that are a literal; the walk never descends into one. |
+| `declared_name_fields` | Kinds whose `name` field is an identifier the unit declares. |
+| `declared_names_extra` | Declared names no `name` field can express (patterns, captures). |
+| `call_names` | The names one node calls. |
+| `member_separators` | Leaf texts after which an identifier is a member and is never renamed. |
+| `modifiers` | The declaration's modifiers; reported, never hashed. |
+| `hook_node_kinds` | The node kinds only the hooks above name, for the drift test. |
+
+`tests/test_dedup_languages.py` fails the build when a profile names a node kind
+its grammar does not have, or claims an extension zemble does not index as code.
+Do not guess node kinds: parse a fixture and print the tree.
+
+The unit kinds a profile declares are the home of the "is this a whole body"
+vocabulary (`zemble.dedup.model.BODY_KINDS` is derived from them), so a new
+language widens logic mode by itself. A file whose extension no profile claims is
+never walked at all.
+
 ## Limits
 
-- Java only. The unit extractor is tree-sitter Java; nothing else is scanned.
+- Java and Zig only. A third language is a profile module away, but until one
+  exists nothing else is scanned.
+- Statement windows dominate the cost on repositories with long function bodies.
+  sketerm (453 Zig files) is 2.8 s with `--no-windows` and 83 s with them, for
+  619 303 units against 13 284 bodies; javaweb's 6309 Java files are 46-53 s.
 - No index and no incremental state: every run re-parses the tree. That is the
   45 s above, and it is why there is no cache to invalidate.
 - Two call-free bodies trivially satisfy the call-set check (an empty set
@@ -370,3 +418,6 @@ from 163 to 125 and the entire family disappeared. Fixture `CtorA`/`CtorB` in
   the wider finding) but it does read as two entries for one family.
 - `logic` embeds every body in the workspace on every run. It is 16 s with the
   local Potion model, but a paid embedder would make it a paid operation.
+- A file that fails to parse is counted in `failed_files` and named in a note,
+  never silently dropped: 15 files on javaweb, `gradle-wrapper.jar` among them,
+  reach the scan through a negated gitignore rule and show up there.

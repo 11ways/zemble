@@ -14,6 +14,7 @@ from pathspec import GitIgnoreSpec
 
 from zemble.dedup.homes import judge_classes
 from zemble.dedup.ignore import apply_ignores, find_ignore_files
+from zemble.dedup.languages import supported_extensions
 from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Lane, PairReason, Unit
 from zemble.dedup.structure import check_pair
 from zemble.dedup.units import extract_units
@@ -25,6 +26,8 @@ _WORKER_CHUNK = 60
 _MAX_FILE_BYTES = 2_000_000
 #: How many pair reasons a logic class keeps; a class of 20 members has 190 pairs.
 _MAX_REASONS = 6
+#: How many failing paths the report names before it only counts them.
+_MAX_FAILED_EXAMPLES = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,9 +59,18 @@ class DupeOptions:
 
 @dataclass
 class _Scan:
-    """The Java files one run will read."""
+    """The files one run will read, absolute path plus the path the report prints."""
 
     jobs: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class _Extraction:
+    """What reading the workspace produced: units, files read, and files that would not parse."""
+
+    units: list[Unit] = field(default_factory=list)
+    files: int = 0
+    failed: list[str] = field(default_factory=list)
 
 
 def _excluder(patterns: Sequence[str]) -> GitIgnoreSpec | None:
@@ -66,12 +78,25 @@ def _excluder(patterns: Sequence[str]) -> GitIgnoreSpec | None:
     return GitIgnoreSpec.from_lines(patterns) if patterns else None
 
 
+def _selected_paths(root: Path, paths: Sequence[str]) -> list[Path]:
+    """Resolve a `--paths` restriction against the scan root, never against the process CWD.
+
+    An absolute path is taken as given; everything else is root-relative, so a CLI run from
+    anywhere and an MCP call that only knows the workspace agree on what `src` means.
+    """
+    resolved = []
+    for raw in paths:
+        path = Path(raw)
+        resolved.append(path.resolve() if path.is_absolute() else (root / path).resolve())
+    return resolved
+
+
 def _scan(root: Path, paths: Sequence[str], exclude: Sequence[str] = ()) -> _Scan:
-    """Walk the workspace for Java files, honouring a path restriction and exclude patterns."""
+    """Walk the workspace for supported files, honouring a path restriction and exclude patterns."""
     scan = _Scan()
-    selected = [Path(path).resolve() for path in paths]
+    selected = _selected_paths(root, paths)
     excluded = _excluder(exclude)
-    for file_path in walk_files(root, extensions=[".java"]):
+    for file_path in walk_files(root, extensions=supported_extensions()):
         if selected and not any(_is_under(file_path, choice) for choice in selected):
             continue
         if excluded is not None and excluded.match_file(file_path.relative_to(root).as_posix()):
@@ -91,20 +116,26 @@ def _is_under(file_path: Path, choice: Path) -> bool:
     return file_path == choice or choice in file_path.parents
 
 
-def _extract_batch(payload: tuple[list[tuple[str, str]], dict[str, object]]) -> list[Unit]:
-    """Worker entry point: extract the units of a batch of files."""
+def _extract_batch(payload: tuple[list[tuple[str, str]], dict[str, object]]) -> tuple[list[Unit], list[str]]:
+    """Worker entry point: extract the units of a batch of files, naming the ones that failed.
+
+    A failure never fails the run, but it is counted and reported: a missing grammar or an
+    unreadable file must not read as a clean result.
+    """
     jobs, options = payload
     units: list[Unit] = []
+    failed: list[str] = []
     for absolute, relative in jobs:
         try:
             source = Path(absolute).read_bytes()
         except OSError:
+            failed.append(relative)
             continue
         try:
             units.extend(extract_units(source, relative, **options))  # type: ignore[arg-type]
-        except Exception:  # a single unparseable file never fails the run
-            continue
-    return units
+        except Exception:
+            failed.append(relative)
+    return units, failed
 
 
 def _batches(jobs: list[tuple[str, str]], size: int) -> Iterator[list[tuple[str, str]]]:
@@ -113,12 +144,12 @@ def _batches(jobs: list[tuple[str, str]], size: int) -> Iterator[list[tuple[str,
         yield jobs[start : start + size]
 
 
-def collect_units(root: Path, options: DupeOptions) -> tuple[list[Unit], int]:
+def collect_units(root: Path, options: DupeOptions) -> _Extraction:
     """Extract every unit under a root.
 
     :param root: The workspace directory.
     :param options: The run's options.
-    :return: The units and the number of files read.
+    :return: The units, the number of files read and the files that would not parse.
     """
     scan = _scan(root, options.paths, options.exclude)
     extract_options: dict[str, object] = {
@@ -129,21 +160,23 @@ def collect_units(root: Path, options: DupeOptions) -> tuple[list[Unit], int]:
     }
     workers = options.jobs if options.jobs is not None else min(os.cpu_count() or 1, 8)
     batches = list(_batches(scan.jobs, _WORKER_CHUNK))
-    units: list[Unit] = []
-    if workers <= 1 or len(batches) <= 1:
-        for batch in batches:
-            units.extend(_extract_batch((batch, extract_options)))
-        return units, len(scan.jobs)
-    context = pool_context()
+    extraction = _Extraction(files=len(scan.jobs))
+    context = pool_context() if workers > 1 and len(batches) > 1 else None
     if context is None:
         # No start method is safe here (see zemble.parallel): extract in this process.
-        for batch in batches:
-            units.extend(_extract_batch((batch, extract_options)))
-        return units, len(scan.jobs)
+        results = (_extract_batch((batch, extract_options)) for batch in batches)
+        _merge(extraction, results)
+        return extraction
     with pooled(workers, context) as pool:
-        for result in pool.map(_extract_batch, ((batch, extract_options) for batch in batches)):
-            units.extend(result)
-    return units, len(scan.jobs)
+        _merge(extraction, pool.map(_extract_batch, ((batch, extract_options) for batch in batches)))
+    return extraction
+
+
+def _merge(extraction: _Extraction, results: Iterable[tuple[list[Unit], list[str]]]) -> None:
+    """Fold every worker batch's units and failures into one extraction."""
+    for units, failed in results:
+        extraction.units.extend(units)
+        extraction.failed.extend(failed)
 
 
 # ---- clone classes -------------------------------------------------------
@@ -344,10 +377,14 @@ def find_duplication(
     if not root_path.exists():
         raise FileNotFoundError(f"No such directory: {root}")
     started = time.perf_counter()
-    units, files = collect_units(root_path, options)
+    extraction = collect_units(root_path, options)
+    units = extraction.units
     report = DupeReport(
         root=str(root_path),
-        analyzed_files=files,
+        analyzed_files=extraction.files,
+        failed_files=len(extraction.failed),
+        failed_examples=sorted(extraction.failed)[:_MAX_FAILED_EXAMPLES],
+        supported_extensions=tuple(supported_extensions()),
         units=len(units),
         body_units=sum(1 for unit in units if unit.is_body),
         min_tokens=options.min_tokens,

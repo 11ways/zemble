@@ -47,9 +47,10 @@ signature-only view of a file or a type (150 to 300 tokens for a whole class) an
 beat plain search on hit rate, they buy structure.
 
 **Duplication** (`zemble dupes`, MCP `dupes`). Exact, alpha-renamed and logic clone
-classes over Java bodies and statement windows, ranked by weight. Logic clones are never
-reported on embedding similarity alone: a structural check has to agree, and the reason
-is printed. It is a report, never a gate. See [docs/dedup.md](docs/dedup.md).
+classes over declaration bodies and statement windows, ranked by weight. Java and Zig
+today; a language is one profile module in `src/zemble/dedup/languages/`. Logic clones are
+never reported on embedding similarity alone: a structural check has to agree, and the
+reason is printed. It is a report, never a gate. See [docs/dedup.md](docs/dedup.md).
 
 **Home** (`zemble home`, MCP `home`). "Does this feature already exist, and which module
 should it live in?" Answered from the existing mechanisms search and the graph find,
@@ -358,7 +359,7 @@ index in RAM.
 | `explain` | A budgeted evidence bundle as markdown. |
 | `outline` | Signature-only view of a file or a type. |
 | `signatures` | A declaration plus its exactly resolved call sites. |
-| `dupes` | Clone classes over the workspace's Java code. |
+| `dupes` | Clone classes over the workspace's code (Java, Zig). |
 | `home` | Existing mechanisms, candidate homes, verdict and checklist. |
 | `status` | Which zemble code this server is running (version, source root, revision, start time) and whether the checkout moved under it. |
 

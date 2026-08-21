@@ -32,6 +32,29 @@ def _header(report: DupeReport) -> str:
     )
 
 
+def scan_notes(report: DupeReport) -> list[str]:
+    """What the scan itself is worth saying: nothing walked, and files that would not parse.
+
+    A run that walked nothing must never render as "No duplication found."; a missing grammar
+    or an unreadable file must not read as a clean result either.
+
+    :param report: The report to describe.
+    :return: The notes, in the order both surfaces print them.
+    """
+    notes: list[str] = []
+    if report.analyzed_files == 0:
+        supported = ", ".join(report.supported_extensions) or "none"
+        notes.append(
+            f"Scanned 0 supported file(s) under {report.root} (supported: {supported}). "
+            "Nothing analyzed: check --paths/--exclude/ignore files."
+        )
+    if report.failed_files:
+        shown = ", ".join(report.failed_examples)
+        more = "" if report.failed_files <= len(report.failed_examples) else ", ..."
+        notes.append(f"extraction failed for {report.failed_files} file(s): {shown}{more}")
+    return notes
+
+
 def _head_line(index: int, clone: CloneClass, *, with_kind: bool) -> str:
     """Render a clone class's one-line summary."""
     head = clone.members[0]
@@ -58,6 +81,7 @@ def _class_lines(index: int, clone: CloneClass, verdict: HomeVerdict | None = No
 def _preamble(report: DupeReport) -> list[str]:
     """The header, the run's notes and any ignore-file violation."""
     lines = [_header(report)]
+    lines.extend(f"  note: {note}" for note in scan_notes(report))
     lines.extend(f"  note: {note}" for note in report.notes)
     lines.extend(f"  ignore-file violation: {problem}" for problem in report.ignore_problems)
     return lines
@@ -119,7 +143,7 @@ def format_report(report: DupeReport, limit: int = 25, *, brief: bool = False, s
             for index, clone in enumerate(classes[:limit], start=1):
                 lines.extend(_class_lines(index, clone, report.homes.get(clone.key)))
                 lines.append("")
-    if not report.classes:
+    if not report.classes and report.analyzed_files:
         lines.extend(["", "No duplication found."])
     lines.extend(_trailer(report, show_suppressed))
     return "\n".join(lines).rstrip() + "\n"
@@ -196,6 +220,10 @@ def baseline_diff_json(report: DupeReport, baseline: Baseline, limit: int = 25) 
         "new": [report.clone_dict(clone) for clone in _ordered(difference.new)[:limit]],
         "ignore_problems": list(report.ignore_problems),
         "suppressed": len(report.suppressed),
+        "analyzed_files": report.analyzed_files,
+        "failed_files": report.failed_files,
+        "supported_extensions": list(report.supported_extensions),
+        "notes": scan_notes(report) + list(report.notes),
     }
 
 
@@ -207,6 +235,7 @@ def report_json(report: DupeReport, limit: int = 25) -> dict[str, object]:
     :return: A JSON-serializable dict.
     """
     payload = report.to_dict()
+    payload["notes"] = scan_notes(report) + list(report.notes)
     capped = []
     for lane in Lane:
         for kind in CloneKind:

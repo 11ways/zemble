@@ -11,6 +11,7 @@ import json
 
 from zemble.dedup.baseline import load_baseline, save_baseline
 from zemble.dedup.detect import DupeOptions, find_duplication
+from zemble.dedup.languages import supported_extensions, supported_languages
 from zemble.dedup.model import CloneKind, Lane
 from zemble.dedup.report import baseline_diff_json, format_baseline_diff, format_report, report_json
 
@@ -20,7 +21,12 @@ _LANE_CHOICES = [lane.value for lane in Lane] + ["all"]
 
 def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `dupes` subcommand on the main parser."""
-    parser = sub.add_parser("dupes", help="Report duplicated Java code (exact, alpha-renamed, logic clone classes).")
+    languages = ", ".join(supported_languages())
+    parser = sub.add_parser(
+        "dupes",
+        help=f"Report duplicated code (exact, alpha-renamed, logic clone classes; {languages}).",
+        epilog=f"Scanned file types: {', '.join(supported_extensions())}.",
+    )
     parser.add_argument("path", nargs="?", default=".", help="Workspace directory (default: current directory).")
     parser.add_argument(
         "--kind",
@@ -47,7 +53,13 @@ def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--logic-top-k", type=int, default=10, help="Embedding neighbours considered per unit (default: 10)."
     )
-    parser.add_argument("--paths", nargs="+", default=None, metavar="PATH", help="Restrict the scan to these paths.")
+    parser.add_argument(
+        "--paths",
+        nargs="+",
+        default=None,
+        metavar="PATH",
+        help="Restrict the scan to these paths, relative to the workspace directory (or absolute).",
+    )
     parser.add_argument(
         "--exclude",
         action="append",
