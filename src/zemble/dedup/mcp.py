@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import Field
 
+from zemble.dedup.baseline import BASELINE_RELATIVE_PATH, load_baseline, save_baseline
 from zemble.dedup.detect import DupeOptions, find_duplication
 from zemble.dedup.model import CloneKind, Lane
-from zemble.dedup.report import format_report, report_json
+from zemble.dedup.report import baseline_diff_json, format_baseline_diff, format_report, report_json
 
 if TYPE_CHECKING:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP
@@ -31,16 +33,47 @@ def _options(kind: str, lane: str, paths: list[str] | None, exclude: list[str] |
     )
 
 
-def _run(options: DupeOptions, repo: str, limit: int, output: DupeFormat, brief: bool) -> str | dict[str, Any]:
+def _run(
+    options: DupeOptions,
+    repo: str,
+    limit: int,
+    output: DupeFormat,
+    brief: bool,
+    against_baseline: bool,
+    write_baseline: bool,
+) -> str | dict[str, Any]:
     """Run one duplication scan and render it the way the caller asked for.
 
     The JSON form is returned as an object, never as a string: a tool that hands back
     `json.dumps(...)` from a `-> str` signature makes the client parse JSON out of JSON.
+    The baseline lives at the fixed `<repo>/.zemble/dupes.baseline.json`; diffing loads it
+    before `save_baseline` overwrites it, so one call can both diff and advance it.
     """
     report = find_duplication(repo, options)
+    baseline_path = Path(report.root) / BASELINE_RELATIVE_PATH
+    baseline = None
+    notes: list[str] = []
+    if against_baseline:
+        try:
+            baseline = load_baseline(baseline_path)
+        except ValueError as error:
+            if baseline_path.is_file():
+                notes.append(f"baseline: {error}")
+            else:
+                notes.append(f"baseline: none at {BASELINE_RELATIVE_PATH}; pass save_baseline=true to write one")
+    if write_baseline:
+        save_baseline(baseline_path, report)
+        notes.append(f"baseline: wrote {len(report.classes)} class key(s) to {BASELINE_RELATIVE_PATH}")
     if output == "json":
-        return report_json(report, limit)
-    return format_report(report, limit, brief=brief)
+        payload = baseline_diff_json(report, baseline, limit) if baseline else report_json(report, limit)
+        if notes:
+            payload["baseline_notes"] = notes
+        return payload
+    if baseline:
+        text = format_baseline_diff(report, baseline, limit=limit)
+    else:
+        text = format_report(report, limit, brief=brief)
+    return text + "".join(f"{note}\n" for note in notes)
 
 
 def register_dupes_tool(server: FastMCP) -> None:
@@ -73,6 +106,20 @@ def register_dupes_tool(server: FastMCP) -> None:
         brief: Annotated[
             bool, Field(description="Text format only: one line per class, no member paths and no reasons.")
         ] = False,
+        baseline: Annotated[
+            bool,
+            Field(
+                description="Diff this run against `<repo>/.zemble/dupes.baseline.json`: "
+                "resolved / changed / remaining / new instead of the flat report."
+            ),
+        ] = False,
+        save_baseline: Annotated[
+            bool,
+            Field(
+                description="Write this run's clone class keys to `<repo>/.zemble/dupes.baseline.json` "
+                "(after the diff, so one call can diff and advance the baseline)."
+            ),
+        ] = False,
     ) -> str | dict[str, Any]:
         """Report duplicated Java code as clone classes ranked by weight.
 
@@ -80,7 +127,8 @@ def register_dupes_tool(server: FastMCP) -> None:
         normalizes locals, parameters and lambda parameters (a differing literal or field name
         never matches), and `logic` reports embedding candidates that passed a control-flow and
         call-set check, with the reason stated per pair. Classes are sectioned by lane, so test
-        scaffolding can never outrank production duplication. This is a report, never a gate.
+        scaffolding can never outrank production duplication. Classes spanning modules declared
+        in `.zemble/home.toml` carry a home verdict. This is a report, never a gate.
         """
         options = _options(kind, lane, paths, exclude, min_files)
-        return await asyncio.to_thread(_run, options, repo, limit, format, brief)
+        return await asyncio.to_thread(_run, options, repo, limit, format, brief, baseline, save_baseline)

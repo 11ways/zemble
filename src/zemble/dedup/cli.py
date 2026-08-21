@@ -12,7 +12,7 @@ import json
 from zemble.dedup.baseline import load_baseline, save_baseline
 from zemble.dedup.detect import DupeOptions, find_duplication
 from zemble.dedup.model import CloneKind, Lane
-from zemble.dedup.report import format_baseline_diff, format_report, report_json
+from zemble.dedup.report import baseline_diff_json, format_baseline_diff, format_report, report_json
 
 _KIND_CHOICES = [kind.value for kind in CloneKind] + ["all"]
 _LANE_CHOICES = [lane.value for lane in Lane] + ["all"]
@@ -113,16 +113,19 @@ def run_dupes(args: argparse.Namespace) -> int:
         report = find_duplication(args.path, options)
     except FileNotFoundError as error:
         raise SystemExit(str(error)) from None
-    if args.save_baseline:
-        written = save_baseline(args.save_baseline, report)
-        print(f"Wrote {len(report.classes)} clone class key(s) to {written}")
-    if args.json:
-        print(json.dumps(report_json(report, args.limit), indent=2))
-    elif args.baseline:
+    baseline = None
+    if args.baseline:
         try:
             baseline = load_baseline(args.baseline)
         except ValueError as error:
             raise SystemExit(str(error)) from None
+    if args.save_baseline:
+        written = save_baseline(args.save_baseline, report)
+        print(f"Wrote {len(report.classes)} clone class key(s) to {written}")
+    if args.json:
+        payload = baseline_diff_json(report, baseline, args.limit) if baseline else report_json(report, args.limit)
+        print(json.dumps(payload, indent=2))
+    elif baseline:
         print(format_baseline_diff(report, baseline, limit=args.limit), end="")
     else:
         print(

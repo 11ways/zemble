@@ -377,8 +377,19 @@ def test_class_key_stability_journey(tmp_path: Path) -> None:
     # 3. Adding a copy is a different class, and says so.
     (workspace / "src" / "Delta.java").write_text(source.replace("class Alpha", "class Delta"))
     grown = find_duplication(workspace, options)
-    assert grown.classes[0].key != key, "step 3: a third copy is a new class"
+    grown_key = grown.classes[0].key
+    assert grown_key != key, "step 3: a third copy is a new class"
     assert len(grown.classes[0].members) == 3, "step 3: the copy did join the class"
+
+    # 4. Moving a file does not move the key: the identity is the content, not the paths.
+    (workspace / "src" / "moved").mkdir()
+    (workspace / "src" / "Delta.java").rename(workspace / "src" / "moved" / "Delta.java")
+    moved = find_duplication(workspace, options)
+    assert moved.classes[0].key == grown_key, "step 4: a file move keeps the key"
+
+    # 5. Scanning from an ancestor root gives the same key, so per-repo ignore entries hold.
+    parent = find_duplication(tmp_path, options)
+    assert parent.classes[0].key == grown_key, "step 5: the key is scan-root independent"
 
 
 def _ignore_file(root: Path, *lines: str) -> Path:
@@ -432,6 +443,40 @@ def test_suppression_journey(tmp_path: Path) -> None:
     other_kind = find_duplication(workspace, options)
     assert not other_kind.ignore_problems, "step 5: --kind exact does not judge renamed entries"
 
+    # 6. A nested repo's own ignore file is honoured by a workspace scan of the ancestor root.
+    body = (
+        "package inner;\n\npublic class Inner {\n"
+        "    public String weave(String input) {\n"
+        "        StringBuilder builder = new StringBuilder();\n"
+        '        builder.append("inner");\n'
+        "        builder.append(input.length());\n"
+        "        builder.append(input.trim());\n"
+        "        builder.append(input);\n"
+        "        return builder.toString();\n"
+        "    }\n}\n"
+    )
+    for repo, name in (("repo-a", "Inner"), ("repo-b", "InnerCopy")):
+        target = workspace / repo / "src" / f"{name}.java"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body.replace("class Inner", f"class {name}"))
+    spanning = find_duplication(workspace, options)
+    inner_key = next(
+        clone.key for clone in spanning.classes if any("repo-a" in member.file_path for member in clone.members)
+    )
+    nested = workspace / "repo-a" / ".zemble" / "dupes.ignore"
+    nested.parent.mkdir(parents=True)
+    nested.write_text(f"{inner_key}  the two repos ship separately, reviewed\n")
+    honoured = find_duplication(workspace, options)
+    assert inner_key in {clone.key for clone in honoured.suppressed}, "step 6: the nested entry suppresses"
+    assert inner_key not in {clone.key for clone in honoured.classes}, "step 6: and the class left the report"
+
+    # 7. A violation in a nested file is named by that file's own path.
+    nested.write_text(f"{inner_key}\n")
+    bare_nested = find_duplication(workspace, options)
+    assert any(problem.startswith("repo-a/.zemble/dupes.ignore:1:") for problem in bare_nested.ignore_problems), (
+        "step 7: the violation names the nested file"
+    )
+
 
 def test_baseline_journey(tmp_path: Path) -> None:
     """A baseline turns a second run into resolved / remaining / new instead of two lists to eyeball."""
@@ -456,30 +501,56 @@ def test_baseline_journey(tmp_path: Path) -> None:
     baseline = load_baseline(saved)
     assert baseline.keys == {clone.key for clone in before.classes}, "step 1: every class is remembered"
 
-    # 2. Fixing one duplication and adding another gives resolved, remaining and new.
+    # 2. Fixing one class, editing another and adding a third gives resolved, changed and new.
     (workspace / "src" / "Beta.java").write_text("package fixtures;\n\npublic class Beta {\n}\n")
     (workspace / "src" / "Delta.java").write_text(setup.replace("class AlphaTest", "class Delta"))
+    fresh = (
+        "package fixtures;\n\npublic class Epsilon {\n"
+        "    public String weave(String input) {\n"
+        "        StringBuilder builder = new StringBuilder();\n"
+        '        builder.append("epsilon");\n'
+        "        builder.append(input.length());\n"
+        "        builder.append(input.trim());\n"
+        "        builder.append(input);\n"
+        "        return builder.toString();\n"
+        "    }\n}\n"
+    )
+    (workspace / "src" / "Epsilon.java").write_text(fresh)
+    (workspace / "src" / "EpsilonCopy.java").write_text(fresh.replace("class Epsilon", "class EpsilonCopy"))
     after = find_duplication(workspace, options)
     difference = diff_baseline(after, baseline)
     resolved = {entry.members[0] for entry in difference.resolved}
     assert "src/Alpha.java:6-15" in resolved, "step 2: the class whose copy was deleted is resolved"
     assert difference.resolved[0].kind == "exact", "step 2: a resolved entry still describes itself"
     assert len(difference.remaining) == 1, "step 2: the untouched class is remaining"
-    assert len(difference.new) == 1 and len(difference.new[0].members) == 3, "step 2: the grown class counts as new"
+    assert len(difference.new) == 1, "step 2: only the genuinely new pair counts as new"
+    assert "src/Epsilon.java" in {member.file_path for member in difference.new[0].members}, (
+        "step 2: the new class is the planted pair"
+    )
 
-    # 3. The rendered diff names all three sections and stays a report.
+    # 2b. The grown class re-keyed but spans the old files, so it is CHANGED, not resolved-plus-new.
+    assert len(difference.changed) == 1, "step 2b: the grown class is paired with its old entry"
+    change = difference.changed[0]
+    assert change.was.key != change.now.key, "step 2b: the key really did move"
+    assert len(change.now.members) == 3 and change.score_delta > 0, "step 2b: the delta says it grew"
+
+    # 3. The rendered diff names all four sections and stays a report.
     text = format_baseline_diff(after, baseline)
-    assert "== RESOLVED" in text and "== REMAINING" in text and "== NEW ==" in text, "step 3: three sections"
-    assert "resolved" in text and "remaining" in text, "step 3: the counts lead the diff"
+    assert "== RESOLVED" in text and "== CHANGED" in text, "step 3: resolved and changed sections"
+    assert "== REMAINING" in text and "== NEW ==" in text, "step 3: remaining and new sections"
+    assert "changed" in text and f"{change.was.key} -> {change.now.key}" in text, "step 3: the pairing is printed"
     unchanged = format_baseline_diff(before, baseline)
-    assert unchanged.count("  none") == 2, "step 3: an empty section says so rather than vanishing"
+    assert unchanged.count("  none") == 3, "step 3: an empty section says so rather than vanishing"
 
-    # 4. A suppressed class is neither new nor remaining, and is not called resolved either.
-    _ignore_file(workspace, f"{difference.new[0].key}  three copies of one fixture, on purpose for now")
+    # 4. A suppressed class is neither new nor changed, and its re-keyed old entry is not resolved.
+    _ignore_file(workspace, f"{change.now.key}  three copies of one fixture, on purpose for now")
     quiet = find_duplication(workspace, options)
     quiet_difference = diff_baseline(quiet, baseline)
-    assert not quiet_difference.new, "step 4: a suppressed class is not new"
-    assert not any(entry.key == difference.new[0].key for entry in quiet_difference.resolved), "step 4: nor resolved"
+    assert not quiet_difference.changed, "step 4: a suppressed class is not changed"
+    assert not any(entry.key == change.now.key for entry in quiet_difference.resolved), "step 4: nor resolved as-is"
+    assert not any(entry.key == change.was.key for entry in quiet_difference.resolved), (
+        "step 4: the old entry it re-keyed from is not called resolved either: it is still there, on purpose"
+    )
 
     # 5. A narrowed run never calls what it did not look for resolved.
     everything = find_duplication(LANES, DupeOptions(kinds=(CloneKind.EXACT,)))
@@ -519,3 +590,187 @@ def test_brief_journey() -> None:
 
     # 4. The full report still has them.
     assert ".java:" in format_report(report), "step 4: --brief is the only thing that drops them"
+
+
+def _synthetic_unit(name: str, calls: tuple[str, ...], literals: tuple[str, ...] = ("1",)):
+    """Build one in-memory unit for reason-aggregation tests."""
+    from zemble.dedup.model import Unit
+
+    return Unit(
+        file_path=f"src/{name}.java",
+        start_line=1,
+        end_line=9,
+        kind="method",
+        name=f"{name}.apply",
+        token_count=40,
+        exact_hash=f"exact-{name}",
+        renamed_hash=f"renamed-{name}",
+        skeleton=("if", "return"),
+        calls=calls,
+        literals=literals,
+    )
+
+
+def test_reason_aggregation_journey() -> None:
+    """Three or more copies get one consensus line plus outliers; a pair keeps its pair reason."""
+    from zemble.dedup.model import CloneClass, PairReason
+
+    alpha = _synthetic_unit("Alpha", ("applyAttribute", "setStringAttribute"))
+    beta = _synthetic_unit("Beta", ("applyAttribute", "setStringAttribute", "toBooleanValue"))
+    gamma = _synthetic_unit("Gamma", ("applyAttribute", "setStringAttribute"), literals=("1", "2"))
+    reasons = (
+        PairReason(left=alpha.location, right=beta.location, reason="pair reason one"),
+        PairReason(left=alpha.location, right=gamma.location, reason="pair reason two"),
+    )
+    clone = CloneClass(kind=CloneKind.LOGIC, members=(alpha, beta, gamma), tokens=40, reasons=reasons)
+
+    # 1. The wire form leads with one consensus line over the whole class.
+    wire = clone.wire_reasons
+    assert wire[0].startswith("3 copies;"), "step 1: the aggregate counts the copies"
+    assert "control flow identical across all copies" in wire[0], "step 1: the flow consensus is stated"
+    assert "all call {applyAttribute, setStringAttribute}" in wire[0], "step 1: the shared call set is stated"
+    assert "literals differ per copy" in wire[0], "step 1: the literal spread is stated"
+
+    # 2. Only the member that deviates from the consensus is named.
+    assert wire[1] == "outlier Beta.apply also calls {toBooleanValue}", "step 2: the outlier and its extra calls"
+    assert len(wire) == 2, "step 2: agreeing members are not repeated"
+
+    # 3. A two-copy class keeps the pair format: the aggregate would say nothing more.
+    pair = CloneClass(kind=CloneKind.LOGIC, members=(alpha, beta), tokens=40, reasons=(reasons[0],))
+    assert pair.wire_reasons == ["pair reason one"], "step 3: a pair stays a pair"
+
+    # 4. The text report prints the aggregate lines too.
+    from zemble.dedup.report import _class_lines
+
+    lines = _class_lines(1, clone)
+    assert any("reason: 3 copies;" in line for line in lines), "step 4: the report prints the aggregate"
+    assert any("outlier Beta.apply" in line for line in lines), "step 4: and the outlier"
+
+
+_HOME_TOML = """
+order = ["core", "app", "widget"]
+
+[modules]
+core = ["core/**"]
+app = ["app/**"]
+widget = ["widget/**"]
+
+[[forbidden]]
+from = "widget"
+to = "app"
+why = "widgets ship standalone"
+"""
+
+_JAVA_BODY = """package %s;
+
+public class %s {
+    public String weave(String input) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("%s");
+        builder.append(input.length());
+        builder.append(input.trim());
+        builder.append(input);
+        return builder.toString();
+    }
+}
+"""
+
+
+def _plant_pair(workspace: Path, left: str, right: str, salt: str) -> None:
+    """Write one identical body into two module directories."""
+    for module, name in ((left, "One" + salt.title()), (right, "Two" + salt.title())):
+        target = workspace / module / "src" / f"{name}.java"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_JAVA_BODY % (module.replace("-", ""), name, salt))
+
+
+def _verdict_for(report, module: str):
+    """The home verdict of the class with a member under one module directory."""
+    clone = next(c for c in report.classes if any(m.file_path.startswith(f"{module}/") for m in c.members))
+    return clone, report.homes.get(clone.key)
+
+
+def test_home_verdicts_journey(tmp_path: Path) -> None:
+    """A clone class spanning declared modules carries a verdict driven by home.toml."""
+    workspace = tmp_path / "workspace"
+    _plant_pair(workspace, "core", "app", "shared")
+    _plant_pair(workspace, "app", "widget", "leaky")
+    _plant_pair(workspace, "stray-one", "stray-two", "orphan")
+    options = DupeOptions(kinds=(CloneKind.EXACT,))
+
+    # 1. Without a home.toml there are no verdicts and no noise.
+    silent = find_duplication(workspace, options)
+    assert len(silent.classes) == 3, "setup: three cross-module classes"
+    assert silent.homes == {} and not silent.notes, "step 1: no config, no verdicts, no note"
+
+    # 2. The most core member module that everyone may depend on is the candidate home.
+    (workspace / ".zemble").mkdir()
+    (workspace / ".zemble" / "home.toml").write_text(_HOME_TOML)
+    report = find_duplication(workspace, options)
+    _, candidate = _verdict_for(report, "core")
+    assert candidate is not None and candidate.kind.value == "candidate-home", "step 2: core+app has a home"
+    assert candidate.home == "core" and candidate.modules == ("core", "app"), "step 2: core is the home, rank order"
+
+    # 3. A forbidden dependency is named, rule and all, instead of a naive extract-upward.
+    _, forbidden = _verdict_for(report, "widget")
+    assert forbidden is not None and forbidden.kind.value == "forbidden-dep", "step 3: widget must not depend on app"
+    assert "widgets ship standalone" in forbidden.detail, "step 3: the rule's why is carried"
+    assert "deeper than app" in forbidden.detail, "step 3: the direction of the fix is stated"
+
+    # 4. Sibling directories outside the declared order have no shared ancestor.
+    _, orphan = _verdict_for(report, "stray-one")
+    assert orphan is not None and orphan.kind.value == "no-shared-ancestor", "step 4: undeclared siblings"
+
+    # 5. The text and JSON forms carry the verdicts.
+    text = format_report(report)
+    assert "home: candidate home core" in text, "step 5: the report prints the verdict"
+    payload = report_json(report)
+    judged = [clone for clone in payload["classes"] if "home" in clone]
+    assert {clone["home"]["verdict"] for clone in judged} == {
+        "candidate-home",
+        "forbidden-dep",
+        "no-shared-ancestor",
+    }, "step 5: every verdict survives the wire"
+
+    # 6. A malformed home.toml is a note, never a crash: this is still a report.
+    (workspace / ".zemble" / "home.toml").write_text("order = [")
+    broken = find_duplication(workspace, options)
+    assert broken.homes == {}, "step 6: no verdicts from a config that cannot be trusted"
+    assert any("home.toml error" in note for note in broken.notes), "step 6: and the report says why"
+
+
+def test_mcp_baseline_journey(tmp_path: Path) -> None:
+    """Over MCP the baseline lives at a fixed path, so save and diff are two booleans."""
+    import asyncio
+
+    from zemble.index_cache import IndexCache
+    from zemble.mcp import create_server
+
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    source = (LANES / "src" / "main" / "java" / "fixtures" / "Alpha.java").read_text()
+    (workspace / "src" / "Alpha.java").write_text(source)
+    (workspace / "src" / "Beta.java").write_text(source.replace("class Alpha", "class Beta"))
+    server = create_server(IndexCache())
+
+    def call(**arguments):
+        return asyncio.run(server.call_tool("dupes", {"repo": str(workspace), "kind": "exact", **arguments}))
+
+    # 1. Asking for a diff before any baseline exists is answered, not raised.
+    content, _ = call(baseline=True)
+    assert "baseline: none at .zemble/dupes.baseline.json" in content[0].text, "step 1: the miss is named"
+    assert content[0].text.startswith("Analyzed "), "step 1: the plain report still comes back"
+
+    # 2. save_baseline writes the fixed per-workspace file.
+    content, _ = call(save_baseline=True)
+    assert (workspace / ".zemble" / "dupes.baseline.json").is_file(), "step 2: the baseline is on disk"
+    assert "baseline: wrote" in content[0].text, "step 2: and the answer says so"
+
+    # 3. The next run diffs against it.
+    content, _ = call(baseline=True)
+    assert "== RESOLVED" in content[0].text and "remaining" in content[0].text, "step 3: the diff form"
+
+    # 4. The JSON form is the diff object, once-encoded.
+    _, structured = call(baseline=True, format="json")
+    payload = structured["result"]
+    assert payload["counts"] == {"resolved": 0, "changed": 0, "remaining": 1, "new": 0}, "step 4: the buckets"

@@ -13,7 +13,8 @@ from pathlib import Path
 import numpy as np
 from pathspec import GitIgnoreSpec
 
-from zemble.dedup.ignore import IgnoreFile, apply_ignores
+from zemble.dedup.homes import judge_classes
+from zemble.dedup.ignore import apply_ignores, find_ignore_files
 from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Lane, PairReason, Unit
 from zemble.dedup.structure import check_pair
 from zemble.dedup.units import extract_units
@@ -366,7 +367,8 @@ def find_duplication(
         report.notes.extend(notes)
     if options.use_ignore_file:
         scanned = [kind.value for kind in options.kinds]
-        suppression = apply_ignores(classes, IgnoreFile.load(root_path), scanned)
+        ignores = find_ignore_files(root_path, (unit.file_path for unit in units))
+        suppression = apply_ignores(classes, ignores, scanned)
         classes = list(suppression.kept)
         report.suppressed = list(suppression.suppressed)
         report.ignore_problems = list(suppression.problems)
@@ -374,5 +376,8 @@ def find_duplication(
         classes = [clone for clone in classes if clone.lane is options.lane]
         report.suppressed = [clone for clone in report.suppressed if clone.lane is options.lane]
     report.classes = classes
+    homes, notes = judge_classes(root_path, classes)
+    report.homes = homes
+    report.notes.extend(notes)
     report.elapsed_seconds = time.perf_counter() - started
     return report

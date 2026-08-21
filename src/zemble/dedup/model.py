@@ -30,12 +30,25 @@ class Lane(str, Enum):
 BODY_KINDS = ("method", "constructor", "initializer")
 
 #: The normalized stream a class of each kind is keyed by. Logic classes have no stream of
-#: their own, so they are keyed by the exact body hash of each member.
+#: their own, so they are keyed by the alpha-renamed body hash of each member.
 KEY_HASH_ATTRIBUTE: dict[CloneKind, str] = {
     CloneKind.EXACT: "exact_hash",
     CloneKind.RENAMED: "renamed_hash",
-    CloneKind.LOGIC: "exact_hash",
+    CloneKind.LOGIC: "renamed_hash",
 }
+
+#: Copies at or above which a logic class's reasons are aggregated instead of listed per pair.
+AGGREGATE_FROM = 3
+#: How many outlier members the aggregate names before summing the rest up.
+_AGGREGATE_OUTLIERS = 4
+#: How many names a brace list shows before an ellipsis.
+_NAMES_SHOWN = 5
+
+
+def _braced(names: list[str]) -> str:
+    """Render a sorted name list as `{a, b, ...}`."""
+    shown = ", ".join(names[:_NAMES_SHOWN]) + ("" if len(names) <= _NAMES_SHOWN else ", ...")
+    return f"{{{shown}}}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,19 +132,43 @@ class CloneClass:
     def key(self) -> str:
         """A stable identity for this class: its kind plus a digest of its members' streams.
 
-        Line numbers are deliberately absent, so editing around a clone keeps its key; adding
-        or removing a copy changes it, which is what makes a stale ignore entry visible.
+        File paths and line numbers are deliberately absent, so editing around a clone, moving
+        a file, or scanning from a different ancestor root all keep the key; adding or removing
+        a copy changes it, which is what makes a stale ignore entry visible.
         """
         attribute = KEY_HASH_ATTRIBUTE[self.kind]
-        parts = sorted({f"{member.file_path}\0{getattr(member, attribute)}" for member in self.members})
+        parts = sorted(getattr(member, attribute) for member in self.members)
         digest = hashlib.sha256("\n".join(parts).encode()).hexdigest()
         return f"{self.kind.value}:{digest[:12]}"
 
     @property
+    def aggregate_reasons(self) -> list[str]:
+        """One consensus line plus the members that deviate from it, for classes of 3+ copies."""
+        shared = set(self.members[0].calls)
+        for member in self.members[1:]:
+            shared &= set(member.calls)
+        flows = {member.skeleton for member in self.members}
+        literal_sets = {tuple(sorted(set(member.literals))) for member in self.members}
+        calls_note = f"all call {_braced(sorted(shared))}" if shared else "no call shared by every copy"
+        flow_note = (
+            "control flow identical across all copies" if len(flows) == 1 else f"{len(flows)} control-flow shapes"
+        )
+        literal_note = "literals identical" if len(literal_sets) == 1 else "literals differ per copy"
+        lines = [f"{len(self.members)} copies; {flow_note}; {calls_note}; {literal_note}"]
+        outliers = [(member, extra) for member in self.members if (extra := sorted(set(member.calls) - shared))]
+        for member, extra in outliers[:_AGGREGATE_OUTLIERS]:
+            lines.append(f"outlier {member.name} also calls {_braced(extra)}")
+        if len(outliers) > _AGGREGATE_OUTLIERS:
+            lines.append(f"and {len(outliers) - _AGGREGATE_OUTLIERS} more member(s) with extra calls")
+        return lines
+
+    @property
     def wire_reasons(self) -> list[str]:
-        """The reasons for the wire: one entry when every pair agreed, the pairs when they did not."""
+        """The reasons for the wire: an aggregate for 3+ copies, deduped pairs below that."""
         if not self.reasons:
             return []
+        if len(self.members) >= AGGREGATE_FROM:
+            return self.aggregate_reasons
         verdicts = {reason.reason for reason in self.reasons}
         if len(verdicts) == 1:
             return [self.reasons[0].reason]
@@ -184,6 +221,9 @@ class DupeReport:
     suppressed: list[CloneClass] = field(default_factory=list)
     #: Ignore-file violations: entries without a justification, and entries matching nothing.
     ignore_problems: list[str] = field(default_factory=list)
+    #: Cross-module verdicts keyed by class key (`zemble.dedup.homes.HomeVerdict`); typed loosely
+    #: because importing homes here would be a cycle.
+    homes: dict[str, Any] = field(default_factory=dict)
 
     def of_kind(self, kind: CloneKind) -> list[CloneClass]:
         """Return this report's classes of one kind, already ranked."""
@@ -192,6 +232,14 @@ class DupeReport:
     def section(self, lane: Lane, kind: CloneKind) -> list[CloneClass]:
         """Return this report's classes of one lane and kind, already ranked."""
         return [clone for clone in self.classes if clone.kind is kind and clone.lane is lane]
+
+    def clone_dict(self, clone: CloneClass) -> dict[str, Any]:
+        """Render one class for the wire, with its cross-module verdict when one exists."""
+        payload = clone.to_dict()
+        verdict = self.homes.get(clone.key)
+        if verdict is not None:
+            payload["home"] = verdict.to_dict()
+        return payload
 
     def to_dict(self) -> dict[str, Any]:
         """Render the whole report for the wire."""
@@ -208,5 +256,5 @@ class DupeReport:
             "notes": list(self.notes),
             "suppressed": len(self.suppressed),
             "ignore_problems": list(self.ignore_problems),
-            "classes": [clone.to_dict() for clone in self.classes],
+            "classes": [self.clone_dict(clone) for clone in self.classes],
         }
