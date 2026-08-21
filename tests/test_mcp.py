@@ -24,7 +24,7 @@ from zemble.utils import format_results, is_git_url
 
 def _tool_text(result: Any) -> str:
     """Extract the text string from a FastMCP call_tool result."""
-    return result[0][0].text
+    return result[0].text
 
 
 async def _call_tool(
@@ -537,9 +537,9 @@ async def test_status_tool_returns_the_runtime_identity(cache: IndexCache) -> No
     from zemble.runtime import identity
 
     server = create_server(cache)
-    content, structured = await server.call_tool("status", {})
-    assert isinstance(structured, dict), "the tool hands back an object, not a JSON string"
-    payload = structured.get("result", structured)
+    content = await server.call_tool("status", {})
+    payload = json.loads(content[0].text)
+    assert isinstance(payload, dict), "the tool hands back an object, encoded once as text"
     assert payload["identity"]["pid"] == identity().pid, "the answering process names itself"
     assert payload["identity"]["zemble_version"] == identity().zemble_version
     assert payload["stale"] is False, "a server started from the current checkout is not stale"
@@ -559,8 +559,15 @@ async def test_tool_calls_probe_for_staleness(cache: IndexCache, monkeypatch: py
 
 
 def _double_encoding_complaint(name: str, result: Any) -> str | None:
-    """Return why one tool result is JSON hidden inside a JSON string, or None when it is clean."""
-    content, structured = result
+    """Return why one tool result is not handed over exactly once, or None when it is clean.
+
+    Two shapes are hunted: text that is itself a JSON string, and the SDK's structured
+    twin. FastMCP wraps any non-object return annotation as ``{"result": value}`` in
+    `structuredContent`, and a client that prefers that lane then renders formatted text
+    as a JSON object; every tool is registered with ``structured_output=False`` so the
+    text lane is the only one.
+    """
+    content, structured = result if isinstance(result, tuple) else (result, None)
     text = content[0].text
     try:
         decoded = json.loads(text)
@@ -568,13 +575,8 @@ def _double_encoding_complaint(name: str, result: Any) -> str | None:
         decoded = None
     if isinstance(decoded, str):
         return f"{name}: the text content is a JSON string holding {decoded[:40]!r}"
-    if isinstance(structured, dict) and isinstance(structured.get("result"), str):
-        inner = structured["result"]
-        try:
-            json.loads(inner)
-        except (json.JSONDecodeError, TypeError):
-            return None
-        return f"{name}: structured content carries JSON encoded as a string"
+    if structured is not None:
+        return f"{name}: answered with structured content {str(structured)[:40]!r} next to the text"
     return None
 
 
@@ -586,8 +588,11 @@ async def test_no_tool_returns_json_inside_a_json_string(
     graph_cache: Path,
 ) -> None:
     """Every registered tool hands its answer over once: text stays text, JSON stays an object."""
-    bad = ([MagicMock(text=json.dumps(json.dumps({"root": "x"})))], {"result": json.dumps({"root": "x"})})
-    assert _double_encoding_complaint("stub", bad) is not None, "the check itself recognises the shape it hunts"
+    bad = ([MagicMock(text=json.dumps(json.dumps({"root": "x"})))], None)
+    assert _double_encoding_complaint("stub", bad) is not None, "the check itself recognises JSON-in-JSON"
+    wrapped = ([MagicMock(text="plain report")], {"result": "plain report"})
+    assert _double_encoding_complaint("stub", wrapped) is not None, "the check itself recognises the SDK twin"
+    assert _double_encoding_complaint("stub", ([MagicMock(text="plain report")], None)) is None
 
     root = str(graph_fixture_root)
     dupes_root = str(Path(__file__).parent / "fixtures" / "dedup_lanes")
@@ -613,8 +618,11 @@ async def test_no_tool_returns_json_inside_a_json_string(
         patch("zemble.index_cache.save_index_to_cache"),
     ):
         server = create_server(cache)
-        registered = {tool.name for tool in await server.list_tools()}
+        listed = await server.list_tools()
+        registered = {tool.name for tool in listed}
         assert registered <= {name for name, _ in calls}, "every registered tool is covered by this test"
+        schemas = {tool.name for tool in listed if tool.outputSchema is not None}
+        assert schemas == set(), "a tool advertising an output schema gets its text wrapped as {'result': ...}"
         complaints = []
         for name, args in calls:
             result = await server.call_tool(name, args)

@@ -82,7 +82,7 @@ def _run(
 def register_dupes_tool(server: FastMCP) -> None:
     """Register the duplication tool on a FastMCP server."""
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def dupes(
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
         kind: Annotated[

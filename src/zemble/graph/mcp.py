@@ -118,7 +118,7 @@ async def _dispatch(repo: str, symbol: str, method: str, **kwargs: Any) -> dict[
 def register_graph_tools(server: FastMCP) -> None:
     """Register the symbol-graph tools on a FastMCP server."""
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def graph_definition(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
@@ -129,7 +129,7 @@ def register_graph_tools(server: FastMCP) -> None:
         """
         return await _dispatch(repo, symbol, "definition")
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def graph_callers(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
@@ -142,7 +142,7 @@ def register_graph_tools(server: FastMCP) -> None:
         """
         return await _dispatch(repo, symbol, "callers")
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def graph_implementations(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
@@ -150,7 +150,7 @@ def register_graph_tools(server: FastMCP) -> None:
         """List the direct and transitive subtypes of a Java class or interface, with their depth."""
         return await _dispatch(repo, symbol, "implementations")
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def graph_tests_of(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
@@ -158,7 +158,7 @@ def register_graph_tools(server: FastMCP) -> None:
         """Find the tests covering a Java symbol: naming matches (FooTest) first, then tests that use it."""
         return await _dispatch(repo, symbol, "tests_of")
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def graph_neighbors(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],

@@ -64,7 +64,7 @@ class StaleAwareFastMCP(FastMCP):
 def register_status_tool(server: FastMCP) -> None:
     """Register the runtime-identity tool on a FastMCP server."""
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def status() -> dict[str, Any]:
         """Report which zemble code this MCP server is running and whether it went stale.
 

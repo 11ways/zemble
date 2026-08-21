@@ -284,28 +284,27 @@ def test_mcp_server_registers_the_dupes_tool() -> None:
     assert {"search", "find_related", "graph_definition"} <= tools, "step 2: nothing was replaced"
 
     # 3. By default it answers with the text report the CLI prints, not with JSON in a string.
-    content, structured = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact"}))
-    text = content[0].text
+    answer = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact"}))
+    assert isinstance(answer, list) and len(answer) == 1, "step 3: one text lane, no structured twin"
+    text = answer[0].text
     assert text.startswith("Analyzed "), "step 3: the default format is the CLI's own report"
-    assert structured["result"] == text, "step 3: the text is handed over once, unencoded"
 
     # 4. `brief` trims it to one line per class, still as text.
-    brief = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact", "brief": True}))[0][0].text
+    brief = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact", "brief": True}))[0].text
     assert "-- EXACT --" not in brief and "#1  exact " in brief, "step 4: brief is the header and the class lines"
 
-    # 5. `format="json"` returns the structured object itself, never a JSON string.
-    content, structured = asyncio.run(
-        server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact", "format": "json"})
-    )
-    payload = structured["result"]
+    # 5. `format="json"` returns the object, encoded exactly once as the text content.
+    content = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "exact", "format": "json"}))
+    payload = json.loads(content[0].text)
     assert isinstance(payload, dict), "step 5: the JSON form is an object on the wire"
     assert payload["class_counts"]["exact"] == 2, "step 5: the tool returns the ranked classes"
-    assert json.loads(content[0].text) == payload, "step 5: the text content is that object, encoded once"
 
     # 6. The lane and exclude arguments reach the scan.
-    lane_only = asyncio.run(
-        server.call_tool("dupes", {"repo": str(LANES), "kind": "exact", "lane": "test", "format": "json"})
-    )[1]["result"]
+    lane_only = json.loads(
+        asyncio.run(server.call_tool("dupes", {"repo": str(LANES), "kind": "exact", "lane": "test", "format": "json"}))[
+            0
+        ].text
+    )
     assert {clone["lane"] for clone in lane_only["classes"]} == {"test"}, "step 6: --lane is available over MCP"
 
 
@@ -879,22 +878,22 @@ def test_mcp_baseline_journey(tmp_path: Path) -> None:
         return asyncio.run(server.call_tool("dupes", {"repo": str(workspace), "kind": "exact", **arguments}))
 
     # 1. Asking for a diff before any baseline exists is answered, not raised.
-    content, _ = call(baseline=True)
+    content = call(baseline=True)
     assert "baseline: none at .zemble/dupes.baseline.json" in content[0].text, "step 1: the miss is named"
     assert content[0].text.startswith("Analyzed "), "step 1: the plain report still comes back"
 
     # 2. save_baseline writes the fixed per-workspace file.
-    content, _ = call(save_baseline=True)
+    content = call(save_baseline=True)
     assert (workspace / ".zemble" / "dupes.baseline.json").is_file(), "step 2: the baseline is on disk"
     assert "baseline: wrote" in content[0].text, "step 2: and the answer says so"
 
     # 3. The next run diffs against it.
-    content, _ = call(baseline=True)
+    content = call(baseline=True)
     assert "== RESOLVED" in content[0].text and "remaining" in content[0].text, "step 3: the diff form"
 
     # 4. The JSON form is the diff object, once-encoded.
-    _, structured = call(baseline=True, format="json")
-    payload = structured["result"]
+    content = call(baseline=True, format="json")
+    payload = json.loads(content[0].text)
     assert payload["counts"] == {"resolved": 0, "changed": 0, "remaining": 1, "new": 0}, "step 4: the buckets"
 
 

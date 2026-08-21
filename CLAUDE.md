@@ -70,7 +70,10 @@ overwrite each other. Never tune on individual eval queries.
   to change it (prove it with the benchmark).
 - MCP tools return their payload as an object (or as plain text), never as a
   `json.dumps` string from a `-> str` signature: that makes the client parse JSON
-  out of JSON. `tests/test_mcp.py` fails the build when one does.
+  out of JSON. Every tool is registered `@server.tool(structured_output=False)`: FastMCP
+  otherwise wraps a non-object return type as `{"result": ...}` in `structuredContent`,
+  and Claude Code renders that twin instead of the text. `tests/test_mcp.py` fails the
+  build when a tool advertises an output schema or answers with structured content.
 - Defaults are local/offline/no key. Hosted providers (Voyage) are opt-in via env;
   `docs/comparison.md` carries the recommendation.
 - Secrets: `VOYAGE_API_KEY` lives in `~/.config/zemble/env` (mode 600) on the dev

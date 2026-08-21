@@ -135,7 +135,7 @@ async def _call(cache: IndexCache, root: Path, args: dict[str, Any]) -> str:
     with patch("zemble.mcp.ZembleIndex.from_path", return_value=_fake_index(root)):
         server = create_server(cache)
         result = await server.call_tool("home", args)
-    return result[0][0].text
+    return result[0].text
 
 
 def test_mcp_tool_answers_in_process(workspace: Path, cache: IndexCache) -> None:

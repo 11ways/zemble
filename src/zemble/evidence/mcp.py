@@ -143,7 +143,7 @@ def register_evidence_tools(
     :param default_content: Content types the server was configured with.
     """
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def explain(
         query: Annotated[str, Field(description="What you want explained, in natural language or as a symbol name.")],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
@@ -176,7 +176,7 @@ def register_evidence_tools(
             get_index, repo, query, budget, top_k, selected, tuple(paths or ()), tuple(exclude or ())
         )
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def outline(
         target: Annotated[
             str, Field(description="A workspace-relative file path, or a simple or qualified type name.")
@@ -197,7 +197,7 @@ def register_evidence_tools(
             payload = await asyncio.to_thread(_outline_here, repo, target, members)
         return _as_payload(payload, "outline")
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def signatures(
         symbol: Annotated[str, Field(description="A simple name, a qualified name, or `Type.member`.")],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],

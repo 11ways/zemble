@@ -45,7 +45,7 @@ def register_home_tool(server: FastMCP, get_index: IndexGetter) -> None:
     :param get_index: Awaitable that returns the index for a repo and content selection.
     """
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def home(
         description: Annotated[str, Field(description="The feature you are about to build, in your own words.")],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],

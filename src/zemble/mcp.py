@@ -154,7 +154,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
         ),
     )
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def search(
         query: Annotated[str, Field(description="Natural language or code query.")],
         repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
@@ -209,7 +209,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             return {"error": "No results found."}
         return format_results(query, results, max_snippet_lines)
 
-    @server.tool()
+    @server.tool(structured_output=False)
     async def find_related(
         file_path: Annotated[
             str,

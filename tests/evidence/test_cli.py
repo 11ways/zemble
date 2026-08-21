@@ -128,7 +128,7 @@ async def _call(cache: IndexCache, root: Path, tool: str, args: dict[str, Any]) 
     with patch("zemble.mcp.ZembleIndex.from_path", return_value=_fake_index(root)):
         server = create_server(cache)
         result = await server.call_tool(tool, args)
-    return result[0][0].text
+    return result[0].text
 
 
 def test_mcp_tools(graph_fixture_root: Path, graph_cache: Path, cache: IndexCache) -> None:
@@ -214,5 +214,5 @@ def test_mcp_explain_prefers_the_daemon(
     with patch("zemble.mcp.ZembleIndex.from_path", side_effect=AssertionError("must not index here")):
         server = create_server(cache)
         result = asyncio.run(server.call_tool("explain", {"query": "warm", "repo": str(graph_fixture_root)}))
-    assert result[0][0].text == "# Evidence for: warm", "the daemon's markdown is what the tool returns"
+    assert result[0].text == "# Evidence for: warm", "the daemon's markdown is what the tool returns"
     assert asked == ["explain"], "and it asked for exactly that command"
