@@ -47,7 +47,10 @@ def _class_lines(index: int, clone: CloneClass, verdict: HomeVerdict | None = No
     lines = [_head_line(index, clone, with_kind=False)]
     lines.extend(f"    {member.location}" for member in clone.members)
     if verdict is not None:
-        lines.append(f"    home: {verdict.describe()}")
+        head, *rest = verdict.describe_lines()
+        lines.append(f"    home: {head}")
+        # Continuation lines align under the text, not under the `home:` label.
+        lines.extend(f"          {line}" for line in rest)
     lines.extend(f"    reason: {reason}" for reason in clone.wire_reasons)
     return lines
 

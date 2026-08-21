@@ -326,6 +326,11 @@ def _named_rows(row_matches: Sequence[RowMatch]) -> dict[str, RowMatch]:
     The owning class of a `Class.member` name is indexed too: a row that names one
     method of a class is naming that class as the mechanism, and the hit the search
     anchors on is the type at least as often as the member.
+
+    AIDEV-NOTE: `zemble.home.tables.row_names_symbol` relates the same two shapes for
+    `dupes`, but the other way round (bare `Class` row -> members of that class, matched
+    on a file-local qualified name by suffix). Deliberately not one shared predicate:
+    this side matches search labels by equality and would change `home`'s strong marks.
     """
     if not row_matches:
         return {}

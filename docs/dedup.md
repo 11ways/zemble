@@ -157,12 +157,31 @@ A workspace scan finds clone classes spanning repos, but a flat list cannot say
 what to do about them: that depends on dependency direction. When the scanned
 root has a `.zemble/home.toml` (the same file `zemble home` reads: module
 `order`, module globs, `[[forbidden]]` rules), every class spanning two or more
-declared modules carries one of three verdicts, printed as a `home:` line under
+declared modules carries one of four verdicts, printed as a `home:` line under
 its members and as a `home` object in the JSON:
 
+- **existing-home** -- the most core member module already declares one of the
+  copies as a capability's home, so the mechanism EXISTS and the other copies
+  are the drift:
+
+  ```
+  home: existing home zenit: Texts.trimmedOrNull
+        declared by ARCH.md: Blank-safe string trimming
+        downstream copies should call or extend it
+  ```
+
+  The evidence line carries the row's TITLE (its capability up to the first
+  parenthesis, truncated at 100 characters): a capability cell is prose and
+  routinely runs for hundreds of characters. The JSON adds `symbol`, `location`
+  (`<file path>:<start line>` of that copy, the declaration's first line, not its
+  line range) and `evidence` (one
+  `{"kind": "declared-row", "capability", "file", "line"}` per row, with the
+  whole capability cell) to the usual `verdict` / `modules` / `home` / `detail`.
 - **candidate-home** -- the most core member module, when every other member may
   depend on it: `home: candidate home zenit (spans orcono, zenit; zenit is the
-  most core member module and every other member may depend on it)`.
+  most core member module and every other member may depend on it)`. This is a
+  PLACE for a new mechanism, never a claim that a reusable one is already there;
+  only `existing-home` says that.
 - **forbidden-dep** -- a `[[forbidden]]` rule blocks some member from depending
   on the would-be home; the rule and its `why` are quoted, plus `a shared home
   must sit deeper than <module>`. This is the case where a naive
@@ -170,8 +189,39 @@ its members and as a `home` object in the JSON:
 - **no-shared-ancestor** -- no member module is in the declared order (sibling
   apps): the weakest finding, labelled as such.
 
+`existing-home` reads the same `home_modules` the `home` tool does, so the home
+cell must name its module IN BACKTICKS: a row whose home cell is prose declares
+no module, matches no copy, and is silently no evidence -- no verdict change and
+no note. `forbidden-dep` outranks `existing-home`: when a member may not depend on the
+module that declares the mechanism, calling it is not the fix, whatever the
+table says.
+
 No `home.toml` means no verdicts and no noise; a malformed one is reported as a
 note and skipped, because this is a report, never a gate.
+
+### What counts as evidence for `existing-home`
+
+Declared capability-table rows (the `[[tables]]` of `home.toml`) and nothing
+else. A copy is promoted when it is a whole body -- not a statement window --
+living in the candidate home module -- and not a synthetic member such as
+`Type.<initializer>`, which nothing can call -- and a row whose `home` cell
+backticks that module names that body. Three name shapes match and no more: the exact
+`Type.member`, a `Type.member` row whose qualified tail the unit carries
+(`Outer.Texts.trimmedOrNull` is named by `Texts.trimmedOrNull`), and a bare
+`Type` row, which covers the members declared directly in that type. A row that
+names a different type's member of the same name (`Other.trimmedOrNull` against
+`Texts.trimmedOrNull`) does NOT match: symbol matching fails closed, because a
+wrong `existing-home` sends a reader to code that does something else.
+
+Callers, the symbol graph, embeddings and search are deliberately not consulted.
+`dupes` is a cache-free scan that must run on any checkout without an index, and
+usage is not intent: a helper twenty callers reach for is not thereby the
+declared home of anything, while a mechanism a human wrote into the table is one
+however few callers it has. Classifying a class therefore never triggers
+indexing, embedding or retrieval. The tables are read once per run, and only
+once a class actually spans two declared modules: a scan with nothing to judge
+never opens them. A declared table file that is missing is then a note in the
+report and no evidence; one that parses to no rows is simply no evidence.
 
 ## `--brief`
 

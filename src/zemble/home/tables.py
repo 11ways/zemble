@@ -150,6 +150,31 @@ def _names_of(token: str) -> list[str]:
     return names
 
 
+def row_names_symbol(declared: str, unit_name: str) -> bool:
+    """Whether a declared table name names a file-local qualified symbol such as `Texts.trimmedOrNull`.
+
+    Three shapes count and no more: the exact name, a `Type.member` row whose qualified
+    tail the unit carries (`Outer.Texts.trimmedOrNull` is named by `Texts.trimmedOrNull`),
+    and a bare `Type` row naming any member declared directly in that type. A row's member
+    name alone never matches, so `Other.trimmedOrNull` does not claim `Texts.trimmedOrNull`:
+    an unrecognised shape fails closed rather than guessing.
+
+    AIDEV-NOTE: `zemble.home.decide._named_rows` also relates a row's `Class.member` to
+    its bare `Class`, but in the OPPOSITE direction - it indexes a declared name under
+    its owning type and matches search labels by equality, while this matches a
+    file-local qualified unit name by suffix. Keep the two rules in step by hand; they
+    are not one predicate, and merging them would change what `home` calls strong.
+    """
+    if not declared or not unit_name:
+        return False
+    if declared == unit_name:
+        return True
+    if "." in declared:
+        return unit_name.endswith(f".{declared}")
+    parts = unit_name.split(".")
+    return len(parts) >= 2 and parts[-2] == declared
+
+
 def load_rows(config: HomeConfig) -> list[DeclaredRow]:
     """Parse every declared-home table the workspace pointed at.
 
@@ -313,6 +338,7 @@ __all__ = [
     "RowMatch",
     "load_rows",
     "match_rows",
+    "row_names_symbol",
     "symbol_names",
     "words",
 ]
