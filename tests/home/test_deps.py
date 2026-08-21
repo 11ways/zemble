@@ -181,3 +181,31 @@ def test_a_depends_on_naming_an_unknown_module_is_refused(tmp_path: Path) -> Non
     """A dependency on a module the workspace never declared is a config error, not an edge."""
     with pytest.raises(ConfigError, match="undeclared module 'zenit-cms'"):
         _workspace(tmp_path, deps={"zenit-flow": ["zenit-cms"]})
+
+
+def test_the_shared_home_is_the_deepest_one_not_the_most_core(tmp_path: Path) -> None:
+    """`nearest_common_dependency` walks down to the modules the siblings actually sit on."""
+    # 1. Two siblings on zenit, which itself sits on protoblast: zenit is the shared home.
+    deep = _workspace(
+        tmp_path / "deep",
+        deps={"zenit": ["protoblast"], "zenit-flow": ["zenit"], "zenit-widget": ["zenit"]},
+    )
+    assert deep.common_dependencies(["zenit-flow", "zenit-widget"]) == ("zenit",), "step 1: protoblast is dropped"
+    assert deep.nearest_common_dependency(["zenit-flow", "zenit-widget"]) == "zenit", "step 1: the deepest one wins"
+
+    # 2. Siblings that share only the root library get the root library.
+    only = _workspace(tmp_path / "only", deps={"zenit-flow": ["protoblast"], "zenit-widget": ["protoblast"]})
+    assert only.nearest_common_dependency(["zenit-flow", "zenit-widget"]) == "protoblast", "step 2: nothing deeper"
+
+    # 3. Two shared modules neither of which reaches the other are a tie, broken by `order`.
+    tie = _workspace(
+        tmp_path / "tie",
+        deps={"zenit-flow": ["zenit", "protoblast"], "zenit-widget": ["zenit", "protoblast"]},
+    )
+    assert set(tie.common_dependencies(["zenit-flow", "zenit-widget"])) == {"zenit", "protoblast"}, "step 3: both"
+    assert tie.nearest_common_dependency(["zenit-flow", "zenit-widget"]) == "protoblast", "step 3: most core wins"
+
+    # 4. Siblings that share nothing are told so rather than pushed into an unrelated module.
+    apart = _workspace(tmp_path / "apart", deps={"zenit-flow": ["zenit"], "zenit-widget": ["protoblast"]})
+    assert apart.common_dependencies(["zenit-flow", "zenit-widget"]) == (), "step 4: no shared dependency"
+    assert apart.nearest_common_dependency(["zenit-flow", "zenit-widget"]) is None, "step 4: and no suggestion"

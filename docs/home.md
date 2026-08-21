@@ -118,7 +118,8 @@ The sibling lane exists because `EXTEND_EXISTING` naming one of two siblings is 
 confidently wrong answer: `zenit-flow` cannot use a mechanism that lives in
 `zenit-widget`, so "extend `WidgetMigrations`" is advice that does not compile. The
 answer says so in one line - "zenit-widget and zenit-flow are siblings (no dependency
-path); the shared mechanism belongs in protoblast" - and names the shared home.
+path); the shared mechanism belongs in plumage" - and names the shared home: the deepest
+module both of them already depend on, not the root of the workspace.
 
 It fires only from a KNOWN dependency graph. A workspace that declares no dependencies
 and has no build files is told exactly that instead: "no dependency information for this
@@ -246,12 +247,21 @@ silently turned into "no" either: once a graph is known, an unknown pair fails c
 scoring, and a workspace with NO edges at all makes the answer say the dependency
 information is missing rather than pretend it decided something.
 
-`config.nearest_common_dependency([a, b])` returns the **highest-ranked** module - the one
-earliest in `order` - that every given module can reach, or `None`. That is the
-conservative answer and matches the "as close to core as its mechanics allow" rule; the
-cost is that in a workspace where everything depends on one root library, that root is
-always the suggestion. The candidate list beside the verdict is what carries the nearer
-alternatives.
+`config.nearest_common_dependency([a, b])` returns the **deepest** module every given
+module can reach, or `None`. Nearest means nearest to THEM, not to the core: of the
+modules they all depend on, the ones that are not themselves a dependency of another
+shared module. Two `zenit-*` siblings depend on `protoblast`, `hawkeye`, `zenit` and
+`plumage`; `plumage` reaches the other three, so `plumage` is the answer and the root
+library is not. `config.common_dependencies([a, b])` returns that whole maximal set, and
+when it holds more than one module `order` breaks the tie - most core first - with the
+answer saying the tie happened.
+
+Two consequences worth knowing. A `[[forbidden]]` rule removes an edge from reachability,
+so a module sitting behind a refusal can become maximal: `zenit-comms` and `zenit-ai` both
+reach `zenit-cms` and `zenit-pages`, and because `zenit-cms must not depend on
+zenit-pages`, `zenit-pages` is the deepest thing they share. And a dependency CYCLE would
+leave nothing maximal, so the whole shared set is used instead of reporting that the
+modules share nothing.
 
 ## Source sets
 
@@ -401,7 +411,8 @@ two vocabularies, which live in their own modules.
 | Call | Returns | Semantics |
 | --- | --- | --- |
 | `config.reachable(consumer, home)` | `Reachability` | `DIRECT` / `TRANSITIVE` / `FORBIDDEN` / `UNREACHABLE` / `UNKNOWN`; `Reachability.usable` is True for the first two only |
-| `config.nearest_common_dependency([a, b, ...])` | `str` or `None` | the highest-ranked module (earliest in `order`) every given module can reach, excluding the given modules themselves; `None` when they share nothing or the graph is empty |
+| `config.nearest_common_dependency([a, b, ...])` | `str` or `None` | the DEEPEST module every given module can reach - shared, and not itself reachable from another shared module - excluding the given modules themselves; ties are broken by `order`, most core first; `None` when they share nothing or the graph is empty |
+| `config.common_dependencies([a, b, ...])` | `tuple[str, ...]` | the whole maximal shared set the line above picks from, so a caller can report the tie |
 | `config.source_set_of(path)` | `SourceSet` | `COMMON` / `SERVER` / `BROWSER` / `TEST` / `UNKNOWN` for a workspace-relative path |
 | `config.source_set_compatible(consumer_path, provider_path)` | `bool` | the one compatibility table; `UNKNOWN` pairs only with `UNKNOWN` |
 | `config.dependencies` | `DependencyGraph` | the merged graph itself: `nodes`, `edges` (each with `origin` and the Gradle `configuration`), `known`, `targets_of`, `has_edges_from` |

@@ -193,8 +193,16 @@ class HomeConfig:
         return self.dependencies.reachable(consumer, home)
 
     def nearest_common_dependency(self, modules: Sequence[str]) -> str | None:
-        """Return the highest-ranked module every given module may depend on, if any."""
+        """Return the deepest module every given module may depend on, if any.
+
+        Nearest to THEM, not to the core: a module they all reach and that no other such
+        module reaches. `order` only breaks a tie between two of those.
+        """
         return self.dependencies.nearest_common_dependency(modules, self.rank)
+
+    def common_dependencies(self, modules: Sequence[str]) -> tuple[str, ...]:
+        """Return every deepest shared dependency of a set of modules, the tie included."""
+        return self.dependencies.common_dependencies(modules)
 
     def source_set_of(self, file_path: str) -> SourceSet:
         """Return the fold of a module a workspace-relative path is compiled into."""

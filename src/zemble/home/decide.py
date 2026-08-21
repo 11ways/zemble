@@ -767,12 +767,16 @@ def _sibling_of_home(
 
 def _sibling_decision(config: HomeConfig, best: Mechanism, sibling: str, reasons: list[str]) -> _Decision:
     """Answer a description whose modules cannot reach each other's code."""
+    shared = config.common_dependencies([best.module, sibling])
     suggested = config.nearest_common_dependency([best.module, sibling])
     reasons.append(f"{best.label} in {best.module} looks like this ({best.location}), but {sibling} also wants it")
     reasons.append(
         f"{best.module} and {sibling} are siblings (no dependency path); the shared mechanism belongs in"
         f" {suggested if suggested else 'a module both of them can depend on'}"
     )
+    if suggested is not None and len(shared) > 1:
+        others = ", ".join(module for module in shared if module != suggested)
+        reasons.append(f"{suggested} and {others} are equally deep shared dependencies; {suggested} is the most core")
     reasons.append(
         f"{sibling} cannot depend on {best.module} ({config.reachable(sibling, best.module).value}), so extending"
         f" {best.label} would not serve it"

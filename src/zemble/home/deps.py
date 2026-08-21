@@ -137,23 +137,46 @@ class DependencyGraph:
         return Reachability.UNREACHABLE
 
     def nearest_common_dependency(self, modules: Sequence[str], rank: Callable[[str], int]) -> str | None:
-        """Return the highest-ranked module every given module may reach, if there is one.
+        """Return the DEEPEST module every given module may reach, if there is one.
+
+        Nearest means nearest to the modules that would share the mechanism, not nearest to
+        the core: of the modules they all depend on, the ones that are not themselves a
+        dependency of another shared module. Two `zenit-*` siblings share `protoblast`,
+        `hawkeye` and `zenit`, and the answer is `zenit` - `protoblast` is dropped because
+        `zenit` already reaches it, and putting widget-and-flow state in the root library
+        would be the wrong advice. A tie between two maximal modules is broken by `order`,
+        most core first, and the answer says the tie happened.
 
         :param modules: The modules that would share the mechanism.
         :param rank: A module's distance from the core, lowest first.
         :return: The module to put the shared mechanism in, or None when they share nothing.
         """
+        candidates = self.common_dependencies(modules)
+        return min(candidates, key=lambda node: (rank(node), node)) if candidates else None
+
+    def common_dependencies(self, modules: Sequence[str]) -> tuple[str, ...]:
+        """Return the maximal modules every given module may reach.
+
+        The members themselves are never candidates: siblings do not reach each other, and
+        a module is not its own shared home. A shared module reachable FROM another shared
+        module is dropped, which is what makes the result the deepest shared layer rather
+        than the most core one.
+        """
         wanted = [module for module in dict.fromkeys(modules) if module]
         if not wanted or not self.known:
-            return None
+            return ()
         shared = [
             node
             for node in self.nodes
             if node not in wanted and all(self.reachable(module, node).usable for module in wanted)
         ]
-        if not shared:
-            return None
-        return min(shared, key=lambda node: (rank(node), node))
+        maximal = [
+            node for node in shared if not any(other != node and self.reachable(other, node).usable for other in shared)
+        ]
+        # AIDEV-NOTE: a dependency CYCLE makes every shared module reachable from another
+        # one and would leave nothing maximal. Falling back to the whole shared set keeps
+        # the answer total instead of reporting that the modules share nothing.
+        return tuple(maximal or shared)
 
     def to_dict(self) -> dict[str, Any]:
         """Render the graph as JSON-ready data."""
