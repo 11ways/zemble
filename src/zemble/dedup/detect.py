@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from pathspec import GitIgnoreSpec
 
 from zemble.dedup.homes import judge_classes
 from zemble.dedup.ignore import apply_ignores, find_ignore_files
@@ -19,7 +18,7 @@ from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Lane, PairReas
 from zemble.dedup.structure import check_pair
 from zemble.dedup.units import extract_units
 from zemble.embedding.base import Embedder
-from zemble.index.file_walker import walk_files
+from zemble.index.file_walker import compile_ignore, walk_files
 from zemble.parallel import pool_context, pooled
 
 _WORKER_CHUNK = 60
@@ -73,11 +72,6 @@ class _Extraction:
     failed: list[str] = field(default_factory=list)
 
 
-def _excluder(patterns: Sequence[str]) -> GitIgnoreSpec | None:
-    """Compile --exclude patterns into one gitignore spec matched against root-relative paths."""
-    return GitIgnoreSpec.from_lines(patterns) if patterns else None
-
-
 def _selected_paths(root: Path, paths: Sequence[str]) -> list[Path]:
     """Resolve a `--paths` restriction against the scan root, never against the process CWD.
 
@@ -95,7 +89,7 @@ def _scan(root: Path, paths: Sequence[str], exclude: Sequence[str] = ()) -> _Sca
     """Walk the workspace for supported files, honouring a path restriction and exclude patterns."""
     scan = _Scan()
     selected = _selected_paths(root, paths)
-    excluded = _excluder(exclude)
+    excluded = compile_ignore(exclude)
     for file_path in walk_files(root, extensions=supported_extensions()):
         if selected and not any(_is_under(file_path, choice) for choice in selected):
             continue
