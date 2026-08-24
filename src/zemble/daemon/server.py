@@ -565,10 +565,12 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
         return {"ensured": True}
     kinds = args.get("kinds")
     extra: dict[str, Any] = {}
+    if args.get("limit") is not None:
+        extra["limit"] = int(args["limit"])
     if command == "neighbors":
         from zemble.graph.model import EdgeKind
 
-        extra = {"hops": int(args.get("hops", 1)), "kinds": [EdgeKind(kind) for kind in kinds] if kinds else None}
+        extra.update({"hops": int(args.get("hops", 1)), "kinds": [EdgeKind(kind) for kind in kinds] if kinds else None})
     return await asyncio.to_thread(answer, path, str(args.get("symbol", "")), command, **extra)
 
 

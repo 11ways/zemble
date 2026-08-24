@@ -13,13 +13,16 @@ from zemble.dedup.detect import DupeOptions, find_duplication
 from zemble.dedup.languages import supported_extensions, supported_languages
 from zemble.dedup.model import CloneKind, Lane
 from zemble.dedup.report import baseline_diff_json, format_baseline_diff, format_report, report_json
+from zemble.mcp_repo import resolve_repo, with_default_note
 
 if TYPE_CHECKING:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP
 
 _LANGUAGES = ", ".join(supported_languages())
 _EXTENSIONS = ", ".join(supported_extensions())
-_REPO_DESCRIPTION = f"Local directory path of the workspace to scan for duplicated code ({_LANGUAGES}; {_EXTENSIONS})."
+_REPO_DESCRIPTION = with_default_note(
+    f"Local directory path of the workspace to scan for duplicated code ({_LANGUAGES}; {_EXTENSIONS})."
+)
 
 DupeFormat = Literal["text", "json"]
 
@@ -84,7 +87,7 @@ def register_dupes_tool(server: FastMCP) -> None:
 
     @server.tool(structured_output=False)
     async def dupes(
-        repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
+        repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         kind: Annotated[
             str,
             Field(description="Which duplication to report: exact, renamed, logic, or all."),
@@ -138,4 +141,4 @@ def register_dupes_tool(server: FastMCP) -> None:
         in `.zemble/home.toml` carry a home verdict. This is a report, never a gate.
         """
         options = _options(kind, lane, paths, exclude, min_files)
-        return await asyncio.to_thread(_run, options, repo, limit, format, brief, baseline, save_baseline)
+        return await asyncio.to_thread(_run, options, resolve_repo(repo), limit, format, brief, baseline, save_baseline)

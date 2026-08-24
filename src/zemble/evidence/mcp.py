@@ -13,6 +13,7 @@ from zemble.evidence.answers import explain_payload, outline_payload, signatures
 from zemble.graph.cli import ensure_graph
 from zemble.graph.provider import SqliteGraphProvider
 from zemble.index import ZembleIndex
+from zemble.mcp_repo import resolve_repo, with_default_note
 from zemble.types import ContentType
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -29,7 +30,7 @@ _CONTENT_DESCRIPTION = (
     "Defaults to the content the server was configured with."
 )
 
-_REPO_DESCRIPTION = (
+_REPO_DESCRIPTION = with_default_note(
     "Local directory path of the workspace. Both the code index and the Java symbol graph are built "
     "on first use and refreshed once per server process."
 )
@@ -146,7 +147,7 @@ def register_evidence_tools(
     @server.tool(structured_output=False)
     async def explain(
         query: Annotated[str, Field(description="What you want explained, in natural language or as a symbol name.")],
-        repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
+        repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         budget: Annotated[
             int,
             Field(description="Token budget for the whole bundle.", ge=200, le=50_000),
@@ -171,6 +172,7 @@ def register_evidence_tools(
         # only run once the server is being built.
         from zemble.mcp import _resolve_content_selection
 
+        repo = resolve_repo(repo)
         selected = _resolve_content_selection(content, default_content)
         return await _explain_answer(
             get_index, repo, query, budget, top_k, selected, tuple(paths or ()), tuple(exclude or ())
@@ -181,7 +183,7 @@ def register_evidence_tools(
         target: Annotated[
             str, Field(description="A workspace-relative file path, or a simple or qualified type name.")
         ],
-        repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
+        repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         members: Annotated[str | None, Field(description="Only show members whose name matches this pattern.")] = None,
     ) -> dict[str, Any]:
         """List what a Java file or type declares, signatures only, for a few hundred tokens.
@@ -189,6 +191,7 @@ def register_evidence_tools(
         Use this before reading a file: it shows every member with its line range, so
         the next read can be a line span instead of a whole file.
         """
+        repo = resolve_repo(repo)
         try:
             payload = await _remote("outline", {"path": repo, "target": target, "members": members})
         except CommandRefused as exc:
@@ -200,13 +203,14 @@ def register_evidence_tools(
     @server.tool(structured_output=False)
     async def signatures(
         symbol: Annotated[str, Field(description="A simple name, a qualified name, or `Type.member`.")],
-        repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
+        repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
     ) -> dict[str, Any]:
         """Show a Java symbol's signature and the call sites the graph resolved exactly.
 
         Cheaper than `graph_callers` when all you need is whether something is used
         and from where; weaker resolutions are counted rather than listed.
         """
+        repo = resolve_repo(repo)
         try:
             payload = await _remote("signatures", {"path": repo, "symbol": symbol})
         except CommandRefused as exc:

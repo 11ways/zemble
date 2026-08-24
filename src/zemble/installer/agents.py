@@ -86,34 +86,41 @@ INSTRUCTIONS = f"""\
 {ZEMBLE_START}
 ## Zemble Code Search
 
-A `zemble` MCP server is available with two tools:
-- `mcp__zemble__search` — search the codebase with a natural-language or code query.
-- `mcp__zemble__find_related` — find code similar to a specific file and line.
+A `zemble` MCP server is available. Its tools:
+- `mcp__zemble__search` — search a codebase with a natural-language or code query. Returns file path + exact line.
+- `mcp__zemble__find_related` — code similar to a specific file and line (logic-duplication leads, parallel implementations).
+- `mcp__zemble__graph_definition` / `graph_callers` / `graph_implementations` / `graph_overrides` / `graph_tests_of` / `graph_neighbors` — the Java symbol graph: where a symbol is declared, who calls it, its subtypes, every override of one method (`Type.member`), its tests, its one-hop neighbourhood.
+- `mcp__zemble__outline` — a Java file's or type's declarations, signatures only (~200 tokens).
+- `mcp__zemble__explain` — a budgeted evidence bundle for a query (primary chunks + enclosing-type outline + tests + callers, each labelled with why it is there).
+- `mcp__zemble__signatures` — a symbol's signature plus its exactly-resolved call sites.
+- `mcp__zemble__dupes` — clone classes (exact / alpha-renamed / logic) ranked by weight; a REPORT, never a gate.
+- `mcp__zemble__home` — "does this already exist, and where should it live?": existing mechanisms, candidate home modules ranked with reasons, and a verdict. Run it BEFORE designing any mechanism; cite its answer.
 
-Use `mcp__zemble__search` to find where something is implemented — instead of using Grep or Glob to discover files. After zemble returns the file and line, navigate there directly and read that file. Do not grep for the same content again.
+`repo` is optional on every tool: it defaults to the directory the session started in (each tool's description announces the resolved path). Output cost is bounded and stated: `search` returns `top_k` (default 5) results of `max_snippet_lines` (default 10) lines; graph tools cap at `limit` (default 50) and always report `total`.
 
-Pass `content="docs"` to the MCP search tool for documentation and prose, `content="config"` for config files, or `content="all"` for everything. On the CLI, use `--content docs`, `--content config`, or `--content all` instead.
+Pick the tool by the shape of the question:
+- "Where is X declared / who calls X / what implements or overrides X / what tests X?" -> the `graph_*` tools. MANDATORY for Java symbol relationships; never grep for these.
+- "What is the shape of this class?" -> `outline`, instead of reading the file.
+- "How does mechanism Y work?" -> `explain`, instead of reading several files.
+- "Does this already exist, and where should it live?" -> `home`, BEFORE designing any mechanism.
+- "Where is the code that does Z?" -> `search`. Pass `content="docs"` for prose, `"config"` for config files, `"all"` for everything (CLI: `--content`). A workspace root containing several repos is one index; one call covers them all.
+- A literal-string sweep feeding a shell pipeline (extract a capture group, count, build a table) -> Grep is fine; that is its niche. After any zemble hit, navigate directly to the file and line; never re-grep for the same content.
 
 For CLI fallback or sub-agents without MCP access, use:
 
 ```bash
 zemble search "authentication flow" ./my-project --max-snippet-lines 10
 zemble search "deployment guide" ./my-project --content docs
-zemble search "database host port" ./my-project --content config
 zemble find-related src/auth.py 42 ./my-project
-zemble search "save model to disk" ./my-project --top-k 10
+zemble graph callers ./my-project Type.method
+zemble graph overridden-by ./my-project Type.method
+zemble outline ./my-project package.Type
+zemble explain ./my-project "what does X do" --budget 3000
+zemble dupes ./my-project --kind renamed --limit 20
+zemble home ./my-project "a per-user remembered UI preference stored in a cookie"
 ```
 
 The index is built on first run and cached automatically. If `zemble` is not on `$PATH`, use `uvx --from "{ZEMBLE_PIN}" zemble`.
-
-### Workflow
-
-1. Call `mcp__zemble__search` with a query describing what the code does or its name. The tool returns results with 10 lines of context each (function/class signature + first body lines, enough to confirm the location).
-2. Navigate directly to the top result's file and line. Read only the function or class at that location.
-3. Make the edit. Do not re-search or grep for the same content.
-4. Set the MCP search tool's `content` field to `docs`, `config`, or `all` when searching beyond code.
-5. Optionally use `mcp__zemble__find_related` with `file_path`, `line`, and the same `content` selection to discover similar code elsewhere.
-6. Use Grep only when you need every occurrence of a literal string across the whole repo (e.g., all callers of a renamed function).
 {ZEMBLE_END}
 """
 

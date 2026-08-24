@@ -21,13 +21,14 @@ from zemble.graph.mcp import register_graph_tools
 from zemble.home.mcp import register_home_tool
 from zemble.index import ScopeRefused, ZembleIndex
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
+from zemble.mcp_repo import DEFAULT_REPO, resolve_repo, with_default_note
 from zemble.runtime.mcp import StaleAwareFastMCP, register_status_tool
 from zemble.types import ContentType
 from zemble.utils import describe_unresolved_location, format_results, is_git_url
 
 logger = logging.getLogger(__name__)
 
-_REPO_DESCRIPTION = (
+_REPO_DESCRIPTION = with_default_note(
     "A local directory path or https:// or http:// git URL (e.g. https://github.com/org/repo) to index and "
     "search. The index is cached after the first call, so repeat queries are fast."
 )
@@ -149,15 +150,15 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             "Call `search` once with a focused query, it returns the file path and exact line. "
             "Navigate directly to that file at the given line; do not grep for the same content. "
             "Use `find_related` to discover similar code elsewhere in the same repo. "
-            "When working in a local project, pass the project root as `repo`. "
-            "For remote repos, pass an explicit https:// URL. Never guess or infer URLs."
+            f"Every tool's `repo` is optional and defaults to the server's start directory ({DEFAULT_REPO}); "
+            "pass it only to query a different local path or an explicit https:// URL. Never guess or infer URLs."
         ),
     )
 
     @server.tool(structured_output=False)
     async def search(
         query: Annotated[str, Field(description="Natural language or code query.")],
-        repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
+        repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         top_k: Annotated[int, Field(description="Number of results to return.", ge=1)] = 5,
         max_snippet_lines: Annotated[
             int | None,
@@ -183,8 +184,9 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
 
         Write queries using function/class names or behavior descriptions, not error messages.
         Returns file paths and line numbers — navigate directly there, do not repeat the search.
-        Pass a git URL or local path as `repo`; indexes are cached for the session.
+        Omit `repo` to search the server's start directory; indexes are cached for the session.
         """
+        repo = resolve_repo(repo)
         selected_content = _resolve_content_selection(content, default_content)
         remote = await _answer_remotely(
             "search",
@@ -221,7 +223,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             ),
         ],
         line: Annotated[int, Field(description="Any line inside the chunk (1-indexed); it need not be the first.")],
-        repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
+        repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         top_k: Annotated[int, Field(description="Number of similar chunks to return.", ge=1)] = 5,
         max_snippet_lines: Annotated[
             int | None,
@@ -246,6 +248,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
         or all tests for a class. Use after `search` when you need related code beyond the primary result.
         Pass `file_path` and `line` from a prior search result.
         """
+        repo = resolve_repo(repo)
         selected_content = _resolve_content_selection(content, default_content)
         remote = await _answer_remotely(
             "find_related",

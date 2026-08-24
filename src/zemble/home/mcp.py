@@ -14,6 +14,7 @@ from zemble.home.answers import DEFAULT_TOP_K, home_payload
 from zemble.home.cli import HOME_CONTENT
 from zemble.home.config import ConfigError, HomeConfig
 from zemble.index import ZembleIndex
+from zemble.mcp_repo import resolve_repo, with_default_note
 from zemble.types import ContentType
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -21,7 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 IndexGetter = Callable[[str, Sequence[ContentType]], Awaitable[ZembleIndex]]
 
-_REPO_DESCRIPTION = (
+_REPO_DESCRIPTION = with_default_note(
     "Local directory path of the workspace. Both the code index and the Java symbol graph are built "
     "on first use and refreshed once per server process."
 )
@@ -48,7 +49,7 @@ def register_home_tool(server: FastMCP, get_index: IndexGetter) -> None:
     @server.tool(structured_output=False)
     async def home(
         description: Annotated[str, Field(description="The feature you are about to build, in your own words.")],
-        repo: Annotated[str, Field(description=_REPO_DESCRIPTION)],
+        repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         top_k: Annotated[int, Field(description="Code results to weigh.", ge=1, le=100)] = DEFAULT_TOP_K,
     ) -> str:
         """Check whether a capability already exists and which module should own it.
@@ -63,6 +64,7 @@ def register_home_tool(server: FastMCP, get_index: IndexGetter) -> None:
         # only run once the server is being built.
         from zemble.mcp import _daemon_call
 
+        repo = resolve_repo(repo)
         args = {
             "path": repo,
             "description": description,

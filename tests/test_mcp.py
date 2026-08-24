@@ -603,6 +603,7 @@ async def test_no_tool_returns_json_inside_a_json_string(
         ("graph_definition", {"symbol": "Shape", "repo": root}),
         ("graph_callers", {"symbol": "Helpers.twice", "repo": root}),
         ("graph_implementations", {"symbol": "Shape", "repo": root}),
+        ("graph_overrides", {"symbol": "Shape.area", "repo": root}),
         ("graph_tests_of", {"symbol": "com.example.core.Circle", "repo": root}),
         ("graph_neighbors", {"symbol": "com.example.core.Circle", "repo": root}),
         ("outline", {"target": "Shape", "repo": root}),
@@ -719,6 +720,81 @@ async def test_a_daemon_outage_still_falls_back(cache: IndexCache, monkeypatch: 
         server = create_server(cache)
         result = await server.call_tool("search", {"query": "anything", "repo": "/some/path"})
     assert "No results found" in _tool_text(result), "the in-process answer came back"
+
+
+@pytest.mark.anyio
+async def test_search_defaults_repo_to_the_server_start_directory(
+    cache: IndexCache,
+    mock_embedder: FakeEmbedder,
+    tmp_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An omitted `repo` is answered from the directory the server was started in."""
+    from zemble import mcp_repo
+
+    monkeypatch.setattr(mcp_repo, "DEFAULT_REPO", str(tmp_project))
+    with (
+        patch("zemble.index.index.load_embedder", return_value=mock_embedder),
+        patch("zemble.index_cache.save_index_to_cache"),
+    ):
+        server = create_server(cache)
+        result = await server.call_tool("search", {"query": "authenticate", "top_k": 5})
+    payload = json.loads(_tool_text(result))
+    assert payload["results"], "the default repo was indexed and searched"
+
+
+@pytest.mark.anyio
+async def test_graph_tool_defaults_repo_to_the_server_start_directory(
+    cache: IndexCache,
+    graph_fixture_root: Path,
+    graph_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graph tools fall back to the announced default workspace when `repo` is omitted."""
+    from zemble import mcp_repo
+
+    monkeypatch.setattr(mcp_repo, "DEFAULT_REPO", str(graph_fixture_root))
+    server = create_server(cache)
+    result = await server.call_tool("graph_definition", {"symbol": "Shape"})
+    payload = json.loads(_tool_text(result))
+    assert any(entry["qualified_name"] == "com.example.core.Shape" for entry in payload["results"])
+
+
+@pytest.mark.anyio
+async def test_graph_overrides_lists_overriding_methods(
+    cache: IndexCache,
+    graph_fixture_root: Path,
+    graph_cache: Path,
+) -> None:
+    """`graph_overrides` on `Type.member` answers with each overriding method's location."""
+    server = create_server(cache)
+    result = await server.call_tool("graph_overrides", {"symbol": "Shape.area", "repo": str(graph_fixture_root)})
+    payload = json.loads(_tool_text(result))
+    names = {entry["qualified_name"] for entry in payload["results"]}
+    assert "com.example.core.Circle.area" in names
+    assert payload["total"] == len(payload["results"])
+
+
+def test_graph_answer_caps_results_and_names_the_cap(graph_fixture_root: Path, graph_cache: Path) -> None:
+    """A limit below the hit count truncates loudly; `total` always names what exists."""
+    from zemble.graph.mcp import answer
+
+    root = str(graph_fixture_root)
+    full = answer(root, "Shape", "implementations")
+    assert full["total"] == len(full["results"]) >= 2, "the fixture has several Shape subtypes"
+    assert "truncated" not in full
+    capped = answer(root, "Shape", "implementations", limit=1)
+    assert len(capped["results"]) == 1
+    assert capped["total"] == full["total"]
+    assert "raise `limit`" in capped["truncated"]
+
+
+def test_graph_answer_refuses_an_unknown_method(graph_fixture_root: Path, graph_cache: Path) -> None:
+    """A wire command outside the query vocabulary fails closed, never reaching getattr."""
+    from zemble.graph.mcp import answer
+
+    payload = answer(str(graph_fixture_root), "Shape", "connection")
+    assert payload == {"error": "Unknown graph command 'connection'."}
 
 
 @pytest.mark.anyio

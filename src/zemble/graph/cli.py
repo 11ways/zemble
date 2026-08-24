@@ -51,6 +51,10 @@ _METHODS = {
     "tests-of": "tests_of",
 }
 
+#: Every provider query the wire may name; derived from `_METHODS` so adding a CLI
+#: command is the one edit. Anything else fails closed instead of reaching getattr.
+PROVIDER_METHODS = frozenset(_METHODS.values()) | {"definition", "neighbors"}
+
 _refreshed: set[str] = set()
 
 

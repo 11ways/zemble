@@ -415,11 +415,17 @@ callers: 8 result(s)
 
 ## MCP
 
-Five tools are registered on the existing zemble MCP server:
-`graph_definition`, `graph_callers`, `graph_implementations`, `graph_tests_of`
-and `graph_neighbors`. Each takes `symbol` and `repo`, builds the graph on first
-use and refreshes it once per server process, and returns JSON. An ambiguous
-name comes back as an `error` with a `candidates` list rather than as a failure.
+Six tools are registered on the existing zemble MCP server:
+`graph_definition`, `graph_callers`, `graph_implementations`, `graph_overrides`
+(the method-level counterpart of `graph_implementations`: every override of one
+`Type.member`), `graph_tests_of` and `graph_neighbors`. Each takes `symbol` and
+an optional `repo` (defaulting to the server's start directory, announced in the
+parameter description), builds the graph on first use and refreshes it once per
+server process, and returns JSON. An ambiguous name comes back as an `error`
+with a `candidates` list rather than as a failure. Every answer is capped at
+`limit` results (default 50) and carries `total`, plus a `truncated` note when
+the cap bit, so a cap is never silent. A wire command outside the query
+vocabulary fails closed with an `error` instead of reaching the provider.
 
 ## The provider seam
 
