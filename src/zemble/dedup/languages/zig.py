@@ -60,7 +60,7 @@ def zig_parser() -> Parser | None:
         return None
 
 
-def _member_body(node: Node) -> Node | None:
+def _member_body(node: Node, source: bytes) -> Node | None:
     """A function keeps its `body` field; a test or comptime block owns a bare `block` child."""
     body = node.child_by_field_name("body")
     if body is not None:

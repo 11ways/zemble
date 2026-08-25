@@ -358,11 +358,15 @@ class SqliteGraphProvider:
 
     def coverage_note(self) -> str:
         """Explain what the graph does and does not cover, for empty answers."""
-        raw = self.meta().get("skipped_by_language")
+        meta = self.meta()
+        covered = meta.get("language", "")
+        raw = meta.get("skipped_by_language")
         skipped = json.loads(raw) if raw else {}
+        count = len(covered.split(",")) if covered else 0
+        summary = f"The graph covers {count} languages (every bundled grammar)."
         if not skipped:
-            return "The graph covers Java source only."
+            return summary
         listed = ", ".join(
-            f"{language} ({count})" for language, count in sorted(skipped.items(), key=lambda item: -item[1])[:6]
+            f"{language} ({files})" for language, files in sorted(skipped.items(), key=lambda item: -item[1])[:6]
         )
-        return f"The graph covers Java source only; no graph extractor for: {listed}."
+        return f"{summary[:-1]}; no grammar for: {listed}."

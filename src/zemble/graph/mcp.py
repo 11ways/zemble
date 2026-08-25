@@ -1,4 +1,4 @@
-"""MCP tools over the Java symbol graph, registered onto an existing FastMCP server."""
+"""MCP tools over the symbol graph, registered onto an existing FastMCP server."""
 
 from __future__ import annotations
 
@@ -19,7 +19,8 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 _REPO_DESCRIPTION = with_default_note(
-    "Local directory path of the workspace to query. The Java symbol graph is built on first use "
+    "Local directory path of the workspace to query. The symbol graph (every bundled grammar; Java and "
+    "Hawkeye templates with compiler-grade lanes) is built on first use "
     "and refreshed once per server process."
 )
 _SYMBOL_DESCRIPTION = "A simple name (`PageWindow`), a qualified name, or `Type.member` (`PageWindow.of`)."
@@ -145,7 +146,7 @@ def register_graph_tools(server: FastMCP) -> None:
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
     ) -> dict[str, Any]:
-        """Find where a Java symbol is declared, with its exact file, line and signature.
+        """Find where a symbol is declared, with its exact file, line and signature.
 
         Use this instead of grepping for `class Foo` or `void bar(`.
         """
@@ -157,7 +158,7 @@ def register_graph_tools(server: FastMCP) -> None:
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
     ) -> dict[str, Any]:
-        """List every call site of a Java method or constructor, with a reason per hit.
+        """List every call site of a function, method or constructor, with a reason per hit.
 
         Each result says how confidently it was resolved: `exact` means the declaring
         type was pinned down, `unique_name` means only one symbol in the workspace
@@ -171,7 +172,7 @@ def register_graph_tools(server: FastMCP) -> None:
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
     ) -> dict[str, Any]:
-        """List the direct and transitive subtypes of a Java class or interface, with their depth.
+        """List the direct and transitive subtypes of a class, interface, trait or protocol, with their depth.
 
         For every override of one method (`Type.member`), use `graph_overrides` instead.
         """
@@ -183,7 +184,7 @@ def register_graph_tools(server: FastMCP) -> None:
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
     ) -> dict[str, Any]:
-        """List every subtype method that overrides a Java method, with its file and line.
+        """List every subtype method that overrides a method, with its file and line.
 
         The method-level counterpart of `graph_implementations`: `Shape.area` lists each
         concrete `area()` in the workspace, ready to be read as line spans.
@@ -196,7 +197,7 @@ def register_graph_tools(server: FastMCP) -> None:
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
     ) -> dict[str, Any]:
-        """Find the tests covering a Java symbol: naming matches (FooTest) first, then tests that use it."""
+        """Find the tests covering a symbol: naming matches (FooTest, test_foo) first, then tests that use it."""
         return await _dispatch(repo, symbol, "tests_of", limit=limit)
 
     @server.tool(structured_output=False)

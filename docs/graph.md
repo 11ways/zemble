@@ -1,8 +1,11 @@
 # Symbol graph
 
-`zemble graph` builds a symbol graph over a Java and Hawkeye workspace and answers
-relationship questions about it: who calls this, who implements this, what tests
-cover this. It is stored beside the search index and updated incrementally.
+`zemble graph` builds a symbol graph over a workspace in every language with a bundled
+tree-sitter grammar and answers relationship questions about it: who calls this, who
+implements this, what tests cover this. It is stored beside the search index and updated
+incrementally. Java and Hawkeye templates go through hand-written extractors; every
+other language goes through one grammar-driven extractor fed by a spec (see
+[Languages](#languages)).
 
 The graph is deliberately not a compiler. It is a tree-sitter extractor plus a
 name resolver, and every answer it gives carries a grade saying how much it
@@ -13,8 +16,10 @@ actually knows. Use it to navigate; do not use it as proof.
 Two tables of things, both language neutral (`zemble/graph/model.py`).
 
 **Symbols** are declarations. Kinds: `PACKAGE`, `CLASS`, `INTERFACE`, `ENUM`,
-`RECORD`, `ANNOTATION`, `METHOD`, `CONSTRUCTOR`, `FIELD`, `ENUM_CONSTANT`,
-`TEMPLATE`, `BLOCK`.
+`RECORD`, `ANNOTATION`, `STRUCT`, `TYPE` (an alias or typedef), `MODULE` (a file, or a
+namespace with a body), `METHOD`, `CONSTRUCTOR`, `FUNCTION` (a callable that belongs to
+no type), `FIELD`, `ENUM_CONSTANT`, `TEMPLATE`, `BLOCK`. A trait or protocol is an
+`INTERFACE`; a Rust `impl` or a Swift `extension` adds members to the type it names.
 
 A symbol's `id` is `<file-relative-path>#<qualified-name>` with a signature
 disambiguator appended for callables, so the two `scale` overloads of
@@ -137,8 +142,46 @@ These are real, not hypothetical:
   not match, and falls through to the by-name rung.
 - **Two local classes with the same name in two overloads of one method** share a
   symbol id.
-- **Non-Java, non-template files are skipped**, counted per language, and named
-  in the note a query prints when it has nothing to say.
+- **Files of a language without a bundled grammar are skipped**, counted per
+  language, and named in the note a query prints when it has nothing to say.
+
+## Languages
+
+Every grammar `semble_grammars` ships except Java has a `LanguageSpec` in
+`src/zemble/languages/catalog.py`: which node kinds declare a type, a namespace, a
+callable, a field or a constant, where their name, body, parameters and supertypes live
+(as small path expressions over the tree, `src/zemble/languages/paths.py`), which nodes
+are calls and how their callee splits into receiver and name, and the conventions the
+grammar does not spell out (`self` names, constructor names, whether a capitalised call
+constructs, whether a leading underscore or a lowercase initial hides a declaration).
+`src/zemble/graph/generic.py` reads any spec into the same symbols and edges the Java
+extractor emits, so the resolver, the outline and the tools never know a second reader
+exists. `tests/test_languages.py` fails the build when a spec names a node kind its
+grammar lacks, or when a bundled code grammar has no spec.
+
+What differs from the Java lane:
+
+- **Every file is a `MODULE` symbol** holding its top-level declarations, qualified by the
+  package header where the language has one (`app.core.Point` in Kotlin, `store.helper`
+  in Go) and by the file's own dotted path otherwise (`src.zemble.graph.store.build_graph`).
+  A namespace with a body (`namespace App.Core {`, `mod inner {`, `defmodule Store.Point`)
+  names itself in full.
+- **Resolution stays inside a language family.** `jvm` (Java, Kotlin, Scala, Groovy),
+  `js` (JavaScript, TypeScript, TSX) and `c` (C, C++, Objective-C) resolve into each
+  other; everything else only into itself. An unqualified call from inside a method reaches
+  the file's own functions before the workspace, and an import that names a path the
+  graph cannot see (`from pkg.mod import Base` for `src/pkg/mod.py`) matches by suffix.
+  Only Java treats an import as authoritative.
+- **Tests are recognised by file name too**: `test_x.py`, `x_test.go`, `x.test.ts`,
+  `x_spec.rb` and their kin make a file a test source, its module a `TESTS` edge to the
+  module it names, and every resolved reference out of it an `EXERCISES` edge.
+- **Overrides are name and arity only**, walked through `EXTENDS`/`IMPLEMENTS` edges the
+  same way, so `impl Trait for Type` and `class Circle(Shape)` both yield them.
+- **No compiler facts**: the facts overlay is Java-only, so other languages keep their
+  tree-sitter grades.
+
+Adding a language is adding one spec to the catalog (parse a fixture and print the tree;
+never guess node kinds) and one sample under `tests/fixtures/polyglot_samples/`.
 
 ## Hawkeye templates
 

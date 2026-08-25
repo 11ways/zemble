@@ -1,7 +1,7 @@
 # Evidence bundles
 
 `zemble explain` answers a question with a fixed number of tokens. It searches,
-follows the Java symbol graph one hop out of what it found, and packs the result
+follows the symbol graph one hop out of what it found, and packs the result
 under a budget with a one-line reason per item. Two smaller surfaces come with
 it: `zemble outline` (what a file or type declares, signatures only) and
 `zemble signatures` (a declaration plus the call sites the graph resolved
@@ -324,8 +324,10 @@ depends on the packing result above.
 
 ## Limits
 
-- Java only, because the expansion is the Java symbol graph. A non-Java primary
-  chunk still becomes a tier 0 item; it simply has no anchor and no expansion.
+- The expansion is only as good as the graph: a primary chunk in a language the graph
+  reads through a grammar spec anchors and expands like a Java one, with the spec's
+  resolution grades; a chunk in a language without a grammar becomes a tier 0 item with
+  no anchor and no expansion. The measured numbers below are Java-only.
 - Every graph limit applies (see `docs/graph.md`): `UNIQUE_NAME` is a guess, and
   a bundle's reasons say so rather than hiding it.
 - Tier-3 ambiguous callers are counted in a note, never listed. Use

@@ -1,0 +1,3 @@
+:root { --x: 1px; }
+.point { width: var(--x); }
+@media (max-width: 3px) { .point { color: red; } }

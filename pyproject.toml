@@ -85,7 +85,7 @@ zemble = ["py.typed", "agents/*.md", "agents/*.toml"]
 version = {attr = "zemble.version.__version__"}
 
 [tool.ruff]
-exclude = [".venv/"]
+exclude = [".venv/", "tests/fixtures/"]
 line-length = 120
 target-version = "py310"
 
@@ -143,6 +143,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["fixtures"]
 addopts = ["--tb=short", "--strict-markers", "--cov=zemble", "--cov-report=term-missing"]
 markers = ["slow: end-to-end tests over a real workspace; deselect with -m 'not slow'"]
 

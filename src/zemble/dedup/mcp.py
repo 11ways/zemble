@@ -19,9 +19,9 @@ if TYPE_CHECKING:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP
 
 _LANGUAGES = ", ".join(supported_languages())
-_EXTENSIONS = ", ".join(supported_extensions())
 _REPO_DESCRIPTION = with_default_note(
-    f"Local directory path of the workspace to scan for duplicated code ({_LANGUAGES}; {_EXTENSIONS})."
+    f"Local directory path of the workspace to scan for duplicated code "
+    f"({len(supported_languages())} languages, {len(supported_extensions())} file types: {_LANGUAGES})."
 )
 
 DupeFormat = Literal["text", "json"]

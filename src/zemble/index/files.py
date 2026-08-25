@@ -466,6 +466,16 @@ def detect_language(file_name: Path) -> str | None:
     return _EXTENSION_TO_LANGUAGE.get(file_name.suffix.lower())
 
 
+def extensions_for_language(language: str, types: Sequence[ContentType] | None = None) -> list[str]:
+    """Every extension mapped to a language, optionally only those of the given content types."""
+    allowed = set(get_extensions(types)) if types is not None else None
+    return sorted(
+        extension
+        for extension, owner in _EXTENSION_TO_LANGUAGE.items()
+        if owner == language and (allowed is None or extension in allowed)
+    )
+
+
 def get_extensions(types: Sequence[ContentType]) -> list[str]:
     """Returns a list of supported file extensions for the given content types."""
     languages: set[str] = set()

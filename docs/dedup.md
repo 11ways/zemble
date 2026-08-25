@@ -4,10 +4,11 @@
 in the shape `zenit-dev duplication` prints for `.hwk` templates, so a reader who
 knows one report family recognises the other.
 
-**Java and Zig today** (`.java`, `.zig`); adding a language is adding one profile
-module, see [Adding a language](#adding-a-language). The report header names the
-extensions the run walked, so an empty result can never be mistaken for a clean
-workspace.
+**Every language with a bundled grammar** is compared: Java and Zig through hand-written
+profiles, every other language through a profile derived from its grammar spec in
+`src/zemble/languages/catalog.py` (the same spec the symbol graph reads), see
+[Adding a language](#adding-a-language). The report header names the extensions the run
+walked, so an empty result can never be mistaken for a clean workspace.
 
 It is a **report, never a gate**: the exit code is 0 however much duplication it
 finds. The only non-zero exits are a bad flag and a missing path.
@@ -16,7 +17,8 @@ It was Java-only for its first year, and that was an implementation shortcut,
 not a principle: every node type the extractor knew was hard-coded tree-sitter
 Java. Everything downstream of unit extraction -- hashing, grouping, ranking,
 lanes, ignore files, baselines, home verdicts -- was already language-neutral, so
-the fix was to lift the Java vocabulary into a profile and register a second one.
+the fix was to lift the Java vocabulary into a profile, register a second one (Zig),
+and then derive one from every grammar spec so the remaining languages arrived at once.
 
 `.hwk` templates stay out on purpose. They are indexed and are in the symbol
 graph, but duplicated markup is `zenit-dev duplication`'s job: it matches
@@ -480,9 +482,19 @@ from 163 to 125 and the entire family disappeared. Fixture `CtorA`/`CtorB` in
 
 ## Adding a language
 
-A language is one module under `src/zemble/dedup/languages/` exporting a
-`LanguageProfile`, plus one entry in that package's `_ALL` tuple. `units.py`
-holds no node type of any language and must stay that way. The fields:
+A language with a grammar spec gets its profile for free: `zemble.dedup.languages.generic`
+derives one from the spec (its callable rules become the member kinds, its type,
+namespace and extension rules the containers, its call rules the called names, its
+binding paths the declared names), and the token-level vocabulary is a shared superset
+(`CONTROL_KEYWORDS`, `LITERAL_KINDS`, `DECLARING_KINDS`) narrowed to what the grammar
+actually has. Only a spec with a callable rule that has a body is comparable; a
+stylesheet or a Dockerfile is not. So adding a language is adding a spec to
+`src/zemble/languages/catalog.py` and a fixture to `_VISIBILITY_FIXTURES` in
+`tests/test_dedup.py`.
+
+A hand-written profile (Java, Zig) is one module under `src/zemble/dedup/languages/`
+exporting a `LanguageProfile`, plus one entry in that package's `_HAND_WRITTEN` tuple.
+`units.py` holds no node type of any language and must stay that way. The fields:
 
 | Field | What it answers |
 | --- | --- |
@@ -502,6 +514,8 @@ holds no node type of any language and must stay that way. The fields:
 | `modifiers` | The declaration's modifiers; reported, never hashed. |
 | `visibility` | How far one member can be called from, its declaring body's kind included. |
 | `hook_node_kinds` | The node kinds only the hooks above name, for the drift test. |
+| `classify` | Optional: decides a node's unit kind when its node kind alone cannot (an Elixir `call` that is a `def`). |
+| `descend` | Optional: whether a node that is neither member nor container is looked through for members. |
 
 `tests/test_dedup_languages.py` fails the build when a profile names a node kind
 its grammar does not have, or claims an extension zemble does not index as code.
@@ -514,8 +528,9 @@ never walked at all.
 
 ## Limits
 
-- Java and Zig only. A third language is a profile module away, but until one
-  exists nothing else is scanned.
+- A derived profile is only as precise as its spec: a grammar whose call node the spec
+  does not describe compares bodies with an empty call list, so its logic clones lean on
+  the skeleton and literals alone. `zemble dupes` names the extensions it walked.
 - Statement windows dominate the cost on repositories with long function bodies.
   sketerm (453 Zig files) is 2.8 s with `--no-windows` and 83 s with them, for
   619 303 units against 13 284 bodies; javaweb's 6309 Java files are 46-53 s.

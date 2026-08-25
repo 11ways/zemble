@@ -100,7 +100,7 @@ def test_mcp_tools_journey(graph_fixture_root: Path, graph_cache: Path) -> None:
     # 4. An empty answer explains what the graph covers.
     payload = _answer(root, "Marker", "tests_of")
     assert payload["results"] == [], "step 4: nothing tests Marker"
-    assert "Java" in payload["note"], "step 4: and the note says why that may be"
+    assert "languages" in payload["note"], "step 4: and the note says what the graph covers"
 
     # 5. Neighbours accept the extra arguments.
     payload = _answer(root, "com.example.core.Circle", "neighbors", hops=2, kinds=None)

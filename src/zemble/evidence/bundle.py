@@ -20,6 +20,7 @@ from zemble.evidence.tokens import estimate_tokens
 from zemble.graph.model import CALLABLE_KINDS, TYPE_KINDS, EdgeKind, Hit, Resolution, Symbol, SymbolKind
 from zemble.graph.provider import GraphProvider, display_name
 from zemble.index import ZembleIndex
+from zemble.index.files import detect_language
 from zemble.types import SearchResult
 
 PRIMARY_FILES = 5
@@ -45,7 +46,6 @@ _IDENTIFIER_WORD = re.compile(
 
 _ANON_MARKER = "$anon@"
 _DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
-_LANGUAGE_BY_SUFFIX = {".java": "java", ".py": "python", ".md": "markdown", ".ts": "typescript", ".js": "javascript"}
 
 
 class ItemKind(str, Enum):
@@ -319,7 +319,7 @@ class _Candidate:
 
 def _language_of(file_path: str) -> str:
     """Return the markdown fence language for a path."""
-    return _LANGUAGE_BY_SUFFIX.get(Path(file_path).suffix.lower(), "")
+    return detect_language(Path(file_path)) or ""
 
 
 def _render_item(item: BundleItem) -> str:

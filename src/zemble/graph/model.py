@@ -28,12 +28,30 @@ class SymbolKind(str, Enum):
     ENUM_CONSTANT = "enum_constant"
     TEMPLATE = "template"
     BLOCK = "block"
+    # Kinds the grammar-driven extractors add on top of the Java vocabulary.
+    STRUCT = "struct"
+    TYPE = "type"
+    MODULE = "module"
+    FUNCTION = "function"
 
 
-TYPE_KINDS: frozenset[SymbolKind] = frozenset(
-    {SymbolKind.CLASS, SymbolKind.INTERFACE, SymbolKind.ENUM, SymbolKind.RECORD, SymbolKind.ANNOTATION}
+#: Kinds that declare a type of their own: what a supertype clause or a type position names.
+DECLARED_TYPE_KINDS: frozenset[SymbolKind] = frozenset(
+    {
+        SymbolKind.CLASS,
+        SymbolKind.INTERFACE,
+        SymbolKind.ENUM,
+        SymbolKind.RECORD,
+        SymbolKind.ANNOTATION,
+        SymbolKind.STRUCT,
+        SymbolKind.TYPE,
+    }
 )
-CALLABLE_KINDS: frozenset[SymbolKind] = frozenset({SymbolKind.METHOD, SymbolKind.CONSTRUCTOR})
+#: Kinds that own members and anchor a resolution scope. A MODULE is the file, or a named
+#: namespace inside it, in every language that has no Java-style package symbol: its members
+#: are the top-level functions and constants, which is why it is a container like a type.
+TYPE_KINDS: frozenset[SymbolKind] = DECLARED_TYPE_KINDS | {SymbolKind.MODULE}
+CALLABLE_KINDS: frozenset[SymbolKind] = frozenset({SymbolKind.METHOD, SymbolKind.CONSTRUCTOR, SymbolKind.FUNCTION})
 #: Kinds that name themselves: a template is displayed and looked up by its own name, never
 #: as `Owner.member`, exactly like a type declaration.
 NAMED_KINDS: frozenset[SymbolKind] = TYPE_KINDS | {SymbolKind.TEMPLATE}

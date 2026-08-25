@@ -21,11 +21,11 @@ _LANE_CHOICES = [lane.value for lane in Lane] + ["all"]
 
 def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `dupes` subcommand on the main parser."""
-    languages = ", ".join(supported_languages())
+    languages = supported_languages()
     parser = sub.add_parser(
         "dupes",
-        help=f"Report duplicated code (exact, alpha-renamed, logic clone classes; {languages}).",
-        epilog=f"Scanned file types: {', '.join(supported_extensions())}.",
+        help=f"Report duplicated code (exact, alpha-renamed, logic clone classes; {len(languages)} languages).",
+        epilog=f"Languages: {', '.join(languages)}. File types: {', '.join(supported_extensions())}.",
     )
     parser.add_argument("path", nargs="?", default=".", help="Workspace directory (default: current directory).")
     parser.add_argument(

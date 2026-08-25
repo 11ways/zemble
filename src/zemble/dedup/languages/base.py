@@ -8,57 +8,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from enum import Enum
 
 from tree_sitter import Node, Parser
+
+from zemble.languages.visibility import Visibility
 
 
 def node_text(source: bytes, node: Node) -> str:
     """Return a node's source text."""
     return source[node.start_byte : node.end_byte].decode("utf-8", "replace")
-
-
-class Visibility(str, Enum):
-    """How far a declaration can be called from, in every language duplication compares.
-
-    The value is both the wire spelling and the word a report prints; UNKNOWN is what a unit
-    no profile can place gets, and every consumer must treat it as restricted.
-    """
-
-    PUBLIC = "public"
-    PROTECTED = "protected"
-    PACKAGE = "package-private"
-    PRIVATE = "private"
-    UNKNOWN = "unknown"
-
-    @property
-    def is_public(self) -> bool:
-        """Whether this level alone allows a call from another module."""
-        return self is Visibility.PUBLIC
-
-    def phrase(self, subject: str) -> str:
-        """How a report names one subject's level ("member is private", "member visibility unknown")."""
-        if self is Visibility.UNKNOWN:
-            return f"{subject} visibility unknown"
-        return f"{subject} is {self.value}"
-
-    def narrower(self, other: Visibility) -> Visibility:
-        """The more restrictive of two levels, as folding a nested type through its parents needs.
-
-        AIDEV-NOTE: UNKNOWN ranks below PRIVATE on purpose, so folding an unplaceable level
-        through a public parent stays unknown instead of inheriting the parent's promise.
-        """
-        return self if _RANK[self] <= _RANK[other] else other
-
-
-#: Restriction order, most restrictive first; a level without a rank raises rather than passing.
-_RANK: dict[Visibility, int] = {
-    Visibility.UNKNOWN: 0,
-    Visibility.PRIVATE: 1,
-    Visibility.PACKAGE: 2,
-    Visibility.PROTECTED: 3,
-    Visibility.PUBLIC: 4,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +56,7 @@ class LanguageProfile:
     #: Leaf texts after which an identifier is a MEMBER name and is never renamed.
     member_separators: frozenset[str]
     #: The body of one member declaration, or None when it is abstract.
-    member_body: Callable[[Node], Node | None]
+    member_body: Callable[[Node, bytes], Node | None]
     #: The name segment one member declaration contributes.
     member_name: Callable[[Node, bytes], str]
     #: The nested container a member opens, or None when it opens none.
@@ -113,6 +71,18 @@ class LanguageProfile:
     visibility: Callable[[Node, bytes], Visibility]
     #: Node kinds only the hooks above name, listed so the drift test can check them too.
     hook_node_kinds: frozenset[str] = field(default_factory=frozenset)
+    #: Decides a node's unit kind when the node kind alone cannot (a `call` that is a `def`);
+    #: None means `member_kinds` decides by node kind.
+    classify: Callable[[Node, bytes], str | None] | None = None
+    #: Whether a node that is neither member nor container is looked through for members
+    #: (a Haskell `declarations` list, a SQL `statement`); None looks only through `flatten_kinds`.
+    descend: Callable[[Node, bytes], bool] | None = None
+
+    def member_kind(self, node: Node, source: bytes) -> str | None:
+        """The unit kind one node declares, or None when it declares no comparable body."""
+        if self.classify is not None:
+            return self.classify(node, source)
+        return self.member_kinds.get(node.type)
 
     @property
     def node_kinds(self) -> frozenset[str]:

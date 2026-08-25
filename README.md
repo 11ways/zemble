@@ -31,10 +31,13 @@ and it returns the chunks nearest to the code living there.
 
 **Symbol graph** (`zemble graph *`, MCP `graph_definition`, `graph_callers`,
 `graph_implementations`, `graph_tests_of`, `graph_neighbors`). Callers, callees,
-references, implementations, supertypes, overrides, tests-of and neighbour walks over a
-Java and Hawkeye workspace. Every answer carries the rung it landed on (exact, unique
+references, implementations, supertypes, overrides, tests-of and neighbour walks over
+every language with a bundled tree-sitter grammar (57 of them: Python, TypeScript, Go,
+Rust, C, C++, C#, Ruby, PHP, Kotlin, Swift, ... plus Java and Hawkeye templates through
+their hand-written lanes). Every answer carries the rung it landed on (exact, unique
 name, ambiguous, unresolved) and a one-line reason, because the extractor is tree-sitter
-plus a name resolver and not a compiler. Where a build emits
+plus a name resolver and not a compiler. Names only resolve within a language family (a
+Python `get` never lands on a Java `get`; Kotlin may land on Java). Where a build emits
 [compiler facts](docs/graph-facts.md), those replace the guessed edges for the files they
 cover. See [docs/graph.md](docs/graph.md).
 
@@ -47,8 +50,9 @@ signature-only view of a file or a type (150 to 300 tokens for a whole class) an
 beat plain search on hit rate, they buy structure.
 
 **Duplication** (`zemble dupes`, MCP `dupes`). Exact, alpha-renamed and logic clone
-classes over declaration bodies and statement windows, ranked by weight. Java and Zig
-today; a language is one profile module in `src/zemble/dedup/languages/`. Logic clones are
+classes over declaration bodies and statement windows, ranked by weight, in every language
+the symbol graph reads (Java and Zig through hand-written profiles, the rest derived from
+the grammar specs in `src/zemble/languages/catalog.py`). Logic clones are
 never reported on embedding similarity alone: a structural check has to agree, and the
 reason is printed. It is a report, never a gate. See [docs/dedup.md](docs/dedup.md).
 
@@ -366,7 +370,7 @@ index in RAM.
 | `explain` | A budgeted evidence bundle as markdown. Narrowable with `paths` and `exclude`. |
 | `outline` | Signature-only view of a file or a type. |
 | `signatures` | A declaration plus its exactly resolved call sites. |
-| `dupes` | Clone classes over the workspace's code (Java, Zig). |
+| `dupes` | Clone classes over the workspace's code, in every language with a grammar. |
 | `home` | Existing mechanisms, candidate homes, verdict and checklist. |
 | `status` | Which zemble code this server is running (version, source root, revision, start time) and whether the checkout moved under it. |
 

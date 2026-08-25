@@ -1,4 +1,4 @@
-"""Command-line surface for the Java symbol graph.
+"""Command-line surface for the symbol graph.
 
 Lives here rather than in `zemble.cli` so wiring the feature into the top-level
 parser is three lines.
@@ -60,7 +60,7 @@ _refreshed: set[str] = set()
 
 def add_graph_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `graph` subcommand tree on the main parser."""
-    graph_p = sub.add_parser("graph", help="Java symbol graph: definitions, callers, implementations, tests.")
+    graph_p = sub.add_parser("graph", help="Symbol graph: definitions, callers, implementations, tests.")
     graph_sub = graph_p.add_subparsers(dest="graph_command", required=True)
 
     build_p = graph_sub.add_parser("build", help="Build or incrementally refresh the symbol graph.")

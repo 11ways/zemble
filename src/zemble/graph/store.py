@@ -15,6 +15,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from zemble.cache import find_index_from_cache_folder
@@ -33,6 +34,7 @@ from zemble.graph.facts import (
     read_facts_files,
     symbol_facts,
 )
+from zemble.graph.generic import extract_generic_file, language_parser
 from zemble.graph.hwk import extract_hwk_file
 from zemble.graph.java import FileExtraction, extract_java_file
 from zemble.graph.lookup import (
@@ -48,20 +50,37 @@ from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol
 from zemble.graph.resolve import Resolver
 from zemble.index.file_walker import ignored_prefix, walk_files
 from zemble.index.files import detect_language, get_extensions
+from zemble.languages.catalog import SPECS
 from zemble.parallel import pool_context, pooled
 from zemble.types import ContentType
 
 logger = logging.getLogger(__name__)
 
-GRAPH_FORMAT_VERSION = 5
+GRAPH_FORMAT_VERSION = 6
 GRAPH_DB_NAME = "graph.sqlite"
-#: The languages an extractor exists for, in the order they were added.
-GRAPH_LANGUAGES = ("java", "hwk")
 # Edge kinds that are computed from resolved symbols rather than extracted from source.
 # They are always recomputed for a re-resolved file, never reloaded and re-inserted.
 _DERIVED_KINDS = (EdgeKind.OVERRIDES.value, EdgeKind.TESTS.value, EdgeKind.EXERCISES.value)
-#: File suffix -> the extractor that reads it. A suffix absent here is skipped and counted.
-_EXTRACTORS = {".java": extract_java_file, ".hwk": extract_hwk_file}
+#: Languages with a hand-written extractor; every other language with a spec and a grammar
+#: goes through the grammar-driven one. A language absent from both is skipped and counted.
+_HAND_WRITTEN = {"java": extract_java_file, "hwk": extract_hwk_file}
+#: The languages an extractor exists for: the hand-written lanes first, then every spec.
+GRAPH_LANGUAGES: tuple[str, ...] = (*_HAND_WRITTEN, *(language for language in SPECS if language not in _HAND_WRITTEN))
+
+
+def extractor_for(file_path: Path) -> Callable[[bytes, str], FileExtraction] | None:
+    """The extractor that reads a file, or None when its language has none."""
+    language = detect_language(file_path)
+    if language is None:
+        return None
+    hand_written = _HAND_WRITTEN.get(language)
+    if hand_written is not None:
+        return hand_written
+    if language in SPECS and language_parser(language) is not None:
+        return partial(extract_generic_file, language=language)
+    return None
+
+
 _WORKER_CHUNK = 40
 #: Above this many files to re-resolve, materialising the whole symbol table once beats
 #: asking sqlite for each name a resolution touches. Both lookups answer identically; this
@@ -330,7 +349,9 @@ def edge_from_row(row: sqlite3.Row) -> Edge:
 def _extract_one(job: tuple[str, str]) -> FileExtraction | None:
     """Extract one file in a worker process, returning None when it cannot be read."""
     absolute, relative = job
-    extract = _EXTRACTORS[Path(absolute).suffix.lower()]
+    extract = extractor_for(Path(absolute))
+    if extract is None:
+        return None
     try:
         source = Path(absolute).read_bytes()
     except OSError:
@@ -378,12 +399,12 @@ class _Scan:
 
 
 def _scan(root: Path) -> _Scan:
-    """Walk the workspace, splitting Java files from everything the graph has no extractor for."""
+    """Walk the workspace, splitting extractable files from everything the graph has no reader for."""
     scan = _Scan()
     for file_path in walk_files(root, extensions=get_extensions((ContentType.CODE,))):
         scan.scanned += 1
         suffix = file_path.suffix.lower()
-        if suffix not in _EXTRACTORS:
+        if extractor_for(file_path) is None:
             scan.skipped[detect_language(file_path) or suffix] += 1
             continue
         try:
@@ -413,7 +434,7 @@ def _scan_changed(root: Path, changed: Iterable[Path], stored: dict[str, tuple[i
             relative = candidate.relative_to(root).as_posix()
         except ValueError:
             continue
-        if candidate.suffix.lower() in _EXTRACTORS and ignored_prefix(root, relative) is None:
+        if extractor_for(candidate) is not None and ignored_prefix(root, relative) is None:
             named[relative] = candidate
 
     for relative, stamp in stored.items():
@@ -740,7 +761,7 @@ def _recover_extracted_edges(
     changed_coverage = (plan.invalidated | plan.moved_coverage(overlay)) & stored_targets
     if not changed_coverage:
         return []
-    jobs = [(str(root / path), path) for path in sorted(changed_coverage) if (root / path).suffix in _EXTRACTORS]
+    jobs = [(str(root / path), path) for path in sorted(changed_coverage) if extractor_for(root / path) is not None]
     return _extract_many(jobs, workers)
 
 

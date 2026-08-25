@@ -146,12 +146,12 @@ def test_coverage_note_names_missing_extractors(graph_cache: Path, tmp_path: Pat
     workspace = tmp_path / "mixed"
     workspace.mkdir()
     (workspace / "Main.java").write_text("package p;\npublic class Main {}\n", encoding="utf-8")
-    (workspace / "app.ts").write_text("export const x = 1;\n", encoding="utf-8")
+    (workspace / "app.cob").write_text("IDENTIFICATION DIVISION.\n", encoding="utf-8")
     build_graph(str(workspace))
     provider = SqliteGraphProvider(str(workspace))
     try:
         note = provider.coverage_note()
     finally:
         provider.close()
-    assert "no graph extractor for" in note, "the note names the gap"
-    assert "typescript" in note, "and which language it is"
+    assert "no grammar for: cobol (1)" in note, "the note names the gap"
+    assert "languages" in note, "and says how wide the coverage is"

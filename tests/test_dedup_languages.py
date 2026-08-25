@@ -14,6 +14,7 @@ from zemble.index.files import get_extensions
 from zemble.types import ContentType
 
 ZIG_FIXTURES = Path(__file__).parent / "fixtures" / "dedup_zig"
+POLYGLOT = Path(__file__).parent / "fixtures" / "polyglot"
 
 
 def _zig_units(name: str) -> list:
@@ -70,7 +71,7 @@ def test_zig_and_java_are_scanned_by_one_run(tmp_path: Path) -> None:
         (tmp_path / "src" / name).write_text((ZIG_FIXTURES / "src" / name).read_text())
     report = find_duplication(tmp_path, DupeOptions(kinds=(CloneKind.EXACT,), windows=False))
     assert report.analyzed_files == 4, "both languages are walked in one pass"
-    assert report.supported_extensions == (".java", ".zig"), "the report names what it walked"
+    assert {".java", ".zig"} <= set(report.supported_extensions), "the report names what it walked"
     files = {member.file_path for clone in report.classes for member in clone.members}
     assert any(path.endswith(".java") for path in files), "the Java copy is reported"
     assert any(path.endswith(".zig") for path in files), "the Zig copy is reported"
@@ -114,14 +115,44 @@ def test_an_unclaimed_extension_fails_closed(tmp_path: Path) -> None:
     """A file no profile claims is never parsed, never walked, and never a silent clean report."""
     # 1. Asking for one by hand is refused rather than guessed at.
     with pytest.raises(ValueError, match="No duplication language profile"):
-        extract_units(b"print('hi')\n", "src/thing.py")
-    assert profile_for("src/thing.py") is None, "nothing claims .py"
+        extract_units(b"IDENTIFICATION DIVISION.\n", "src/thing.cob")
+    assert profile_for("src/thing.cob") is None, "nothing claims .cob: COBOL has no bundled grammar"
 
     # 2. A workspace of only unclaimed files scans nothing and says so instead of "no duplication".
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "thing.py").write_text("print('hi')\n")
+    (tmp_path / "src" / "thing.cob").write_text("IDENTIFICATION DIVISION.\n")
     report = find_duplication(tmp_path, DupeOptions(kinds=(CloneKind.EXACT,)))
     assert report.analyzed_files == 0 and report.failed_files == 0, "step 2: unclaimed files are not walked"
     text = format_report(report)
     assert "No duplication found." not in text, "step 2: nothing scanned is not a clean result"
-    assert "Scanned 0 supported file(s)" in text and ".java, .zig" in text, "step 2: it says what it looked for"
+    assert "Scanned 0 supported file(s)" in text and ".java" in text and ".zig" in text, (
+        "step 2: it says what it looked for"
+    )
+
+
+def test_spec_driven_languages_journey() -> None:
+    """A language read through its grammar spec compares like a hand-written one."""
+    # 1. Two Python functions that differ only in their local names are one renamed clone class.
+    report = find_duplication(
+        POLYGLOT, DupeOptions(kinds=(CloneKind.RENAMED,), windows=False, paths=("app/copy_a.py", "app/copy_b.py"))
+    )
+    assert report.failed_files == 0, "step 1: both files parsed"
+    assert _members(report, CloneKind.RENAMED) == [{"render_rows", "render_table"}], "step 1: locals normalize"
+
+    # 2. Elixir declares everything as a `call`: the classify hook tells a `def` from a call.
+    units = {
+        unit.name: unit
+        for unit in extract_units(
+            (POLYGLOT / "app" / "copy_c.ex").read_bytes(), "app/copy_c.ex", windows=False, min_tokens=3
+        )
+    }
+    assert units["Copy.render"].visibility is Visibility.PUBLIC, "step 2: `def` is public"
+    assert units["Copy.hidden"].visibility is Visibility.PRIVATE, "step 2: `defp` is private"
+    assert units["Copy.hidden"].modifiers == ("defp",), "step 2: and the keyword is the modifier"
+    assert "join" in units["Copy.render"].calls, "step 2: pipeline calls are seen"
+
+    # 3. A structural node that is no declaration is looked through (a Haskell declaration list).
+    haskell = extract_units(
+        b"module M where\nweave n = go (n + 1)\n  where go x = x * 2\n", "m.hs", windows=False, min_tokens=3
+    )
+    assert "weave" in {unit.name for unit in haskell}, "step 3: the function under `declarations` is a unit"

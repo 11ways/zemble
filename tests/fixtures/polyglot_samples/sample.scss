@@ -1,0 +1,5 @@
+@use 'base';
+$limit: 3;
+@mixin area($x) { width: $x; }
+@function helper($n) { @return $n + 1; }
+.point { @include area(1px); &:hover { color: red; } }

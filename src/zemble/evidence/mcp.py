@@ -31,7 +31,7 @@ _CONTENT_DESCRIPTION = (
 )
 
 _REPO_DESCRIPTION = with_default_note(
-    "Local directory path of the workspace. Both the code index and the Java symbol graph are built "
+    "Local directory path of the workspace. Both the code index and the symbol graph are built "
     "on first use and refreshed once per server process."
 )
 
@@ -162,7 +162,7 @@ def register_evidence_tools(
     ) -> str:
         """Get a budgeted evidence bundle instead of reading whole files.
 
-        Searches, then follows the Java symbol graph one hop out of what it found:
+        Searches, then follows the symbol graph one hop out of what it found:
         the enclosing type's outline, the tests that cover it, its callers, its
         callees and any sibling documentation. Every item says why it is there, and
         anything that did not fit is listed as a location so you know it exists.
@@ -186,7 +186,7 @@ def register_evidence_tools(
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         members: Annotated[str | None, Field(description="Only show members whose name matches this pattern.")] = None,
     ) -> dict[str, Any]:
-        """List what a Java file or type declares, signatures only, for a few hundred tokens.
+        """List what a file, type or module declares, signatures only, for a few hundred tokens.
 
         Use this before reading a file: it shows every member with its line range, so
         the next read can be a line span instead of a whole file.
@@ -205,7 +205,7 @@ def register_evidence_tools(
         symbol: Annotated[str, Field(description="A simple name, a qualified name, or `Type.member`.")],
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
     ) -> dict[str, Any]:
-        """Show a Java symbol's signature and the call sites the graph resolved exactly.
+        """Show a symbol's signature and the call sites the graph resolved exactly.
 
         Cheaper than `graph_callers` when all you need is whether something is used
         and from where; weaker resolutions are counted rather than listed.

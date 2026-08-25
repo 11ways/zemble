@@ -1,0 +1,7 @@
+interface Shape { area: Float }
+type Point implements Shape & Node { x: Int! area: Float }
+enum Color { RED GREEN }
+input PointInput { x: Int }
+type Query { point(id: ID!): Point }
+union Thing = Point | Vec
+scalar Date

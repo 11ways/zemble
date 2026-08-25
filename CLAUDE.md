@@ -10,8 +10,11 @@ status table with every measured number; read it first.
 
 - `src/zemble/` -- `index/` (chunk/BM25/dense stores, create, file walker, symbols),
   `chunking/` (tree-sitter chunking, `capsule.py`), `ranking/`, `search.py`,
-  `embedding/` (Embedder seam, providers, sqlite cache), `rerank/`, `graph/`
-  (Java + hwk extractors, resolver, sqlite store, `facts.py` overlay, provider),
+  `embedding/` (Embedder seam, providers, sqlite cache), `rerank/`, `languages/`
+  (one `LanguageSpec` per bundled grammar: declaration/call node kinds plus path
+  expressions; the home of every grammar-specific fact outside the Java and hwk lanes),
+  `graph/` (Java + hwk extractors, `generic.py` spec-driven extractor for every other
+  grammar, resolver, sqlite store, `facts.py` overlay, provider),
   `evidence/` (explain/outline/signatures), `dedup/`, `home/`, `daemon/`
   (server, client, watcher), `index_cache.py` (shared with the MCP server), `cli.py`,
   `mcp.py`, `installer/` + `agents/` (agent config templates).
@@ -66,7 +69,10 @@ overwrite each other. Never tune on individual eval queries.
 - Linear git history: no merge commits. Work on a branch/worktree, `git rebase main`,
   fast-forward. Commit subject starts with a real Unicode gitmoji, max 3 lines.
 - Vocabularies have one home (enum/sealed type, exhaustive dispatch); unknown members
-  fail closed. Ranking must stay bit-identical across refactors that are not meant
+  fail closed. A language is one spec in `languages/catalog.py`; the graph and dedup both
+  read it, and `tests/test_languages.py` fails the build on a node kind the grammar lacks
+  or a bundled code grammar without a spec. Never guess node kinds: parse a fixture and
+  print the tree. Ranking must stay bit-identical across refactors that are not meant
   to change it (prove it with the benchmark).
 - MCP tools return their payload as an object (or as plain text), never as a
   `json.dumps` string from a `-> str` signature: that makes the client parse JSON

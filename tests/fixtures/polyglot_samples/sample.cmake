@@ -1,0 +1,7 @@
+function(area x)
+  helper(${x})
+endfunction()
+macro(helper n)
+  message(${n})
+endmacro()
+add_library(point src/point.c)

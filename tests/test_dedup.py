@@ -321,7 +321,7 @@ def test_nothing_scanned_is_never_a_clean_report(tmp_path: Path) -> None:
     assert report.analyzed_files == 0, "step 1: nothing was walked"
     assert "No duplication found." not in text, "step 1: the misleading line is gone"
     assert f"Scanned 0 supported file(s) under {report.root}" in text, "step 1: it names the root"
-    assert "(supported: .java, .zig)" in text, "step 1: it names the extensions it walks"
+    assert "(supported: " in text and ".java" in text and ".zig" in text, "step 1: it names the extensions it walks"
     assert "check --paths/--exclude/ignore files" in text, "step 1: it names the likely cause"
 
     # 2. Brief mode says it too; a piped report must not read as a pass either.
@@ -330,7 +330,7 @@ def test_nothing_scanned_is_never_a_clean_report(tmp_path: Path) -> None:
     # 3. The JSON form carries it machine-readably, counts and all.
     payload = report_json(report)
     assert payload["analyzed_files"] == 0 and payload["failed_files"] == 0, "step 3: the counts are on the wire"
-    assert payload["supported_extensions"] == [".java", ".zig"], "step 3: so are the extensions"
+    assert set(payload["supported_extensions"]) >= {".java", ".zig"}, "step 3: so are the extensions"
     assert any("Scanned 0 supported file(s)" in note for note in payload["notes"]), "step 3: and the note"
 
     # 4. The CLI still exits 0: this is a report, not a gate.
@@ -1264,6 +1264,250 @@ _VISIBILITY_FIXTURES: dict[str, tuple[str, str]] = {
         "    return total;\n"
         "}\n",
     ),
+    "javascript": (
+        "vis.js",
+        "export function weave(input) {\n"
+        "  const parts = input.split(',');\n"
+        "  parts.push('x');\n"
+        "  return parts.join('-');\n"
+        "}\n",
+    ),
+    "typescript": (
+        "vis.ts",
+        "export function weave(input: string): string {\n"
+        "  const parts = input.split(',');\n"
+        "  parts.push('x');\n"
+        "  return parts.join('-');\n"
+        "}\n",
+    ),
+    "tsx": (
+        "vis.tsx",
+        "export function weave(input: string): string {\n"
+        "  const parts = input.split(',');\n"
+        "  parts.push('x');\n"
+        "  return parts.join('-');\n"
+        "}\n",
+    ),
+    "python": (
+        "vis.py",
+        "def weave(text):\n    parts = text.split(',')\n    parts.append('x')\n    return '-'.join(parts)\n",
+    ),
+    "starlark": (
+        "vis.bzl",
+        "def weave(text):\n    parts = text.split(',')\n    parts.append('x')\n    return '-'.join(parts)\n",
+    ),
+    "go": (
+        "vis.go",
+        "package vis\n"
+        "\n"
+        "func Weave(input string) string {\n"
+        '\tparts := strings.Split(input, ",")\n'
+        '\tparts = append(parts, "x")\n'
+        '\treturn strings.Join(parts, "-")\n'
+        "}\n",
+    ),
+    "rust": (
+        "vis.rs",
+        "pub fn weave(input: &str) -> String {\n"
+        "    let mut parts: Vec<&str> = input.split(',').collect();\n"
+        '    parts.push("x");\n'
+        '    parts.join("-")\n'
+        "}\n",
+    ),
+    "c": ("vis.c", "int weave(int input) {\n    int total = input * 2;\n    total += 1;\n    return total;\n}\n"),
+    "cpp": ("vis.cpp", "int weave(int input) {\n    int total = input * 2;\n    total += 1;\n    return total;\n}\n"),
+    "csharp": (
+        "Vis.cs",
+        "public class Vis {\n"
+        "    public int Weave(int input) {\n"
+        "        int total = input * 2;\n"
+        "        total += 1;\n"
+        "        return total;\n"
+        "    }\n"
+        "}\n",
+    ),
+    "ruby": ("vis.rb", "def weave(input)\n  parts = input.split(',')\n  parts.push('x')\n  parts.join('-')\nend\n"),
+    "php": (
+        "Vis.php",
+        "<?php\n"
+        "function weave($input) {\n"
+        "    $parts = explode(',', $input);\n"
+        "    $parts[] = 'x';\n"
+        "    return implode('-', $parts);\n"
+        "}\n",
+    ),
+    "kotlin": (
+        "Vis.kt",
+        "fun weave(input: String): String {\n"
+        '    val parts = input.split(",").toMutableList()\n'
+        '    parts.add("x")\n'
+        '    return parts.joinToString("-")\n'
+        "}\n",
+    ),
+    "swift": (
+        "Vis.swift",
+        "public func weave(_ input: String) -> String {\n"
+        '    var parts = input.split(separator: ",")\n'
+        '    parts.append("x")\n'
+        '    return parts.joined(separator: "-")\n'
+        "}\n",
+    ),
+    "scala": (
+        "Vis.scala",
+        "def weave(input: String): String = {\n"
+        '  val parts = input.split(",").toBuffer\n'
+        '  parts += "x"\n'
+        '  parts.mkString("-")\n'
+        "}\n",
+    ),
+    "dart": (
+        "vis.dart",
+        "String weave(String input) {\n"
+        "  var parts = input.split(',');\n"
+        "  parts.add('x');\n"
+        "  return parts.join('-');\n"
+        "}\n",
+    ),
+    "lua": (
+        "vis.lua",
+        "function weave(input)\n"
+        "  local parts = split(input, ',')\n"
+        "  table.insert(parts, 'x')\n"
+        "  return table.concat(parts, '-')\n"
+        "end\n",
+    ),
+    "elixir": (
+        "vis.ex",
+        "defmodule Vis do\n"
+        "  def weave(input) do\n"
+        '    parts = String.split(input, ",")\n'
+        '    parts = parts ++ ["x"]\n'
+        '    Enum.join(parts, "-")\n'
+        "  end\n"
+        "end\n",
+    ),
+    "erlang": (
+        "vis.erl",
+        "-module(vis).\n"
+        "weave(Input) ->\n"
+        '    Parts = string:split(Input, ","),\n'
+        '    More = Parts ++ ["x"],\n'
+        '    string:join(More, "-").\n',
+    ),
+    "haskell": ("Vis.hs", 'module Vis where\nweave input = unwords (reverse (words input) ++ ["x"])\n'),
+    "ocaml": (
+        "vis.ml",
+        'let weave input =\n  let parts = String.split_on_char \',\' input in\n  String.concat "-" (parts @ ["x"])\n',
+    ),
+    "julia": (
+        "vis.jl",
+        'function weave(input)\n    parts = split(input, ",")\n    push!(parts, "x")\n    join(parts, "-")\nend\n',
+    ),
+    "r": (
+        "vis.R",
+        "weave <- function(input) {\n"
+        "  parts <- strsplit(input, ',')[[1]]\n"
+        "  parts <- c(parts, 'x')\n"
+        "  paste(parts, collapse = '-')\n"
+        "}\n",
+    ),
+    "perl": (
+        "vis.pl",
+        "sub weave {\n"
+        "    my ($input) = @_;\n"
+        "    my @parts = split(',', $input);\n"
+        "    push @parts, 'x';\n"
+        "    return join('-', @parts);\n"
+        "}\n",
+    ),
+    "bash": ("vis.sh", 'weave() {\n  local parts="$1"\n  parts="$parts,x"\n  echo "${parts//,/-}"\n}\n'),
+    "powershell": (
+        "vis.ps1",
+        "function Weave($input) {\n  $parts = $input -split ','\n  $parts += 'x'\n  return ($parts -join '-')\n}\n",
+    ),
+    "solidity": (
+        "Vis.sol",
+        "contract Vis {\n"
+        "  function weave(uint input) public pure returns (uint) {\n"
+        "    uint total = input * 2;\n"
+        "    total += 1;\n"
+        "    return total;\n"
+        "  }\n"
+        "}\n",
+    ),
+    "groovy": (
+        "Vis.groovy",
+        "def weave(input) {\n  def parts = input.split(',')\n  parts << 'x'\n  return parts.join('-')\n}\n",
+    ),
+    "objc": ("vis.m", "int weave(int input) {\n    int total = input * 2;\n    total += 1;\n    return total;\n}\n"),
+    "clojure": (
+        "vis.clj",
+        "(defn weave [input]\n"
+        '  (let [parts (clojure.string/split input #",")]\n'
+        '    (clojure.string/join "-" (conj parts "x"))))\n',
+    ),
+    "scheme": (
+        "vis.scm",
+        "(define (weave input)\n"
+        "  (let ((parts (string-split input #\\,)))\n"
+        '    (string-join (append parts (list "x")) "-")))\n',
+    ),
+    "racket": (
+        "vis.rkt",
+        "#lang racket\n"
+        "(define (weave input)\n"
+        '  (let ([parts (string-split input ",")])\n'
+        '    (string-join (append parts (list "x")) "-")))\n',
+    ),
+    "nix": (
+        "vis.nix",
+        '{\n  weave = input: builtins.concatStringsSep "-" ((builtins.filter builtins.isString input) ++ ["x"]);\n}\n',
+    ),
+    "fortran": (
+        "vis.f90",
+        "function weave(input) result(total)\n"
+        "  integer :: input\n"
+        "  integer :: total\n"
+        "  total = input * 2\n"
+        "  total = total + 1\n"
+        "end function weave\n",
+    ),
+    "sql": ("vis.sql", "CREATE FUNCTION weave(n INT) RETURNS INT AS $$ SELECT n * 2 + 1 $$ LANGUAGE sql;\n"),
+    "cmake": (
+        "vis.cmake",
+        "function(weave input)\n  set(total ${input})\n  list(APPEND total x)\n  message(${total})\nendfunction()\n",
+    ),
+    "hcl": ("vis.tf", 'locals {\n  weave = join("-", concat(split(",", var.input), ["x"]))\n}\n'),
+    "typst": ("vis.typst", '#let weave(input) = input.split(",").push("x").join("-")\n'),
+    "vim": (
+        "vis.vim",
+        "function! Weave(input) abort\n"
+        "  let parts = split(a:input, ',')\n"
+        "  call add(parts, 'x')\n"
+        "  return join(parts, '-')\n"
+        "endfunction\n",
+    ),
+    "wat": (
+        "vis.wat",
+        "(module\n"
+        "  (func $weave (param $n i32) (result i32)\n"
+        "    (i32.add (i32.mul (local.get $n) (i32.const 2)) (i32.const 1))))\n",
+    ),
+    "make": ("vis.mk", "weave: input.txt\n\tcat input.txt > out.txt\n\techo x >> out.txt\n\ttr ',' '-' < out.txt\n"),
+    "scss": (
+        "vis.scss",
+        "@function weave($input) {\n  $total: $input * 2;\n  $total: $total + 1;\n  @return $total;\n}\n",
+    ),
+    "jsonnet": (
+        "vis.jsonnet",
+        "local weave(input) = std.join('-', std.split(input, ',') + ['x']);\n{ out: weave('a,b') }\n",
+    ),
+    "just": ("vis.just", "weave input:\n  echo {{input}} | tr ',' '-'\n  echo x\n"),
+    "batch": ("vis.bat", ":weave\necho %1\nexit /b\n"),
+    "gotmpl": ("vis.gotmpl", '{{ define "weave" }}{{ .Input }}-{{ .Extra }}{{ end }}\n'),
+    "dockerfile": ("Dockerfile", "FROM python:3.12\n"),
+    "heex": ("vis.heex", "<div><.weave input={@input} /></div>\n"),
+    "jinja2": ("vis.j2", "{{ weave(3) }}\n"),
 }
 
 

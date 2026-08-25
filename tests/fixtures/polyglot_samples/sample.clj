@@ -1,0 +1,7 @@
+(ns store.point (:require [clojure.string :as str]))
+(defn area [x] (helper x))
+(defn- helper [n] (+ n 1))
+(defmacro m [x] x)
+(defrecord Point [x y])
+(defprotocol Shape (area [this]))
+(def limit 3)

@@ -74,7 +74,7 @@ _NAME_FIELD_DECLARATIONS = frozenset(
 )
 
 
-def _member_body(node: Node) -> Node | None:
+def _member_body(node: Node, source: bytes) -> Node | None:
     """An initializer is its own body; everything else keeps the `body` field."""
     if node.type in _INITIALIZER_TYPES:
         return node

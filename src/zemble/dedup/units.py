@@ -287,7 +287,9 @@ class _UnitExtractor:
             else:
                 members.append(node)
         for member in members:
-            kind = self.profile.member_kinds.get(member.type)
+            if _is_comment(member):
+                continue
+            kind = self.profile.member_kind(member, self.source)
             if kind is not None:
                 self._emit_member(member, qualified, kind, container_visibility)
                 continue
@@ -298,10 +300,13 @@ class _UnitExtractor:
                     inner = f"{qualified}.{container.name}" if qualified else container.name
                 folded = container.visibility.narrower(container_visibility)
                 self._visit_members(list(container.body.named_children), inner, folded)
+                continue
+            if self.profile.descend is not None and self.profile.descend(member, self.source):
+                self._visit_members(list(member.named_children), qualified, container_visibility)
 
     def _emit_member(self, member: Node, qualified: str, kind: str, container_visibility: Visibility) -> None:
         """Emit the unit of one member declaration, its parameters counted as declared names."""
-        body = self.profile.member_body(member)
+        body = self.profile.member_body(member, self.source)
         if body is None:
             return
         segment = self.profile.member_name(member, self.source)

@@ -117,16 +117,17 @@ def test_graph_db_path_creates_its_folder(graph_cache: Path, tmp_path: Path) -> 
     assert path.name == GRAPH_DB_NAME, "the graph lives in graph.sqlite"
 
 
-def test_non_java_files_are_counted_not_extracted(graph_cache: Path, tmp_path: Path) -> None:
-    """A workspace with other languages reports them per language instead of failing."""
+def test_files_without_a_grammar_are_counted_not_extracted(graph_cache: Path, tmp_path: Path) -> None:
+    """Every language with a grammar is extracted; the rest is reported per language instead of failing."""
     workspace = tmp_path / "mixed"
     (workspace / "src").mkdir(parents=True)
     (workspace / "src/Main.java").write_text("package p;\npublic class Main {}\n", encoding="utf-8")
     (workspace / "src/app.ts").write_text("export const x = 1;\n", encoding="utf-8")
     (workspace / "src/app.py").write_text("x = 1\n", encoding="utf-8")
+    (workspace / "src/app.cob").write_text("IDENTIFICATION DIVISION.\n", encoding="utf-8")
     stats = build_graph(str(workspace))
-    assert stats.extracted_files == 1, "only the Java file is extracted"
-    assert stats.skipped_by_language == {"typescript": 1, "python": 1}, "the rest is counted per language"
+    assert stats.extracted_files == 3, "Java, TypeScript and Python are all extracted"
+    assert stats.skipped_by_language == {"cobol": 1}, "a language without a grammar is counted"
 
 
 def test_change_set_refresh_journey(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path) -> None:

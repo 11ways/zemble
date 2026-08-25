@@ -1,4 +1,4 @@
-"""Workspace-wide resolution of extracted Java references.
+"""Workspace-wide resolution of extracted references, in every language the graph reads.
 
 Resolution is a ladder, and every rung is recorded on the edge so a consumer can
 tell a fact from a guess: EXACT (the declaring type was pinned down by scope and
@@ -12,10 +12,12 @@ from __future__ import annotations
 import re
 from collections.abc import Container, Iterable
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from zemble.graph.lookup import DeclarationKey, FileContext, SymbolLookup, function_key
 from zemble.graph.model import (
     CALLABLE_KINDS,
+    DECLARED_TYPE_KINDS,
     TYPE_KINDS,
     Edge,
     EdgeKind,
@@ -24,10 +26,16 @@ from zemble.graph.model import (
     SymbolKind,
     is_test_path,
 )
+from zemble.index.files import detect_language
+from zemble.languages.catalog import family_of, is_test_file
 
-# Suffixes and prefixes that mark a test type as covering a subject type.
-_TEST_SUFFIXES = ("Tests", "Test", "IT")
-_TEST_PREFIXES = ("Test",)
+# Suffixes and prefixes that mark a test type or module as covering a subject: `FooTest`,
+# `TestFoo`, `test_foo`, `foo_test`, `foo.spec`, `foo_spec`.
+_TEST_SUFFIXES = ("Tests", "Test", "IT", "_test", "_tests", "_spec", ".test", ".spec", "-test")
+_TEST_PREFIXES = ("Test", "test_", "test-")
+#: The one language whose imports are authoritative: a Java import names exactly one type,
+#: so an imported name absent from the workspace is external, never a same-named local type.
+_STRICT_IMPORT_LANGUAGE = "java"
 
 _TYPE_EDGE_KINDS = frozenset({EdgeKind.EXTENDS, EdgeKind.IMPLEMENTS, EdgeKind.REFERENCES_TYPE, EdgeKind.ANNOTATED_WITH})
 _TEMPLATE_SUFFIX = ".hwk"
@@ -112,9 +120,44 @@ class Resolver:
         self._chain_cache[type_id] = order
         return order
 
-    def _lookup_qualified(self, qualified: str, kinds: Container[SymbolKind]) -> list[Symbol]:
-        """Return workspace symbols with an exact qualified name and an accepted kind."""
-        return [symbol for symbol in self.lookup.by_qualified(qualified) if symbol.kind in kinds]
+    def _lookup_qualified(
+        self, qualified: str, kinds: Container[SymbolKind], file_path: str | None = None
+    ) -> list[Symbol]:
+        """Return workspace symbols with an exact qualified name and an accepted kind.
+
+        Given a file, only symbols of that file's language family count: a Python module and a
+        Go package file may both be `app.shapes`, and neither is a type the other means.
+        """
+        found = [symbol for symbol in self.lookup.by_qualified(qualified) if symbol.kind in kinds]
+        return self._same_family(found, file_path) if file_path is not None else found
+
+    @staticmethod
+    def _family(file_path: str) -> str | None:
+        """The resolution family of a file, from its suffix."""
+        return family_of(detect_language(PurePosixPath(file_path)))
+
+    def _same_family(self, symbols: list[Symbol], file_path: str) -> list[Symbol]:
+        """Keep the symbols a file may resolve into: those of its own language family.
+
+        A Python `get` must never land on a Java `get`; a Kotlin call may land on a Java
+        method (both are `jvm`). A file whose language has no family keeps every candidate.
+        """
+        family = self._family(file_path)
+        if family is None:
+            return symbols
+        return [symbol for symbol in symbols if self._family(symbol.file_path) == family]
+
+    @staticmethod
+    def _prefer_declared(symbols: list[Symbol]) -> list[Symbol]:
+        """Prefer real type declarations over modules that merely share the name."""
+        declared = [symbol for symbol in symbols if symbol.kind in DECLARED_TYPE_KINDS]
+        return declared or symbols
+
+    def _module_of(self, file_path: str) -> Symbol | None:
+        """The symbol standing for a file itself, in the languages that have one."""
+        return next(
+            (symbol for symbol in self.lookup.types_in_file(file_path) if symbol.kind is SymbolKind.MODULE), None
+        )
 
     # ---- type resolution ------------------------------------------------
 
@@ -126,9 +169,9 @@ class Resolver:
 
     def _resolve_dotted_type(self, name: str, context: FileContext) -> _Match:
         """Resolve `Outer.Inner` or a fully qualified name."""
-        exact = self._lookup_qualified(name, TYPE_KINDS)
+        exact = self._lookup_qualified(name, TYPE_KINDS, context.file_path)
         if exact:
-            return _grade(exact, Resolution.EXACT)
+            return _grade(self._prefer_declared(exact), Resolution.EXACT)
         head, _, tail = name.partition(".")
         head_match = self._resolve_simple_type(head, context)
         if head_match.symbol_id is not None:
@@ -160,22 +203,36 @@ class Resolver:
             return _grade(sorted(same_file, key=lambda s: len(s.qualified_name))[:1], Resolution.EXACT)
         imported = context.imports.explicit.get(name)
         if imported is not None:
-            # The import names exactly one type. If it is not in the workspace it is a
-            # JDK or third-party type, and falling back to a same-named workspace type
-            # would be wrong, not merely imprecise.
-            return _grade(self._lookup_qualified(imported, TYPE_KINDS), Resolution.EXACT)
+            exact = self._lookup_qualified(imported, TYPE_KINDS, context.file_path)
+            if exact or detect_language(PurePosixPath(context.file_path)) == _STRICT_IMPORT_LANGUAGE:
+                # A Java import names exactly one type. If it is not in the workspace it is a
+                # JDK or third-party type, and falling back to a same-named workspace type
+                # would be wrong, not merely imprecise.
+                return _grade(exact, Resolution.EXACT)
+            # Elsewhere an import path is written relative to a root the graph cannot see
+            # (`pkg.mod.Base` for `src/pkg/mod.py`), so a qualified name ending in it is the
+            # one meant; failing that, the ladder continues.
+            suffix = f".{imported}"
+            by_suffix = [
+                symbol
+                for symbol in self._same_family(self.lookup.types_by_simple(name), context.file_path)
+                if symbol.qualified_name.endswith(suffix) or symbol.qualified_name == imported
+            ]
+            if by_suffix:
+                return _grade(self._prefer_declared(by_suffix), Resolution.EXACT)
         if context.package:
-            same_package = self._lookup_qualified(f"{context.package}.{name}", TYPE_KINDS)
+            same_package = self._lookup_qualified(f"{context.package}.{name}", TYPE_KINDS, context.file_path)
             if same_package:
-                return _grade(same_package, Resolution.EXACT)
+                return _grade(self._prefer_declared(same_package), Resolution.EXACT)
         wildcard_hits = [
             symbol
             for package in context.imports.wildcards
-            for symbol in self._lookup_qualified(f"{package}.{name}", TYPE_KINDS)
+            for symbol in self._lookup_qualified(f"{package}.{name}", TYPE_KINDS, context.file_path)
         ]
         if wildcard_hits:
             return _grade(wildcard_hits, Resolution.EXACT)
-        return _grade(self.lookup.types_by_simple(name), Resolution.UNIQUE_NAME)
+        candidates = self._same_family(self.lookup.types_by_simple(name), context.file_path)
+        return _grade(self._prefer_declared(candidates), Resolution.UNIQUE_NAME)
 
     # ---- call resolution ------------------------------------------------
 
@@ -227,7 +284,23 @@ class Resolver:
                 found = self._members_named(static_owner.symbol_id, edge.dst_name, edge.arity)
                 if found:
                     return _grade(found, static_owner.resolution)
-        return self._resolve_call_by_name(edge)
+            module = self._module_of(context.file_path)
+            if module is not None:
+                # An unqualified call from inside a method reaches the file's own functions
+                # before anything the rest of the workspace declares under that name.
+                found = self._members_named(module.id, edge.dst_name, edge.arity)
+                if found:
+                    return _grade(found, Resolution.EXACT)
+                imported = context.imports.explicit.get(edge.dst_name)
+                if imported is not None:
+                    through_import = [
+                        symbol
+                        for symbol in self.lookup.callables_by_simple(edge.dst_name)
+                        if symbol.qualified_name.endswith(f".{imported}") or symbol.qualified_name == imported
+                    ]
+                    if through_import:
+                        return _grade(through_import, Resolution.EXACT)
+        return self._resolve_call_by_name(edge, context)
 
     def _members_of_owner(self, owner_match: _Match, edge: Edge) -> _Match | None:
         """Search the receiver type, or every candidate when the receiver itself was ambiguous."""
@@ -264,11 +337,11 @@ class Resolver:
                 return match
         return None
 
-    def _resolve_call_by_name(self, edge: Edge) -> _Match:
-        """Last rung: match a call against every same-named callable in the workspace."""
+    def _resolve_call_by_name(self, edge: Edge, context: FileContext) -> _Match:
+        """Last rung: match a call against every same-named callable of the file's language family."""
         candidates = [
             symbol
-            for symbol in self.lookup.callables_by_simple(edge.dst_name)
+            for symbol in self._same_family(self.lookup.callables_by_simple(edge.dst_name), context.file_path)
             if edge.arity < 0 or symbol.arity == edge.arity
         ]
         return _grade(candidates, Resolution.UNIQUE_NAME)
@@ -472,9 +545,11 @@ class Resolver:
         for edge in edges:
             if edge.dst_id is None or edge.kind in (EdgeKind.TESTS, EdgeKind.EXERCISES):
                 continue
-            if not is_test_path(_file_of(edge.src_id)):
-                # `is_test` is a path fact, so a non-test path can never hold a test symbol:
-                # deciding it from the id alone spares a lookup per resolved edge.
+            source_path = _file_of(edge.src_id)
+            if not is_test_path(source_path) and not is_test_file(source_path):
+                # `is_test` is a path fact (a test directory, or a test file name), so a
+                # non-test path can never hold a test symbol: deciding it from the id alone
+                # spares a lookup per resolved edge.
                 continue
             source = self.lookup.by_id(edge.src_id)
             target = self.lookup.by_id(edge.dst_id)
@@ -516,11 +591,14 @@ def _file_of(symbol_id: str) -> str:
 
 
 def _subject_name(name: str) -> str | None:
-    """Return the subject type name a test class name implies, if any."""
+    """Return the subject name a test type or module name implies, if any."""
     for suffix in _TEST_SUFFIXES:
         if name.endswith(suffix) and len(name) > len(suffix):
             return name[: -len(suffix)]
     for prefix in _TEST_PREFIXES:
-        if name.startswith(prefix) and len(name) > len(prefix) and name[len(prefix)].isupper():
-            return name[len(prefix) :]
+        if name.startswith(prefix) and len(name) > len(prefix):
+            rest = name[len(prefix) :]
+            # `TestFoo` names Foo; `Testing` and `testament` name nothing.
+            if prefix.endswith(("_", "-")) or rest[:1].isupper():
+                return rest
     return None

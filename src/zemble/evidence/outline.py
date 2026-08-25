@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from zemble.graph.model import TYPE_KINDS, Resolution, Symbol, SymbolKind
 from zemble.graph.provider import GraphProvider, display_name
+from zemble.index.files import detect_language
 
 # Anonymous classes are named `<Type>$anon@<line>` by the extractor. They are noise in
 # an outline: the reader asked what a type declares, not what it instantiates inline.
@@ -146,7 +148,9 @@ def _matches(name: str, pattern: str) -> bool:
 
 def _looks_like_path(target: str) -> bool:
     """Return True if a target reads as a file path rather than a type name."""
-    return "/" in target or "\\" in target or target.endswith(".java")
+    if "/" in target or "\\" in target:
+        return True
+    return "." in target and detect_language(PurePosixPath(target)) is not None
 
 
 def _children(symbols: list[Symbol], container_id: str | None) -> list[Symbol]:
@@ -183,12 +187,12 @@ def _resolve_target(graph: GraphProvider, target: str) -> tuple[list[Symbol], li
         path = target.replace("\\", "/")
         symbols = graph.symbols_in_file(path)
         if not symbols:
-            raise OutlineError(f"No Java symbols indexed for file {target!r}.")
+            raise OutlineError(f"No symbols indexed for file {target!r}.")
         roots = [symbol for symbol in symbols if symbol.kind in TYPE_KINDS and _is_top_level(symbols, symbol)]
         return symbols, roots, path
     candidates = [symbol for symbol in graph.definition(target) if symbol.kind in TYPE_KINDS]
     if not candidates:
-        raise OutlineError(f"No type named {target!r}. Pass a file path to outline a file.")
+        raise OutlineError(f"No type or module named {target!r}. Pass a file path to outline a file.")
     if len({symbol.id for symbol in candidates}) > 1:
         raise OutlineError(f"{target!r} is ambiguous; pass a qualified name or a file path.", candidates)
     root = candidates[0]

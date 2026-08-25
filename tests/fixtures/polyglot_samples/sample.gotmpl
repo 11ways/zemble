@@ -1,0 +1,3 @@
+{{ define "area" }}{{ .X }}{{ end }}
+{{ template "area" . }}
+{{ range .Items }}{{ if .Ok }}{{ .Name }}{{ end }}{{ end }}
