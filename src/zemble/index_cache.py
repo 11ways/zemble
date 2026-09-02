@@ -25,6 +25,7 @@ from zemble.embedding.base import Embedder
 from zemble.embedding.pricing import EmbeddingBudgetExceeded
 from zemble.embedding.registry import load_embedder
 from zemble.index import ZembleIndex
+from zemble.runtime.memory import release_free_heap
 from zemble.types import ContentType
 from zemble.utils import is_git_url
 
@@ -150,6 +151,7 @@ class IndexCache:
         if not is_git_url(source):
             finished = time.monotonic()
             self._revalidate_after[cache_key] = finished + (finished - start) * MIN_REVALIDATE_FACTOR
+        release_free_heap()
         return index
 
     def evict(self, cache_key: CacheKey) -> None:
@@ -159,6 +161,8 @@ class IndexCache:
         self.last_used.pop(cache_key, None)
         if existed and self._on_evict is not None:
             self._on_evict(cache_key)
+        if existed:
+            release_free_heap()
 
     def loaded(self) -> list[tuple[CacheKey, ZembleIndex]]:
         """Return every key whose index is built and available right now, oldest use first."""

@@ -1,4 +1,4 @@
-"""Runtime identity: which code a process runs, and whether the checkout moved under it."""
+"""Runtime identity and the heap trim: what a process runs, and what it hands back."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from zemble.runtime import identity, status_payload
+from zemble.runtime import identity, memory, status_payload
 from zemble.runtime.identity import RuntimeIdentity, git_revision
 from zemble.version import __version__
 
@@ -169,3 +169,20 @@ def test_stale_warning_is_silent_when_current(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(runtime_mcp, "_warned", False)
     monkeypatch.setattr(runtime_mcp, "stale_note", lambda: None)
     assert runtime_mcp.warn_if_stale(now=10.0) is None, "nothing to say about a fresh server"
+
+
+def test_releasing_the_free_heap_is_safe_wherever_it_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trim reports whether it did anything and degrades to a no-op off glibc."""
+    # 1. It answers with a plain bool, whatever this platform's C library offers.
+    assert isinstance(memory.release_free_heap(), bool)
+
+    # 2. Where the symbol is missing (musl, macOS) absence is normal, not an error.
+    monkeypatch.setattr(memory, "_MALLOC_TRIM", None)
+    assert memory.release_free_heap() is False
+
+    # 3. A trim that fails is not a build failure.
+    def refuse(_size: int) -> int:
+        raise OSError("no")
+
+    monkeypatch.setattr(memory, "_MALLOC_TRIM", refuse)
+    assert memory.release_free_heap() is False

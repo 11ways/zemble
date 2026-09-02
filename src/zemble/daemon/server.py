@@ -41,6 +41,7 @@ from zemble.index.symbols import SymbolDefinitions
 from zemble.index.types import PersistencePath, PreviousIndex
 from zemble.index_cache import CacheKey, IndexCache, compute_cache_key
 from zemble.runtime.identity import identity, status_payload
+from zemble.runtime.memory import release_free_heap
 from zemble.types import ContentType
 from zemble.utils import describe_unresolved_location, format_results, is_git_url
 
@@ -298,6 +299,9 @@ class Daemon:
                 self.cache.replace(cache_key, index, cooldown_seconds=elapsed * 3)
         finally:
             self.rebuilding.discard(cache_key)
+        # The index this replaced is unreachable now, and so is everything the build allocated
+        # on the way. Hand it back: a long-lived daemon otherwise stays at its largest build.
+        release_free_heap()
         result: dict[str, Any] = {**counts, "ms": round(elapsed * 1000), "chunks": len(index.chunks)}
         logger.info(
             "rebuilt %s: %d added, %d changed, %d removed, %d chunks in %d ms",
