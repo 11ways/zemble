@@ -105,14 +105,16 @@ def rebuild_index(
     """
     root = Path(cache_key[0])
     content = cache_key[1]
-    # AIDEV-NOTE: nothing here may write into the index that is being served. The vector
-    # matrix is copied because the reused-layout case writes fresh rows straight into it, and
-    # the BM25 index is derived (`for_update`), which shares the previous index's immutable
-    # postings and puts the changes in a delta beside them. That is what lets a query keep
-    # hitting the old index while this runs, with the lock held only for the swap.
+    # AIDEV-NOTE: nothing here may write into the index that is being served. The vector matrix
+    # is handed over UNCOPIED: `_assemble_vectors` copies it itself, at the one point a row is
+    # written, so a rebuild that embeds nothing keeps sharing the previous index's mapping
+    # instead of allocating a private matrix per file event. The BM25 index is derived
+    # (`for_update`), which shares the previous index's immutable postings and puts the changes
+    # in a delta beside them. That is what lets a query keep hitting the old index while this
+    # runs, with the lock held only for the swap.
     previous = PreviousIndex(
         chunks=previous_index.chunks,
-        vectors=previous_index._semantic_index.vectors.copy(),
+        vectors=previous_index._semantic_index.vectors,
         manifest=previous_index._manifest,
         bm25_index=previous_index._bm25_index,
     )

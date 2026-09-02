@@ -90,7 +90,8 @@ class SelectableBasicBackend(CosineBasicBackend):
         Vicinity's own loader reads the whole matrix and then re-normalizes it; the constructor
         normalizes before saving, so the stored rows are already unit length and both passes are
         pure cost. The mapped matrix is read-only, so any caller that writes into ``vectors``
-        (incremental reindexing) must ask for a writable copy.
+        must ask for a writable copy; an incremental build does not, because it copies the
+        matrix itself only once it has a row to write.
 
         :param path: Directory the backend was saved to.
         :param writable: Read the vectors into memory instead of mapping them read-only.

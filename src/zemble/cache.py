@@ -417,8 +417,8 @@ def load_previous_for_incremental(
 
         chunks = list(load_chunks(persistence_path.chunks))
 
-        # Incremental reindexing writes new rows into this matrix, so it cannot be a mapped view.
-        vectors = SelectableBasicBackend.load(persistence_path.semantic_index, writable=True).vectors
+        # Mapped read-only: the build copies this matrix itself if it has a row to write.
+        vectors = SelectableBasicBackend.load(persistence_path.semantic_index).vectors
         bm25_index = BM25.load(persistence_path.bm25_index)
         chunk_count = len(chunks)
         if not (chunk_count == vectors.shape[0] == len(bm25_index.doc_order)):

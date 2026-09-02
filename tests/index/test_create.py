@@ -52,10 +52,14 @@ def test_incremental_reindex_reuses_updates_and_prunes(mock_embedder: Any, tmp_p
     assert semantic_unchanged.vectors is semantic_before.vectors
 
     (tmp_path / "b.py").write_text("def changed_value():\n    return 999\n")
+    previous_vectors_before = previous.vectors.copy()
     bm25_before, semantic_before, chunks_before, manifest_before = create_index_from_path(
         tmp_path, mock_embedder, display_root=tmp_path, previous=previous
     )
-    assert semantic_before.vectors is previous.vectors
+    # A build with a row to embed copies the previous matrix rather than writing into it: the
+    # index that matrix belongs to may still be answering queries.
+    assert semantic_before.vectors is not previous.vectors
+    np.testing.assert_array_equal(previous.vectors, previous_vectors_before)
     previous = PreviousIndex(
         chunks=chunks_before,
         vectors=semantic_before.vectors,

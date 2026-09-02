@@ -224,6 +224,12 @@ def _assemble_vectors(
 ) -> EmbeddingMatrix:
     """Build the vector matrix for a build, copying every reused row out of the previous index.
 
+    AIDEV-NOTE: the previous matrix is copied HERE, at the one place a row is written, and
+    never by the caller. A watched workspace rebuilds on every file event, and the previous
+    matrix is a read-only mapping of vectors.npy: copying it up front turned hundreds of MB
+    of evictable page cache into anonymous heap on the first rebuild, per resident index.
+    A rebuild that embeds nothing now shares the mapping with the index it replaces.
+
     :param total: The number of chunks in the new index.
     :param placements: Each planned file with the row its chunks start at.
     :param fresh_rows: The rows that were embedded this build.
@@ -236,7 +242,9 @@ def _assemble_vectors(
         # A full build embeds every row, so the fresh matrix is already the whole thing.
         return fresh if fresh is not None else np.empty((0, 0), dtype=np.float32)
     if _has_same_vector_layout(manifest, previous.manifest):
-        embeddings = previous.vectors
+        if fresh is None:
+            return previous.vectors
+        embeddings = np.array(previous.vectors, dtype=np.float32)
     else:
         embeddings = np.empty((total, previous.vectors.shape[1]), dtype=np.float32)
         for start, planned in placements:
