@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,7 +63,7 @@ class FileManifestEntry:
 class PreviousIndex:
     """A previously built index, loaded for reuse during incremental reindexing."""
 
-    chunks: list[Chunk]
+    chunks: Sequence[Chunk]
     vectors: EmbeddingMatrix
     manifest: dict[str, FileManifestEntry]
     bm25_index: BM25

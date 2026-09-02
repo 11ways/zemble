@@ -9,6 +9,7 @@ from zemble.chunking import chunk_source
 from zemble.chunking.capsule import CapsuleOptions, RepoRelativePaths
 from zemble.embedding.base import Embedder
 from zemble.index.bm25 import BM25
+from zemble.index.chunk_store import SplicedChunks
 from zemble.index.dense import SelectableBasicBackend, embed_chunks
 from zemble.index.file_walker import WalkedFile, ignored_prefix, walk_entries
 from zemble.index.files import (
@@ -34,6 +35,24 @@ class PlannedFile:
     reused: bool
     chunks: list[Chunk]
     count: int
+    #: For a reused file, the sequence its chunks are still stored in; they are never copied out
+    #: of it, so `chunks` stays empty and the build splices the range instead.
+    source: Sequence[Chunk] | None = None
+
+
+def _reused_file(
+    indexed_path: str, previous_entry: FileManifestEntry, previous_chunks: Sequence[Chunk] | None
+) -> PlannedFile:
+    """Plan a file whose modification time did not move, leaving its chunks where they are."""
+    return PlannedFile(
+        indexed_path,
+        previous_entry.mtime_ns,
+        previous_entry,
+        True,
+        [],
+        previous_entry.count,
+        source=previous_chunks if previous_chunks else None,
+    )
 
 
 def _reindex_file(
@@ -106,8 +125,7 @@ def plan_files(
             previous_entry = previous_manifest.get(indexed_path) if previous_manifest is not None else None
 
             if previous_entry is not None and previous_entry.mtime_ns == mtime_ns:
-                reused = list(previous_chunks[previous_entry.start : previous_entry.end]) if previous_chunks else []
-                planned = PlannedFile(indexed_path, mtime_ns, previous_entry, True, reused, previous_entry.count)
+                planned = _reused_file(indexed_path, previous_entry, previous_chunks)
             else:
                 file_chunks = chunk_source(
                     read_file_text(walked.path),
@@ -172,8 +190,7 @@ def plan_changed_files(
     for indexed_path, previous_entry in manifest.items():
         candidate = touched.pop(indexed_path, None)
         if candidate is None:
-            reused = list(previous_chunks[previous_entry.start : previous_entry.end]) if previous_chunks else []
-            yield PlannedFile(indexed_path, previous_entry.mtime_ns, previous_entry, True, reused, previous_entry.count)
+            yield _reused_file(indexed_path, previous_entry, previous_chunks)
             continue
         planned = _plan_one(candidate, indexed_path, previous_entry, previous_chunks, resolved_capsules, repo_paths)
         if planned is not None:
@@ -200,8 +217,7 @@ def _plan_one(
             return None
         mtime_ns = stat.st_mtime_ns
         if previous_entry is not None and previous_entry.mtime_ns == mtime_ns:
-            reused = list(previous_chunks[previous_entry.start : previous_entry.end]) if previous_chunks else []
-            return PlannedFile(indexed_path, mtime_ns, previous_entry, True, reused, previous_entry.count)
+            return _reused_file(indexed_path, previous_entry, previous_chunks)
         file_chunks = chunk_source(
             read_file_text(file_path),
             indexed_path,
@@ -265,7 +281,7 @@ def create_index_from_path(
     capsules: CapsuleOptions | None = None,
     changed_paths: Iterable[Path] | None = None,
     exclude: Sequence[str] = (),
-) -> tuple[BM25, SelectableBasicBackend, list[Chunk], dict[str, FileManifestEntry]]:
+) -> tuple[BM25, SelectableBasicBackend, Sequence[Chunk], dict[str, FileManifestEntry]]:
     """Create an index from a resolved directory, optionally reusing a previous index's unchanged files.
 
     :param path: Resolved absolute path to index.
@@ -312,21 +328,28 @@ def create_index_from_path(
             )
         )
 
-    chunks: list[Chunk] = []
+    runs: list[tuple[Sequence[Chunk], int, int]] = []
     chunk_ids: list[str] = []
     manifest: dict[str, FileManifestEntry] = {}
     placements: list[tuple[int, PlannedFile]] = []
     fresh_rows: list[int] = []
+    fresh_chunks: list[Chunk] = []
+    start = 0
 
     for planned in plan:
-        start = len(chunks)
         placements.append((start, planned))
-        chunks.extend(planned.chunks)
+        if planned.source is not None and planned.previous_entry is not None:
+            runs.append((planned.source, planned.previous_entry.start, planned.count))
+        elif planned.chunks:
+            runs.append((planned.chunks, 0, planned.count))
         chunk_ids.extend(make_chunk_id(planned.indexed_path, slot) for slot in range(planned.count))
         manifest[planned.indexed_path] = FileManifestEntry(mtime_ns=planned.mtime_ns, start=start, count=planned.count)
         if not planned.reused:
             fresh_rows.extend(range(start, start + planned.count))
+            fresh_chunks.extend(planned.chunks)
+        start += planned.count
 
+    chunks: Sequence[Chunk] = SplicedChunks(runs)
     if not chunks:
         raise ValueError(f"No supported files found under {path}.")
 
@@ -334,7 +357,7 @@ def create_index_from_path(
     # That is what lets the caching embedder see the whole pending set at once - which is
     # where the budget guard lives - and it costs a paid provider one batched pass instead
     # of one request per changed file.
-    fresh = embed_chunks(embedder, [chunks[row] for row in fresh_rows]) if fresh_rows else None
+    fresh = embed_chunks(embedder, fresh_chunks) if fresh_rows else None
     embeddings = _assemble_vectors(len(chunks), placements, fresh_rows, fresh, previous, manifest)
 
     # BM25 is mutated only once the vectors exist: a refused or failed embed must not leave a

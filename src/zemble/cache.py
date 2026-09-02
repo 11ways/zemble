@@ -13,7 +13,7 @@ import orjson
 from zemble.chunking.capsule import CapsuleOptions
 from zemble.embedding.pricing import CONFIRM_ENV
 from zemble.index.bm25 import BM25
-from zemble.index.chunk_store import load_chunks
+from zemble.index.chunk_store import file_paths_of, load_chunks
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.file_walker import walk_entries
 from zemble.index.files import FileStatus, get_extensions, get_file_status
@@ -415,7 +415,9 @@ def load_previous_for_incremental(
             return None
         persistence_path = PersistencePath.from_path(find_index_from_cache_folder(path, content, exclude))
 
-        chunks = list(load_chunks(persistence_path.chunks))
+        # Mapped, not materialized: a build reuses these chunks by reference, and the
+        # verification below reads the path column rather than building 100k Chunk objects.
+        chunks = load_chunks(persistence_path.chunks)
 
         # Mapped read-only: the build copies this matrix itself if it has a row to write.
         vectors = SelectableBasicBackend.load(persistence_path.semantic_index).vectors
@@ -423,11 +425,12 @@ def load_previous_for_incremental(
         chunk_count = len(chunks)
         if not (chunk_count == vectors.shape[0] == len(bm25_index.doc_order)):
             return None
+        stored_paths = file_paths_of(chunks)
         expected_ids: list[str] = []
         next_start = 0
         for indexed_path, entry in manifest.items():
             if entry.start != next_start or any(
-                chunk.file_path != indexed_path for chunk in chunks[entry.start : entry.end]
+                stored_path != indexed_path for stored_path in stored_paths[entry.start : entry.end]
             ):
                 return None
             expected_ids.extend(make_chunk_id(indexed_path, slot) for slot in range(entry.count))

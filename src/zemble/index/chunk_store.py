@@ -8,7 +8,8 @@ materializing anything.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from bisect import bisect_right
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, overload
 
@@ -123,6 +124,118 @@ class ChunkList(Sequence[Chunk]):
         if self._languages is None:
             table = self._language_table
             self._languages = [table[index] if index >= 0 else None for index in self._language_ids.tolist()]
+        return self._languages
+
+
+class SplicedChunks(Sequence[Chunk]):
+    """A chunk sequence stitched from runs of existing sequences, materializing nothing.
+
+    AIDEV-NOTE: this is what keeps a rebuilt index's chunks in the mapped columns. An
+    incremental build reuses almost every file verbatim, and copying those chunks into a list
+    turned the whole :class:`ChunkList` into ~150 MB of Python objects on the first file event,
+    per resident index. Adjacent runs of one source are merged and a spliced source is flattened
+    into its own runs, so a long-lived daemon keeps a handful of runs rather than one per file.
+    """
+
+    def __init__(self, runs: Sequence[tuple[Sequence[Chunk], int, int]]) -> None:
+        """Hold the runs; each is a source sequence, the row it starts at, and how many rows it covers."""
+        self._sources: list[Sequence[Chunk]] = []
+        self._starts: list[int] = []
+        self._offsets: list[int] = [0]
+        for source, start, count in runs:
+            for flat_source, flat_start, flat_count in self._flatten(source, start, count):
+                self._append(flat_source, flat_start, flat_count)
+        self._file_paths: list[str] | None = None
+        self._languages: list[str | None] | None = None
+
+    @staticmethod
+    def _flatten(source: Sequence[Chunk], start: int, count: int) -> Iterator[tuple[Sequence[Chunk], int, int]]:
+        """Expand a run over a spliced source into runs over that source's own sources."""
+        if not isinstance(source, SplicedChunks):
+            yield source, start, count
+            return
+        end = start + count
+        for position, (inner_source, inner_start) in enumerate(zip(source._sources, source._starts)):
+            run_start, run_end = source._offsets[position], source._offsets[position + 1]
+            overlap_start, overlap_end = max(start, run_start), min(end, run_end)
+            if overlap_start < overlap_end:
+                yield inner_source, inner_start + (overlap_start - run_start), overlap_end - overlap_start
+
+    def _append(self, source: Sequence[Chunk], start: int, count: int) -> None:
+        """Add one run, extending the last one instead when it continues the same source."""
+        if count <= 0:
+            return
+        if self._sources and self._sources[-1] is source and self._starts[-1] + self._run_length(-1) == start:
+            self._offsets[-1] += count
+            return
+        self._sources.append(source)
+        self._starts.append(start)
+        self._offsets.append(self._offsets[-1] + count)
+
+    def _run_length(self, position: int) -> int:
+        """The number of rows the run at *position* covers."""
+        return self._offsets[position] - self._offsets[position - 1]
+
+    def __len__(self) -> int:
+        """The number of chunks."""
+        return self._offsets[-1]
+
+    @overload
+    def __getitem__(self, item: int) -> Chunk: ...
+
+    @overload
+    def __getitem__(self, item: slice) -> list[Chunk]: ...
+
+    def __getitem__(self, item: int | slice) -> Chunk | list[Chunk]:
+        """Materialize one chunk, or a list of chunks for a slice."""
+        if isinstance(item, slice):
+            return [self._chunk(row) for row in range(*item.indices(len(self)))]
+        if item < 0:
+            item += len(self)
+        if not 0 <= item < len(self):
+            raise IndexError(item)
+        return self._chunk(item)
+
+    def _chunk(self, row: int) -> Chunk:
+        """Read one row out of the run that holds it."""
+        position = bisect_right(self._offsets, row) - 1
+        return self._sources[position][self._starts[position] + (row - self._offsets[position])]
+
+    def __iter__(self) -> Iterator[Chunk]:
+        """Iterate over every chunk, run by run."""
+        for position, source in enumerate(self._sources):
+            start = self._starts[position]
+            for offset in range(self._offsets[position + 1] - self._offsets[position]):
+                yield source[start + offset]
+
+    def __eq__(self, other: object) -> bool:
+        """Compare element-wise against any other sequence of chunks."""
+        if isinstance(other, Sequence):
+            return len(self) == len(other) and all(mine == theirs for mine, theirs in zip(self, other))
+        return NotImplemented
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def _column(self, of_source: Callable[[Sequence[Chunk]], list[Any]]) -> list[Any]:
+        """Concatenate one whole-index column, reading each run out of its source's own column."""
+        values: list[Any] = []
+        for position, source in enumerate(self._sources):
+            start = self._starts[position]
+            values.extend(of_source(source)[start : start + (self._offsets[position + 1] - self._offsets[position])])
+        return values
+
+    @property
+    def file_paths(self) -> list[str]:
+        """Every chunk's file path, in chunk order, without materializing chunks."""
+        if self._file_paths is None:
+            self._file_paths = self._column(file_paths_of)
+        return self._file_paths
+
+    @property
+    def languages(self) -> list[str | None]:
+        """Every chunk's language, in chunk order, without materializing chunks."""
+        if self._languages is None:
+            self._languages = self._column(languages_of)
         return self._languages
 
 
