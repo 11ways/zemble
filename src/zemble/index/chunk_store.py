@@ -16,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 import orjson
 
-from zemble.index.columnar import StringTable, map_blob, offsets_of
+from zemble.index.columnar import StringTable, atomic_bytes, atomic_save, map_blob, offsets_of
 from zemble.types import Chunk
 
 #: Bumped when the columnar chunk layout changes shape.
@@ -179,16 +179,20 @@ def save_chunks(path: Path, chunks: Sequence[Chunk]) -> None:
         language_ids.append(-1 if language is None else language_index.setdefault(language, len(language_index)))
         lines[row] = (chunk.start_line, chunk.end_line)
 
-    (path / _CONTENT_NAME).write_bytes(b"".join(contents))
-    np.save(path / _CONTENT_OFFSETS_NAME, offsets_of(contents))
-    (path / _CONTEXT_NAME).write_bytes(b"".join(contexts))
-    np.save(path / _CONTEXT_OFFSETS_NAME, offsets_of(contexts))
+    # AIDEV-NOTE: every column is replaced, never truncated in place. A warm daemon keeps these
+    # very files mapped while it persists a rebuild over them, and a plain write_bytes/np.save
+    # rewrites the inode under that mapping: the reader then sees a torn column (or SIGBUS).
+    # That is what `atomic_bytes`/`atomic_save` are for; bm25.py already writes this way.
+    atomic_bytes(path / _CONTENT_NAME, b"".join(contents))
+    atomic_save(path / _CONTENT_OFFSETS_NAME, offsets_of(contents))
+    atomic_bytes(path / _CONTEXT_NAME, b"".join(contexts))
+    atomic_save(path / _CONTEXT_OFFSETS_NAME, offsets_of(contexts))
     StringTable.save(path, _PATHS_TABLE, list(path_index))
     StringTable.save(path, _LANGUAGES_TABLE, list(language_index))
-    np.save(path / _PATH_IDS_NAME, np.array(path_ids, dtype=np.int32))
-    np.save(path / _LANGUAGE_IDS_NAME, np.array(language_ids, dtype=np.int32))
-    np.save(path / _LINES_NAME, lines)
-    (path / _META_NAME).write_bytes(orjson.dumps({"format": _CHUNKS_FORMAT, "n_chunks": len(chunks)}))
+    atomic_save(path / _PATH_IDS_NAME, np.array(path_ids, dtype=np.int32))
+    atomic_save(path / _LANGUAGE_IDS_NAME, np.array(language_ids, dtype=np.int32))
+    atomic_save(path / _LINES_NAME, lines)
+    atomic_bytes(path / _META_NAME, orjson.dumps({"format": _CHUNKS_FORMAT, "n_chunks": len(chunks)}))
 
 
 def load_chunks(path: Path) -> ChunkList:

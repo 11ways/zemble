@@ -16,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 import orjson
 
-from zemble.index.columnar import StringTable
+from zemble.index.columnar import StringTable, atomic_bytes, atomic_save
 from zemble.ranking.boosting import NAMESPACE_CHAIN_RE, defined_symbol_names
 from zemble.types import Chunk
 
@@ -64,8 +64,9 @@ class _NameTable:
             count=int(counts.sum()),
         )
         StringTable.save(path, prefix, names)
-        np.save(path / f"{prefix}{_OFFSETS_SUFFIX}", offsets)
-        np.save(path / f"{prefix}{_CHUNKS_SUFFIX}", chunk_ids)
+        # Replaced, never truncated: a warm process has these columns mapped (see save_chunks).
+        atomic_save(path / f"{prefix}{_OFFSETS_SUFFIX}", offsets)
+        atomic_save(path / f"{prefix}{_CHUNKS_SUFFIX}", chunk_ids)
 
     @classmethod
     def load(cls, path: Path, prefix: str) -> "_NameTable":
@@ -132,7 +133,7 @@ def save_symbol_definitions(path: Path, chunks: Sequence[Chunk]) -> None:
 
     _NameTable.save(path, _GENERAL, general)
     _NameTable.save(path, _SQL, sql)
-    (path / _META_NAME).write_bytes(orjson.dumps({"format": _SYMBOLS_FORMAT, "n_chunks": len(chunks)}))
+    atomic_bytes(path / _META_NAME, orjson.dumps({"format": _SYMBOLS_FORMAT, "n_chunks": len(chunks)}))
 
 
 def symbol_files(path: Path) -> list[Path]:
