@@ -3,7 +3,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from zemble.index.chunk_store import ChunkList, file_paths_of, languages_of, load_chunks, save_chunks
+from zemble.index.chunk_store import (
+    ChunkList,
+    SplicedChunks,
+    file_paths_of,
+    languages_of,
+    load_chunks,
+    save_chunks,
+)
 from zemble.types import Chunk
 
 
@@ -76,3 +83,39 @@ def test_empty_chunk_list_roundtrips(tmp_path: Path) -> None:
 
     assert len(loaded) == 0
     assert list(loaded) == []
+
+
+def test_spliced_chunks_read_like_the_sequence_they_stand_in_for(tmp_path: Path) -> None:
+    """A rebuild's spliced chunks answer exactly as the list they replace, run by run."""
+    stored = _chunks()
+    save_chunks(tmp_path, stored)
+    mapped = load_chunks(tmp_path)
+    replacement = [
+        Chunk(content="def b():\n    return 22\n", file_path="src/a.py", start_line=4, end_line=6, language="python"),
+        Chunk(content="def c():\n    return 3\n", file_path="src/a.py", start_line=8, end_line=9, language="python"),
+    ]
+    # src/a.py's second chunk was re-chunked into two; everything around it is reused.
+    spliced = SplicedChunks([(mapped, 0, 1), (replacement, 0, 2), (mapped, 2, 2)])
+    expected = [stored[0], *replacement, stored[2], stored[3]]
+
+    # 1. Every way of reading the sequence agrees with the list it stands in for.
+    assert len(spliced) == len(expected)
+    assert list(spliced) == expected, "iteration walks the runs in order"
+    assert [spliced[row] for row in range(len(spliced))] == expected, "indexing resolves the right run"
+    assert spliced[-1] == expected[-1] and spliced[1:4] == expected[1:4]
+    assert spliced == expected, "it compares equal to the plain list"
+    assert file_paths_of(spliced) == [chunk.file_path for chunk in expected]
+    assert languages_of(spliced) == [chunk.language for chunk in expected]
+    with pytest.raises(IndexError):
+        spliced[len(expected)]
+
+    # 2. Runs of one source that continue each other are merged, so a no-op rebuild keeps one run.
+    unchanged = SplicedChunks([(mapped, 0, 2), (mapped, 2, 2)])
+    assert list(unchanged) == stored
+    assert len(unchanged._sources) == 1, "adjacent runs of the same source collapse"
+
+    # 3. A second generation flattens onto the original sources instead of nesting.
+    generation_two = SplicedChunks([(spliced, 0, 3), (spliced, 3, 2)])
+    assert list(generation_two) == expected
+    assert all(source is not spliced for source in generation_two._sources), "no spliced source survives"
+    assert len(generation_two._sources) == len(spliced._sources)
