@@ -190,3 +190,31 @@ def test_cli_prefers_the_daemon_and_falls_back_when_it_is_gone(
     captured = capsys.readouterr()
     assert "daemon unavailable (not running (ENOENT)); running in-process" in captured.err, "step 2: one honest line"
     assert captured.out.startswith("# Home for: compute an area"), "step 2: answered here instead"
+
+
+def test_mcp_tool_reports_a_refusal_as_the_answer(workspace: Path, cache: IndexCache) -> None:
+    """A refused build is the answer an agent has to read, on both lanes, never a tool error.
+
+    `home` caught only ConfigError, so for days the one tool this workspace makes mandatory
+    before designing a mechanism answered a deliberate refusal with a stack trace.
+    """
+    from zemble.daemon import client
+    from zemble.daemon.protocol import CommandRefused
+    from zemble.graph import cli as graph_cli
+    from zemble.index.scope import OversizedRootRefused
+
+    refusal = "Refusing to index /some/path: 4,000 files, 412.0 MB of source. Exclude paths with .zembleignore"
+
+    # 1. The daemon lane: a CommandRefused comes back as its own text.
+    graph_cli._refreshed.clear()
+    with patch.object(client, "call", side_effect=CommandRefused(refusal)):
+        server = create_server(cache)
+        answer = asyncio.run(server.call_tool("home", {"description": "an area", "repo": str(workspace)}))
+    assert refusal in answer[0].text, f"step 1: the daemon's refusal reaches the caller, got {answer[0].text}"
+
+    # 2. The in-process lane: the same refusal, raised by the guard itself, reads the same.
+    graph_cli._refreshed.clear()
+    with patch("zemble.mcp.ZembleIndex.from_path", side_effect=OversizedRootRefused(refusal)):
+        server = create_server(cache)
+        answer = asyncio.run(server.call_tool("home", {"description": "an area", "repo": str(workspace)}))
+    assert refusal in answer[0].text, f"step 2: the in-process refusal reads the same, got {answer[0].text}"

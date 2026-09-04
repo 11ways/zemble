@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
 
+from zemble.daemon.protocol import CommandRefused
 from zemble.graph.cli import ensure_graph
 from zemble.graph.provider import SqliteGraphProvider
 from zemble.home.answers import DEFAULT_TOP_K, home_payload
@@ -76,7 +77,10 @@ def register_home_tool(server: FastMCP, get_index: IndexGetter) -> None:
             if payload is None:
                 index = await get_index(repo, HOME_CONTENT)
                 payload = await asyncio.to_thread(_here, index, repo, description, top_k)
-        except ConfigError as error:
+        # A refusal is the answer, on both lanes: the daemon raises CommandRefused and the
+        # in-process one arrives as the ValueError `zemble.mcp._get_index` wraps a refusal in.
+        # An agent has to be able to read the reason and act on it, not a stack trace.
+        except (ConfigError, CommandRefused, ValueError) as error:
             return str(error)
         return str(payload["markdown"])
 

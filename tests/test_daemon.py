@@ -971,3 +971,24 @@ def test_daemon_log_handler_rotates(tmp_path: Path) -> None:
     backups = sorted(p.name for p in log_file.parent.iterdir() if p.name != log_file.name)
     assert len(backups) <= LOG_BACKUP_COUNT, "no more than the declared number of backups survives"
     assert all(p.stat().st_size <= LOG_MAX_BYTES for p in log_file.parent.iterdir()), "every file is bounded"
+
+
+@pytest.mark.anyio
+async def test_a_refused_command_logs_its_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refusal writes down WHY: `Command 'home' refused` and nothing else diagnosed nothing.
+
+    Only the client saw the numbers, so 322 refusals in the daemon log named neither the guard
+    that fired nor the tree it measured.
+    """
+    workspace = _fat_workspace(tmp_path / "work")
+    monkeypatch.setenv(WORK_LIMIT_ENV, "1")
+    daemon = _daemon_with_fake_embedder(watch=False)
+    with caplog.at_level("WARNING", logger="zemble.daemon.server"):
+        response = await daemon.handle({"cmd": "search", "args": {"path": str(workspace), "query": "app"}})
+    assert response["kind"] == ErrorKind.REFUSED.value, "the wire vocabulary still says refused"
+    logged = [record.getMessage() for record in caplog.records]
+    assert any("Refusing to index" in line and "may chunk" in line for line in logged), (
+        f"the refusal's own reason has to reach the log, got {logged}"
+    )

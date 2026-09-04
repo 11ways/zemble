@@ -394,7 +394,9 @@ class Daemon:
         except Exception as exc:
             refused = isinstance(exc, REFUSAL_TYPES)
             kind = ErrorKind.REFUSED if refused else ErrorKind.FAILED
-            logger.warning("Command %r %s", command, "refused" if refused else "failed", exc_info=not refused)
+            # A refusal carries no traceback worth printing, but it does carry the numbers and
+            # the knob that decided it. Logging only "refused" left 322 log lines saying nothing.
+            logger.warning("Command %r %s: %s", command, "refused" if refused else "failed", exc, exc_info=not refused)
             message = str(exc) if refused else f"{type(exc).__name__}: {exc}"
             return {"id": request_id, "ok": False, "error": message, "kind": kind.value}
         finally:
