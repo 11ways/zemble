@@ -14,7 +14,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from zemble.chunking.capsule import CapsuleOptions
 from zemble.embedding.base import Embedder
 from zemble.embedding.pricing import CONFIRM_ENV, confirmed, embedder_family, remedies
 from zemble.index.file_walker import _DEFAULT_IGNORED_DIRS, walk_entries
@@ -45,6 +44,15 @@ class ScopeRefused(RuntimeError):
     One base class so every surface - the CLI, the MCP tools and the daemon wire - can tell a
     refusal, which is the same answer in every process, from a failure, which may not be.
     """
+
+    def __init__(self, message: str, knob: str = CONFIRM_ENV) -> None:
+        """Refuse a root, carrying the ceiling's own environment variable rather than a guess.
+
+        :param message: The refusal text, which already names the ceiling in its own unit.
+        :param knob: The environment variable that raises the ceiling this refusal hit.
+        """
+        super().__init__(message)
+        self.knob = knob
 
 
 class BroadRootRefused(ScopeRefused):
@@ -211,7 +219,7 @@ def require_affordable_scope(
     embedder: Embedder,
     content: Sequence[ContentType] = (ContentType.CODE,),
     exclude: Sequence[str] = (),
-    capsules: CapsuleOptions | None = None,
+    previous_manifest: dict[str, object] | None = None,
 ) -> TreeEstimate:
     """Refuse a build whose walk alone is more source than one build may chunk.
 
@@ -224,7 +232,8 @@ def require_affordable_scope(
     :param embedder: The embedder the build resolved, named in the refusal.
     :param content: The content types the build will index.
     :param exclude: Extra gitignore-style patterns this build was told to skip.
-    :param capsules: The capsule configuration, used to find the previous index's manifest.
+    :param previous_manifest: The manifest the build itself will reuse from, whose unchanged
+        files are not work; None means a build that reuses nothing.
     :return: The estimate, so a caller may log what it just approved.
     :raises OversizedRootRefused: If the walk exceeds the work limit and nothing confirmed it.
     """
@@ -233,13 +242,10 @@ def require_affordable_scope(
     # honest for WORK, which is what this guard measures, and it is void for MONEY: a lower bound
     # on bytes says nothing about a bill once the content-addressed cache has already paid for
     # most of the chunks those bytes produce. Pricing these bytes is what refused `home` for days.
-    from zemble.cache import load_manifest_for_incremental
-
     resolved = Path(root).expanduser().resolve()
     if confirmed() or work_limit_bytes() <= 0:
         return TreeEstimate(root=resolved, files=0, bytes=0, children=())
-    manifest = load_manifest_for_incremental(str(resolved), embedder.model_id, content, capsules, exclude)
-    estimate = estimate_tree(resolved, content, exclude, manifest)
+    estimate = estimate_tree(resolved, content, exclude, previous_manifest)
     if not exceeds_work_limit(estimate.bytes):
         return estimate
     family = embedder_family(embedder)
@@ -248,7 +254,8 @@ def require_affordable_scope(
         f"{estimate.files:,} files, {_megabytes(estimate.bytes)} of source exceeds the "
         f"{_megabytes(work_limit_bytes())} this build may chunk. Nothing was parsed or embedded.\n"
         f"{estimate.breakdown()}\n"
-        f"{remedies(resolved, WORK_LIMIT_ENV)}"
+        f"{remedies(resolved, WORK_LIMIT_ENV)}",
+        WORK_LIMIT_ENV,
     )
 
 

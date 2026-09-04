@@ -23,7 +23,6 @@ from zemble.index.chunk_store import file_paths_of, languages_of, load_chunks, r
 from zemble.index.create import create_index_from_path
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.files import read_file_text
-from zemble.index.scope import require_affordable_scope, require_declared_scope
 from zemble.index.symbols import SymbolDefinitions, save_symbol_definitions
 from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath
 from zemble.index.view import IndexView
@@ -268,9 +267,7 @@ class ZembleIndex:
         if cache_path:
             return cls.load_from_disk(cache_path, embedder=resolved)
 
-        require_declared_scope(path)
         path = path.resolve()
-        require_affordable_scope(path, resolved, normalized, exclude, resolved_capsules)
         previous = load_previous_for_incremental(str(path), resolved.model_id, normalized, resolved_capsules, exclude)
         bm25_index, semantic_index, chunks, manifest = create_index_from_path(
             path,

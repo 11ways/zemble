@@ -315,6 +315,42 @@ async def test_a_refused_paid_rebuild_leaves_the_old_index_serving(
 
 
 @pytest.mark.anyio
+async def test_the_watcher_rebuild_passes_the_same_scope_guard_as_the_cli(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dump into a watched tree is refused by the work guard: one seam, both lanes.
+
+    Before this, `require_affordable_scope` sat above `ZembleIndex.from_path` only, and the
+    daemon's rebuild reached `create_index_from_path` directly - so the CLI was refused while
+    the daemon chunked and embedded the very same tree, unguarded, minutes later.
+    """
+    daemon = _daemon_with_fake_embedder(watch=False)
+
+    # 1. The tree is resident and answering.
+    cache_key, index = await daemon.index_for({"path": str(tmp_project)})
+    assert index.search("authenticate"), "step 1: the root is being served"
+
+    # 2. More source than the ceiling lands under the watched root: the rebuild refuses it.
+    _vendored_source(tmp_project)
+    monkeypatch.setenv(WORK_LIMIT_ENV, "1")
+    outcome = await daemon.rebuild(cache_key)
+    assert "refused" in outcome, f"step 2: the rebuild must report a refusal, got {outcome}"
+    assert "may chunk" in outcome["refused"], "step 2: refused as work, in megabytes, not as a bill"
+    assert outcome["knob"] == WORK_LIMIT_ENV, "step 2: the refusal names the ceiling that refused it"
+
+    # 3. Nothing was swapped, so the index from before the dump still answers.
+    served = await daemon.cache.get(str(tmp_project))
+    assert served.search("authenticate"), "step 3: the previous index still answers"
+    assert daemon.last_error[cache_key]["refused"] == outcome["refused"], "step 3: status carries the refusal"
+
+    # 4. With room to work again, the same rebuild takes the whole dump in.
+    monkeypatch.delenv(WORK_LIMIT_ENV)
+    result = await daemon.rebuild(cache_key)
+    assert result["added"] == 12, f"step 4: the deferred files are picked up, got {result}"
+    assert cache_key not in daemon.last_error, "step 4: a successful rebuild clears the refusal"
+
+
+@pytest.mark.anyio
 async def test_rebuild_of_an_unloaded_root_is_a_no_op(tmp_project: Path) -> None:
     """Rebuilding a root that is not resident does nothing rather than building it."""
     daemon = _daemon_with_fake_embedder(watch=False)
@@ -825,14 +861,19 @@ async def test_a_sub_path_is_served_from_the_loaded_workspace_index(tmp_path: Pa
     daemon.shutdown()
 
 
+def _vendored_source(root: Path, files: int = 12) -> Path:
+    """Fill `vendored/` with more source than a 1 MB work ceiling allows one build to chunk."""
+    (root / "vendored").mkdir(exist_ok=True)
+    for index in range(files):
+        (root / "vendored" / f"copy_{index}.py").write_text("x = 1\n" * 16_000, encoding="utf-8")
+    return root
+
+
 def _fat_workspace(root: Path, files: int = 12) -> Path:
     """Write a workspace whose `vendored/` directory dwarfs its `src/` and beats a 1 MB ceiling."""
     (root / "src").mkdir(parents=True)
     (root / "src" / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
-    (root / "vendored").mkdir()
-    for index in range(files):
-        (root / "vendored" / f"copy_{index}.py").write_text("x = 1\n" * 16_000, encoding="utf-8")
-    return root
+    return _vendored_source(root, files)
 
 
 def _raw_request(request: dict[str, Any]) -> dict[str, Any]:

@@ -32,7 +32,7 @@ from zemble.daemon.protocol import (
     socket_path,
 )
 from zemble.daemon.watch import IgnoreRules, RootWatcher
-from zemble.embedding.pricing import BUDGET_ENV, EmbeddingBudgetExceeded
+from zemble.embedding.pricing import EmbeddingBudgetExceeded
 from zemble.graph.facts import matches_facts_glob
 from zemble.index import ScopeRefused, ZembleIndex
 from zemble.index.create import create_index_from_path
@@ -53,7 +53,10 @@ Handler = Callable[["Daemon", dict[str, Any]], Awaitable[Any]]
 # AIDEV-NOTE: a deterministic "no" is not an outage. Answering the same request in the
 # client's own process refuses identically, so the wire says REFUSED and the client stops
 # instead of paying for a second full build to be told the same thing.
-REFUSAL_TYPES: tuple[type[BaseException], ...] = (ScopeRefused, EmbeddingBudgetExceeded)
+REFUSAL_TYPES: tuple[type[ScopeRefused] | type[EmbeddingBudgetExceeded], ...] = (
+    ScopeRefused,
+    EmbeddingBudgetExceeded,
+)
 
 #: Java is watched on top of the index's own extensions so the symbol graph stays fresh.
 _GRAPH_EXTENSIONS = frozenset({".java"})
@@ -286,11 +289,11 @@ class Daemon:
                     return {"skipped": "not loaded"}
                 try:
                     index, counts = await asyncio.to_thread(rebuild_index, current, cache_key, changed_paths)
-                except EmbeddingBudgetExceeded as exc:
-                    # Nothing was embedded and nothing was swapped, so the index that was
-                    # serving this root before is still the one serving it now.
+                except REFUSAL_TYPES as exc:
+                    # Nothing was chunked, embedded or swapped, so the index that was serving
+                    # this root before is still the one serving it now.
                     logger.warning("refused to rebuild %s: %s", cache_key[0], exc)
-                    refusal = {"refused": str(exc), "at": time.time(), "budget_env": BUDGET_ENV}
+                    refusal = {"refused": str(exc), "at": time.time(), "knob": exc.knob}
                     self.last_error[cache_key] = refusal
                     return refusal
                 elapsed = time.monotonic() - started

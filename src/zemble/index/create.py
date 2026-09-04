@@ -19,6 +19,7 @@ from zemble.index.files import (
     get_file_status,
     read_file_text,
 )
+from zemble.index.scope import require_affordable_scope, require_declared_scope
 from zemble.index.sparse import enrich_for_bm25
 from zemble.index.types import FileManifestEntry, PreviousIndex, make_chunk_id
 from zemble.tokens import tokenize
@@ -301,6 +302,16 @@ def create_index_from_path(
     bm25_index = previous.bm25_index.for_update() if previous is not None else BM25()
     previous_manifest = previous.manifest if previous is not None else {}
     resolved_capsules = CapsuleOptions.resolve(capsules)
+    normalized = (content,) if isinstance(content, ContentType) else tuple(content)
+
+    # AIDEV-NOTE: the scope guards live HERE, at the one construction seam every lane passes,
+    # rather than in ZembleIndex.from_path: the daemon's watcher rebuild calls this function
+    # directly, so a guard installed above it refused the CLI while the daemon chunked the same
+    # tree unguarded. Measured against `previous_manifest` - the manifest this build will really
+    # reuse from - so the guard can never approve an incremental build the build then does in
+    # full because the previous index turned out to be unusable.
+    require_declared_scope(path)
+    require_affordable_scope(path, embedder, normalized, exclude, previous_manifest or None)
 
     if previous is not None and changed_paths is not None:
         plan = list(
