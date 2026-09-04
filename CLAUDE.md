@@ -85,7 +85,7 @@ overwrite each other. Never tune on individual eval queries.
 - Secrets: `VOYAGE_API_KEY` lives in `~/.config/zemble/env` (mode 600) on the dev
   machine; load with `set -a; . ~/.config/zemble/env; set +a`. Never print it, never
   put it on a command line, never write it into the repo, logs, or docs.
-- Paid embedders are budget-guarded (`ZEMBLE_EMBED_BUDGET_TOKENS`, refusal before any request); `zemble embed-status <path>` reports what a build would embed and cost, embedding nothing.
+- Two guards, two units: runaway WORK is refused from the walk in bytes (`ZEMBLE_INDEX_WORK_LIMIT_MB`, 180 MB, every embedder) and a runaway BILL is refused from the uncached set in money (`ZEMBLE_EMBED_BUDGET_USD`, $5.00; `ZEMBLE_EMBED_BUDGET_TOKENS` caps a model with no documented price). Never price bytes: the embedding cache is invisible before chunking. `zemble embed-status <path>` reports both ceilings and the verdict, embedding nothing.
 - Caches: `~/.cache/zemble/` (indexes, `embeddings/*.sqlite`, `javac-facts/`,
   `daemon.log`); daemon socket `$XDG_RUNTIME_DIR/zemble/daemon.sock`. The embedding
   cache is keyed by chunk text + dims: changing capsule text means a full re-embed.

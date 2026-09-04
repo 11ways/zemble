@@ -206,48 +206,67 @@ would-be-embedded texts are already paid for. It **never embeds anything**, neve
 contacts a provider (not even to learn a model's vector width) and needs no API key.
 
 It reports chunks total / reusable from the previous index / cached / uncached, the
-estimated tokens and cost for the uncached ones, the cache file, the embedder, and
-whether the budget below would refuse the build.
+estimated tokens and cost for the uncached ones, the cache file, the embedder, the source
+volume a build would chunk against the work ceiling, the spending ceilings, and whether a
+build would be refused. The verdict covers **both** guards below, because a report that
+knew only about the bill once called a build affordable that the work guard refused.
+
+```
+work       1.3 MB of source to chunk, against a 180.0 MB ceiling
+budget     $5.00
+verdict    a build would be allowed
+```
+
+A repeated chunk is billed once, the way the caching embedder buys it: duplicate texts
+inside one call share a single provider slot.
 
 On the javaweb workspace (77,092 chunks) a cold pass costs about 11 s of chunking plus
 0.3 s of cache lookup; when the previous index covers every file the walk alone answers
 in well under a second.
 
-### The budget
+### The two guards
 
-The budget is enforced twice: once from the walk alone, before a single file is parsed,
-and once from the exact uncached set, before a single request is sent.
+Two different harms, two guards, two units: **refuse work by work, refuse money by money.**
+Only the cache-aware number gates money.
 
-#### 1. The pre-parse size guard (every embedder, local included)
+| Harm | Guard | Where | Unit | Applies to |
+| --- | --- | --- | --- | --- |
+| runaway WORK (minutes of chunking) | `require_affordable_scope` | `index/scope.py`, pre-parse | BYTES of source a build would chunk | every embedder, local included |
+| runaway BILL | `check_budget` | `embedding/pricing.py`, post-chunk | USD of the UNCACHED texts | remote, priced embedders |
+
+The pre-parse guard cannot know a bill. The content-addressed embedding cache is invisible
+to it by construction - there is no chunk text to hash yet - so a tree whose chunks were all
+paid for last week looks exactly like a tree nobody has ever indexed. Pricing those bytes
+anyway is what refused `home` on a workspace whose real bill was $0.000016.
+
+#### 1. The pre-parse work guard (every embedder, local included)
 
 Before a local index is chunked, the tree is walked - the same walker a build uses, so
 the same `.gitignore`, `.zembleignore`, default-ignored directories and 1 MB file cap
-apply - and its bytes are turned into tokens at the same characters / 3.6 density. Files
-a previous index already covers unchanged are left out, because a build would reuse them
-without embedding anything, so an incremental rebuild is never refused for the size of
-the tree it already indexed. Over budget is an `OversizedRootRefused`, and **nothing is
-parsed**:
+apply. Files a previous index already covers unchanged are left out, because a build would
+reuse them without embedding anything, so an incremental rebuild is never refused for the
+size of the tree it already indexed. Over the ceiling is an `OversizedRootRefused`, and
+**nothing is parsed**:
 
 ```
 Refusing to index /home/me/sketerm with model2vec:minishlab/potion-code-16M-v2: 7,372
-files, 253.4 MB, ~70,386,261 estimated tokens exceeds the budget of 50,000,000 tokens.
-Nothing was parsed or embedded.
+files, 253.4 MB of source exceeds the 180.0 MB this build may chunk. Nothing was parsed
+or embedded.
   zig-pkg/                    6821 files  234.0 MB  (~92%)
   src/                         461 files  17.9 MB  (~7%)
-  vendor/                       79 files   1.3 MB  (~1%)
+  vendor/                       79 files  1.3 MB  (~1%)
 Exclude paths with /home/me/sketerm/.zembleignore (gitignore syntax), or point repo at a
-sub-path such as /home/me/sketerm/src, or raise ZEMBLE_EMBED_BUDGET_TOKENS / set
+sub-path such as /home/me/sketerm/src, or raise ZEMBLE_INDEX_WORK_LIMIT_MB / set
 ZEMBLE_EMBED_CONFIRM=1 (--yes on the CLI) in the environment of the process that builds
 (a running daemon does not see a client's environment; restart it).
 ```
 
-The ceiling is `ZEMBLE_EMBED_BUDGET_TOKENS` when it is set - one knob for both lanes,
-because a caller who names a ceiling means it whatever the embedder is. Only the DEFAULT
-differs, because the two lanes are refused for different reasons: **2,000,000 tokens for a
-paid embedder** (a bill of a few tens of cents) and **50,000,000 for a local one**
-(~180 MB of source, i.e. where runaway *work* begins). A real multi-repo workspace is
-normal local work and is not refused: javaweb measures 7,130 files, 46.2 MB, ~12.8M tokens.
-The tree above, which carries thirteen copies of its own source in a package directory, is.
+The ceiling is `ZEMBLE_INDEX_WORK_LIMIT_MB`, named in MEGABYTES because that is the unit a
+human reads a tree in, and it defaults to **180 MB of source** - where runaway work begins.
+A real multi-repo workspace is ordinary work and is not refused: javaweb measures 9,039
+files and 64.0 MB of code, 78.7 MB with docs and config. The tree above, which carries
+thirteen copies of its own source in a package directory, is refused. `0` or less disables
+the guard. It names no price and no token count: it cannot know either.
 
 This guard exists because the expensive half of an oversized build is the parse, not the
 embed: on a 414 MB tree, chunking took 94 s before the old post-chunk guard could refuse,
@@ -256,38 +275,63 @@ completion. The walk itself takes 0.2 s.
 
 The byte estimate is a *lower* bound on what is embedded - a context capsule adds a
 header to every chunk, measured at +21% on this repository and +52% on the small test
-fixture tree - so this guard refuses only what is certainly over budget, and the exact
-check below still stands behind it.
+fixture tree. That is honest for work, and void for money.
 
-#### 2. The post-chunk guard (remote embedders)
+Both scope guards sit at `create_index_from_path`, the one construction seam every index
+build passes, so the daemon's watcher rebuild is judged by exactly the same rule as the
+CLI. Before that they sat above `ZembleIndex.from_path` only, and the daemon re-chunked
+and re-embedded, unguarded, the very tree the CLI had just been refused.
 
-Before a **remote** embedder embeds a batch of uncached documents, the whole pending
-set is estimated and compared with `ZEMBLE_EMBED_BUDGET_TOKENS` (default 2,000,000,
-roughly one full javaweb index). Over budget is a loud `EmbeddingBudgetExceeded` naming
-the estimate, the price, the budget and the ways out, and **nothing is sent**:
+#### 2. The post-chunk bill guard (remote embedders)
+
+Before a **remote** embedder embeds a batch of uncached documents, the whole pending set -
+and only that set, the cached texts are already excluded - is priced and compared with
+`ZEMBLE_EMBED_BUDGET_USD` (default **$5.00**). That is 16x a full javaweb index at
+`voyage-4-lite` ($0.31) and 2.7x the same index at the dearest code model ($1.86), so a
+legitimate workspace index never prompts and a runaway still does. Over budget is a loud
+`EmbeddingBudgetExceeded` naming the estimate, the cost, the ceiling and the ways out, and
+**nothing is sent**:
 
 ```
-Refusing to embed 61,000 uncached chunk(s) with voyage:voyage-4-lite@1024: ~15,500,000
-estimated tokens (~$0.31) exceeds the budget of 2,000,000 tokens. Exclude paths with
-<root>/.zembleignore (gitignore syntax), or point repo at a sub-path such as <root>/src,
-or raise ZEMBLE_EMBED_BUDGET_TOKENS / set ZEMBLE_EMBED_CONFIRM=1 (--yes on the CLI) in
-the environment of the process that builds (a running daemon does not see a client's
-environment; restart it).
+Refusing to embed 640000 uncached chunk(s) with voyage:voyage-code-4@1024: ~250,000,000
+estimated tokens (~$30.00) exceeds the budget of $5.00 (ZEMBLE_EMBED_BUDGET_USD). Exclude
+paths with <root>/.zembleignore (gitignore syntax), or point repo at a sub-path such as
+<root>/src, or raise ZEMBLE_EMBED_BUDGET_USD / set ZEMBLE_EMBED_CONFIRM=1 (--yes on the
+CLI) in the environment of the process that builds (a running daemon does not see a
+client's environment; restart it).
 ```
+
+A model with **no documented price** cannot be billed, so its VOLUME is capped instead:
+`ZEMBLE_EMBED_BUDGET_TOKENS`, default 2,000,000 tokens, which is $0.26 even at the dearest
+documented rate. This is fail-closed - an unknown price is never treated as free and never
+as unlimited - and the refusal says so:
+
+```
+Refusing to embed 9000 uncached chunk(s) with openai:http://localhost:11434/v1#nomic-embed-text:
+~2,500,000 estimated tokens exceeds the ceiling of 2,000,000 tokens for a model with no
+documented price (ZEMBLE_EMBED_BUDGET_TOKENS). ...
+```
+
+`ZEMBLE_EMBED_BUDGET_TOKENS`, when a caller sets it deliberately, is an additional cap on a
+priced model too: a caller who names a token ceiling means it. Set either knob to `0` or
+less to disable that half alone. A free (local) model is capped by neither: it is the work
+guard's business.
 
 Both refusals name the same three remedies, in the same order, from one helper: exclude
-paths, narrow the root, or raise/confirm the budget. The first two work from inside a
-tool call; the third needs the environment of whichever process builds.
+paths, narrow the root, or raise/confirm the ceiling that refused. The first two work from
+inside a tool call; the third needs the environment of whichever process builds.
 
 - The check sits in the caching embedder, at the one point where the uncached set for a
   whole build is known, so the CLI, the MCP server and the daemon all inherit it. It is
   never per 512-text slice.
-- Local embedders are never gated, with or without a confirmation.
-- `zemble search`, `zemble stats` and `zemble find-related` take `-y/--yes`; in-process
-  they print the refusal and exit non-zero.
-- The daemon catches a refusal, logs one line, keeps the previous index serving (nothing
-  is embedded and nothing is swapped) and shows it in `zemble daemon status` as the
-  root's `last_error`.
+- Local embedders are never billed, with or without a confirmation.
+- Every subcommand that can reach an index build takes `-y/--yes`: `search`, `stats`,
+  `find-related`, `explain` and `home`. In-process they print the refusal and exit
+  non-zero. `outline`, `signatures`, `graph` and `dupes` answer from the symbol graph and
+  never build one, which a drift test proves by running each with the build seam trip-wired.
+- The daemon catches a refusal, logs the refusal's own text (not just "refused"), keeps the
+  previous index serving (nothing is chunked, embedded or swapped) and shows it in
+  `zemble daemon status` as the root's `last_error`.
 - A refusal travels the daemon protocol as `{"ok": false, "kind": "refused", ...}` and
   raises `CommandRefused` in the client. Callers report it instead of falling back
   in-process: the same request refuses identically in every process, and rebuilding it
@@ -317,10 +361,11 @@ requests for paths such as `~/projects` without blocking a declared workspace su
 `javaweb`.
 
 The refusal names the root and all ways out: search a narrower project, declare the
-workspace, or deliberately override both this check and the embedding budget with
-`--yes` / `ZEMBLE_EMBED_CONFIRM=1`. It shares a base class, `ScopeRefused`, with the
-size guard above, which is what lets every surface treat both as deliberate answers. A confirmed CLI request runs in-process because an
-already-running daemon cannot inherit an environment decision made by its client.
+workspace, or deliberately override this check, the work ceiling and the budget at once
+with `--yes` / `ZEMBLE_EMBED_CONFIRM=1`. It shares a base class, `ScopeRefused`, with the
+work guard above, which is what lets every surface treat both as deliberate answers. A
+confirmed CLI request runs in-process because an already-running daemon cannot inherit an
+environment decision made by its client.
 
 ### Prices
 

@@ -155,12 +155,15 @@ export ZEMBLE_RERANK_K=50
 **Before a first paid index, run `zemble embed-status <path>`.** It chunks the tree the
 way a build would and reports how many chunks are already cached, how many would be
 embedded, and what those cost at the model's list price - without embedding anything or
-needing a key. A build that would spend more than `ZEMBLE_EMBED_BUDGET_TOKENS` is refused
-before a single request, naming the estimate and how to proceed. The same ceiling is
-checked once more from the walk alone, before any file is parsed, for every embedder
-including the local ones - a tree big enough to refuse is a tree big enough for the parse
-to take minutes. The default is 2,000,000 tokens for a paid embedder and 50,000,000 for a
-local one; see [docs/embedders.md](docs/embedders.md#cost-visibility-and-the-budget-guard).
+needing a key. Two guards stand behind it, in two units. A build whose UNCACHED texts would
+cost more than `ZEMBLE_EMBED_BUDGET_USD` (default $5.00) is refused before a single request,
+naming the cost and how to proceed; a model with no documented price is capped by volume
+instead, at `ZEMBLE_EMBED_BUDGET_TOKENS` (default 2,000,000). Separately, and for every
+embedder including the local ones, a tree holding more than `ZEMBLE_INDEX_WORK_LIMIT_MB` of
+source (default 180 MB) is refused from the walk alone, before any file is parsed - a tree
+big enough to refuse is a tree big enough for the parse to take minutes. Bytes are work, not
+a bill: what a build costs is decided from the uncached set, never from the size of the
+tree. See [docs/embedders.md](docs/embedders.md#cost-visibility-and-the-budget-guard).
 
 Put those lines in `~/.config/zemble/env` (mode 600; or point `ZEMBLE_ENV_FILE` at another
 file) and zemble loads them itself at startup for the CLI, the MCP server and the daemon;

@@ -238,14 +238,17 @@ The daemon is an accelerator, never a requirement.
 - Any failure (cannot start, connection lost, protocol error) raises `DaemonError`,
   and the caller answers in-process after one stderr line:
   `daemon unavailable (<reason>); running in-process`.
-- **A refusal is not an outage.** A deliberate, deterministic "no" - a root too broad
-  (`ScopeRefused`) or too big for the token budget (`EmbeddingBudgetExceeded`) - is
+- **A refusal is not an outage.** A deliberate, deterministic "no" - a root too broad or
+  holding more source than one build may chunk (`ScopeRefused`) or a bill over the budget
+  (`EmbeddingBudgetExceeded`) - is
   answered as `{"ok": false, "kind": "refused", "error": ...}` and raises `CommandRefused`
   (a `CommandFailed`) in the client. Callers surface it instead of falling back: the same
   request refuses identically in this process, so a fallback would pay for a full,
   minutes-long build only to be told the same thing. `ErrorKind` in `protocol.py` is the
   one home for that vocabulary, and an unknown kind from a newer daemon is read as
   `failed`, i.e. it falls back - unknown members fail closed toward the safe behaviour.
+  The daemon logs the refusal's own text, and each refusal carries the environment variable
+  that would raise the ceiling it hit (`knob` in the root's `last_error`).
 - `--no-daemon` and `ZEMBLE_DAEMON=0` skip the daemon silently: an opt-out is not a failure.
 - `--embedder` skips it too, silently: the daemon holds one embedder (the environment
   default), and an override is answered in the calling process.
