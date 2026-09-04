@@ -135,7 +135,9 @@ changed is never paid for twice.
 - Only documents are cached. Queries always reach the provider: for an
   asymmetric model a query vector must never be served where a document vector
   was asked for.
-- `ZEMBLE_EMBED_CACHE=0` disables the wrapper entirely.
+- `ZEMBLE_EMBED_CACHE=0` disables the wrapper entirely. It does NOT disable the budget
+  guard, which sits at the seams that buy rather than inside the wrapper; an uncached build
+  simply has nothing already paid for, so every text counts against the ceiling.
 
 Model2Vec is deliberately *not* wrapped: embedding locally is faster than a
 sqlite round trip.
@@ -198,6 +200,7 @@ build starts. Two things make that visible.
 ```bash
 zemble embed-status /path/to/workspace --embedder voyage:voyage-4-lite@1024
 zemble embed-status . --content all --json
+zemble embed-status . --exclude 'vendored/' 'third_party/'
 ```
 
 It chunks the tree exactly as a build would - same walker, same capsules, same
@@ -208,8 +211,12 @@ contacts a provider (not even to learn a model's vector width) and needs no API 
 It reports chunks total / reusable from the previous index / cached / uncached, the
 estimated tokens and cost for the uncached ones, the cache file, the embedder, the source
 volume a build would chunk against the work ceiling, the spending ceilings, and whether a
-build would be refused. The verdict covers **both** guards below, because a report that
-knew only about the bill once called a build affordable that the work guard refused.
+build would be refused. The verdict covers **both** guards below, and reads each one's
+verdict from the guard's own home (`work_refusal`, `bill_refusal`) over the inputs the build
+would use, because a report that knew only about the bill once called a build affordable that
+the work guard refused - and then, one layer down, computed the work verdict here from
+different inputs. `--exclude` takes the same patterns a build does, so the report can model
+the recovery a refusal advertises rather than answering for a build nobody is running.
 
 ```
 work       1.3 MB of source to chunk, against a 180.0 MB ceiling
@@ -232,7 +239,7 @@ Only the cache-aware number gates money.
 | Harm | Guard | Where | Unit | Applies to |
 | --- | --- | --- | --- | --- |
 | runaway WORK (minutes of chunking) | `require_affordable_scope` | `index/scope.py`, pre-parse | BYTES of source a build would chunk | every embedder, local included |
-| runaway BILL | `check_budget` | `embedding/pricing.py`, post-chunk | USD of the UNCACHED texts | remote, priced embedders |
+| runaway BILL | `require_affordable_bill` | `embedding/pricing.py`, post-chunk | USD of the UNCACHED texts, or their VOLUME where no bill can be computed | every remote embedder |
 
 The pre-parse guard cannot know a bill. The content-addressed embedding cache is invisible
 to it by construction - there is no chunk text to hash yet - so a tree whose chunks were all
@@ -282,6 +289,14 @@ build passes, so the daemon's watcher rebuild is judged by exactly the same rule
 CLI. Before that they sat above `ZembleIndex.from_path` only, and the daemon re-chunked
 and re-embedded, unguarded, the very tree the CLI had just been refused.
 
+A rebuild the watcher drives from a KNOWN change set is measured on the paths it names, not
+by walking the tree: `plan_changed_files` exists to avoid that walk, and walking anyway cost
+0.26 s and 9,766 stats on every coalesced file event. It also measured the wrong set - every
+file whose modification time had drifted, rather than the ones the build would chunk - so
+after a large `git checkout` a one-file rebuild could be refused for drift it would have
+REUSED, and since a refused rebuild swaps nothing the manifest never advanced and every later
+event refused again, wedging that root until the daemon restarted.
+
 #### 2. The post-chunk bill guard (remote embedders)
 
 Before a **remote** embedder embeds a batch of uncached documents, the whole pending set -
@@ -302,9 +317,10 @@ client's environment; restart it).
 ```
 
 A model with **no documented price** cannot be billed, so its VOLUME is capped instead:
-`ZEMBLE_EMBED_BUDGET_TOKENS`, default 2,000,000 tokens, which is $0.26 even at the dearest
-documented rate. This is fail-closed - an unknown price is never treated as free and never
-as unlimited - and the refusal says so:
+`ZEMBLE_EMBED_BUDGET_TOKENS`, default 2,000,000 tokens. That cap bounds VOLUME, not spend -
+an undocumented model may charge more per token than anything in the table, and 2M tokens at
+$2 per million is $4.00 - but it is fail-closed, because an unknown price is never treated as
+free and never as unlimited, and the refusal says so:
 
 ```
 Refusing to embed 9000 uncached chunk(s) with openai:http://localhost:11434/v1#nomic-embed-text:
@@ -312,18 +328,36 @@ Refusing to embed 9000 uncached chunk(s) with openai:http://localhost:11434/v1#n
 documented price (ZEMBLE_EMBED_BUDGET_TOKENS). ...
 ```
 
-`ZEMBLE_EMBED_BUDGET_TOKENS`, when a caller sets it deliberately, is an additional cap on a
-priced model too: a caller who names a token ceiling means it. Set either knob to `0` or
-less to disable that half alone. A free (local) model is capped by neither: it is the work
-guard's business.
+**The volume backstop.** Money is judged first, and the token ceiling sits under it as an
+absolute limit that applies to a PRICED model too: `MAX_BUDGET_TOKENS`, 100,000,000. The
+money ceiling is `$5.00 / price`, which makes the price table load-bearing - a rate that is
+10x too low admits 10x the tokens while the guard keeps printing "$5.00" - and the chars/3.6
+density estimate is load-bearing the same way. The backstop means a stale rate or a
+mis-measured density can NARROW the ceiling but never delete it. It is above the ~60M tokens
+the 180 MB work ceiling can produce, so it never binds a build the work guard would have let
+through. The price table carries the date it was last read (`PRICES_CHECKED_ON`) and a test
+fails once that is more than 180 days old.
+
+`ZEMBLE_EMBED_BUDGET_TOKENS`, when a caller sets it deliberately, replaces whichever token
+ceiling would otherwise apply - the unpriced cap or the backstop - on any model that costs
+anything: a caller who names a token ceiling means it. Setting it to `0` or less disables the
+volume half, and for a model with **no documented price** the volume half is the whole bill
+guard, so that is a way to disable the money ceiling entirely for that model.
+`ZEMBLE_EMBED_BUDGET_USD=0` disables the money half. A free (local) model is capped by
+neither: it is the work guard's business.
 
 Both refusals name the same three remedies, in the same order, from one helper: exclude
 paths, narrow the root, or raise/confirm the ceiling that refused. The first two work from
 inside a tool call; the third needs the environment of whichever process builds.
 
-- The check sits in the caching embedder, at the one point where the uncached set for a
-  whole build is known, so the CLI, the MCP server and the daemon all inherit it. It is
-  never per 512-text slice.
+- The check sits at the seams that BUY document vectors - `index/dense.py::embed_chunks` for
+  an index build, `dedup/detect.py` for logic-mode duplication - and asks the embedder what
+  it would actually have to buy, so a caching embedder answers with its uncached set and a
+  bare one with everything. It is per build, never per 512-text slice, and it deliberately
+  does NOT live inside `CachingEmbedder`: that wrapper is optional (`ZEMBLE_EMBED_CACHE=0`,
+  or a library caller handing in a bare remote embedder), and one environment variable must
+  not be able to delete every spending ceiling. A drift test names those seams, so a third
+  place that buys vectors fails the build instead of shipping unguarded.
 - Local embedders are never billed, with or without a confirmation.
 - Every subcommand that can reach an index build takes `-y/--yes`: `search`, `stats`,
   `find-related`, `explain` and `home`. In-process they print the refusal and exit
@@ -379,10 +413,19 @@ reported as "unknown price" rather than guessed, and an unknown price never beco
 | `voyage-4-lite` | 0.02 | | `text-embedding-3-small` | 0.02 |
 | `model2vec:*` | free (local) | | `text-embedding-3-large` | 0.13 |
 
+Every rate above was last read off its provider's price list on the date in
+`PRICES_CHECKED_ON` (`embedding/pricing.py`), and `test_the_price_table_is_dated_and_sane`
+fails once that is 180 days old or a rate is outside the plausible band for USD per million
+tokens. That is not tidiness: the token ceiling a priced build is judged by is derived from
+these numbers.
+
 **The estimate is an estimate.** Tokens are counted as characters / 3.6, the density
 measured on javaweb (15,526,808 provider-reported tokens for 73,957 chunks); a tree of
-minified or non-Latin text will differ. The provider's own `usage.total_tokens` is what
-is billed.
+minified or non-Latin text will differ, under-counting several-fold in the worst case. The
+provider's own `usage.total_tokens` is what is billed. Since the ceiling became money, that
+density risk converts directly into dollars: a build estimated at $4.99 on CJK or minified
+source could really bill several times that. The 100M-token backstop is what bounds how far
+wrong the estimate can carry a build.
 
 ## The user env file
 

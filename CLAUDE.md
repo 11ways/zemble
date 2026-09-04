@@ -85,7 +85,7 @@ overwrite each other. Never tune on individual eval queries.
 - Secrets: `VOYAGE_API_KEY` lives in `~/.config/zemble/env` (mode 600) on the dev
   machine; load with `set -a; . ~/.config/zemble/env; set +a`. Never print it, never
   put it on a command line, never write it into the repo, logs, or docs.
-- Two guards, two units: runaway WORK is refused from the walk in bytes (`ZEMBLE_INDEX_WORK_LIMIT_MB`, 180 MB, every embedder) and a runaway BILL is refused from the uncached set in money (`ZEMBLE_EMBED_BUDGET_USD`, $5.00; `ZEMBLE_EMBED_BUDGET_TOKENS` caps a model with no documented price). Never price bytes: the embedding cache is invisible before chunking. `zemble embed-status <path>` reports both ceilings and the verdict, embedding nothing.
+- Two guards, two units: runaway WORK is refused from the walk in bytes (`ZEMBLE_INDEX_WORK_LIMIT_MB`, 180 MB, every embedder) and a runaway BILL is refused from the uncached set in money (`ZEMBLE_EMBED_BUDGET_USD`, $5.00; `ZEMBLE_EMBED_BUDGET_TOKENS` caps a model with no documented price, and `MAX_BUDGET_TOKENS` = 100M is the absolute volume backstop under the money ceiling, because `$5.00 / price` is only as honest as the price table and the chars/3.6 estimate). Never price bytes: the embedding cache is invisible before chunking. The bill guard lives at the seams that BUY vectors, never inside `CachingEmbedder`, which `ZEMBLE_EMBED_CACHE=0` removes. `zemble embed-status <path> [--exclude ...]` reports both ceilings and the verdict, embedding nothing.
 - Caches: `~/.cache/zemble/` (indexes, `embeddings/*.sqlite`, `javac-facts/`,
   `daemon.log`); daemon socket `$XDG_RUNTIME_DIR/zemble/daemon.sock`. The embedding
   cache is keyed by chunk text + dims: changing capsule text means a full re-embed.

@@ -158,7 +158,9 @@ embedded, and what those cost at the model's list price - without embedding anyt
 needing a key. Two guards stand behind it, in two units. A build whose UNCACHED texts would
 cost more than `ZEMBLE_EMBED_BUDGET_USD` (default $5.00) is refused before a single request,
 naming the cost and how to proceed; a model with no documented price is capped by volume
-instead, at `ZEMBLE_EMBED_BUDGET_TOKENS` (default 2,000,000). Separately, and for every
+instead, at `ZEMBLE_EMBED_BUDGET_TOKENS` (default 2,000,000), and every priced model carries
+an absolute 100M-token backstop underneath the money ceiling, so a stale price or a bad
+token estimate can narrow that ceiling but never delete it. Separately, and for every
 embedder including the local ones, a tree holding more than `ZEMBLE_INDEX_WORK_LIMIT_MB` of
 source (default 180 MB) is refused from the walk alone, before any file is parsed - a tree
 big enough to refuse is a tree big enough for the parse to take minutes. Bytes are work, not
