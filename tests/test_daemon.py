@@ -701,7 +701,7 @@ async def test_a_rebuild_never_blocks_the_root_it_rebuilds(tmp_project: Path, mo
     daemon = _daemon_with_fake_embedder(watch=False)
     cache_key, index = await daemon.index_for({"path": str(tmp_project)})
     graph_calls: list[Any] = []
-    monkeypatch.setattr("zemble.graph.store.graph_exists", lambda root: True)
+    monkeypatch.setattr("zemble.graph.store.graph_present", lambda root: True)
     monkeypatch.setattr("zemble.graph.store.build_graph", lambda root, **kwargs: graph_calls.append((root, kwargs)))
 
     entered = threading.Event()
@@ -750,7 +750,7 @@ async def test_a_rebuild_never_blocks_the_root_it_rebuilds(tmp_project: Path, mo
 @pytest.mark.anyio
 async def test_a_watched_edit_is_searchable_almost_at_once(tmp_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The whole path from change set to a searchable result stays well under a second."""
-    monkeypatch.setattr("zemble.graph.store.graph_exists", lambda root: False)
+    monkeypatch.setattr("zemble.graph.store.graph_present", lambda root: False)
     daemon = _daemon_with_fake_embedder(watch=False)
     cache_key, _index = await daemon.index_for({"path": str(tmp_project)})
 

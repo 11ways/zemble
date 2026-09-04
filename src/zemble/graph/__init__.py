@@ -19,6 +19,7 @@ _LAZY = {
     "build_graph": "zemble.graph.store",
     "graph_db_path": "zemble.graph.store",
     "graph_exists": "zemble.graph.store",
+    "graph_present": "zemble.graph.store",
 }
 
 
@@ -43,4 +44,5 @@ __all__ = [
     "build_graph",
     "graph_db_path",
     "graph_exists",
+    "graph_present",
 ]

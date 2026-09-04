@@ -356,15 +356,17 @@ class Daemon:
         The watcher's change set is handed straight to the graph build, which then stats the
         named files instead of walking the workspace for them.
         """
-        from zemble.graph.store import build_graph, graph_exists
+        from zemble.graph.store import build_graph, graph_present
 
-        if not await asyncio.to_thread(graph_exists, root):
+        # The predicate is the FILE, not a readable graph: a malformed store is exactly the one
+        # the watcher must keep driving, and `build_graph` rebuilds it from source.
+        if not await asyncio.to_thread(graph_present, root):
             return None
         started = time.monotonic()
         try:
             await asyncio.to_thread(partial(build_graph, root, changed_paths=changed_paths))
         except Exception:
-            logger.warning("Failed to refresh the symbol graph for %s", root, exc_info=True)
+            logger.error("The symbol graph for %s is now STALE: its refresh failed", root, exc_info=True)
             return None
         return round((time.monotonic() - started) * 1000)
 
