@@ -7,6 +7,7 @@ pre-flight said a build was affordable while the pre-parse guard refused the sam
 
 from __future__ import annotations
 
+import ast
 import math
 from pathlib import Path
 
@@ -315,6 +316,31 @@ def _buy_logic_bodies(embedder: Embedder) -> None:
     logic_classes(units, DupeOptions(kinds=(CloneKind.LOGIC,), windows=False), embedder)
 
 
+#: The method every provider hands document texts to. Whoever names it is a seam that buys.
+SEAM_METHOD = "embed_documents"
+
+
+def _reaches_the_provider(module: Path) -> bool:
+    """Return whether a module names the provider seam, in any spelling Python can reach it by.
+
+    Enumerating by substring (`.embed_documents(`) read source as TEXT, so a space before the
+    parenthesis or a `getattr` by name was never enumerated at all, and step 2 only ever drives
+    what step 1 found. The parse tree does not care how a call is spaced; what it cannot see is
+    a name assembled at runtime, which no buying seam has any reason to do.
+
+    :param module: The module to read.
+    :return: Whether it reaches the seam by name.
+    """
+    for node in ast.walk(ast.parse(module.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Attribute) and node.attr == SEAM_METHOD:
+            return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
+            named = node.args[1] if len(node.args) > 1 else None
+            if isinstance(named, ast.Constant) and named.value == SEAM_METHOD:
+                return True
+    return False
+
+
 #: Every place outside `zemble/embedding/` that hands document texts to a provider, each with the
 #: call that drives it. The guard lives at the seams that buy rather than inside the optional
 #: cache wrapper, so this is what keeps them in step - and naming a seam here is not enough,
@@ -323,29 +349,41 @@ def _buy_logic_bodies(embedder: Embedder) -> None:
 PAID_DOCUMENT_SEAMS = {"index/dense.py": _buy_chunks, "dedup/detect.py": _buy_logic_bodies}
 
 
-def test_every_paid_document_seam_passes_the_bill_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_every_paid_document_seam_passes_the_bill_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A new place that buys document vectors must meet the bill guard, not discover it later.
 
     The money check no longer sits behind `CachingEmbedder`, which one environment variable can
     remove; it sits at the seams that buy. That only holds while every seam is one of these AND
     every one of them really refuses.
     """
+    # 1. The enumeration reads the grammar rather than the text, so no spelling of the call
+    #    hides from it - and a module that only talks about the seam is not one.
+    spellings = {
+        "spaced.py": "def go(e, t):\n    return e .embed_documents (t)\n",
+        "indirect.py": 'def go(e, t):\n    return getattr(e, "embed_documents")(t)\n',
+        "mentioned.py": '"""A module that says embed_documents and calls nothing."""\n',
+    }
+    for name, source in spellings.items():
+        (tmp_path / name).write_text(source, encoding="utf-8")
+    reaching = [name for name in sorted(spellings) if _reaches_the_provider(tmp_path / name)]
+    assert reaching == ["indirect.py", "spaced.py"], f"step 1: the enumeration found {reaching}"
+
     source_root = Path(__file__).resolve().parents[2] / "src" / "zemble"
     found: list[str] = []
     for module in sorted(source_root.rglob("*.py")):
         relative = module.relative_to(source_root).as_posix()
         if relative.startswith("embedding/"):
             continue  # The providers and the cache are the implementations, not the buyers.
-        if ".embed_documents(" in module.read_text(encoding="utf-8"):
+        if _reaches_the_provider(module):
             found.append(relative)
 
-    # 1. Nobody bought vectors from a seam this suite has never heard of.
+    # 2. Nobody bought vectors from a seam this suite has never heard of.
     assert set(found) == set(PAID_DOCUMENT_SEAMS), (
-        f"step 1: the seams that buy document vectors changed, got {found}; "
+        f"step 2: the seams that buy document vectors changed, got {found}; "
         "wire require_affordable_bill into the new one and name it here with the call that drives it"
     )
 
-    # 2. And every one of them, driven for real against a ceiling of nothing, refuses and buys
+    # 3. And every one of them, driven for real against a ceiling of nothing, refuses and buys
     #    nothing. Reading the source for the guard's NAME never proved this: deleting both call
     #    lines left this test - and the whole suite - green.
     monkeypatch.setenv(BUDGET_USD_ENV, "0.0000001")
@@ -353,7 +391,7 @@ def test_every_paid_document_seam_passes_the_bill_guard(monkeypatch: pytest.Monk
         spy = PricedEmbedder(dimensions=8)
         with pytest.raises(EmbeddingBudgetExceeded):
             probe(spy)
-        assert spy.document_batches == [], f"step 2: {relative} bought {spy.document_batches} before the guard"
+        assert spy.document_batches == [], f"step 3: {relative} bought {spy.document_batches} before the guard"
 
 
 def test_the_report_bills_what_the_build_announces(
@@ -392,6 +430,70 @@ def test_the_report_bills_what_the_build_announces(
     assert f"~{status.estimated_tokens} tokens" in announced[0], (
         f"step 2: the report estimated {status.estimated_tokens}, the build announced {announced[0]}"
     )
+
+
+class _ProbeOnlyWidth(PricedEmbedder):
+    """A remote model whose vector width only a provider request could tell."""
+
+    #: Shadows the base property on purpose: this model publishes no width anywhere.
+    declared_dimensions = None
+
+    def __init__(self, dimensions: int = 8) -> None:
+        """Initialise the fake, counting every read of the width a probe would have to pay for."""
+        super().__init__(dimensions=dimensions)
+        self.width_reads = 0
+
+    @property
+    def dimensions(self) -> int:
+        """The width, recorded because reading it is the request a pre-flight may never make."""
+        self.width_reads += 1
+        return self._dimensions
+
+
+def test_the_report_bills_what_a_build_buys_for_a_model_that_declares_no_width(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A model with no declared width is billed for what its cache buys, not for every copy.
+
+    Asking the buyer what a repeated chunk costs reads a vector width, and reading one off such
+    a model is a provider request this report may never make - so the question was skipped and
+    every uncached text billed instead: measured at 3,662 tokens where the caching build bought
+    184. The width a report may use is the one the family's own cache file already holds, and a
+    duplicate collapses whether or not any width is known at all.
+    """
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "repeated.py").write_text("x = 1\n" * 16_000, encoding="utf-8")
+    inner = _ProbeOnlyWidth()
+    monkeypatch.setattr(
+        "zemble.embedding.preflight.build_embedder",
+        lambda spec: ResolvedEmbedder(
+            spec=spec, embedder=CachingEmbedder(inner, FAMILY), scheme="voyage", family=FAMILY
+        ),
+    )
+
+    # 1. The report answers over an empty cache file, with no width to be had from anywhere,
+    #    and it contacts nobody to get one.
+    status = embed_status(root)
+    assert status.dimensions is None, "step 1: the fixture must be a model that declares no width"
+    assert status.uncached > 1, f"step 1: the fixture must chunk into several, got {status.uncached}"
+    assert inner.width_reads == 0, "step 1: a pre-flight report may not pay for a probe"
+
+    # 2. The build buys the distinct texts once, and announces exactly what the report estimated.
+    with caplog.at_level("INFO", logger="zemble.embedding.pricing"):
+        ZembleIndex.from_path(root, embedder=CachingEmbedder(inner, FAMILY))
+    announced = [record.getMessage() for record in caplog.records if "uncached chunk(s)" in record.getMessage()]
+    assert len(announced) == 1, f"step 2: exactly one announcement, got {caplog.records}"
+    bought = int(announced[0].split()[1])
+    assert bought < status.uncached, f"step 2: the fixture must repeat chunks, {bought} of {status.uncached} distinct"
+    assert f"~{status.estimated_tokens} tokens" in announced[0], (
+        f"step 2: the report estimated {status.estimated_tokens}, the build announced {announced[0]}"
+    )
+
+    # 3. And now that the file holds vectors, the report reads its width off it: nothing to buy.
+    assert inner.width_reads > 0, "step 3: the build is what pays for the probe"
+    after = embed_status(root)
+    assert after.estimated_tokens == 0, f"step 3: everything is bought already, got {after.estimated_tokens} tokens"
 
 
 def test_the_report_bills_what_a_cacheless_build_announces(

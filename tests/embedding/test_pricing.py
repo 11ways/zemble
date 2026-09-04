@@ -29,6 +29,7 @@ from zemble.embedding.pricing import (
     estimate_cost,
     estimate_tokens,
     format_cost,
+    format_usd,
     price_per_million,
     require_affordable_bill,
 )
@@ -236,7 +237,26 @@ def test_paid_embed_logs_one_line(tmp_path: Path, caplog: pytest.LogCaptureFixtu
         buy(embedder, ["a" * 3600])
     lines = [record.getMessage() for record in caplog.records]
     assert len(lines) == 1, f"exactly one announcement, got {lines}"
-    assert "embedding 1 uncached chunk(s), ~1000 tokens, ~$0.0000 with voyage:voyage-4-lite@4" == lines[0], lines[0]
+    assert "embedding 1 uncached chunk(s), ~1000 tokens, ~$0.00002 with voyage:voyage-4-lite@4" == lines[0], lines[0]
+
+
+def test_a_money_figure_reads_as_zero_only_when_it_is_zero() -> None:
+    """The one money format keeps a small figure readable however small it gets.
+
+    Rounding to `$0.00` is what two formatters did to a refusal ("~$0.0002 exceeds the budget of
+    $0.00"); fixing that at four decimals only moved the same defect one order of magnitude
+    down, where a ceiling of `$0.0000001` read "exceeds the budget of $0.0000".
+    """
+    # 1. Ordinary money is ordinary: two decimals, and zero is allowed to look like zero.
+    assert format_usd(0.0) == "$0.00", "step 1: nothing costs nothing"
+    assert (format_usd(5.0), format_usd(0.01)) == ("$5.00", "$0.01"), "step 1: a cent is still two decimals"
+
+    # 2. Under a cent the precision follows the figure, so nothing positive renders as zero.
+    for amount in (0.009, 0.0002, 0.00002, 1e-7, 1e-12, 1e-13, 1e-300):
+        rendered = format_usd(amount)
+        assert float(rendered.removeprefix("$")) > 0, f"step 2: {amount} rendered as {rendered}, which reads as zero"
+    assert format_usd(1e-7) == "$0.0000001", "step 2: and it is still a decimal figure, not an exponent"
+    assert format_usd(1e-13) == "$1.00e-13", "step 2: until digits stop being readable at all"
 
 
 def test_local_embed_announces_nothing(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

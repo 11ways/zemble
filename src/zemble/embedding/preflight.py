@@ -97,23 +97,6 @@ class EmbedStatus:
         )
 
 
-def _cache_lookup_width(cache: EmbeddingCache, declared: int | None) -> int | None:
-    """Return the width a build's cache reads would use, without asking a provider anything.
-
-    A model whose width only a probe could tell has still been bought at SOME width by every
-    earlier build, and the cache file records it. Only an unambiguous file answers: with two
-    widths stored, a build could read either, and over-billing beats inventing a hit.
-
-    :param cache: The family's cache file.
-    :param declared: The width the embedder already declares, when it declares one.
-    :return: The width to look up, or None when nothing can be looked up honestly.
-    """
-    if declared is not None:
-        return declared
-    widths = cache.stored_dimensions()
-    return widths[0] if len(widths) == 1 else None
-
-
 def embed_status(
     path: Path | str,
     content: Sequence[ContentType] = (ContentType.CODE,),
@@ -180,7 +163,7 @@ def embed_status(
         cache = EmbeddingCache(resolved.family)
         cache_path = str(cache.path)
         try:
-            width = _cache_lookup_width(cache, dimensions)
+            width = cache.usable_width(dimensions)
             if width is not None:
                 covered = cache.covered(digests, width)
         finally:
@@ -193,14 +176,15 @@ def embed_status(
     # `pending_purchase` is the one home of that answer and the guard reads it too, so both
     # lanes agree by construction. Counting a repeated chunk twice reported a bill nobody pays;
     # collapsing one the build will pay twice under-reported it 20x. The chunk counts stay per
-    # chunk either way. Asking the buyer is free only where a width is already known - reading
-    # it off a model that declares none costs a provider probe, which this report never makes -
-    # so an undeclared width falls back to billing every uncached text, which over-bills rather
-    # than inventing a discount.
+    # chunk either way. The question is asked UNPROBED, because reading a width off a model that
+    # declares none costs a provider request this report never makes: skipping the buyer there
+    # instead billed every copy again, 20x, on the default configuration. What is left is the
+    # cache file that holds two widths, where the report cannot tell which one a build would
+    # read and counts nothing as stored - pessimistic, never a discount nobody can prove.
     uncached_texts = [text for text, digest in zip(texts, digests, strict=True) if digest not in covered]
     uncached = len(uncached_texts)
     cached = len(texts) - uncached
-    billed = pending_purchase(resolved.embedder, uncached_texts) if dimensions is not None else uncached_texts
+    billed = pending_purchase(resolved.embedder, uncached_texts, may_probe=False)
     tokens = estimate_tokens(billed)
     price = price_per_million(resolved.family)
 

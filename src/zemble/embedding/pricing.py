@@ -85,9 +85,10 @@ DEAREST_DOCUMENTED_RATE = max(price for prices in PRICES_USD_PER_MILLION_TOKENS.
 #: tokens even the dearest model in the table bills exactly the default budget - so a rate
 #: mistyped low for any other model NARROWS the ceiling instead of deleting it. A mistyped
 #: dearest entry does lift it, which is what ``PRICES_CHECKED_ON`` and the unit-sanity test are
-#: for. It has to sit BELOW the ~60M tokens the 180 MB work ceiling can produce, or it would
-#: bind nothing the work guard did not already refuse; a legitimate build that big names
-#: ``ZEMBLE_EMBED_BUDGET_TOKENS`` deliberately. Raising the money knob does NOT raise it.
+#: for. It has to sit BELOW what the 180 MB work ceiling can produce - 60.5M estimated tokens at
+#: the +21% capsule overhead measured on this repo, 76.0M at the +52% measured on a small tree -
+#: or it would bind nothing the work guard did not already refuse; a legitimate build that big
+#: names ``ZEMBLE_EMBED_BUDGET_TOKENS`` deliberately. Raising the money knob does NOT raise it.
 MAX_BUDGET_TOKENS = int(DEFAULT_BUDGET_USD / DEAREST_DOCUMENTED_RATE * 1_000_000)
 
 
@@ -134,8 +135,15 @@ def format_usd(amount: float) -> str:
 
     THE one money format: an estimate and the ceiling it is compared against are printed side
     by side, and two formatters made a refusal read ``~$0.0002 exceeds the budget of $0.00``.
+    Four decimals was the same defect one order of magnitude down - a ceiling of $0.0000001 read
+    ``exceeds the budget of $0.0000`` - so the precision follows the figure: no amount that is
+    not zero ever renders as one. Below a picodollar the digits stop being readable at all and
+    the exponent is what a reader can act on.
     """
-    return f"${amount:.2f}" if amount >= 0.01 or amount == 0 else f"${amount:.4f}"
+    if amount == 0 or abs(amount) >= 0.01:
+        return f"${amount:.2f}"
+    digits = -math.floor(math.log10(abs(amount)))
+    return f"${amount:.{digits}f}" if digits <= 12 else f"${amount:.2e}"
 
 
 def format_cost(tokens: int, price: float | None) -> str:
@@ -288,19 +296,23 @@ def embedder_family(embedder: object) -> str:
     return f"{scheme}{separator}{body if at else rest}"
 
 
-def pending_purchase(embedder: object, texts: list[str]) -> list[str]:
+def pending_purchase(embedder: object, texts: list[str], may_probe: bool = True) -> list[str]:
     """Return the texts an embedder would really have to buy out of these.
 
-    An embedder that stores what it bought answers for itself through ``pending_documents``,
-    because only it knows which of these texts are already paid for and which copies of a
-    repeated text share one provider slot. Anything else buys every one of them: FAIL CLOSED,
-    never an assumption that some invisible cache will pick up the bill.
+    An embedder that stores what it bought answers for itself, because only it knows which of
+    these texts are already paid for and which copies of a repeated text share one provider
+    slot. Anything else buys every one of them: FAIL CLOSED, never an assumption that some
+    invisible cache will pick up the bill.
 
     :param embedder: The embedder a build resolved.
     :param texts: Every text the build is about to embed.
+    :param may_probe: Whether the caller may cost a provider round trip to learn a vector width.
+        A pre-flight report may not, and asks the unprobed question instead of skipping the
+        buyer - skipping it billed every copy of a repeated chunk for a model with no declared
+        width, 20x what the caching build then bought.
     :return: The subset that would actually reach a provider.
     """
-    resolve = getattr(embedder, "pending_documents", None)
+    resolve = getattr(embedder, "pending_documents" if may_probe else "pending_documents_unprobed", None)
     if resolve is None:
         return texts
     pending: list[str] = resolve(texts)

@@ -230,6 +230,14 @@ it is billed once, while the bare remote embedder `ZEMBLE_EMBED_CACHE=0` hands a
 does buy every copy. Deduplicating unconditionally reported a twentieth of the bill that
 build would be refused over.
 
+The report asks that question UNPROBED (`pending_purchase(..., may_probe=False)`), because
+deciding what is already bought reads a vector width and reading one off a model that declares
+none is a provider request this report never makes. The width then comes from what the family's
+own cache file holds, which leaves exactly one case where the two lanes differ: a file holding
+two widths, where the report cannot tell which one a build would read and counts nothing as
+stored. That over-reports and never under-reports - the report can say REFUSED for a build that
+would be allowed, never the reverse.
+
 On the javaweb workspace (77,092 chunks) a cold pass costs about 11 s of chunking plus
 0.3 s of cache lookup; when the previous index covers every file the walk alone answers
 in well under a second.
@@ -342,10 +350,14 @@ bills exactly $5.00 - so a rate mistyped low for any other model NARROWS the cei
 of deleting it. A mistyped *dearest* entry does lift it, which is what `PRICES_CHECKED_ON`
 and the unit-sanity test are for.
 
-It has to BIND, and it does: 180 MB of source is at most ~60M estimated tokens (file bytes
-plus the measured +21% capsule overhead, over chars/3.6), so 38.5M sits under everything the
-work guard admits, while the measured full javaweb code-and-docs index (~21.6M estimated
-tokens) passes with room over it. At 100,000,000 it sat *above* the work ceiling and could
+It has to BIND, and it does: 180 MB of source carries between ~60.5M and ~76M estimated tokens
+(file bytes plus a capsule overhead measured at +21% on this repo and +52% on a small fixture
+tree, over chars/3.6), so 38.5M sits under even the low end of what the work guard admits,
+while the measured full javaweb code-and-docs index (~21.6M estimated tokens) passes with room
+over it. The binding argument needs the LOW end, which is why the test uses +21%; the reader
+who wants the worst case wants the high one - a build at the work ceiling can really bill up to
+~$9.88 at the dearest documented rate, which is what the work ceiling, not this backstop,
+bounds. At 100,000,000 it sat *above* the work ceiling and could
 therefore refuse nothing at all: with `voyage-code-4` mistyped one order of magnitude low, a
 build at the work ceiling billed $7.26 for real while the guard computed $0.73 and allowed
 it. Raising `ZEMBLE_EMBED_BUDGET_USD` does not raise the backstop; a build that is genuinely

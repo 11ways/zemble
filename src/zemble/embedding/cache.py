@@ -151,6 +151,44 @@ class EmbeddingCache:
             ).fetchall()
         return [int(row[0]) for row in rows]
 
+    def usable_width(self, declared: int | None) -> int | None:
+        """Return the width a build's cache reads would use, without asking a provider anything.
+
+        A model whose width only a probe could tell has still been bought at SOME width by every
+        earlier build, and this file records it. Only an unambiguous file answers: with two
+        widths stored, a build could read either, and over-billing beats inventing a hit.
+
+        :param declared: The width the embedder already declares, when it declares one.
+        :return: The width to look up, or None when nothing can be looked up honestly.
+        """
+        if declared is not None:
+            return declared
+        widths = self.stored_dimensions()
+        return widths[0] if len(widths) == 1 else None
+
+    def pending(self, texts: list[str], dims: int | None) -> list[str]:
+        """Return the texts a buyer reading this file would really have to send.
+
+        THE one answer to what a cached buy costs, so a report and a build cannot disagree about
+        it: duplicates collapse, because :meth:`CachingEmbedder.embed_documents` gives every copy
+        of one text a single provider slot, and a stored vector was bought already.
+
+        :param texts: The texts a build is about to embed.
+        :param dims: The width a stored vector has to serve; None names no usable width, so
+            nothing counts as stored - never a discount nobody can prove.
+        :return: Those still to be bought, first occurrence first.
+        """
+        digests = [text_hash(text) for text in texts]
+        covered = self.covered(digests, dims) if dims is not None else set()
+        pending: list[str] = []
+        seen: set[str] = set()
+        for text, digest in zip(texts, digests, strict=True):
+            if digest in covered or digest in seen:
+                continue
+            seen.add(digest)
+            pending.append(text)
+        return pending
+
     def put_many(self, rows: list[tuple[str, int, np.ndarray]]) -> None:
         """Store vectors, ignoring any key another process wrote first.
 
@@ -205,32 +243,41 @@ class CachingEmbedder:
         return declared_dimensions(self.inner)
 
     @property
+    def known_dimensions(self) -> int | None:
+        """The width to judge stored vectors by where no provider may be asked, or None for none."""
+        return self.cache.usable_width(self.declared_dimensions)
+
+    @property
     def semantic_weight_bonus(self) -> float:
         """The wrapped embedder's fusion bonus; caching does not change how good its vectors are."""
         return semantic_weight_bonus(self.inner)
 
     def pending_documents(self, texts: list[str]) -> list[str]:
-        """Return the distinct texts this cache would still have to buy out of these.
+        """Return the distinct texts this cache would still have to buy, at the width a build reads.
 
-        Duplicates collapse, because :meth:`embed_documents` gives every copy of one text a
-        single provider slot; pricing the answer therefore prices what is really bought. This
-        is the cache's half of the bill guard - it answers WHAT would be bought, and
+        This is the cache's half of the bill guard - it answers WHAT would be bought, and
         :func:`zemble.embedding.pricing.require_affordable_bill` decides whether it may be.
+        Reading that width costs a provider probe on a model that declares none, which the seam
+        calling this is about to make anyway; :meth:`pending_documents_unprobed` is the same
+        answer for a caller that may not.
 
         :param texts: The texts a build is about to embed.
         :return: Those with no usable vector stored, first occurrence first.
         """
-        dims = self.dimensions
-        digests = [text_hash(text) for text in texts]
-        covered = self.cache.covered(digests, dims)
-        pending: list[str] = []
-        seen: set[str] = set()
-        for text, digest in zip(texts, digests, strict=True):
-            if digest in covered or digest in seen:
-                continue
-            seen.add(digest)
-            pending.append(text)
-        return pending
+        return self.cache.pending(texts, self.dimensions)
+
+    def pending_documents_unprobed(self, texts: list[str]) -> list[str]:
+        """Return the same answer for a caller that may not ask the provider anything.
+
+        A pre-flight report contacts nobody, not even to learn a vector width, so the width comes
+        from what this family's file already holds. Where that is not unambiguous nothing counts
+        as stored, which over-bills rather than inventing a hit - but duplicates still collapse,
+        because one text having one provider slot is a fact about the buyer, not about a width.
+
+        :param texts: The texts a build would embed.
+        :return: Those with no usable vector stored, first occurrence first.
+        """
+        return self.cache.pending(texts, self.known_dimensions)
 
     def embed_documents(self, texts: list[str]) -> EmbeddingMatrix:
         """Embed documents, calling the provider only for texts not already stored.
