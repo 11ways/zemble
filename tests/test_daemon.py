@@ -36,7 +36,7 @@ from zemble.daemon.protocol import (
 from zemble.daemon.watch import IgnoreRules
 from zemble.index.file_walker import walk_files
 from zemble.index.files import get_extensions
-from zemble.index.scope import WORK_LIMIT_ENV
+from zemble.index.scope import WORK_LIMIT_ENV, estimate_tree
 from zemble.index_cache import compute_cache_key
 from zemble.types import ContentType, IndexStats
 
@@ -348,6 +348,49 @@ async def test_the_watcher_rebuild_passes_the_same_scope_guard_as_the_cli(
     result = await daemon.rebuild(cache_key)
     assert result["added"] == 12, f"step 4: the deferred files are picked up, got {result}"
     assert cache_key not in daemon.last_error, "step 4: a successful rebuild clears the refusal"
+
+
+@pytest.mark.anyio
+async def test_a_named_change_set_is_judged_on_the_paths_it_names(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watcher lane measures the paths it was handed, not the whole drifted tree.
+
+    `plan_changed_files` exists to avoid a walk, and the guard walked anyway: 0.26 s and 9,766
+    stats per coalesced file event on javaweb. Worse, it measured every mtime-drifted file, so
+    after a large checkout a one-file rebuild was refused for drift it would have REUSED - and
+    since a refused rebuild swaps nothing, the manifest never moved and every later event
+    refused again, wedging that root until the daemon was restarted.
+    """
+    daemon = _daemon_with_fake_embedder(watch=False)
+    cache_key, _index = await daemon.index_for({"path": str(tmp_project)})
+    _vendored_source(tmp_project)
+    await daemon.rebuild(cache_key)
+
+    # 1. Every file's modification time moves, the way a branch checkout moves them, while the
+    #    content stays put - so the whole tree is "changed" to a walk and reusable to a build.
+    for path in sorted(tmp_project.rglob("*.py")):
+        path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    touched = tmp_project / "auth.py"
+    touched.write_text(touched.read_text(encoding="utf-8") + "\n\ndef logout(token):\n    return None\n")
+
+    # 2. The walk sees the whole tree as work, which is what the guard used to measure here.
+    monkeypatch.setenv(WORK_LIMIT_ENV, "1")
+    drifted = estimate_tree(tmp_project.resolve(), (ContentType.CODE,), (), daemon.cache.loaded()[0][1]._manifest)
+    assert drifted.bytes > 1_000_000, f"step 2: the fixture must drift past the ceiling, got {drifted.bytes}"
+
+    # 3. A rebuild naming ONE file is judged on that file, and goes through without a walk.
+    def _no_walking(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("the named lane walked the tree, which is the walk it exists to avoid")
+
+    monkeypatch.setattr("zemble.index.scope.estimate_tree", _no_walking)
+    outcome = await daemon.rebuild(cache_key, changed_paths=[touched])
+    assert "refused" not in outcome, f"step 3: one changed file is not runaway work, got {outcome}"
+    assert outcome["changed"] == 1, f"step 3: and exactly that file was rebuilt, got {outcome}"
+
+    # 4. The index really swapped, so the manifest advanced and the next event starts fresh.
+    served = await daemon.cache.get(str(tmp_project))
+    assert served.search("logout"), "step 4: the rebuilt index is the one being served"
 
 
 @pytest.mark.anyio

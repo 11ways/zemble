@@ -11,7 +11,7 @@ from zemble.embedding.base import Embedder
 from zemble.index.bm25 import BM25
 from zemble.index.chunk_store import SplicedChunks
 from zemble.index.dense import SelectableBasicBackend, embed_chunks
-from zemble.index.file_walker import WalkedFile, ignored_prefix, walk_entries
+from zemble.index.file_walker import WalkedFile, walk_entries
 from zemble.index.files import (
     FileStatus,
     detect_language,
@@ -19,7 +19,7 @@ from zemble.index.files import (
     get_file_status,
     read_file_text,
 )
-from zemble.index.scope import require_affordable_scope, require_declared_scope
+from zemble.index.scope import changed_indexed_paths, require_affordable_scope, require_declared_scope
 from zemble.index.sparse import enrich_for_bm25
 from zemble.index.types import FileManifestEntry, PreviousIndex, make_chunk_id
 from zemble.tokens import tokenize
@@ -172,21 +172,10 @@ def plan_changed_files(
     """
     resolved_capsules = CapsuleOptions.resolve(capsules)
     normalized = (content,) if isinstance(content, ContentType) else content
-    extensions = {extension.lower() for extension in get_extensions(normalized)}
     repo_paths = RepoRelativePaths()
     manifest = previous_manifest or {}
-    root_for_paths = display_root if display_root is not None else path
 
-    touched: dict[str, Path] = {}
-    for candidate in changed:
-        try:
-            indexed_path = str(candidate.relative_to(root_for_paths).as_posix())
-            relative = candidate.relative_to(path).as_posix()
-        except ValueError:
-            continue
-        if candidate.suffix.lower() not in extensions or ignored_prefix(path, relative, list(exclude)) is not None:
-            continue
-        touched[indexed_path] = candidate
+    touched = changed_indexed_paths(path, changed, normalized, display_root, exclude)
 
     for indexed_path, previous_entry in manifest.items():
         candidate = touched.pop(indexed_path, None)
@@ -309,15 +298,19 @@ def create_index_from_path(
     # directly, so a guard installed above it refused the CLI while the daemon chunked the same
     # tree unguarded. Measured against `previous_manifest` - the manifest this build will really
     # reuse from - so the guard can never approve an incremental build the build then does in
-    # full because the previous index turned out to be unusable.
+    # full because the previous index turned out to be unusable, and against the change set on
+    # the lane that has one, so the guard never walks a tree the build itself refuses to walk.
+    changed = list(changed_paths) if previous is not None and changed_paths is not None else None
     require_declared_scope(path)
-    require_affordable_scope(path, embedder, normalized, exclude, previous_manifest or None)
+    require_affordable_scope(
+        path, embedder, normalized, exclude, previous_manifest or None, changed=changed, display_root=display_root
+    )
 
-    if previous is not None and changed_paths is not None:
+    if changed is not None:
         plan = list(
             plan_changed_files(
                 path,
-                changed_paths,
+                changed,
                 content,
                 display_root=display_root,
                 previous_manifest=previous_manifest,
