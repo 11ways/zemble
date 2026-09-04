@@ -486,35 +486,47 @@ def test_cli_reports_a_daemon_refusal_without_rebuilding(monkeypatch: pytest.Mon
     assert exit_code.value.code == 1, "the refusal is a failed command, not a fallback"
 
 
-def _subcommands(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
-    """Return every subcommand the parser declares, by name."""
-    for action in parser._actions:
-        if isinstance(action, argparse._SubParsersAction):
-            return dict(action.choices)
-    raise AssertionError("the zemble parser must declare subcommands")
+def _leaf_commands(
+    parser: argparse.ArgumentParser, prefix: tuple[str, ...] = ()
+) -> dict[tuple[str, ...], argparse.ArgumentParser]:
+    """Return every LEAF subcommand, keyed by the words a user types to reach it.
+
+    Keyed by leaf because a parent is only a grouping: proving `graph build` never indexes says
+    nothing about the twelve query commands beside it.
+    """
+    leaves: dict[tuple[str, ...], argparse.ArgumentParser] = {}
+    nested = [action for action in parser._actions if isinstance(action, argparse._SubParsersAction)]
+    if not nested:
+        return {prefix: parser} if prefix else {}
+    for action in nested:
+        for name, child in action.choices.items():
+            leaves.update(_leaf_commands(child, (*prefix, name)))
+    return leaves
 
 
 def _takes(subparser: argparse.ArgumentParser, option: str) -> bool:
-    """Return whether a subcommand, or any subcommand nested under it, declares that argument."""
-    for action in subparser._actions:
-        if option in action.option_strings or action.dest == option:
-            return True
-        if isinstance(action, argparse._SubParsersAction) and any(
-            _takes(nested, option) for nested in action.choices.values()
-        ):
-            return True
-    return False
+    """Return whether a subcommand declares that argument itself."""
+    return any(option in action.option_strings or action.dest == option for action in subparser._actions)
 
 
-#: One runnable invocation per subcommand that names a workspace path but is claimed never to
-#: build an index. The claim is PROVED by running it with the build seam trip-wired, so a
+#: One runnable invocation per LEAF subcommand that names a workspace root but is claimed never
+#: to build an index. The claim is PROVED by running it with the build seam trip-wired, so a
 #: command that grows a build fails here instead of telling a user to pass a flag it lacks.
-_NEVER_BUILDS_PROOFS = {
-    "outline": ["outline", "{root}", "auth.py", "--no-daemon"],
-    "signatures": ["signatures", "{root}", "authenticate", "--no-daemon"],
-    "graph": ["graph", "build", "{root}", "--no-daemon"],
-    "dupes": ["dupes", "{root}"],
-    "embed-status": ["embed-status", "{root}"],
+_NEVER_BUILDS_PROOFS: dict[tuple[str, ...], list[str]] = {
+    ("outline",): ["outline", "{root}", "auth.py", "--no-daemon"],
+    ("signatures",): ["signatures", "{root}", "authenticate", "--no-daemon"],
+    ("graph", "build"): ["graph", "build", "{root}", "--no-daemon"],
+    ("graph", "facts", "status"): ["graph", "facts", "status", "{root}", "--no-daemon"],
+    **{
+        ("graph", command): ["graph", command, "{root}", "authenticate", "--no-daemon"]
+        for command in ("definition", "callers", "callees", "references", "implementations")
+    },
+    **{
+        ("graph", command): ["graph", command, "{root}", "authenticate", "--no-daemon"]
+        for command in ("supertypes", "overrides-of", "overridden-by", "tests-of", "neighbors")
+    },
+    ("dupes",): ["dupes", "{root}"],
+    ("embed-status",): ["embed-status", "{root}"],
 }
 
 
@@ -527,10 +539,12 @@ def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
     """Every refusal ends with "or pass --yes", so every command that can be refused must take it.
 
     `zemble home ... --yes` exited 2 with `unrecognized arguments` for as long as the flag was
-    on three subcommands only. Nothing here is asserted from a list of names: a subcommand is
-    exempt only when the parser shows it cannot name a tree, or when running it proves it never
-    reaches the one seam every index build passes.
+    on three subcommands only. Nothing here is asserted from a list of names: a leaf subcommand
+    is exempt only when it declares no filesystem root through `add_root_arg` - the marker, not
+    the spelling, so a command naming its tree `repo` is classified like every other - or when
+    running it proves it never reaches the one seam every index build passes.
     """
+    from zemble.cli import names_a_root
     from zemble.embedding.registry import ResolvedEmbedder
     from zemble.index import ZembleIndex
 
@@ -553,23 +567,34 @@ def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
     assert built, "step 1: the trip wire must fire on a real build"
     built.clear()
 
-    # 2. Every subcommand is classified, and a new one cannot slip through unclassified.
-    for name, subparser in sorted(_subcommands(_build_parser()).items()):
+    # 2. Every leaf is classified, and a new one cannot slip through unclassified.
+    leaves = _leaf_commands(_build_parser())
+    assert ("graph", "callers") in leaves and ("home",) in leaves, (
+        f"step 2: leaves not enumerated, got {sorted(leaves)}"
+    )
+    for words, subparser in sorted(leaves.items()):
         if _takes(subparser, "confirm_embedding"):
             continue
-        if not _takes(subparser, "path"):
-            continue  # It cannot name a tree, so it cannot build one.
-        assert name in _NEVER_BUILDS_PROOFS, (
-            f"step 2: {name!r} names a workspace path but neither takes --yes nor proves it never builds"
+        if not names_a_root(subparser):
+            continue  # It names no tree, so it cannot build one.
+        assert words in _NEVER_BUILDS_PROOFS, (
+            f"step 2: {' '.join(words)!r} names a workspace root but neither takes --yes nor proves it never builds"
         )
 
-    # 3. Each claimed non-builder is run for real: it must answer, and the seam must stay untouched.
-    for name, template in sorted(_NEVER_BUILDS_PROOFS.items()):
+    # 3. Every proof names a leaf that still exists, so a renamed command cannot leave a
+    #    proof standing over nothing.
+    assert set(_NEVER_BUILDS_PROOFS) <= set(leaves), (
+        f"step 3: proofs for commands that no longer exist: {sorted(set(_NEVER_BUILDS_PROOFS) - set(leaves))}"
+    )
+
+    # 4. Each claimed non-builder is run for real: it must answer, and the seam must stay untouched.
+    for words, template in sorted(_NEVER_BUILDS_PROOFS.items()):
         argv = ["zemble", *(part.format(root=str(tmp_project)) for part in template)]
         monkeypatch.setattr(sys, "argv", argv)
         with pytest.raises(SystemExit):
             _cli_main()
         streams = capsys.readouterr()
-        assert "usage:" not in streams.err, f"step 3: {name!r} never ran, argparse rejected {argv}: {streams.err}"
-        assert streams.out.strip(), f"step 3: {name!r} answered nothing, so it proves nothing"
-        assert built == [], f"step 3: {name!r} built an index, so it must accept --yes; built {built}"
+        name = " ".join(words)
+        assert "usage:" not in streams.err, f"step 4: {name!r} never ran, argparse rejected {argv}: {streams.err}"
+        assert streams.out.strip(), f"step 4: {name!r} answered nothing, so it proves nothing"
+        assert built == [], f"step 4: {name!r} built an index, so it must accept --yes; built {built}"

@@ -21,13 +21,15 @@ _LANE_CHOICES = [lane.value for lane in Lane] + ["all"]
 
 def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `dupes` subcommand on the main parser."""
+    from zemble.cli import add_root_arg
+
     languages = supported_languages()
     parser = sub.add_parser(
         "dupes",
         help=f"Report duplicated code (exact, alpha-renamed, logic clone classes; {len(languages)} languages).",
         epilog=f"Languages: {', '.join(languages)}. File types: {', '.join(supported_extensions())}.",
     )
-    parser.add_argument("path", nargs="?", default=".", help="Workspace directory (default: current directory).")
+    add_root_arg(parser, nargs="?", default=".", help="Workspace directory (default: current directory).")
     parser.add_argument(
         "--kind",
         default="exact,renamed",

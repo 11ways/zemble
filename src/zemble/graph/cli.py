@@ -60,11 +60,13 @@ _refreshed: set[str] = set()
 
 def add_graph_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `graph` subcommand tree on the main parser."""
+    from zemble.cli import add_root_arg
+
     graph_p = sub.add_parser("graph", help="Symbol graph: definitions, callers, implementations, tests.")
     graph_sub = graph_p.add_subparsers(dest="graph_command", required=True)
 
     build_p = graph_sub.add_parser("build", help="Build or incrementally refresh the symbol graph.")
-    build_p.add_argument("path", nargs="?", default=".", help="Workspace directory (default: current directory).")
+    add_root_arg(build_p, nargs="?", default=".", help="Workspace directory (default: current directory).")
     build_p.add_argument("--stats", action="store_true", help="Print the full build statistics.")
     build_p.add_argument("--force", action="store_true", help="Re-extract every file instead of only changed ones.")
     build_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
@@ -73,7 +75,7 @@ def add_graph_parser(sub: argparse._SubParsersAction) -> None:
     facts_p = graph_sub.add_parser("facts", help="Inspect the graph facts overlay written by external tools.")
     facts_sub = facts_p.add_subparsers(dest="facts_command", required=True)
     status_p = facts_sub.add_parser("status", help="Show which facts files were found and what they cover.")
-    status_p.add_argument("path", nargs="?", default=".", help="Workspace directory (default: current directory).")
+    add_root_arg(status_p, nargs="?", default=".", help="Workspace directory (default: current directory).")
     status_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
     status_p.add_argument("--no-daemon", action="store_true", help="Do not use the warm daemon.")
     status_p.add_argument(
@@ -82,7 +84,7 @@ def add_graph_parser(sub: argparse._SubParsersAction) -> None:
 
     for command in QUERY_COMMANDS:
         query_p = graph_sub.add_parser(command, help=f"Graph query: {command}.")
-        query_p.add_argument("path", help="Workspace directory the graph was built for.")
+        add_root_arg(query_p, help="Workspace directory the graph was built for.")
         query_p.add_argument("symbol", help="Simple name, qualified name, or Type.member.")
         query_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
         query_p.add_argument("--no-daemon", action="store_true", help="Do not use the warm daemon.")

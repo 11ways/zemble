@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from importlib.util import find_spec
 from pathlib import Path
 from shutil import rmtree
-from typing import Literal
+from typing import Any, Literal
 
 from zemble.cache import (
     cache_key,
@@ -245,6 +245,38 @@ def _resolve_content(content: list[str], include_text_files: bool) -> list[Conte
     if include_text_files or "all" in content:
         return [ContentType.CODE, ContentType.DOCS, ContentType.CONFIG]
     return [ContentType(c) for c in content]
+
+
+#: Marks an argparse argument whose value is a filesystem root a build could run over. THE
+#: declaring home of "this subcommand names a tree": a parser declares one through
+#: :func:`add_root_arg` whatever it spells the argument, and the drift test that demands
+#: `--yes` classifies on the marker alone - `path`, `repo` and `workspace` are one fact.
+ROOT_ARGUMENT_MARKER = "zemble_root_argument"
+
+
+def add_root_arg(parser: argparse.ArgumentParser, name: str = "path", **kwargs: Any) -> argparse.Action:
+    """Declare the argument naming the tree a subcommand works on.
+
+    :param parser: The subcommand's own parser.
+    :param name: What this subcommand calls it; free to differ, the marker is what is read.
+    :param **kwargs: Passed straight through to ``add_argument``.
+    :return: The declared action, marked as naming a filesystem root.
+    """
+    action = parser.add_argument(name, **kwargs)
+    setattr(action, ROOT_ARGUMENT_MARKER, True)
+    return action
+
+
+def names_a_root(parser: argparse.ArgumentParser) -> bool:
+    """Return whether a subcommand declares an argument naming a filesystem root of its own.
+
+    Its own only: a parent that merely groups subcommands names no tree, and every leaf under
+    it has to answer for itself.
+
+    :param parser: The subcommand's parser.
+    :return: Whether one of its arguments was declared through :func:`add_root_arg`.
+    """
+    return any(getattr(action, ROOT_ARGUMENT_MARKER, False) for action in parser._actions)
 
 
 def _add_confirm_arg(p: argparse.ArgumentParser) -> None:
@@ -503,7 +535,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     search_p = sub.add_parser("search", help="Search a codebase.")
     search_p.add_argument("query", help="Natural language or code query.")
-    search_p.add_argument("path", nargs="?", default=".", help="Local path or git URL (default: current directory).")
+    add_root_arg(search_p, nargs="?", default=".", help="Local path or git URL (default: current directory).")
     search_p.add_argument("-k", "--top-k", type=int, default=5, help="Number of results (default: 5).")
     search_p.add_argument(
         "--max-snippet-lines",
@@ -525,7 +557,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_daemon_arg(search_p)
 
     stats_p = sub.add_parser("stats", help="Show what an index contains, including its embedder and dimensions.")
-    stats_p.add_argument("path", nargs="?", default=".", help="Local path or git URL (default: current directory).")
+    add_root_arg(stats_p, nargs="?", default=".", help="Local path or git URL (default: current directory).")
     _add_content_args(stats_p)
     _add_embedder_arg(stats_p)
     _add_confirm_arg(stats_p)
@@ -541,7 +573,7 @@ def _build_parser() -> argparse.ArgumentParser:
     related_p = sub.add_parser("find-related", help="Find code similar to a specific location.")
     related_p.add_argument("file_path", help="File path as shown in search results.")
     related_p.add_argument("line", type=int, help="Line number (1-indexed).")
-    related_p.add_argument("path", nargs="?", default=".", help="Local path or git URL (default: current directory).")
+    add_root_arg(related_p, nargs="?", default=".", help="Local path or git URL (default: current directory).")
     related_p.add_argument("-k", "--top-k", type=int, default=5, help="Number of results (default: 5).")
     related_p.add_argument(
         "--max-snippet-lines",

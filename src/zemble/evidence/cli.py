@@ -31,8 +31,10 @@ AUTO_INTENT = "auto"
 
 def add_evidence_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `explain`, `outline` and `signatures` subcommands."""
+    from zemble.cli import _add_confirm_arg, _add_daemon_arg, _add_embedder_arg, add_root_arg
+
     explain_p = sub.add_parser("explain", help="Budgeted evidence bundle: search plus one graph hop.")
-    explain_p.add_argument("path", help="Workspace directory to search and build the graph for.")
+    add_root_arg(explain_p, help="Workspace directory to search and build the graph for.")
     explain_p.add_argument("query", help="Natural language or code query.")
     explain_p.add_argument(
         "--budget", type=int, default=DEFAULT_BUDGET, help=f"Token budget for the bundle (default: {DEFAULT_BUDGET})."
@@ -49,21 +51,19 @@ def add_evidence_parser(sub: argparse._SubParsersAction) -> None:
     explain_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
     # Only `explain` reads the index, so it is the only one an embedder override or a
     # confirmation concerns: `outline` and `signatures` answer from the graph and never build.
-    from zemble.cli import _add_confirm_arg, _add_daemon_arg, _add_embedder_arg
-
     _add_embedder_arg(explain_p)
     _add_confirm_arg(explain_p)
     _add_daemon_arg(explain_p)
 
     outline_p = sub.add_parser("outline", help="Signature-only view of a file or a type.")
-    outline_p.add_argument("path", help="Workspace directory the graph was built for.")
+    add_root_arg(outline_p, help="Workspace directory the graph was built for.")
     outline_p.add_argument("target", help="Workspace-relative file path, or a simple or qualified type name.")
     outline_p.add_argument("--members", metavar="PATTERN", help="Only show members matching this name pattern.")
     outline_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
     _add_daemon_arg(outline_p)
 
     signatures_p = sub.add_parser("signatures", help="A symbol's signature and the call sites resolved exactly.")
-    signatures_p.add_argument("path", help="Workspace directory the graph was built for.")
+    add_root_arg(signatures_p, help="Workspace directory the graph was built for.")
     signatures_p.add_argument("symbol", help="Simple name, qualified name, or Type.member.")
     signatures_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
     _add_daemon_arg(signatures_p)

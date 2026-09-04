@@ -26,15 +26,15 @@ HOME_CONTENT = (ContentType.CODE, ContentType.DOCS)
 
 def add_home_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `home` subcommand."""
+    from zemble.cli import _add_confirm_arg, _add_daemon_arg, _add_embedder_arg, add_root_arg
+
     parser = sub.add_parser("home", help="Does this feature exist, and which module should it live in?")
-    parser.add_argument("path", help="Workspace directory to search and build the graph for.")
+    add_root_arg(parser, help="Workspace directory to search and build the graph for.")
     parser.add_argument("description", help="The feature you are about to build, in your own words.")
     parser.add_argument(
         "-k", "--top-k", type=int, default=DEFAULT_TOP_K, help=f"Code results to weigh (default: {DEFAULT_TOP_K})."
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable output.")
-    from zemble.cli import _add_confirm_arg, _add_daemon_arg, _add_embedder_arg
-
     _add_embedder_arg(parser)
     _add_confirm_arg(parser)
     _add_daemon_arg(parser)
