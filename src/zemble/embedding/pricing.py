@@ -144,6 +144,21 @@ def budget_tokens(price: float | None = None) -> int | None:
     return None if price is not None else DEFAULT_UNPRICED_BUDGET_TOKENS
 
 
+def applicable_budget_usd(price: float | None) -> float | None:
+    """Return the USD ceiling governing a build at this price, or None when money does not cap it.
+
+    FAIL CLOSED: an unknown price yields None here because it cannot be turned into a bill, never
+    because the build is free - :func:`budget_tokens` is what caps that build, by volume.
+
+    :param price: The model's USD per million tokens; 0.0 when free, None when undocumented.
+    :return: The ceiling in USD, or None when this build is not capped by money.
+    """
+    if price is None or price == 0.0:
+        return None
+    limit = budget_usd()
+    return limit if limit > 0 else None
+
+
 def confirmed() -> bool:
     """Return whether the caller has already agreed to pay whatever this build costs."""
     return os.environ.get(CONFIRM_ENV, "").strip().lower() in {"1", "true", "yes"}
@@ -161,13 +176,9 @@ def _bill_refusal(tokens: int, family: str) -> tuple[str, str] | None:
             f"~{tokens:,} estimated tokens exceeds the ceiling of {ceiling:,} tokens{unpriced} ({BUDGET_ENV})",
             BUDGET_ENV,
         )
-    if price is None:
-        # FAIL CLOSED: an unknown price is never treated as free, only as un-billable, which is
-        # why the volume ceiling above is the one that governs it.
-        return None
-    limit = budget_usd()
+    limit = applicable_budget_usd(price)
     cost = estimate_cost(tokens, price)
-    if cost is not None and 0 < limit < cost:
+    if limit is not None and cost is not None and cost > limit:
         return (
             f"~{tokens:,} estimated tokens (~{format_cost(tokens, price)}) exceeds the budget of "
             f"${limit:.2f} ({BUDGET_USD_ENV})",

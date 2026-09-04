@@ -86,12 +86,16 @@ class TreeEstimate:
         lines = []
         for child in self.children[:limit]:
             share = f"{child.bytes * 100 / self.bytes:.0f}%" if self.bytes else "0%"
-            lines.append(f"  {child.name + '/':<24} {child.files:>7} files  {_megabytes(child.bytes)}  (~{share})")
+            lines.append(f"  {child.name + '/':<24} {child.files:>7} files  {megabytes(child.bytes)}  (~{share})")
         return "\n".join(lines)
 
 
-def _megabytes(size: int) -> str:
-    """Render a byte count in MB, the unit a refusal is read in."""
+def megabytes(size: int) -> str:
+    """Render a byte count in MB, the one unit every work number is read in.
+
+    :param size: A byte count.
+    :return: The count in megabytes.
+    """
     return f"{size / 1_000_000:.1f} MB"
 
 
@@ -251,8 +255,8 @@ def require_affordable_scope(
     family = embedder_family(embedder)
     raise OversizedRootRefused(
         f"Refusing to index {resolved} with {family or 'the configured embedder'}: "
-        f"{estimate.files:,} files, {_megabytes(estimate.bytes)} of source exceeds the "
-        f"{_megabytes(work_limit_bytes())} this build may chunk. Nothing was parsed or embedded.\n"
+        f"{estimate.files:,} files, {megabytes(estimate.bytes)} of source exceeds the "
+        f"{megabytes(work_limit_bytes())} this build may chunk. Nothing was parsed or embedded.\n"
         f"{estimate.breakdown()}\n"
         f"{remedies(resolved, WORK_LIMIT_ENV)}",
         WORK_LIMIT_ENV,
@@ -271,6 +275,7 @@ __all__ = [
     "WORK_LIMIT_ENV",
     "estimate_tree",
     "exceeds_work_limit",
+    "megabytes",
     "require_affordable_scope",
     "require_declared_scope",
     "work_limit_bytes",

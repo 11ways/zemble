@@ -13,6 +13,7 @@ from zemble.embedding.cache import EmbeddingCache, text_hash
 from zemble.embedding.preflight import embed_status
 from zemble.embedding.registry import ResolvedEmbedder
 from zemble.index.create import plan_files
+from zemble.index.scope import WORK_LIMIT_ENV
 from zemble.types import ContentType
 
 FAMILY = "voyage:voyage-4-lite"
@@ -95,11 +96,26 @@ def test_embed_status_journey(tmp_project: Path, paid_embedder: PricedEmbedder) 
 
 
 def test_embed_status_reports_a_refusal(tmp_project: Path, paid_embedder: PricedEmbedder, monkeypatch) -> None:
-    """The report says whether a build would be refused, using the same budget the guard reads."""
+    """The report says whether a build would be refused, reading both ceilings a build passes."""
+    # 1. The bill guard: one token of budget cannot pay for a whole tree.
     monkeypatch.setenv("ZEMBLE_EMBED_BUDGET_TOKENS", "1")
-    assert embed_status(tmp_project).would_refuse, "one token of budget cannot pay for a whole tree"
+    assert embed_status(tmp_project).would_refuse, "step 1: the report reads the same budget the guard reads"
     monkeypatch.setenv("ZEMBLE_EMBED_CONFIRM", "1")
-    assert not embed_status(tmp_project).would_refuse, "a confirmed caller is not refused"
+    assert not embed_status(tmp_project).would_refuse, "step 1: a confirmed caller is not refused"
+
+    monkeypatch.delenv("ZEMBLE_EMBED_BUDGET_TOKENS")
+    monkeypatch.delenv("ZEMBLE_EMBED_CONFIRM")
+
+    # 2. The work guard: a build nobody would be billed much for is still refused as too much work.
+    vendored = tmp_project / "vendored"
+    vendored.mkdir()
+    for index in range(12):
+        (vendored / f"copy_{index}.py").write_text("x = 1\n" * 16_000, encoding="utf-8")
+    status = embed_status(tmp_project)
+    assert not status.would_refuse, "step 2: a megabyte of source is ordinary work"
+    assert status.source_bytes > 1_000_000, "step 2: and the report says how much work a build is"
+    monkeypatch.setenv(WORK_LIMIT_ENV, "1")
+    assert embed_status(tmp_project).would_refuse, "step 2: past the work ceiling the report says REFUSED"
 
 
 def test_embed_status_of_a_local_embedder(tmp_project: Path) -> None:
@@ -131,6 +147,9 @@ def test_embed_status_json_shape(tmp_project: Path, paid_embedder: PricedEmbedde
         "price_per_million_usd",
         "estimated_usd",
         "cache_path",
+        "source_bytes",
+        "work_limit_bytes",
+        "budget_usd",
         "budget_tokens",
         "would_refuse",
         "chunk_seconds",
@@ -158,7 +177,7 @@ def test_cli_embed_status(
         _cli_main()
     assert raised.value.code == 0, "a readable tree reports successfully"
     out = capsys.readouterr().out
-    for fragment in ("root", "embedder", "chunks", "tokens", "cost", "budget"):
+    for fragment in ("root", "embedder", "chunks", "tokens", "cost", "work", "budget", "verdict"):
         assert fragment in out, f"the human report must mention {fragment}"
 
     monkeypatch.setattr(sys, "argv", ["zemble", "embed-status", str(tmp_project), "--json"])
