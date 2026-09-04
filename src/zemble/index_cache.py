@@ -131,7 +131,9 @@ class IndexCache:
             )
         except EmbeddingBudgetExceeded as exc:
             hint = indexed_ancestor_hint(source_key, content)
-            raise EmbeddingBudgetExceeded(f"{exc} {hint}" if hint else str(exc)) from exc
+            # The hint is added to the text; the ceiling that refused is unchanged, so the knob
+            # travels with it. Re-deciding it here would name the money knob for a volume refusal.
+            raise EmbeddingBudgetExceeded(f"{exc} {hint}" if hint else str(exc), exc.knob) from exc
         try:
             save_index_to_cache(index, source_key)
         except Exception:

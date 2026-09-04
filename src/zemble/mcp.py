@@ -19,9 +19,10 @@ from zemble.dedup.mcp import register_dupes_tool
 from zemble.evidence.mcp import register_evidence_tools
 from zemble.graph.mcp import register_graph_tools
 from zemble.home.mcp import register_home_tool
-from zemble.index import ScopeRefused, ZembleIndex
+from zemble.index import ZembleIndex
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.mcp_repo import DEFAULT_REPO, resolve_repo, with_default_note
+from zemble.refusal import Refused
 from zemble.runtime.mcp import StaleAwareFastMCP, register_status_tool
 from zemble.types import ContentType
 from zemble.utils import describe_unresolved_location, format_results, is_git_url
@@ -120,7 +121,10 @@ async def _get_index(
         raise ValueError(reason)
     try:
         index = await cache.get(repo, content=content, exclude=exclude)
-    except ScopeRefused as exc:
+    # Every deliberate refusal - scope, work ceiling, spending budget - is an ANSWER an agent
+    # has to read and act on, so it travels as its own text. Only a real failure is wrapped in
+    # "Failed to index", which is what a money refusal used to be dressed up as.
+    except Refused as exc:
         raise ValueError(str(exc)) from exc
     except Exception as exc:
         raise ValueError(f"Failed to index {repo!r}: {exc}") from exc

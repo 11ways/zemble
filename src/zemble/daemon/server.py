@@ -32,14 +32,14 @@ from zemble.daemon.protocol import (
     socket_path,
 )
 from zemble.daemon.watch import IgnoreRules, RootWatcher
-from zemble.embedding.pricing import EmbeddingBudgetExceeded
 from zemble.graph.facts import matches_facts_glob
-from zemble.index import ScopeRefused, ZembleIndex
+from zemble.index import ZembleIndex
 from zemble.index.create import create_index_from_path
 from zemble.index.files import get_extensions
 from zemble.index.symbols import SymbolDefinitions
 from zemble.index.types import PersistencePath, PreviousIndex
 from zemble.index_cache import CacheKey, IndexCache, compute_cache_key
+from zemble.refusal import Refused
 from zemble.runtime.identity import identity, status_payload
 from zemble.runtime.memory import release_free_heap
 from zemble.types import ContentType
@@ -52,11 +52,11 @@ Handler = Callable[["Daemon", dict[str, Any]], Awaitable[Any]]
 
 # AIDEV-NOTE: a deterministic "no" is not an outage. Answering the same request in the
 # client's own process refuses identically, so the wire says REFUSED and the client stops
-# instead of paying for a second full build to be told the same thing.
-REFUSAL_TYPES: tuple[type[ScopeRefused] | type[EmbeddingBudgetExceeded], ...] = (
-    ScopeRefused,
-    EmbeddingBudgetExceeded,
-)
+# instead of paying for a second full build to be told the same thing. The tuple is derived
+# from the base class rather than listing the two it used to name: every refusal IS a
+# `Refused` and every `Refused` carries the knob this module reports, so a third refusal type
+# is caught and reported here without a second edit - and never as an AttributeError.
+REFUSAL_TYPES: tuple[type[Refused], ...] = (Refused,)
 
 #: Java is watched on top of the index's own extensions so the symbol graph stays fresh.
 _GRAPH_EXTENSIONS = frozenset({".java"})

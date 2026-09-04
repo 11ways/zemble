@@ -18,6 +18,7 @@ from zemble.embedding.base import Embedder
 from zemble.embedding.pricing import CONFIRM_ENV, confirmed, embedder_family, remedies
 from zemble.index.file_walker import _DEFAULT_IGNORED_DIRS, walk_entries
 from zemble.index.files import MAX_FILE_BYTES, get_extensions
+from zemble.refusal import Refused
 from zemble.types import ContentType
 from zemble.workspace import HOME_CONFIG_RELATIVE_PATH
 
@@ -38,21 +39,10 @@ DEFAULT_WORK_LIMIT_BYTES = 180_000_000
 _IGNORED_DIRECTORY_NAMES = frozenset(pattern.removesuffix("/") for pattern in _DEFAULT_IGNORED_DIRS)
 
 
-class ScopeRefused(RuntimeError):
-    """A deterministic refusal to build an index over a root, decided before anything is parsed.
+class ScopeRefused(Refused):
+    """A deterministic refusal to build an index over a root, decided before anything is parsed."""
 
-    One base class so every surface - the CLI, the MCP tools and the daemon wire - can tell a
-    refusal, which is the same answer in every process, from a failure, which may not be.
-    """
-
-    def __init__(self, message: str, knob: str = CONFIRM_ENV) -> None:
-        """Refuse a root, carrying the ceiling's own environment variable rather than a guess.
-
-        :param message: The refusal text, which already names the ceiling in its own unit.
-        :param knob: The environment variable that raises the ceiling this refusal hit.
-        """
-        super().__init__(message)
-        self.knob = knob
+    DEFAULT_KNOB = CONFIRM_ENV
 
 
 class BroadRootRefused(ScopeRefused):
