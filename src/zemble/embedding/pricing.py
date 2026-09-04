@@ -161,17 +161,18 @@ def embedder_family(embedder: object) -> str:
     return f"{scheme}{separator}{body if at else rest}"
 
 
-def remedies(root: str | Path | None = None) -> str:
+def remedies(root: str | Path | None = None, knob: str = BUDGET_ENV) -> str:
     """Name the ways past a refusal, cheapest first, in the one wording every guard uses.
 
     :param root: The tree being indexed, named in the paths; None renders a placeholder.
+    :param knob: The environment variable naming the ceiling that refused, which a caller raises.
     :return: One sentence listing the exclusion file, the sub-path narrowing and the env escapes.
     """
     where = str(root) if root is not None else "<root>"
     return (
         f"Exclude paths with {where}/.zembleignore (gitignore syntax), "
         f"or point repo at a sub-path such as {where}/src, "
-        f"or raise {BUDGET_ENV} / set {CONFIRM_ENV}=1 (--yes on the CLI) in the environment of the process "
+        f"or raise {knob} / set {CONFIRM_ENV}=1 (--yes on the CLI) in the environment of the process "
         f"that builds "
         "(a running daemon does not see a client's environment; restart it)."
     )

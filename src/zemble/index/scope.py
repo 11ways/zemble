@@ -1,12 +1,13 @@
-"""Refuse an accidental aggregation root, or an unaffordable one, before a build starts.
+"""Refuse an accidental aggregation root, or one whose sheer volume is runaway work.
 
 Both refusals happen before a single file is parsed: the expensive half of a build is
 chunking, and a tree big enough to be refused is a tree big enough for that to take minutes.
+Neither of them is about money: what a build costs is decided once the uncached set is known,
+by the budget guard in :mod:`zemble.embedding.pricing`.
 """
 
 from __future__ import annotations
 
-import math
 import os
 from collections import Counter
 from collections.abc import Sequence
@@ -14,18 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from zemble.chunking.capsule import CapsuleOptions
-from zemble.embedding.base import Embedder, is_remote
-from zemble.embedding.pricing import (
-    CONFIRM_ENV,
-    ESTIMATE_CHARS_PER_TOKEN,
-    budget_tokens,
-    confirmed,
-    embedder_family,
-    exceeds_budget,
-    format_cost,
-    price_per_million,
-    remedies,
-)
+from zemble.embedding.base import Embedder
+from zemble.embedding.pricing import CONFIRM_ENV, confirmed, embedder_family, remedies
 from zemble.index.file_walker import _DEFAULT_IGNORED_DIRS, walk_entries
 from zemble.index.files import MAX_FILE_BYTES, get_extensions
 from zemble.types import ContentType
@@ -36,6 +27,14 @@ MAX_UNDECLARED_REPOSITORIES = 8
 
 #: How many of the root's immediate children a refusal names, largest first.
 BREAKDOWN_LIMIT = 8
+
+#: Names the ceiling, in megabytes, on the source volume one build may chunk.
+WORK_LIMIT_ENV = "ZEMBLE_INDEX_WORK_LIMIT_MB"
+
+#: Where runaway WORK begins: ~180 MB of source, the figure the old local-lane ceiling
+#: encoded as 50M tokens. A real multi-repo workspace (javaweb: 64 MB of code) is normal
+#: work; a tree carrying thirteen copies of itself is not.
+DEFAULT_WORK_LIMIT_BYTES = 180_000_000
 
 _IGNORED_DIRECTORY_NAMES = frozenset(pattern.removesuffix("/") for pattern in _DEFAULT_IGNORED_DIRS)
 
@@ -53,7 +52,7 @@ class BroadRootRefused(ScopeRefused):
 
 
 class OversizedRootRefused(ScopeRefused):
-    """A root holds more indexable text than the token budget allows, so nothing was parsed."""
+    """A root holds more source than one build may chunk, so nothing was parsed."""
 
 
 @dataclass(frozen=True)
@@ -74,11 +73,6 @@ class TreeEstimate:
     bytes: int
     children: tuple[DirectoryWeight, ...]
 
-    @property
-    def tokens(self) -> int:
-        """The token count the bytes are worth, at the one estimate ratio the budget guard uses."""
-        return math.ceil(self.bytes / ESTIMATE_CHARS_PER_TOKEN)
-
     def breakdown(self, limit: int = BREAKDOWN_LIMIT) -> str:
         """Render the fattest children, largest first, with their share of the whole."""
         lines = []
@@ -91,6 +85,33 @@ class TreeEstimate:
 def _megabytes(size: int) -> str:
     """Render a byte count in MB, the unit a refusal is read in."""
     return f"{size / 1_000_000:.1f} MB"
+
+
+def work_limit_bytes() -> int:
+    """Return the byte ceiling one build may chunk; 0 or less disables the guard.
+
+    The environment names the ceiling in MEGABYTES, because that is the unit a human reads a
+    tree in; nonsense falls back to the default rather than crashing a build.
+
+    :return: The ceiling in bytes.
+    """
+    raw = os.environ.get(WORK_LIMIT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_WORK_LIMIT_BYTES
+    try:
+        return int(raw) * 1_000_000
+    except ValueError:
+        return DEFAULT_WORK_LIMIT_BYTES
+
+
+def exceeds_work_limit(size: int) -> bool:
+    """Return whether chunking this many bytes of source would be refused right now.
+
+    :param size: The byte volume a build would chunk.
+    :return: Whether the work guard refuses it.
+    """
+    limit = work_limit_bytes()
+    return limit > 0 and not confirmed() and size > limit
 
 
 def _nested_repository_count(root: Path, limit: int) -> int:
@@ -192,56 +213,58 @@ def require_affordable_scope(
     exclude: Sequence[str] = (),
     capsules: CapsuleOptions | None = None,
 ) -> TreeEstimate:
-    """Refuse a build whose walk alone already exceeds the token budget, before anything is parsed.
+    """Refuse a build whose walk alone is more source than one build may chunk.
 
-    This guards EVERY embedder, local ones included: the budget is about the work a build does,
-    not only about a bill, and the post-chunk guard in the caching embedder never sees a local
-    lane at all. The estimate is deliberately taken from file bytes rather than capsule text -
-    the exact number costs the very parse this refusal exists to avoid.
+    This guards EVERY embedder, local ones included, because it is about WORK: the minutes a
+    parse costs, which nobody's cache and nobody's price list can shorten. It says nothing
+    about a bill and must never print one - what a build costs is decided from the uncached
+    set, by the budget guard in the caching embedder.
 
     :param root: The directory about to be indexed.
-    :param embedder: The embedder the build resolved, used to price the estimate.
+    :param embedder: The embedder the build resolved, named in the refusal.
     :param content: The content types the build will index.
     :param exclude: Extra gitignore-style patterns this build was told to skip.
     :param capsules: The capsule configuration, used to find the previous index's manifest.
     :return: The estimate, so a caller may log what it just approved.
-    :raises OversizedRootRefused: If the estimate exceeds the budget and nothing confirmed it.
+    :raises OversizedRootRefused: If the walk exceeds the work limit and nothing confirmed it.
     """
     # AIDEV-NOTE: file bytes are a LOWER bound on what is embedded - a capsule adds a header to
-    # every chunk, measured at +21% over this repo and +52% over the small fixture tree - so this
-    # guard refuses only what is certainly over budget, and the post-chunk guard in the caching
-    # embedder stays as the exact second line of defence for the lanes that cost money.
+    # every chunk, measured at +21% over this repo and +52% over the small fixture tree. That is
+    # honest for WORK, which is what this guard measures, and it is void for MONEY: a lower bound
+    # on bytes says nothing about a bill once the content-addressed cache has already paid for
+    # most of the chunks those bytes produce. Pricing these bytes is what refused `home` for days.
     from zemble.cache import load_manifest_for_incremental
 
     resolved = Path(root).expanduser().resolve()
-    remote = is_remote(embedder)
-    if confirmed() or budget_tokens(remote) <= 0:
+    if confirmed() or work_limit_bytes() <= 0:
         return TreeEstimate(root=resolved, files=0, bytes=0, children=())
     manifest = load_manifest_for_incremental(str(resolved), embedder.model_id, content, capsules, exclude)
     estimate = estimate_tree(resolved, content, exclude, manifest)
-    if not exceeds_budget(estimate.tokens, remote):
+    if not exceeds_work_limit(estimate.bytes):
         return estimate
     family = embedder_family(embedder)
-    price = price_per_million(family) if remote else None
-    cost = f" (~{format_cost(estimate.tokens, price)})" if price is not None else ""
     raise OversizedRootRefused(
         f"Refusing to index {resolved} with {family or 'the configured embedder'}: "
-        f"{estimate.files:,} files, {_megabytes(estimate.bytes)}, ~{estimate.tokens:,} estimated tokens{cost} "
-        f"exceeds the budget of {budget_tokens(remote):,} tokens. Nothing was parsed or embedded.\n"
+        f"{estimate.files:,} files, {_megabytes(estimate.bytes)} of source exceeds the "
+        f"{_megabytes(work_limit_bytes())} this build may chunk. Nothing was parsed or embedded.\n"
         f"{estimate.breakdown()}\n"
-        f"{remedies(resolved)}"
+        f"{remedies(resolved, WORK_LIMIT_ENV)}"
     )
 
 
 __all__ = [
     "BREAKDOWN_LIMIT",
     "BroadRootRefused",
+    "DEFAULT_WORK_LIMIT_BYTES",
     "DirectoryWeight",
     "MAX_UNDECLARED_REPOSITORIES",
     "OversizedRootRefused",
     "ScopeRefused",
     "TreeEstimate",
+    "WORK_LIMIT_ENV",
     "estimate_tree",
+    "exceeds_work_limit",
     "require_affordable_scope",
     "require_declared_scope",
+    "work_limit_bytes",
 ]

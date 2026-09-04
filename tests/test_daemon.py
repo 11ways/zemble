@@ -34,9 +34,9 @@ from zemble.daemon.protocol import (
     socket_path,
 )
 from zemble.daemon.watch import IgnoreRules
-from zemble.embedding.pricing import BUDGET_ENV
 from zemble.index.file_walker import walk_files
 from zemble.index.files import get_extensions
+from zemble.index.scope import WORK_LIMIT_ENV
 from zemble.index_cache import compute_cache_key
 from zemble.types import ContentType, IndexStats
 
@@ -825,13 +825,13 @@ async def test_a_sub_path_is_served_from_the_loaded_workspace_index(tmp_path: Pa
     daemon.shutdown()
 
 
-def _fat_workspace(root: Path, files: int = 40) -> Path:
-    """Write a workspace whose `vendored/` directory dwarfs its `src/`."""
+def _fat_workspace(root: Path, files: int = 12) -> Path:
+    """Write a workspace whose `vendored/` directory dwarfs its `src/` and beats a 1 MB ceiling."""
     (root / "src").mkdir(parents=True)
     (root / "src" / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
     (root / "vendored").mkdir()
     for index in range(files):
-        (root / "vendored" / f"copy_{index}.py").write_text("x = 1\n" * 700, encoding="utf-8")
+        (root / "vendored" / f"copy_{index}.py").write_text("x = 1\n" * 16_000, encoding="utf-8")
     return root
 
 
@@ -847,9 +847,9 @@ def _raw_request(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_a_refusal_is_not_an_outage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_embedder_load: None) -> None:
-    """A budget refusal comes back as REFUSED, so a client stops instead of rebuilding to be refused again."""
+    """A scope refusal comes back as REFUSED, so a client stops instead of rebuilding to be refused again."""
     workspace = _fat_workspace(tmp_path / "work")
-    monkeypatch.setenv(BUDGET_ENV, "1000")
+    monkeypatch.setenv(WORK_LIMIT_ENV, "1")
     with running_server(watch=False, idle_minutes=0):
         # 1. The refusal is its own error kind, not a generic failure.
         with pytest.raises(CommandRefused) as raised:
