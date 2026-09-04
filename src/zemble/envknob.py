@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from typing import overload
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,19 @@ def env_float(name: str, default: float) -> float:
     return value
 
 
+@overload
+def env_int(name: str, default: int) -> int: ...
+
+
+@overload
+def env_int(name: str, default: None) -> int | None: ...
+
+
 def env_int(name: str, default: int | None) -> int | None:
     """Return an integer named by an environment variable, or the default, loudly.
+
+    An unreadable value falls back to the default, so a caller that names a real default never
+    has to handle None - which is why the overloads above carry the default's own type through.
 
     :param name: The environment variable holding the value.
     :param default: What an unset or unusable value means; None where nobody named a ceiling.

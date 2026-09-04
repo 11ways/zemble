@@ -19,12 +19,12 @@ def embed_chunks(embedder: Embedder, chunks: list[Chunk]) -> npt.NDArray[np.floa
     """Embed chunk contents as documents, each prefixed by its context capsule when it has one.
 
     Every chunk a build embeds passes here in ONE call, incremental builds included, so this
-    is where the bill for the whole build is judged - never per provider batch.
+    is where the bill for the whole build is judged - never per provider batch. An uncached set
+    that is over budget raises ``EmbeddingBudgetExceeded`` out of the guard, having sent nothing.
 
     :param embedder: The embedder to use.
     :param chunks: The chunks to embed.
     :return: A float32 matrix, one row per chunk.
-    :raises EmbeddingBudgetExceeded: If buying the uncached part of these chunks is over budget.
     """
     if not chunks:
         return np.empty((0, embedder.dimensions), dtype=np.float32)

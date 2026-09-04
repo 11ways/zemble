@@ -14,6 +14,7 @@ from zemble.dedup.languages import supported_extensions, supported_languages
 from zemble.dedup.model import CloneKind, Lane
 from zemble.dedup.report import baseline_diff_json, format_baseline_diff, format_report, report_json
 from zemble.mcp_repo import resolve_repo, with_default_note
+from zemble.refusal import Refused
 
 if TYPE_CHECKING:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP
@@ -141,4 +142,12 @@ def register_dupes_tool(server: FastMCP) -> None:
         in `.zemble/home.toml` carry a home verdict. This is a report, never a gate.
         """
         options = _options(kind, lane, paths, exclude, min_files)
-        return await asyncio.to_thread(_run, options, resolve_repo(repo), limit, format, brief, baseline, save_baseline)
+        try:
+            return await asyncio.to_thread(
+                _run, options, resolve_repo(repo), limit, format, brief, baseline, save_baseline
+            )
+        # `kind="logic"` buys a vector per candidate body, so this call can be refused by the
+        # spending budget. A refusal is the ANSWER an agent has to read and act on, the way
+        # `home` reports one, never a tool failure with the reason inside a traceback.
+        except Refused as error:
+            return str(error)

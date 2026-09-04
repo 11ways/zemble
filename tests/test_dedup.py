@@ -308,6 +308,49 @@ def test_mcp_server_registers_the_dupes_tool() -> None:
     assert {clone["lane"] for clone in lane_only["classes"]} == {"test"}, "step 6: --lane is available over MCP"
 
 
+def test_a_refused_logic_run_is_the_answer_on_both_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`dupes --kind logic` buys vectors, so it can be refused - and a refusal is an ANSWER.
+
+    `dedup/detect.py` is a paid seam: the logic lane buys one vector per candidate body and
+    passes the same bill guard an index build does, whose refusal ends "--yes on the CLI".
+    `dupes --yes` exited 2 with "unrecognized arguments", the CLI let the refusal escape as an
+    uncaught traceback out of `main`, and the MCP tool reported it as a tool failure.
+    """
+    import asyncio
+
+    from zemble.cli import _apply_embedding_confirmation, _build_parser, _cli_main
+    from zemble.embedding.pricing import CONFIRM_ENV, EmbeddingBudgetExceeded, confirmed
+    from zemble.index_cache import IndexCache
+    from zemble.mcp import create_server
+
+    bill = (
+        "Refusing to embed 6 uncached chunk(s) with voyage:voyage-code-4@1024: ~1,000,000 "
+        "estimated tokens (~$0.12) exceeds the budget of $0.05 (ZEMBLE_EMBED_BUDGET_USD)."
+    )
+
+    def _refuse(*_args: object, **_kwargs: object) -> None:
+        raise EmbeddingBudgetExceeded(bill)
+
+    # 1. The flag the refusal advertises exists, and it sets the confirmation the guard reads.
+    monkeypatch.setenv(CONFIRM_ENV, "")
+    _apply_embedding_confirmation(_build_parser().parse_args(["dupes", str(FIXTURES), "--kind", "logic", "--yes"]))
+    assert confirmed(), "step 1: --yes is the CLI half of the guard's own remedy"
+    monkeypatch.setenv(CONFIRM_ENV, "")
+
+    # 2. On the CLI the refusal is what the command exits with, never a traceback out of main().
+    monkeypatch.setattr("zemble.dedup.cli.find_duplication", _refuse)
+    monkeypatch.setattr(sys, "argv", ["zemble", "dupes", str(FIXTURES), "--kind", "logic"])
+    with pytest.raises(SystemExit) as exit_code:
+        _cli_main()
+    assert str(exit_code.value.code) == bill, f"step 2: the refusal is the answer, got {exit_code.value.code!r}"
+
+    # 3. And over MCP it is the tool's answer, the way `home` reports one.
+    monkeypatch.setattr("zemble.dedup.mcp.find_duplication", _refuse)
+    server = create_server(IndexCache())
+    answer = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "logic"}))
+    assert bill in answer[0].text, f"step 3: the refusal reaches the caller, got {answer[0].text}"
+
+
 def test_nothing_scanned_is_never_a_clean_report(tmp_path: Path) -> None:
     """A run that walked no supported file says what it looked for instead of "No duplication"."""
     from zemble.dedup.mcp import _options, _run

@@ -510,8 +510,10 @@ def _takes(subparser: argparse.ArgumentParser, option: str) -> bool:
 
 
 #: One runnable invocation per LEAF subcommand that names a workspace root but is claimed never
-#: to build an index. The claim is PROVED by running it with the build seam trip-wired, so a
-#: command that grows a build fails here instead of telling a user to pass a flag it lacks.
+#: to reach a seam that can refuse it. The claim is PROVED by running it with both refusable
+#: seams trip-wired - the index build AND the seam that buys vectors - so a command that grows
+#: either fails here instead of telling a user to pass a flag it lacks. `dupes` is not here: its
+#: logic lane buys vectors without building an index, which is exactly the gap this closed.
 _NEVER_BUILDS_PROOFS: dict[tuple[str, ...], list[str]] = {
     ("outline",): ["outline", "{root}", "auth.py", "--no-daemon"],
     ("signatures",): ["signatures", "{root}", "authenticate", "--no-daemon"],
@@ -525,7 +527,6 @@ _NEVER_BUILDS_PROOFS: dict[tuple[str, ...], list[str]] = {
         ("graph", command): ["graph", command, "{root}", "authenticate", "--no-daemon"]
         for command in ("supertypes", "overrides-of", "overridden-by", "tests-of", "neighbors")
     },
-    ("dupes",): ["dupes", "{root}"],
     ("embed-status",): ["embed-status", "{root}"],
 }
 
@@ -542,30 +543,46 @@ def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
     on three subcommands only. Nothing here is asserted from a list of names: a leaf subcommand
     is exempt only when it declares no filesystem root through `add_root_arg` - the marker, not
     the spelling, so a command naming its tree `repo` is classified like every other - or when
-    running it proves it never reaches the one seam every index build passes.
+    running it proves it never reaches a seam that can refuse it. "Never builds an index" was
+    the wrong claim to prove: `dupes --kind logic` buys a vector per candidate body without
+    building one, so it could be refused by a budget whose remedy it did not accept.
     """
     from zemble.cli import names_a_root
+    from zemble.embedding import pricing
     from zemble.embedding.registry import ResolvedEmbedder
     from zemble.index import ZembleIndex
 
-    built: list[str] = []
+    reached: list[str] = []
     real_create = create_index_from_path
+    real_bill = pricing.require_affordable_bill
 
     def _trip_wire(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
-        built.append(str(path))
+        reached.append(str(path))
         return real_create(path, *args, **kwargs)
+
+    def _paid_wire(embedder, texts):  # noqa: ANN001, ANN202
+        reached.append("require_affordable_bill")
+        return real_bill(embedder, texts)
 
     monkeypatch.setattr("zemble.index.create.create_index_from_path", _trip_wire)
     monkeypatch.setattr("zemble.index.index.create_index_from_path", _trip_wire)
+    # Both spellings of the paid seam: `index/dense.py` bound the name at import, `dedup/detect.py`
+    # looks it up on the module when the logic lane runs.
+    monkeypatch.setattr("zemble.embedding.pricing.require_affordable_bill", _paid_wire)
+    monkeypatch.setattr("zemble.index.dense.require_affordable_bill", _paid_wire)
     monkeypatch.setattr(
         "zemble.embedding.preflight.build_embedder",
         lambda spec: ResolvedEmbedder(spec=spec, embedder=FakeEmbedder(), scheme="fake", family="fake:test"),
     )
 
-    # 1. The trip wire really is on the seam a build passes, or every proof below is vacuous.
+    # 1. Both trip wires really are on the seams a refusable command reaches, or every proof
+    #    below is vacuous: the index build, and the seam that buys vectors without building one.
     ZembleIndex.from_path(tmp_project, embedder=FakeEmbedder())
-    assert built, "step 1: the trip wire must fire on a real build"
-    built.clear()
+    assert reached, "step 1: the trip wire must fire on a real build"
+    reached.clear()
+    pricing.require_affordable_bill(FakeEmbedder(), ["a text somebody would have to pay for"])
+    assert reached == ["require_affordable_bill"], "step 1: and on the seam a paid non-build run buys through"
+    reached.clear()
 
     # 2. Every leaf is classified, and a new one cannot slip through unclassified.
     leaves = _leaf_commands(_build_parser())
@@ -587,7 +604,8 @@ def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
         f"step 3: proofs for commands that no longer exist: {sorted(set(_NEVER_BUILDS_PROOFS) - set(leaves))}"
     )
 
-    # 4. Each claimed non-builder is run for real: it must answer, and the seam must stay untouched.
+    # 4. Each claimed non-builder is run for real: it must answer, and both seams must stay
+    #    untouched.
     for words, template in sorted(_NEVER_BUILDS_PROOFS.items()):
         argv = ["zemble", *(part.format(root=str(tmp_project)) for part in template)]
         monkeypatch.setattr(sys, "argv", argv)
@@ -597,4 +615,33 @@ def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
         name = " ".join(words)
         assert "usage:" not in streams.err, f"step 4: {name!r} never ran, argparse rejected {argv}: {streams.err}"
         assert streams.out.strip(), f"step 4: {name!r} answered nothing, so it proves nothing"
-        assert built == [], f"step 4: {name!r} built an index, so it must accept --yes; built {built}"
+        assert reached == [], f"step 4: {name!r} reached a refusable seam, so it must accept --yes; got {reached}"
+
+
+def test_an_argument_that_names_a_tree_is_classified_even_when_the_marker_is_missing() -> None:
+    """The `--yes` classification fails CLOSED: forgetting the marker may not exempt a command.
+
+    Reading an opt-in marker alone let a subcommand declaring a plain positional `repo` - or
+    even a plain `path`, which the older name-based rule did catch - out of the requirement to
+    accept the flag its own refusals advertise. The marker is the declaration; the shipped
+    spellings are the floor under it.
+    """
+    from zemble.cli import ROOT_ARGUMENT_NAMES, add_root_arg, names_a_root
+
+    # 1. A command that declares its tree through the marker is classified, whatever it calls it.
+    declared = argparse.ArgumentParser()
+    add_root_arg(declared, "tree_nobody_would_guess")
+    assert names_a_root(declared), "step 1: the marker is the declaration"
+
+    # 2. A command that spells a tree positionally and forgets the marker is classified too.
+    for spelling in sorted(ROOT_ARGUMENT_NAMES):
+        forgot = argparse.ArgumentParser()
+        forgot.add_argument(spelling)
+        assert names_a_root(forgot), f"step 2: a bare positional {spelling!r} still names a tree"
+
+    # 3. And nothing else is: a grouping parser and an unrelated argument name no tree.
+    assert not names_a_root(argparse.ArgumentParser()), "step 3: a parser with no arguments names no tree"
+    other = argparse.ArgumentParser()
+    other.add_argument("symbol")
+    other.add_argument("--paths", nargs="+")
+    assert not names_a_root(other), "step 3: a symbol is not a tree, and an option is not a positional"

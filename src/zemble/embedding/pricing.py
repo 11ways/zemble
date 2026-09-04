@@ -42,14 +42,6 @@ BUDGET_ENV = "ZEMBLE_EMBED_BUDGET_TOKENS"
 #: unknown model may be handed; it says nothing about what that model charges for it.
 DEFAULT_UNPRICED_BUDGET_TOKENS = 2_000_000
 
-#: The volume no build passes however cheap the price table claims a model is. Dividing a
-#: money ceiling by a price makes that price load-bearing: a rate 10x too low admits 10x the
-#: tokens, and the chars/3.6 density under-counts several-fold on minified or CJK text. This
-#: backstop means a stale rate or a bad density estimate can NARROW the ceiling but never
-#: delete it. 100M tokens is above the ~60M the 180 MB work ceiling can produce, so it never
-#: binds a build the work guard would have let through.
-MAX_BUDGET_TOKENS = 100_000_000
-
 #: The day every price below was last read off its provider's own price list.
 #: ``test_the_price_table_is_dated_and_sane`` fails once it is older than the review interval:
 #: the table is not display data any more, so nobody may inherit it unread.
@@ -62,6 +54,10 @@ CONFIRM_ENV = "ZEMBLE_EMBED_CONFIRM"
 
 #: Schemes that run on this machine: no round trip, no bill, never gated.
 FREE_SCHEMES = frozenset({"model2vec"})
+
+#: What a refusal calls an embedder that declares neither a model id nor a family, because
+#: "Refusing to embed 1 uncached chunk(s) with : ..." names nothing a reader can act on.
+UNNAMED_EMBEDDER = "an unnamed embedder"
 
 #: USD per million tokens, by scheme and model name, from each provider's own price list.
 #: A remote model missing here is priced None ("unknown price"), which is reported, not assumed.
@@ -78,6 +74,21 @@ PRICES_USD_PER_MILLION_TOKENS: dict[str, dict[str, float]] = {
         "text-embedding-3-large": 0.13,
     },
 }
+
+#: The dearest rate the table above documents. Derived, never typed twice: adding a dearer
+#: model moves the volume backstop below it with no second edit.
+DEAREST_DOCUMENTED_RATE = max(price for prices in PRICES_USD_PER_MILLION_TOKENS.values() for price in prices.values())
+
+#: The volume no build passes however cheap the price table claims a model is. Dividing a money
+#: ceiling by a price makes that price load-bearing: a rate 10x too low admits 10x the tokens.
+#: Denominating the backstop in the DEAREST documented rate is what bounds that - at this many
+#: tokens even the dearest model in the table bills exactly the default budget - so a rate
+#: mistyped low for any other model NARROWS the ceiling instead of deleting it. A mistyped
+#: dearest entry does lift it, which is what ``PRICES_CHECKED_ON`` and the unit-sanity test are
+#: for. It has to sit BELOW the ~60M tokens the 180 MB work ceiling can produce, or it would
+#: bind nothing the work guard did not already refuse; a legitimate build that big names
+#: ``ZEMBLE_EMBED_BUDGET_TOKENS`` deliberately. Raising the money knob does NOT raise it.
+MAX_BUDGET_TOKENS = int(DEFAULT_BUDGET_USD / DEAREST_DOCUMENTED_RATE * 1_000_000)
 
 
 class EmbeddingBudgetExceeded(Refused):
@@ -118,12 +129,19 @@ def estimate_cost(tokens: int, price: float | None) -> float | None:
     return None if price is None else tokens * price / 1_000_000
 
 
+def format_usd(amount: float) -> str:
+    """Render a USD amount, keeping a sub-cent figure readable rather than rounding it to $0.00.
+
+    THE one money format: an estimate and the ceiling it is compared against are printed side
+    by side, and two formatters made a refusal read ``~$0.0002 exceeds the budget of $0.00``.
+    """
+    return f"${amount:.2f}" if amount >= 0.01 or amount == 0 else f"${amount:.4f}"
+
+
 def format_cost(tokens: int, price: float | None) -> str:
     """Render an estimated cost for a human, naming an unknown price instead of hiding it."""
     cost = estimate_cost(tokens, price)
-    if cost is None:
-        return "unknown price"
-    return f"${cost:.2f}" if cost >= 0.01 or cost == 0 else f"${cost:.4f}"
+    return "unknown price" if cost is None else format_usd(cost)
 
 
 def budget_usd() -> float:
@@ -206,7 +224,7 @@ def _bill_refusal(tokens: int, family: str) -> tuple[str, str] | None:
     if limit is not None and cost is not None and cost > limit:
         return (
             f"~{tokens:,} estimated tokens (~{format_cost(tokens, price)}) exceeds the budget of "
-            f"${limit:.2f} ({BUDGET_USD_ENV})",
+            f"{format_usd(limit)} ({BUDGET_USD_ENV})",
             BUDGET_USD_ENV,
         )
     ceiling = budget_tokens(price)
@@ -244,7 +262,9 @@ def check_budget(model_id: str, family: str, count: int, tokens: int) -> None:
         return
     reason, knob = refusal
     raise EmbeddingBudgetExceeded(
-        f"Refusing to embed {count} uncached chunk(s) with {model_id}: {reason}. {remedies(None, knob)}", knob
+        f"Refusing to embed {count} uncached chunk(s) with {model_id or UNNAMED_EMBEDDER}: "
+        f"{reason}. {remedies(None, knob)}",
+        knob,
     )
 
 
@@ -296,9 +316,11 @@ def require_affordable_bill(embedder: object, texts: list[str]) -> None:
     environment variable can delete is not a ceiling. Cache awareness comes from asking the
     embedder what it would buy, which is the only cache-aware number that exists here.
 
+    Over budget, :func:`check_budget` raises ``EmbeddingBudgetExceeded`` here, before the caller
+    reaches its provider.
+
     :param embedder: The embedder a build resolved.
     :param texts: Every text this embed would cover, already-bought ones included.
-    :raises EmbeddingBudgetExceeded: If buying what is left of them is over budget.
     """
     if not texts or not is_remote(embedder):
         return
@@ -307,7 +329,9 @@ def require_affordable_bill(embedder: object, texts: list[str]) -> None:
         return
     family = embedder_family(embedder)
     tokens = estimate_tokens(buying)
-    model_id = str(getattr(embedder, "model_id", "") or family)
+    # The announcement below names the embedder too, so the fallback is resolved here rather
+    # than only where the refusal is worded.
+    model_id = str(getattr(embedder, "model_id", "") or family or UNNAMED_EMBEDDER)
     check_budget(model_id, family, len(buying), tokens)
     logger.info(
         "embedding %d uncached chunk(s), ~%d tokens, ~%s with %s",

@@ -396,6 +396,7 @@ overlapping window lengths of one copied run into the single widest one.
 | `--embedder` | env default | Embedder spec used by `--kind logic` |
 | `--jobs` | up to 8 | Extraction worker processes |
 | `--json` | off | Machine-readable output |
+| `-y`/`--yes` | off | Embed whatever `--kind logic` costs, past the spending budget |
 
 ## The MCP tool
 
@@ -543,7 +544,11 @@ never walked at all.
   window spans more files than the body does; that is deliberate (the window is
   the wider finding) but it does read as two entries for one family.
 - `logic` embeds every body in the workspace on every run. It is 16 s with the
-  local Potion model, but a paid embedder would make it a paid operation.
+  local Potion model, but a paid embedder makes it a paid operation: it is one of
+  the two seams the bill guard stands at, so on a remote embedder the run can be
+  refused in money before a single body is sent, and `--yes` (or
+  `ZEMBLE_EMBED_CONFIRM=1`) is what buys it anyway. The refusal is the answer on
+  both surfaces - the CLI exits with it, the MCP tool returns it as its text.
 - A file that fails to parse is counted in `failed_files` and named in a note,
   never silently dropped: 15 files on javaweb, `gradle-wrapper.jar` among them,
   reach the scan through a negated gitignore rule and show up there.

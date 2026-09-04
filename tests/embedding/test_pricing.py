@@ -20,6 +20,7 @@ from zemble.embedding.pricing import (
     PRICE_REVIEW_INTERVAL_DAYS,
     PRICES_CHECKED_ON,
     PRICES_USD_PER_MILLION_TOKENS,
+    UNNAMED_EMBEDDER,
     EmbeddingBudgetExceeded,
     bill_refusal,
     budget_tokens,
@@ -187,6 +188,12 @@ def test_check_budget_message(monkeypatch: pytest.MonkeyPatch) -> None:
     for fragment in ("5,000,000", "$0.10", "$0.05", "voyage:voyage-4-lite@1024", *remedy_fragments):
         assert fragment in message, f"the refusal must name {fragment}"
     assert BUDGET_ENV not in message, "the money ceiling is the one that refused, so it is the one named"
+
+    # An embedder declaring neither a model nor a family is still named: a refusal a reader has
+    # to act on may not read "Refusing to embed 1 uncached chunk(s) with : ...".
+    with pytest.raises(EmbeddingBudgetExceeded) as unnamed:
+        check_budget("", "", 1, 5_000_000)
+    assert f"with {UNNAMED_EMBEDDER}:" in str(unnamed.value), f"got {unnamed.value}"
 
 
 def test_budget_guard_journey(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

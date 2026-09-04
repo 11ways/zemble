@@ -12,26 +12,54 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import make_chunk
 from tests.embedding.test_pricing import PricedEmbedder
 from zemble.cache import save_index_to_cache
 from zemble.daemon.server import REFUSAL_TYPES
+from zemble.dedup.detect import DupeOptions, logic_classes
+from zemble.dedup.model import CloneKind
+from zemble.dedup.units import extract_units
+from zemble.embedding.base import Embedder
 from zemble.embedding.cache import CachingEmbedder
 from zemble.embedding.preflight import embed_status
 from zemble.embedding.pricing import (
     BUDGET_ENV,
     BUDGET_USD_ENV,
+    DEAREST_DOCUMENTED_RATE,
+    DEFAULT_BUDGET_USD,
     DEFAULT_UNPRICED_BUDGET_TOKENS,
     ESTIMATE_CHARS_PER_TOKEN,
+    MAX_BUDGET_TOKENS,
+    PRICES_USD_PER_MILLION_TOKENS,
     EmbeddingBudgetExceeded,
+    bill_refusal,
     check_budget,
+    estimate_cost,
 )
 from zemble.embedding.registry import CACHE_ENV, ResolvedEmbedder, build_embedder, caching_enabled
 from zemble.index import ScopeRefused, ZembleIndex
-from zemble.index.scope import WORK_LIMIT_ENV, estimate_tree
+from zemble.index.dense import embed_chunks
+from zemble.index.scope import DEFAULT_WORK_LIMIT_BYTES, WORK_LIMIT_ENV, estimate_tree
 from zemble.refusal import Refused
 from zemble.types import ContentType
 
 FAMILY = "voyage:voyage-4-lite"
+
+#: The dearest family the price table documents, named the way a cache family key is spelled.
+DEAREST_FAMILY = "openai:https://api.openai.com/v1#text-embedding-3-large"
+
+#: How much bigger an embedded chunk is than the file bytes it came from: a capsule prefixes
+#: every chunk with its context header. Measured at +21% over this repo and +52% over the small
+#: fixture tree, so the SMALLER multiplier is the honest floor under "tokens a build can carry".
+CAPSULE_MULTIPLIER = 1.21
+
+#: The most estimated tokens a build the work guard admits can carry: 180 MB of source at the
+#: capsule floor, over the pricing density. Measured, and the number the backstop must sit under.
+WORK_CEILING_TOKENS = int(DEFAULT_WORK_LIMIT_BYTES * CAPSULE_MULTIPLIER / ESTIMATE_CHARS_PER_TOKEN)
+
+#: The javaweb workspace, measured on the real tree: 73.7 MB of code and docs, 17.8M tokens from
+#: bytes, x1.21 for capsules. The build the backstop may never refuse.
+JAVAWEB_ESTIMATED_TOKENS = 21_600_000
 
 #: The byte volume the pre-parse guard used to refuse: it converted bytes to tokens at the
 #: pricing density and compared them against the old 2M-token ceiling, so any tree fatter
@@ -212,37 +240,120 @@ def test_a_refusal_carries_the_knob_that_refused_it_down_every_lane(tmp_path: Pa
     assert str(inner) in str(outer), "step 3: and the original reason is still readable"
 
 
-#: Every place outside `zemble/embedding/` that hands document texts to a provider. Each one is
-#: a paid seam and each one calls `require_affordable_bill` first; the guard lives at the seams
-#: rather than inside the optional cache wrapper, so this list is what keeps them in step.
-PAID_DOCUMENT_SEAMS = {"index/dense.py", "dedup/detect.py"}
+def test_the_volume_backstop_binds_under_the_work_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A price mistyped low narrows the money ceiling; the backstop is what stops it deleting it.
+
+    The backstop is denominated in the table's own DEAREST documented rate, so the tokens it
+    admits bill at most the default budget whatever any single rate claims. At 100,000,000 it
+    sat ABOVE everything the 180 MB work guard can admit and therefore refused nothing at all:
+    with `voyage-code-4` typed one order of magnitude low, a build at the work ceiling billed
+    $7.26 for real while the guard computed $0.73 and let it through.
+    """
+    # 1. The ceiling is derived from the price table, not typed a second time beside it.
+    dearest = max(price for prices in PRICES_USD_PER_MILLION_TOKENS.values() for price in prices.values())
+    assert DEAREST_DOCUMENTED_RATE == dearest, "step 1: the dearest rate is read off the table"
+    assert MAX_BUDGET_TOKENS == int(DEFAULT_BUDGET_USD / dearest * 1_000_000), "step 1: and the backstop divides it"
+
+    # 2. Which means the dearest model in the table bills exactly the budget at the backstop.
+    at_the_ceiling = estimate_cost(MAX_BUDGET_TOKENS, DEAREST_DOCUMENTED_RATE)
+    assert at_the_ceiling is not None and at_the_ceiling <= DEFAULT_BUDGET_USD, (
+        f"step 2: {MAX_BUDGET_TOKENS:,} tokens at the dearest rate is {at_the_ceiling}, over the budget"
+    )
+
+    # 3. It BINDS: a backstop above everything the work guard admits can never refuse anything.
+    assert MAX_BUDGET_TOKENS < WORK_CEILING_TOKENS, (
+        f"step 3: {MAX_BUDGET_TOKENS:,} is not under the {WORK_CEILING_TOKENS:,} tokens a 180 MB "
+        "build can carry, so no build the work guard admits could ever reach it"
+    )
+
+    # 4. The counter-example: one rate mistyped 10x low. The MONEY half computes $0.73 and allows.
+    monkeypatch.setitem(PRICES_USD_PER_MILLION_TOKENS["voyage"], "voyage-code-4", 0.012)
+    computed = estimate_cost(WORK_CEILING_TOKENS, 0.012)
+    assert computed is not None and computed < DEFAULT_BUDGET_USD, f"step 4: the wrong rate reads as {computed}"
+
+    # 5. And the build is refused all the same, by volume, naming the knob that refused it.
+    refusal = bill_refusal(WORK_CEILING_TOKENS, "voyage:voyage-code-4")
+    assert refusal is not None, "step 5: a rate 10x too low must not delete the ceiling off a build"
+    assert BUDGET_ENV in refusal and "no price may lift" in refusal, f"step 5: refused by volume, got {refusal}"
+
+    # 6. Which matters because the real bill at the real rate was over the budget all along.
+    real = estimate_cost(WORK_CEILING_TOKENS, 0.12)
+    assert real is not None and real > DEFAULT_BUDGET_USD, f"step 6: the real bill was {real}"
 
 
-def test_every_paid_document_seam_passes_the_bill_guard() -> None:
+def test_the_volume_backstop_admits_a_full_workspace_index() -> None:
+    """The backstop bounds a runaway, and a real multi-repo workspace is not one.
+
+    A ceiling that refuses the build it was written for is a broken ceiling: javaweb is the
+    workspace this tool is developed against, and its whole code-and-docs index has to pass.
+    """
+    # 1. The measured full javaweb index is under the backstop, with room over it.
+    assert JAVAWEB_ESTIMATED_TOKENS < MAX_BUDGET_TOKENS, (
+        f"step 1: {JAVAWEB_ESTIMATED_TOKENS:,} estimated tokens must fit under {MAX_BUDGET_TOKENS:,}"
+    )
+
+    # 2. So no lane refuses it: not at the configured model ($0.43), not at the dearest ($2.81).
+    assert bill_refusal(JAVAWEB_ESTIMATED_TOKENS, FAMILY) is None, "step 2: the configured model is affordable"
+    assert bill_refusal(JAVAWEB_ESTIMATED_TOKENS, DEAREST_FAMILY) is None, "step 2: and so is the dearest one"
+
+
+def _buy_chunks(embedder: Embedder) -> None:
+    """Drive `zemble.index.dense.embed_chunks`, the seam every index build buys its vectors at."""
+    embed_chunks(embedder, [make_chunk("x = 1\n" * 600)])
+
+
+def _buy_logic_bodies(embedder: Embedder) -> None:
+    """Drive the dupes logic lane, the seam that buys vectors without ever building an index."""
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures" / "dedup" / "src"
+    units = [
+        unit
+        for name in ("LogicA.java", "LogicB.java")
+        for unit in extract_units((fixtures / name).read_bytes(), name, include_text=True)
+        if unit.is_body
+    ]
+    assert len(units) >= 2, f"the logic lane needs two candidate bodies to embed anything, got {len(units)}"
+    logic_classes(units, DupeOptions(kinds=(CloneKind.LOGIC,), windows=False), embedder)
+
+
+#: Every place outside `zemble/embedding/` that hands document texts to a provider, each with the
+#: call that drives it. The guard lives at the seams that buy rather than inside the optional
+#: cache wrapper, so this is what keeps them in step - and naming a seam here is not enough,
+#: because step 2 RUNS each probe: asserting that the string "require_affordable_bill" appears
+#: in the file passed with both guard call lines deleted.
+PAID_DOCUMENT_SEAMS = {"index/dense.py": _buy_chunks, "dedup/detect.py": _buy_logic_bodies}
+
+
+def test_every_paid_document_seam_passes_the_bill_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """A new place that buys document vectors must meet the bill guard, not discover it later.
 
     The money check no longer sits behind `CachingEmbedder`, which one environment variable can
-    remove; it sits at the seams that buy. That only holds while every seam is one of these.
+    remove; it sits at the seams that buy. That only holds while every seam is one of these AND
+    every one of them really refuses.
     """
     source_root = Path(__file__).resolve().parents[2] / "src" / "zemble"
-    found: dict[str, str] = {}
+    found: list[str] = []
     for module in sorted(source_root.rglob("*.py")):
         relative = module.relative_to(source_root).as_posix()
         if relative.startswith("embedding/"):
             continue  # The providers and the cache are the implementations, not the buyers.
-        text = module.read_text(encoding="utf-8")
-        if ".embed_documents(" in text:
-            found[relative] = text
+        if ".embed_documents(" in module.read_text(encoding="utf-8"):
+            found.append(relative)
 
     # 1. Nobody bought vectors from a seam this suite has never heard of.
-    assert set(found) == PAID_DOCUMENT_SEAMS, (
-        f"step 1: the seams that buy document vectors changed, got {sorted(found)}; "
-        "wire require_affordable_bill into the new one and name it here"
+    assert set(found) == set(PAID_DOCUMENT_SEAMS), (
+        f"step 1: the seams that buy document vectors changed, got {found}; "
+        "wire require_affordable_bill into the new one and name it here with the call that drives it"
     )
 
-    # 2. And every one of them asks the guard before it buys.
-    for relative, text in found.items():
-        assert "require_affordable_bill" in text, f"step 2: {relative} buys vectors without passing the bill guard"
+    # 2. And every one of them, driven for real against a ceiling of nothing, refuses and buys
+    #    nothing. Reading the source for the guard's NAME never proved this: deleting both call
+    #    lines left this test - and the whole suite - green.
+    monkeypatch.setenv(BUDGET_USD_ENV, "0.0000001")
+    for relative, probe in sorted(PAID_DOCUMENT_SEAMS.items()):
+        spy = PricedEmbedder(dimensions=8)
+        with pytest.raises(EmbeddingBudgetExceeded):
+            probe(spy)
+        assert spy.document_batches == [], f"step 2: {relative} bought {spy.document_batches} before the guard"
 
 
 def test_the_report_bills_what_the_build_announces(
@@ -258,9 +369,13 @@ def test_the_report_bills_what_the_build_announces(
     (root / "src").mkdir(parents=True)
     (root / "src" / "repeated.py").write_text("x = 1\n" * 16_000, encoding="utf-8")
     inner = PricedEmbedder(dimensions=8)
+    # The report resolves the buyer the build gets - `build_embedder` wraps while caching is on -
+    # because what a repeated text costs is the BUYER's answer, not a rule the report owns.
     monkeypatch.setattr(
         "zemble.embedding.preflight.build_embedder",
-        lambda spec: ResolvedEmbedder(spec=spec, embedder=inner, scheme="voyage", family=FAMILY),
+        lambda spec: ResolvedEmbedder(
+            spec=spec, embedder=CachingEmbedder(inner, FAMILY), scheme="voyage", family=FAMILY
+        ),
     )
 
     # 1. The file chunks into many pieces, and they are not all different pieces.
@@ -276,4 +391,52 @@ def test_the_report_bills_what_the_build_announces(
     assert bought < status.uncached, f"step 2: the fixture must repeat chunks, {bought} of {status.uncached} distinct"
     assert f"~{status.estimated_tokens} tokens" in announced[0], (
         f"step 2: the report estimated {status.estimated_tokens}, the build announced {announced[0]}"
+    )
+
+
+def test_the_report_bills_what_a_cacheless_build_announces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Collapsing a repeated chunk is the CACHING buyer's behaviour, not a rule of the report's.
+
+    `ZEMBLE_EMBED_CACHE=0` hands a build a bare remote embedder, and a bare remote embedder buys
+    every copy of a repeated text. The report deduplicated unconditionally, so on a tree of
+    near-identical chunks it reported a twentieth of the bill the guard would refuse over - the
+    same report/build divergence as the work guard's, in the other direction.
+    """
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "repeated.py").write_text("x = 1\n" * 16_000, encoding="utf-8")
+    inner = PricedEmbedder(dimensions=8)
+
+    def _resolve(spec: str) -> ResolvedEmbedder:
+        """Resolve the buyer the way `build_embedder` does: wrapped only while caching is on."""
+        embedder = CachingEmbedder(inner, FAMILY, tmp_path / "vectors") if caching_enabled() else inner
+        return ResolvedEmbedder(spec=spec, embedder=embedder, scheme="voyage", family=FAMILY)
+
+    monkeypatch.setattr("zemble.embedding.preflight.build_embedder", _resolve)
+
+    # 1. With the knob off there is no cache to collapse a repeat into, on either lane.
+    monkeypatch.setenv(CACHE_ENV, "0")
+    assert not caching_enabled(), "step 1: the documented knob really is off"
+    status = embed_status(root)
+    assert status.uncached > 1, f"step 1: the fixture must chunk into several, got {status.uncached}"
+
+    # 2. So the report bills every copy, and the build announces exactly that: one answer.
+    with caplog.at_level("INFO", logger="zemble.embedding.pricing"):
+        ZembleIndex.from_path(root, embedder=inner)
+    announced = [record.getMessage() for record in caplog.records if "uncached chunk(s)" in record.getMessage()]
+    assert len(announced) == 1, f"step 2: exactly one announcement, got {caplog.records}"
+    assert int(announced[0].split()[1]) == status.uncached, (
+        f"step 2: the report billed {status.uncached} chunks, the build announced {announced[0]}"
+    )
+    assert f"~{status.estimated_tokens} tokens" in announced[0], (
+        f"step 2: the report estimated {status.estimated_tokens}, the build announced {announced[0]}"
+    )
+
+    # 3. And with the cache back on the same tree is billed for fewer, because the buyer changed:
+    #    the report follows the buyer down instead of assuming a wrapper is there.
+    monkeypatch.setenv(CACHE_ENV, "1")
+    assert embed_status(root).estimated_tokens < status.estimated_tokens, (
+        "step 3: a caching buyer gives every copy of one text a single provider slot"
     )

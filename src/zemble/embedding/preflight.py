@@ -25,6 +25,8 @@ from zemble.embedding.pricing import (
     estimate_cost,
     estimate_tokens,
     format_cost,
+    format_usd,
+    pending_purchase,
     price_per_million,
 )
 from zemble.embedding.registry import build_embedder, caching_enabled, resolve_embedder_spec
@@ -65,7 +67,7 @@ class EmbedStatus:
         """Render the ceilings the BILL is judged against, in the unit each one is set in."""
         parts = []
         if self.budget_usd is not None:
-            parts.append(f"${self.budget_usd:.2f}")
+            parts.append(format_usd(self.budget_usd))
         if self.budget_tokens is not None and self.budget_tokens > 0:
             parts.append(f"{self.budget_tokens:,} tokens")
         return " and ".join(parts) if parts else "nothing to spend, so no ceiling"
@@ -185,21 +187,20 @@ def embed_status(
             cache.close()
         lookup_seconds = time.monotonic() - started
 
-    # AIDEV-NOTE: a build buys each DISTINCT text once - `CachingEmbedder.embed_documents` gives
-    # duplicate texts one provider slot - so the bill is counted over the distinct set while the
-    # chunk counts stay per chunk. Counting a repeated chunk twice reported a bill nobody pays,
-    # and on a tree of near-identical vendored copies that gap is an order of magnitude.
-    uncached = 0
-    billed: list[str] = []
-    seen: set[str] = set()
-    for text, digest in zip(texts, digests, strict=True):
-        if digest in covered:
-            continue
-        uncached += 1
-        if digest not in seen:
-            seen.add(digest)
-            billed.append(text)
+    # AIDEV-NOTE: WHO buys is a question for the buyer, never for this report: the caching
+    # wrapper gives duplicate texts one provider slot, so it buys each DISTINCT text once, while
+    # the bare remote embedder `ZEMBLE_EMBED_CACHE=0` hands a build really does buy every copy.
+    # `pending_purchase` is the one home of that answer and the guard reads it too, so both
+    # lanes agree by construction. Counting a repeated chunk twice reported a bill nobody pays;
+    # collapsing one the build will pay twice under-reported it 20x. The chunk counts stay per
+    # chunk either way. Asking the buyer is free only where a width is already known - reading
+    # it off a model that declares none costs a provider probe, which this report never makes -
+    # so an undeclared width falls back to billing every uncached text, which over-bills rather
+    # than inventing a discount.
+    uncached_texts = [text for text, digest in zip(texts, digests, strict=True) if digest not in covered]
+    uncached = len(uncached_texts)
     cached = len(texts) - uncached
+    billed = pending_purchase(resolved.embedder, uncached_texts) if dimensions is not None else uncached_texts
     tokens = estimate_tokens(billed)
     price = price_per_million(resolved.family)
 

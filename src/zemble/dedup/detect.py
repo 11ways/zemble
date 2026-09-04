@@ -271,11 +271,13 @@ def logic_classes(
 ) -> tuple[list[CloneClass], list[str]]:
     """Build the logic clone classes: embedding candidates that survive the structural check.
 
+    Buying vectors for the candidate bodies is a paid seam, so it passes the bill guard, which
+    raises ``EmbeddingBudgetExceeded`` on a remote embedder whose bill is over budget.
+
     :param units: Every extracted unit; only whole bodies are considered.
     :param options: The run's options, naming the embedder and the similarity threshold.
     :param embedder: An explicit embedder; None loads the configured one.
     :return: The classes and any notes worth printing (timings, skipped work).
-    :raises EmbeddingBudgetExceeded: If buying vectors for the candidate bodies is over budget.
     """
     from zemble.embedding.pricing import require_affordable_bill
     from zemble.embedding.registry import load_embedder

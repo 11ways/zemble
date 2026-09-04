@@ -358,9 +358,10 @@ def create_index_from_path(
         raise ValueError(f"No supported files found under {path}.")
 
     # AIDEV-NOTE: every changed chunk is embedded in ONE call, incremental builds included.
-    # That is what lets the caching embedder see the whole pending set at once - which is
-    # where the budget guard lives - and it costs a paid provider one batched pass instead
-    # of one request per changed file.
+    # That is what lets the budget guard at the buying seam (`zemble.index.dense.embed_chunks`,
+    # which asks `require_affordable_bill` before it buys) judge the whole pending set at once
+    # rather than per batch, and it costs a paid provider one batched pass instead of one
+    # request per changed file.
     fresh = embed_chunks(embedder, fresh_chunks) if fresh_rows else None
     embeddings = _assemble_vectors(len(chunks), placements, fresh_rows, fresh, previous, manifest)
 

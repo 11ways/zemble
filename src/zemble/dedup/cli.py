@@ -14,6 +14,7 @@ from zemble.dedup.detect import DupeOptions, find_duplication
 from zemble.dedup.languages import supported_extensions, supported_languages
 from zemble.dedup.model import CloneKind, Lane
 from zemble.dedup.report import baseline_diff_json, format_baseline_diff, format_report, report_json
+from zemble.refusal import Refused
 
 _KIND_CHOICES = [kind.value for kind in CloneKind] + ["all"]
 _LANE_CHOICES = [lane.value for lane in Lane] + ["all"]
@@ -21,7 +22,7 @@ _LANE_CHOICES = [lane.value for lane in Lane] + ["all"]
 
 def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `dupes` subcommand on the main parser."""
-    from zemble.cli import add_root_arg
+    from zemble.cli import _add_confirm_arg, add_root_arg
 
     languages = supported_languages()
     parser = sub.add_parser(
@@ -88,6 +89,9 @@ def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--embedder", default=None, metavar="SPEC", help="Embedder spec used by `--kind logic`.")
     parser.add_argument("--jobs", type=int, default=None, help="Extraction worker processes (default: up to 8).")
     parser.add_argument("--json", action="store_true", help="Print machine-readable output.")
+    # `--kind logic` buys one vector per candidate body, so this run can be refused by the bill
+    # guard, whose refusal ends "--yes on the CLI". A flag a refusal advertises has to exist.
+    _add_confirm_arg(parser)
 
 
 def _kinds(raw: str) -> tuple[CloneKind, ...]:
@@ -125,7 +129,9 @@ def run_dupes(args: argparse.Namespace) -> int:
     )
     try:
         report = find_duplication(args.path, options)
-    except FileNotFoundError as error:
+    # A deliberate refusal - the spending budget of the logic lane - is the answer, printed the
+    # way every other surface prints one, never a traceback out of `main`.
+    except (Refused, FileNotFoundError) as error:
         raise SystemExit(str(error)) from None
     baseline = None
     if args.baseline:

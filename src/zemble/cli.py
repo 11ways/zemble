@@ -27,9 +27,10 @@ from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
-from zemble.index import ScopeRefused, ZembleIndex, resolve_embedder
+from zemble.index import ZembleIndex, resolve_embedder
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
+from zemble.refusal import Refused
 from zemble.rerank.registry import RerankerSpecError, load_reranker
 from zemble.runtime.cli import STATUS_COMMANDS, add_status_parser, run_status
 from zemble.stats import format_savings_report
@@ -253,6 +254,11 @@ def _resolve_content(content: list[str], include_text_files: bool) -> list[Conte
 #: `--yes` classifies on the marker alone - `path`, `repo` and `workspace` are one fact.
 ROOT_ARGUMENT_MARKER = "zemble_root_argument"
 
+#: The positional names that MEAN a filesystem root, for a parser that forgot the marker. The
+#: marker is the declaration; this list is the fail-closed half, so an argument spelled like a
+#: tree is classified as one whether or not anybody remembered to declare it.
+ROOT_ARGUMENT_NAMES = frozenset({"path", "paths", "repo", "root", "workspace"})
+
 
 def add_root_arg(parser: argparse.ArgumentParser, name: str = "path", **kwargs: Any) -> argparse.Action:
     """Declare the argument naming the tree a subcommand works on.
@@ -271,12 +277,18 @@ def names_a_root(parser: argparse.ArgumentParser) -> bool:
     """Return whether a subcommand declares an argument naming a filesystem root of its own.
 
     Its own only: a parent that merely groups subcommands names no tree, and every leaf under
-    it has to answer for itself.
+    it has to answer for itself. FAIL CLOSED: the marker is how a parser declares it, and a
+    POSITIONAL named like a tree counts too, because reading an opt-in marker alone exempts
+    every command whose author forgot it - the one direction this classification may not fail in.
 
     :param parser: The subcommand's parser.
-    :return: Whether one of its arguments was declared through :func:`add_root_arg`.
+    :return: Whether one of its arguments names a tree, declared or merely spelled like one.
     """
-    return any(getattr(action, ROOT_ARGUMENT_MARKER, False) for action in parser._actions)
+    return any(
+        getattr(action, ROOT_ARGUMENT_MARKER, False)
+        or (not action.option_strings and action.dest in ROOT_ARGUMENT_NAMES)
+        for action in parser._actions
+    )
 
 
 def _add_confirm_arg(p: argparse.ArgumentParser) -> None:
@@ -358,7 +370,11 @@ def _load_index(
         hint = indexed_ancestor_hint(path, content)
         print(f"{e} {hint}" if hint else str(e), file=sys.stderr)
         sys.exit(1)
-    except (ScopeRefused, FileNotFoundError, EmbedderSpecError) as e:
+    # The base class, not a hand-maintained union of its subclasses: every deliberate refusal
+    # is the same answer here, and a third refusal type must not escape as a traceback because
+    # nobody remembered to add it to a list. The clause above is narrower on purpose - only a
+    # spending refusal earns the "an ancestor is already indexed" hint.
+    except (Refused, FileNotFoundError, EmbedderSpecError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 

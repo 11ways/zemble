@@ -220,12 +220,15 @@ the recovery a refusal advertises rather than answering for a build nobody is ru
 
 ```
 work       1.3 MB of source to chunk, against a 180.0 MB ceiling
-budget     $5.00
+budget     $5.00 and 38,461,538 tokens
 verdict    a build would be allowed
 ```
 
-A repeated chunk is billed once, the way the caching embedder buys it: duplicate texts
-inside one call share a single provider slot.
+What a repeated chunk costs is asked of the BUYER, through the same `pending_purchase` seam
+the guard reads: the caching embedder gives every copy of one text a single provider slot, so
+it is billed once, while the bare remote embedder `ZEMBLE_EMBED_CACHE=0` hands a build really
+does buy every copy. Deduplicating unconditionally reported a twentieth of the bill that
+build would be refused over.
 
 On the javaweb workspace (77,092 chunks) a cold pass costs about 11 s of chunking plus
 0.3 s of cache lookup; when the previous index covers every file the walk alone answers
@@ -328,15 +331,27 @@ Refusing to embed 9000 uncached chunk(s) with openai:http://localhost:11434/v1#n
 documented price (ZEMBLE_EMBED_BUDGET_TOKENS). ...
 ```
 
-**The volume backstop.** Money is judged first, and the token ceiling sits under it as an
-absolute limit that applies to a PRICED model too: `MAX_BUDGET_TOKENS`, 100,000,000. The
-money ceiling is `$5.00 / price`, which makes the price table load-bearing - a rate that is
-10x too low admits 10x the tokens while the guard keeps printing "$5.00" - and the chars/3.6
-density estimate is load-bearing the same way. The backstop means a stale rate or a
-mis-measured density can NARROW the ceiling but never delete it. It is above the ~60M tokens
-the 180 MB work ceiling can produce, so it never binds a build the work guard would have let
-through. The price table carries the date it was last read (`PRICES_CHECKED_ON`) and a test
-fails once that is more than 180 days old.
+**The volume backstop.** Money is judged first, and a token ceiling sits under it as an
+absolute limit that applies to a PRICED model too: `MAX_BUDGET_TOKENS`, **derived** as
+`DEFAULT_BUDGET_USD / the dearest rate the table documents` - $5.00 at $0.13 per million, so
+38,461,538 tokens. It is derived rather than typed because the money ceiling is `$5.00 /
+price`, which makes the price table load-bearing: a rate that is 10x too low admits 10x the
+tokens while the guard keeps printing "$5.00". Denominating the backstop in the DEAREST
+documented rate is what bounds that - at the backstop even the dearest model in the table
+bills exactly $5.00 - so a rate mistyped low for any other model NARROWS the ceiling instead
+of deleting it. A mistyped *dearest* entry does lift it, which is what `PRICES_CHECKED_ON`
+and the unit-sanity test are for.
+
+It has to BIND, and it does: 180 MB of source is at most ~60M estimated tokens (file bytes
+plus the measured +21% capsule overhead, over chars/3.6), so 38.5M sits under everything the
+work guard admits, while the measured full javaweb code-and-docs index (~21.6M estimated
+tokens) passes with room over it. At 100,000,000 it sat *above* the work ceiling and could
+therefore refuse nothing at all: with `voyage-code-4` mistyped one order of magnitude low, a
+build at the work ceiling billed $7.26 for real while the guard computed $0.73 and allowed
+it. Raising `ZEMBLE_EMBED_BUDGET_USD` does not raise the backstop; a build that is genuinely
+bigger names `ZEMBLE_EMBED_BUDGET_TOKENS` deliberately, which the refusal says. The price
+table carries the date it was last read (`PRICES_CHECKED_ON`) and a test fails once that is
+more than 180 days old.
 
 `ZEMBLE_EMBED_BUDGET_TOKENS`, when a caller sets it deliberately, replaces whichever token
 ceiling would otherwise apply - the unpriced cap or the backstop - on any model that costs
@@ -359,10 +374,13 @@ inside a tool call; the third needs the environment of whichever process builds.
   not be able to delete every spending ceiling. A drift test names those seams, so a third
   place that buys vectors fails the build instead of shipping unguarded.
 - Local embedders are never billed, with or without a confirmation.
-- Every subcommand that can reach an index build takes `-y/--yes`: `search`, `stats`,
-  `find-related`, `explain` and `home`. In-process they print the refusal and exit
-  non-zero. `outline`, `signatures`, `graph` and `dupes` answer from the symbol graph and
-  never build one, which a drift test proves by running each with the build seam trip-wired.
+- Every subcommand that can be REFUSED takes `-y/--yes`: `search`, `stats`, `find-related`,
+  `explain`, `home` and `dupes`. In-process they print the refusal and exit non-zero.
+  `dupes` is there for its `--kind logic` lane, which buys a vector per candidate body
+  without building an index at all - "never builds an index" was never the same claim as
+  "cannot be refused". `outline`, `signatures` and `graph` answer from the symbol graph, which
+  a drift test proves by running each with BOTH refusable seams trip-wired: the index build
+  and the seam that buys vectors.
 - The daemon catches a refusal, logs the refusal's own text (not just "refused"), keeps the
   previous index serving (nothing is chunked, embedded or swapped) and shows it in
   `zemble daemon status` as the root's `last_error`.
@@ -424,8 +442,11 @@ measured on javaweb (15,526,808 provider-reported tokens for 73,957 chunks); a t
 minified or non-Latin text will differ, under-counting several-fold in the worst case. The
 provider's own `usage.total_tokens` is what is billed. Since the ceiling became money, that
 density risk converts directly into dollars: a build estimated at $4.99 on CJK or minified
-source could really bill several times that. The 100M-token backstop is what bounds how far
-wrong the estimate can carry a build.
+source could really bill several times that. The volume backstop does NOT bound that: it
+compares the same estimate against a token ceiling, and an under-counted density makes the
+estimate smaller, not larger, so it slips past both halves together. The only true bound on
+what such a build can really cost is the byte work ceiling above - which is measured in
+bytes, of which no density estimate can talk it out.
 
 ## The user env file
 

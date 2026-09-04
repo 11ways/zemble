@@ -65,7 +65,7 @@ class DirectoryWeight:
 
 @dataclass(frozen=True)
 class TreeEstimate:
-    """What a full build over a root would chunk, measured from the walk alone."""
+    """What one build would chunk: the whole walk, or only the paths a change set named."""
 
     root: Path
     files: int
@@ -98,8 +98,7 @@ def work_limit_bytes() -> int:
 
     :return: The ceiling in bytes.
     """
-    megabytes_allowed = env_int(WORK_LIMIT_ENV, DEFAULT_WORK_LIMIT_BYTES // 1_000_000)
-    return DEFAULT_WORK_LIMIT_BYTES if megabytes_allowed is None else megabytes_allowed * 1_000_000
+    return env_int(WORK_LIMIT_ENV, DEFAULT_WORK_LIMIT_BYTES // 1_000_000) * 1_000_000
 
 
 def exceeds_work_limit(size: int) -> bool:
