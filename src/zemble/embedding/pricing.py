@@ -2,16 +2,25 @@
 
 The price table is data with one declaring home: a model that is not in it has an
 unknown price, never a guessed one, and an unknown price never silently becomes free.
-Money is refused in money: the ceiling is USD, and the token ceiling beside it exists for
-the one case a bill cannot be computed. Runaway WORK is a different harm with its own
-guard, in bytes, in :mod:`zemble.index.scope`.
+Money is refused in money: the ceiling is USD, and the token ceilings beside it exist for
+the two cases a bill cannot be trusted - a model with no documented price, and a price that
+has moved since anybody read it. Runaway WORK is a different harm with its own guard, in
+bytes, in :mod:`zemble.index.scope`.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import os
+from datetime import date
 from pathlib import Path
+
+from zemble.embedding.base import is_remote
+from zemble.envknob import env_float, env_int
+from zemble.refusal import Refused
+
+logger = logging.getLogger(__name__)
 
 #: Characters per token used to estimate a bill before anything is sent. Measured on the
 #: javaweb workspace (docs/voyage.md: 15,526,808 provider-reported tokens for 73,957 chunks
@@ -26,12 +35,27 @@ BUDGET_USD_ENV = "ZEMBLE_EMBED_BUDGET_USD"
 #: never prompts and a runaway still does.
 DEFAULT_BUDGET_USD = 5.00
 
-#: Names the volume ceiling that applies when a model has NO documented price, and an
-#: additional token cap on every lane when a caller sets it deliberately.
+#: Names the volume ceiling that applies when a model has NO documented price, the absolute
+#: backstop below, and an additional token cap on every lane when a caller sets it deliberately.
 BUDGET_ENV = "ZEMBLE_EMBED_BUDGET_TOKENS"
-#: An unpriced model's bill cannot be bounded, so its VOLUME is. 2M tokens is $0.26 even at
-#: the dearest documented rate, so an unknown model can never surprise by more than that.
+#: An unpriced model's bill cannot be bounded, so its VOLUME is. This caps how much text an
+#: unknown model may be handed; it says nothing about what that model charges for it.
 DEFAULT_UNPRICED_BUDGET_TOKENS = 2_000_000
+
+#: The volume no build passes however cheap the price table claims a model is. Dividing a
+#: money ceiling by a price makes that price load-bearing: a rate 10x too low admits 10x the
+#: tokens, and the chars/3.6 density under-counts several-fold on minified or CJK text. This
+#: backstop means a stale rate or a bad density estimate can NARROW the ceiling but never
+#: delete it. 100M tokens is above the ~60M the 180 MB work ceiling can produce, so it never
+#: binds a build the work guard would have let through.
+MAX_BUDGET_TOKENS = 100_000_000
+
+#: The day every price below was last read off its provider's own price list.
+#: ``test_the_price_table_is_dated_and_sane`` fails once it is older than the review interval:
+#: the table is not display data any more, so nobody may inherit it unread.
+PRICES_CHECKED_ON = date(2026, 9, 4)
+#: How long the table may go unread before that test asks for a re-read.
+PRICE_REVIEW_INTERVAL_DAYS = 180
 
 #: Set to 1 to embed whatever the budget would have refused.
 CONFIRM_ENV = "ZEMBLE_EMBED_CONFIRM"
@@ -56,17 +80,10 @@ PRICES_USD_PER_MILLION_TOKENS: dict[str, dict[str, float]] = {
 }
 
 
-class EmbeddingBudgetExceeded(RuntimeError):
+class EmbeddingBudgetExceeded(Refused):
     """A build would have cost more than the budget allows, so nothing was sent."""
 
-    def __init__(self, message: str, knob: str = BUDGET_USD_ENV) -> None:
-        """Refuse a bill, carrying the ceiling's own environment variable rather than a guess.
-
-        :param message: The refusal text, which already names the ceiling in its own unit.
-        :param knob: The environment variable that raises the ceiling this refusal hit.
-        """
-        super().__init__(message)
-        self.knob = knob
+    DEFAULT_KNOB = BUDGET_USD_ENV
 
 
 def model_of_family(family: str) -> tuple[str, str]:
@@ -114,34 +131,35 @@ def budget_usd() -> float:
 
     :return: The USD ceiling for this build.
     """
-    raw = os.environ.get(BUDGET_USD_ENV, "").strip()
-    if not raw:
-        return DEFAULT_BUDGET_USD
-    try:
-        return float(raw)
-    except ValueError:
-        return DEFAULT_BUDGET_USD
+    return env_float(BUDGET_USD_ENV, DEFAULT_BUDGET_USD)
+
+
+def explicit_budget_tokens() -> int | None:
+    """Return the token ceiling a caller named deliberately, or None when nobody named one.
+
+    :return: The value of the token knob, or None when it is unset or unreadable.
+    """
+    return env_int(BUDGET_ENV, None)
 
 
 def budget_tokens(price: float | None = None) -> int | None:
     """Return the token ceiling this build is capped by, or None when tokens do not cap it.
 
     A caller who names a token ceiling means it, so an explicit value applies to any model
-    that costs anything. Without one, only a model with NO documented price is capped by
-    volume: a priced model is capped by :func:`budget_usd`, and a free one by nothing.
+    that costs anything - including a value of 0 or less, which disables the volume half.
+    Without one, a model with NO documented price is capped at the small unpriced volume, a
+    priced one at :data:`MAX_BUDGET_TOKENS` (the money ceiling is only as good as the price
+    that divides it), and a free one at nothing.
 
     :param price: The model's USD per million tokens; 0.0 when free, None when undocumented.
     :return: The ceiling in tokens, 0 or less when disabled, or None when no token cap applies.
     """
     if price == 0.0:
         return None
-    raw = os.environ.get(BUDGET_ENV, "").strip()
-    if raw:
-        try:
-            return int(raw)
-        except ValueError:
-            pass
-    return None if price is not None else DEFAULT_UNPRICED_BUDGET_TOKENS
+    explicit = explicit_budget_tokens()
+    if explicit is not None:
+        return explicit
+    return MAX_BUDGET_TOKENS if price is not None else DEFAULT_UNPRICED_BUDGET_TOKENS
 
 
 def applicable_budget_usd(price: float | None) -> float | None:
@@ -164,18 +182,25 @@ def confirmed() -> bool:
     return os.environ.get(CONFIRM_ENV, "").strip().lower() in {"1", "true", "yes"}
 
 
+def _volume_reason(price: float | None) -> str:
+    """Say why a VOLUME ceiling applies, unless the reason is simply that a caller named one."""
+    if explicit_budget_tokens() is not None:
+        return ""
+    if price is None:
+        return " for a model with no documented price"
+    return ", the volume ceiling no price may lift"
+
+
 def _bill_refusal(tokens: int, family: str) -> tuple[str, str] | None:
-    """Decide a bill refusal once, returning both its wording and the knob that named the ceiling."""
+    """Decide a bill refusal once, returning both its wording and the knob that named the ceiling.
+
+    Money is judged FIRST: where a bill can be computed it is the harm, and the USD knob is
+    the one worth naming. The volume ceiling below it covers the two cases money cannot -
+    a model with no documented price, and a documented price nobody can prove is current.
+    """
     if confirmed():
         return None
     price = price_per_million(family)
-    ceiling = budget_tokens(price)
-    if ceiling is not None and 0 < ceiling < tokens:
-        unpriced = "" if price is not None else " for a model with no documented price"
-        return (
-            f"~{tokens:,} estimated tokens exceeds the ceiling of {ceiling:,} tokens{unpriced} ({BUDGET_ENV})",
-            BUDGET_ENV,
-        )
     limit = applicable_budget_usd(price)
     cost = estimate_cost(tokens, price)
     if limit is not None and cost is not None and cost > limit:
@@ -183,6 +208,13 @@ def _bill_refusal(tokens: int, family: str) -> tuple[str, str] | None:
             f"~{tokens:,} estimated tokens (~{format_cost(tokens, price)}) exceeds the budget of "
             f"${limit:.2f} ({BUDGET_USD_ENV})",
             BUDGET_USD_ENV,
+        )
+    ceiling = budget_tokens(price)
+    if ceiling is not None and 0 < ceiling < tokens:
+        return (
+            f"~{tokens:,} estimated tokens exceeds the ceiling of {ceiling:,} tokens"
+            f"{_volume_reason(price)} ({BUDGET_ENV})",
+            BUDGET_ENV,
         )
     return None
 
@@ -234,6 +266,56 @@ def embedder_family(embedder: object) -> str:
     scheme, separator, rest = model_id.partition(":")
     body, at, _dimensions = rest.rpartition("@")
     return f"{scheme}{separator}{body if at else rest}"
+
+
+def pending_purchase(embedder: object, texts: list[str]) -> list[str]:
+    """Return the texts an embedder would really have to buy out of these.
+
+    An embedder that stores what it bought answers for itself through ``pending_documents``,
+    because only it knows which of these texts are already paid for and which copies of a
+    repeated text share one provider slot. Anything else buys every one of them: FAIL CLOSED,
+    never an assumption that some invisible cache will pick up the bill.
+
+    :param embedder: The embedder a build resolved.
+    :param texts: Every text the build is about to embed.
+    :return: The subset that would actually reach a provider.
+    """
+    resolve = getattr(embedder, "pending_documents", None)
+    if resolve is None:
+        return texts
+    pending: list[str] = resolve(texts)
+    return pending
+
+
+def require_affordable_bill(embedder: object, texts: list[str]) -> None:
+    """Refuse, or announce, the paid part of one embed before a single text is sent.
+
+    THE money verdict on a real build. It lives at the seam that buys vectors rather than
+    inside the caching wrapper, because that wrapper is optional - ``ZEMBLE_EMBED_CACHE=0``
+    turns it off, and a library caller may hand in a bare remote embedder - and a ceiling one
+    environment variable can delete is not a ceiling. Cache awareness comes from asking the
+    embedder what it would buy, which is the only cache-aware number that exists here.
+
+    :param embedder: The embedder a build resolved.
+    :param texts: Every text this embed would cover, already-bought ones included.
+    :raises EmbeddingBudgetExceeded: If buying what is left of them is over budget.
+    """
+    if not texts or not is_remote(embedder):
+        return
+    buying = pending_purchase(embedder, texts)
+    if not buying:
+        return
+    family = embedder_family(embedder)
+    tokens = estimate_tokens(buying)
+    model_id = str(getattr(embedder, "model_id", "") or family)
+    check_budget(model_id, family, len(buying), tokens)
+    logger.info(
+        "embedding %d uncached chunk(s), ~%d tokens, ~%s with %s",
+        len(buying),
+        tokens,
+        format_cost(tokens, price_per_million(family)),
+        model_id,
+    )
 
 
 def remedies(root: str | Path | None = None, knob: str = BUDGET_USD_ENV) -> str:
