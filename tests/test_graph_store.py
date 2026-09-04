@@ -1,16 +1,20 @@
 """Behaviour journeys over graph storage and incremental rebuilds."""
 
+import logging
 import shutil
 from pathlib import Path
 
 from zemble.graph.store import (
+    GRAPH_BUILD_SUFFIX,
     GRAPH_DB_NAME,
     GRAPH_FORMAT_VERSION,
+    _compact_if_drifted,
     build_graph,
     connect,
     graph_db_path,
     graph_exists,
     graph_folder,
+    open_db,
 )
 
 
@@ -170,3 +174,74 @@ def test_change_set_refresh_journey(graph_fixture_root: Path, graph_cache: Path,
     ).fetchone()
     connection.close()
     assert remaining is None, "step 4: and so did its symbols"
+
+
+def test_torn_store_journey(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path, caplog) -> None:
+    """A store torn by a killed build is refused loudly and rebuilt, never read past."""
+    workspace = _copy_workspace(graph_fixture_root, tmp_path / "ws")
+    path = str(workspace)
+    first = build_graph(path)
+    db = graph_db_path(path)
+
+    # 1. The live store is written durably, so a kill leaves a journal to roll back rather
+    #    than a torn file: that is what `synchronous=OFF` + `journal_mode=MEMORY` discarded.
+    connection = connect(path)
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete", "step 1: the journal is on disk"
+    assert connection.execute("PRAGMA synchronous").fetchone()[0] == 2, "step 1: and commits fsync"
+    connection.close()
+
+    # 2. A file cut short mid-write is exactly what an OOM-killed build left behind.
+    intact = db.read_bytes()
+    db.write_bytes(intact[: len(intact) // 2])
+    assert not graph_exists(path), "step 2: a malformed store is not a graph"
+
+    # 3. Building over it says so at ERROR and rebuilds from source instead of logging past it.
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="zemble.graph.store"):
+        rebuilt = build_graph(path)
+    assert rebuilt.rebuilt_from_corruption, "step 3: the build reports the rebuild it had to do"
+    assert any("malformed" in record.getMessage() for record in caplog.records), "step 3: and says so out loud"
+
+    # 4. What it rebuilt is the graph that was there before, and sqlite agrees it is sound.
+    assert (rebuilt.symbols, rebuilt.edges) == (first.symbols, first.edges), "step 4: the same graph came back"
+    connection = connect(path)
+    assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "step 4: the file is sound"
+    connection.close()
+
+    # 5. The generation it built through is renamed into place, never left beside the store.
+    leftovers = list(db.parent.glob(f"{db.name}{GRAPH_BUILD_SUFFIX}*"))
+    assert leftovers == [], f"step 5: no generation is left behind, found {leftovers}"
+
+    # 6. A refresh after the rebuild is an ordinary no-op again.
+    again = build_graph(path)
+    assert (again.extracted_files, again.rebuilt_from_corruption) == (0, False), "step 6: back to a plain refresh"
+
+
+def test_a_bloated_store_is_compacted(tmp_path: Path) -> None:
+    """Deleted rows are returned to the filesystem, and a small store is left alone."""
+    db = tmp_path / "graph.sqlite"
+    connection = open_db(db)
+    connection.executemany(
+        "INSERT INTO symbols (id, name) VALUES (?, ?)", [(f"id{i}", "x" * 400) for i in range(20_000)]
+    )
+    connection.commit()
+    connection.close()
+    grown = db.stat().st_size
+
+    # 1. A store with nothing free is left exactly as it is.
+    assert not _compact_if_drifted(db), "step 1: nothing to reclaim"
+    assert db.stat().st_size == grown, "step 1: and nothing was rewritten"
+
+    # 2. Deleting most of it frees pages that sqlite keeps in the file.
+    connection = open_db(db)
+    connection.execute("DELETE FROM symbols WHERE id != 'id0'")
+    connection.commit()
+    connection.close()
+    assert db.stat().st_size == grown, "step 2: a delete never shrinks the file on its own"
+
+    # 3. The next build's compaction hands them back, in place, with the rows intact.
+    assert _compact_if_drifted(db), "step 3: the drift is compacted"
+    assert db.stat().st_size < grown // 2, "step 3: and the file actually shrank"
+    connection = open_db(db)
+    assert connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 1, "step 3: the surviving row survived"
+    connection.close()

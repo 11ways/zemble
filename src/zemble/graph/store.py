@@ -58,6 +58,20 @@ logger = logging.getLogger(__name__)
 
 GRAPH_FORMAT_VERSION = 6
 GRAPH_DB_NAME = "graph.sqlite"
+#: Suffix of the generation a full build writes before renaming it over the live store.
+GRAPH_BUILD_SUFFIX = ".building"
+#: The sidecars sqlite keeps beside a store; a leftover one must never be applied to a
+#: generation that replaced the file it belonged to.
+_DB_SIDECARS = ("-journal", "-wal", "-shm")
+#: What sqlite says when the file it opened is not a graph any more. A store that reports
+#: any of these is never repaired in place: it is rebuilt from source, which is cheap
+#: because a graph is derived data.
+_CORRUPTION_MARKERS = ("malformed", "is not a database", "corrupt", "encrypted")
+#: Free-page share above which a store is compacted into a fresh generation. Deletes never
+#: return pages to the filesystem on their own, and an incremental refresh is mostly deletes.
+_COMPACT_FREE_FRACTION = 0.25
+#: Stores below this many pages are left alone; compacting a small file buys nothing.
+_COMPACT_MIN_PAGES = 4096
 # Edge kinds that are computed from resolved symbols rather than extracted from source.
 # They are always recomputed for a re-resolved file, never reloaded and re-inserted.
 _DERIVED_KINDS = (EdgeKind.OVERRIDES.value, EdgeKind.TESTS.value, EdgeKind.EXERCISES.value)
@@ -148,6 +162,10 @@ class GraphStats:
     resolution_counts: dict[str, int] = field(default_factory=dict)
     facts: dict[str, object] = field(default_factory=dict)
     duration_seconds: float = 0.0
+    #: Whether this build rewrote the whole store because the one on disk was malformed.
+    rebuilt_from_corruption: bool = False
+    #: Whether this build rewrote the whole store because deletes had left too much of it free.
+    compacted: bool = False
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-ready view of the build statistics."""
@@ -164,6 +182,8 @@ class GraphStats:
             "resolution_counts": self.resolution_counts,
             "facts": self.facts,
             "duration_seconds": round(self.duration_seconds, 3),
+            "rebuilt_from_corruption": self.rebuilt_from_corruption,
+            "compacted": self.compacted,
         }
 
 
@@ -181,13 +201,69 @@ def graph_db_path(path: str) -> Path:
 
 def connect(path: str, *, read_only: bool = False) -> sqlite3.Connection:
     """Open (and if needed create) the graph database for a project path."""
-    db_path = graph_db_path(path)
+    return open_db(graph_db_path(path), read_only=read_only)
+
+
+def open_db(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
+    """Open one graph database file, applying the durability the store is written under."""
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
+    _apply_durability(connection)
     if not read_only:
         connection.executescript(_SCHEMA)
         _migrate(connection)
     return connection
+
+
+def _apply_durability(connection: sqlite3.Connection) -> None:
+    """Keep the rollback journal on disk and fsync every commit.
+
+    AIDEV-NOTE: this replaced `synchronous=OFF` + `journal_mode=MEMORY`, which threw the
+    rollback journal away: a build killed mid-write (three OOM kills in one week) left a torn
+    file that still answered queries. The javaweb store reached 1.95 GB with 1.28 GB of pages
+    reachable from neither a tree nor the freelist, an `edges` btree with out-of-order rowids,
+    and 4,751 ignored "database disk image is malformed" lines in the daemon log.
+    Deliberately NOT WAL, unlike the embedding cache: a full build is swapped in by renaming
+    a new inode over this file, and a `-wal`/`-shm` pair left pointing at a replaced inode is
+    the very torn read this discipline exists to end.
+    """
+    connection.execute("PRAGMA journal_mode=DELETE")
+    connection.execute("PRAGMA synchronous=FULL")
+
+
+class GraphStoreCorrupt(RuntimeError):
+    """The graph store on disk cannot be read and has to be rebuilt from source."""
+
+
+def is_corruption(exc: BaseException) -> bool:
+    """Return whether a sqlite error says the file itself is unreadable rather than the query."""
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in _CORRUPTION_MARKERS)
+
+
+def _generation_path(db_path: Path) -> Path:
+    """The temporary file a full build writes before it is renamed over the live store."""
+    return db_path.with_name(f"{db_path.name}{GRAPH_BUILD_SUFFIX}-{os.getpid()}")
+
+
+def _discard(db_path: Path) -> None:
+    """Delete a store and every sidecar sqlite may have left beside it."""
+    db_path.unlink(missing_ok=True)
+    for suffix in _DB_SIDECARS:
+        db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
+
+
+def _install_generation(built: Path, db_path: Path) -> None:
+    """Move a finished generation over the live store in one atomic step.
+
+    The sidecars go after the rename, not before: sqlite matches a hot journal by NAME, so
+    one left behind by a killed writer would otherwise be replayed into the new file.
+    """
+    os.replace(built, db_path)
+    for suffix in _DB_SIDECARS:
+        db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
 
 
 def _migrate(connection: sqlite3.Connection) -> None:
@@ -243,6 +319,11 @@ def _backfill_declaration_keys(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
+def graph_present(path: str) -> bool:
+    """Return True if a graph database file exists for a path, readable or not."""
+    return (graph_folder(path) / GRAPH_DB_NAME).is_file()
+
+
 def graph_exists(path: str) -> bool:
     """Return True if a graph database with symbols already exists for a path."""
     db_path = graph_folder(path) / GRAPH_DB_NAME
@@ -252,7 +333,10 @@ def graph_exists(path: str) -> bool:
     try:
         connection = sqlite3.connect(db_path)
         return connection.execute("SELECT 1 FROM symbols LIMIT 1").fetchone() is not None
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        if is_corruption(exc):
+            # Loud, and false: a malformed file is not a graph, so the next build makes one.
+            logger.error("graph store %s is malformed (%s); it will be rebuilt from source", db_path, exc)
         return False
     finally:
         if connection is not None:
@@ -487,8 +571,43 @@ def build_graph(
         raise ValueError(f"{path!r} is not a local directory")
     started = time.perf_counter()
     workers = workers if workers is not None else min(10, (os.cpu_count() or 2))
+    db_path = graph_db_path(str(root))
+    whole = force or not db_path.is_file()
 
-    connection = connect(str(root))
+    try:
+        stats = _build_into(root, db_path, force=force, workers=workers, changed_paths=changed_paths, whole=whole)
+    except sqlite3.DatabaseError as exc:
+        if not is_corruption(exc):
+            raise
+        logger.error("graph store %s is malformed (%s); rebuilding it from source", db_path, exc)
+        _discard(db_path)
+        stats = _build_into(root, db_path, force=True, workers=workers, changed_paths=None, whole=True)
+        stats.rebuilt_from_corruption = True
+    stats.duration_seconds = time.perf_counter() - started
+    return stats
+
+
+def _build_into(
+    root: Path,
+    db_path: Path,
+    *,
+    force: bool,
+    workers: int,
+    changed_paths: Iterable[Path] | None,
+    whole: bool,
+) -> GraphStats:
+    """Run one build, as a renamed-in generation when it rewrites the store, in place otherwise.
+
+    A build that reads the whole workspace anyway writes a brand-new file and swaps it in with
+    a single rename, so a kill leaves the previous store untouched instead of a torn one - and
+    the generation is compact by construction. An incremental refresh writes in place, because
+    copying the store per saved file would cost more than the refresh; it is safe there because
+    the live file carries a real rollback journal (see `_apply_durability`).
+    """
+    target = _generation_path(db_path) if whole else db_path
+    if whole:
+        _discard(target)
+    connection = open_db(target)
     # A forced build re-reads everything, facts files included, so it walks like a cold one.
     named = None if changed_paths is None or force else list(changed_paths)
     scan = _scan(root) if named is None else _scan_changed(root, named, _stored_stamps(connection))
@@ -497,12 +616,44 @@ def build_graph(
         logger.info("graph: skipping %d %s file(s): no graph extractor for %s", count, language, language)
 
     try:
-        _run_build(connection, root, scan, stats, force=force, workers=workers, named_changes=named)
-    finally:
-        connection.commit()
-        connection.close()
-    stats.duration_seconds = time.perf_counter() - started
+        try:
+            _run_build(connection, root, scan, stats, force=force, workers=workers, named_changes=named)
+        finally:
+            connection.commit()
+            connection.close()
+    except BaseException:
+        if whole:
+            _discard(target)
+        raise
+    if whole:
+        _install_generation(target, db_path)
+    else:
+        stats.compacted = _compact_if_drifted(db_path)
     return stats
+
+
+def _compact_if_drifted(db_path: Path) -> bool:
+    """Rewrite a store whose deleted rows have left too much of it free, as a fresh generation.
+
+    Sqlite never returns freed pages to the filesystem, and an incremental refresh is mostly
+    deletes: the store only ever grows unless something compacts it. `VACUUM INTO` writes the
+    compact copy beside it, so the live file is replaced by the same rename a full build uses
+    rather than rewritten under a reader.
+    """
+    connection = sqlite3.connect(db_path)
+    try:
+        pages = connection.execute("PRAGMA page_count").fetchone()[0]
+        free = connection.execute("PRAGMA freelist_count").fetchone()[0]
+        if pages < _COMPACT_MIN_PAGES or free < pages * _COMPACT_FREE_FRACTION:
+            return False
+        target = _generation_path(db_path)
+        _discard(target)
+        logger.info("graph: compacting %s (%d of %d pages free)", db_path, free, pages)
+        connection.execute("VACUUM INTO ?", (str(target),))
+    finally:
+        connection.close()
+    _install_generation(target, db_path)
+    return True
 
 
 def _run_build(
@@ -516,8 +667,6 @@ def _run_build(
     named_changes: list[Path] | None,
 ) -> None:
     """Do the two-pass build inside an open connection."""
-    connection.execute("PRAGMA synchronous=OFF")
-    connection.execute("PRAGMA journal_mode=MEMORY")
     known = _stored_stamps(connection)
     changed = [job for job in scan.jobs if force or known.get(job[1]) != scan.stamps[job[1]]]
     removed = sorted(set(known) - set(scan.stamps))
