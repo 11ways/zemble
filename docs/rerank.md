@@ -34,6 +34,14 @@ tune the pass, all read from the environment (`RerankSettings.from_env`):
 | blend | `ZEMBLE_RERANK_ALPHA` | 1.0 | Weight of the reranker score against the fused score. |
 | passage | `ZEMBLE_RERANK_PASSAGE` | `context` | `context` = capsule + content, `content` = the code alone. |
 
+A hosted reranker is paid, and it passes **neither** of the two index guards
+(docs/embedders.md, "The two guards"): those refuse a runaway BUILD, and a rerank pass is a
+per-query cost with its own bound. One query scores at most `ZEMBLE_RERANK_K` passages
+(default 50), sent as requests of at most 100 documents and ~100,000 estimated tokens each
+with `truncation` on, so neither a long passage nor a wide window can make one query cost an
+unbounded amount. `VoyageReranker.total_tokens` and `.request_count` carry what a pass really
+used, from the provider's own usage figures.
+
 `cross:` needs the optional extra: `pip install 'zemble[rerank]'` (torch + transformers).
 Importing zemble never imports torch, and building a `cross:` reranker does not load the
 model - the first `score()` call does. A test asserts this.

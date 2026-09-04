@@ -255,6 +255,18 @@ Only the cache-aware number gates money.
 | runaway WORK (minutes of chunking) | `require_affordable_scope` | `index/scope.py`, pre-parse | BYTES of source a build would chunk | every embedder, local included |
 | runaway BILL | `require_affordable_bill` | `embedding/pricing.py`, post-chunk | USD of the UNCACHED texts, or their VOLUME where no bill can be computed | every remote embedder |
 
+**Query-side spend sits outside both guards, deliberately.** They exist because a BUILD is
+unbounded in the size of the tree handed to it; a query is not. `zemble.search` embeds the
+query itself (`embed_queries`, one short text - a few dozen tokens, and under a millionth of
+a dollar at any rate in the price table), and a hosted reranker (`rerank/voyage.py`) scores
+one window of candidates per query. What bounds that is the caller's own two constants, not
+anything walked off disk: `ZEMBLE_RERANK_K` passages (default 50), split into requests of at
+most 100 documents and ~100,000 estimated tokens each, with `truncation` on so a long passage
+cannot lift a request past the provider's ceiling. `VoyageReranker` keeps its own running
+`total_tokens` and `request_count` from the provider's own usage figures. Putting a per-build
+ceiling in front of a per-query cost would refuse a search for the size of a repository it
+never reads.
+
 The pre-parse guard cannot know a bill. The content-addressed embedding cache is invisible
 to it by construction - there is no chunk text to hash yet - so a tree whose chunks were all
 paid for last week looks exactly like a tree nobody has ever indexed. Pricing those bytes
