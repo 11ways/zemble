@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import json
 import sys
@@ -8,9 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import make_chunk, write_index_components
-from zemble.cli import _cli_main, _maybe_save_index, _run_clear, _via_daemon, main
+from tests.conftest import FakeEmbedder, make_chunk, write_index_components
+from zemble.cli import _build_parser, _cli_main, _maybe_save_index, _run_clear, _via_daemon, main
 from zemble.embedding.pricing import CONFIRM_ENV
+from zemble.index.create import create_index_from_path
 from zemble.types import ContentType, SearchResult
 from zemble.version import __version__
 
@@ -482,3 +484,92 @@ def test_cli_reports_a_daemon_refusal_without_rebuilding(monkeypatch: pytest.Mon
     with pytest.raises(SystemExit) as exit_code:
         _via_daemon("search", {"path": "/some/path"}, False, None)
     assert exit_code.value.code == 1, "the refusal is a failed command, not a fallback"
+
+
+def _subcommands(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
+    """Return every subcommand the parser declares, by name."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return dict(action.choices)
+    raise AssertionError("the zemble parser must declare subcommands")
+
+
+def _takes(subparser: argparse.ArgumentParser, option: str) -> bool:
+    """Return whether a subcommand, or any subcommand nested under it, declares that argument."""
+    for action in subparser._actions:
+        if option in action.option_strings or action.dest == option:
+            return True
+        if isinstance(action, argparse._SubParsersAction) and any(
+            _takes(nested, option) for nested in action.choices.values()
+        ):
+            return True
+    return False
+
+
+#: One runnable invocation per subcommand that names a workspace path but is claimed never to
+#: build an index. The claim is PROVED by running it with the build seam trip-wired, so a
+#: command that grows a build fails here instead of telling a user to pass a flag it lacks.
+_NEVER_BUILDS_PROOFS = {
+    "outline": ["outline", "{root}", "auth.py", "--no-daemon"],
+    "signatures": ["signatures", "{root}", "authenticate", "--no-daemon"],
+    "graph": ["graph", "build", "{root}", "--no-daemon"],
+    "dupes": ["dupes", "{root}"],
+    "embed-status": ["embed-status", "{root}"],
+}
+
+
+def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
+    tmp_project: Path,
+    graph_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every refusal ends with "or pass --yes", so every command that can be refused must take it.
+
+    `zemble home ... --yes` exited 2 with `unrecognized arguments` for as long as the flag was
+    on three subcommands only. Nothing here is asserted from a list of names: a subcommand is
+    exempt only when the parser shows it cannot name a tree, or when running it proves it never
+    reaches the one seam every index build passes.
+    """
+    from zemble.embedding.registry import ResolvedEmbedder
+    from zemble.index import ZembleIndex
+
+    built: list[str] = []
+    real_create = create_index_from_path
+
+    def _trip_wire(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        built.append(str(path))
+        return real_create(path, *args, **kwargs)
+
+    monkeypatch.setattr("zemble.index.create.create_index_from_path", _trip_wire)
+    monkeypatch.setattr("zemble.index.index.create_index_from_path", _trip_wire)
+    monkeypatch.setattr(
+        "zemble.embedding.preflight.build_embedder",
+        lambda spec: ResolvedEmbedder(spec=spec, embedder=FakeEmbedder(), scheme="fake", family="fake:test"),
+    )
+
+    # 1. The trip wire really is on the seam a build passes, or every proof below is vacuous.
+    ZembleIndex.from_path(tmp_project, embedder=FakeEmbedder())
+    assert built, "step 1: the trip wire must fire on a real build"
+    built.clear()
+
+    # 2. Every subcommand is classified, and a new one cannot slip through unclassified.
+    for name, subparser in sorted(_subcommands(_build_parser()).items()):
+        if _takes(subparser, "confirm_embedding"):
+            continue
+        if not _takes(subparser, "path"):
+            continue  # It cannot name a tree, so it cannot build one.
+        assert name in _NEVER_BUILDS_PROOFS, (
+            f"step 2: {name!r} names a workspace path but neither takes --yes nor proves it never builds"
+        )
+
+    # 3. Each claimed non-builder is run for real: it must answer, and the seam must stay untouched.
+    for name, template in sorted(_NEVER_BUILDS_PROOFS.items()):
+        argv = ["zemble", *(part.format(root=str(tmp_project)) for part in template)]
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit):
+            _cli_main()
+        streams = capsys.readouterr()
+        assert "usage:" not in streams.err, f"step 3: {name!r} never ran, argparse rejected {argv}: {streams.err}"
+        assert streams.out.strip(), f"step 3: {name!r} answered nothing, so it proves nothing"
+        assert built == [], f"step 3: {name!r} built an index, so it must accept --yes; built {built}"

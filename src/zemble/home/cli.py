@@ -33,9 +33,10 @@ def add_home_parser(sub: argparse._SubParsersAction) -> None:
         "-k", "--top-k", type=int, default=DEFAULT_TOP_K, help=f"Code results to weigh (default: {DEFAULT_TOP_K})."
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable output.")
-    from zemble.cli import _add_daemon_arg, _add_embedder_arg
+    from zemble.cli import _add_confirm_arg, _add_daemon_arg, _add_embedder_arg
 
     _add_embedder_arg(parser)
+    _add_confirm_arg(parser)
     _add_daemon_arg(parser)
 
 

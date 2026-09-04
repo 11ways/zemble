@@ -248,14 +248,14 @@ def _resolve_content(content: list[str], include_text_files: bool) -> list[Conte
 
 
 def _add_confirm_arg(p: argparse.ArgumentParser) -> None:
-    """Add -y/--yes: the command-line half of the paid-embedding budget guard."""
+    """Add -y/--yes: the command-line half of both scope guards and the budget guard."""
     p.add_argument(
         "-y",
         "--yes",
         action="store_true",
         # Its own dest: `install --yes` means something else entirely and must not confirm a bill.
         dest="confirm_embedding",
-        help=f"Embed whatever this build costs, past the token budget (also: {CONFIRM_ENV}=1).",
+        help=f"Index and embed whatever this build costs, past every ceiling (also: {CONFIRM_ENV}=1).",
     )
 
 
@@ -492,7 +492,11 @@ def _run_clear(clear_type: _CLEAR_CHOICE) -> None:
         _clear_orphans(cache_folder)
 
 
-def _cli_main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the whole command line, one subcommand at a time.
+
+    :return: The parser, so a drift test can enumerate the subcommands it declares.
+    """
     parser = argparse.ArgumentParser(prog="zemble")
     parser.add_argument("-V", "--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command")
@@ -586,6 +590,11 @@ def _cli_main() -> None:
             help="Skip the confirmation prompt. Combine with --agent for a fully non-interactive run.",
         )
 
+    return parser
+
+
+def _cli_main() -> None:
+    parser = _build_parser()
     args = parser.parse_args()
 
     _apply_embedding_confirmation(args)

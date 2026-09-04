@@ -47,10 +47,12 @@ def add_evidence_parser(sub: argparse._SubParsersAction) -> None:
         help="Force the tier order of one intent instead of detecting it from the query.",
     )
     explain_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
-    # Only `explain` reads the index, so it is the only one an embedder override concerns.
-    from zemble.cli import _add_daemon_arg, _add_embedder_arg
+    # Only `explain` reads the index, so it is the only one an embedder override or a
+    # confirmation concerns: `outline` and `signatures` answer from the graph and never build.
+    from zemble.cli import _add_confirm_arg, _add_daemon_arg, _add_embedder_arg
 
     _add_embedder_arg(explain_p)
+    _add_confirm_arg(explain_p)
     _add_daemon_arg(explain_p)
 
     outline_p = sub.add_parser("outline", help="Signature-only view of a file or a type.")
