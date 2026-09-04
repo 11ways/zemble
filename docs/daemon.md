@@ -300,6 +300,10 @@ edge read back out of sqlite for one changed file - and it is what to attack nex
 
 ## Known limitations
 
+- **A failed graph refresh is reported, never repaired mid-flight.** The daemon logs it
+  at ERROR saying the graph is now STALE and keeps serving the graph it has; the next
+  build is what fixes it, and a store sqlite calls malformed is rebuilt from source
+  there ([storage](graph.md#durability)).
 - **A change set is trusted, not verified.** Only the paths the watcher reports are
   looked at, so an event the watcher never delivered leaves the index and the graph
   stale until something else touches that file. `zemble daemon refresh` and every cold
