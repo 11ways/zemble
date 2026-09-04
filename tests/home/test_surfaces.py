@@ -200,10 +200,12 @@ def test_mcp_tool_reports_a_refusal_as_the_answer(workspace: Path, cache: IndexC
     """
     from zemble.daemon import client
     from zemble.daemon.protocol import CommandRefused
+    from zemble.embedding.pricing import EmbeddingBudgetExceeded
     from zemble.graph import cli as graph_cli
     from zemble.index.scope import OversizedRootRefused
 
     refusal = "Refusing to index /some/path: 4,000 files, 412.0 MB of source. Exclude paths with .zembleignore"
+    bill = "Refusing to embed 640000 uncached chunk(s): ~250,000,000 estimated tokens (~$30.00) exceeds $5.00"
 
     # 1. The daemon lane: a CommandRefused comes back as its own text.
     graph_cli._refreshed.clear()
@@ -218,3 +220,13 @@ def test_mcp_tool_reports_a_refusal_as_the_answer(workspace: Path, cache: IndexC
         server = create_server(cache)
         answer = asyncio.run(server.call_tool("home", {"description": "an area", "repo": str(workspace)}))
     assert refusal in answer[0].text, f"step 2: the in-process refusal reads the same, got {answer[0].text}"
+
+    # 3. A MONEY refusal is a refusal too. It is a RuntimeError rather than a ScopeRefused, so it
+    #    fell through to "Failed to index ..." - a deliberate answer dressed up as an outage on
+    #    the very surface this was fixed for.
+    graph_cli._refreshed.clear()
+    with patch("zemble.mcp.ZembleIndex.from_path", side_effect=EmbeddingBudgetExceeded(bill)):
+        server = create_server(cache)
+        answer = asyncio.run(server.call_tool("home", {"description": "an area", "repo": str(workspace)}))
+    assert bill in answer[0].text, f"step 3: a budget refusal reads as the refusal it is, got {answer[0].text}"
+    assert "Failed to index" not in answer[0].text, "step 3: and never as a failure"
