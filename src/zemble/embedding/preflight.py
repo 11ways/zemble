@@ -95,11 +95,29 @@ class EmbedStatus:
         )
 
 
+def _cache_lookup_width(cache: EmbeddingCache, declared: int | None) -> int | None:
+    """Return the width a build's cache reads would use, without asking a provider anything.
+
+    A model whose width only a probe could tell has still been bought at SOME width by every
+    earlier build, and the cache file records it. Only an unambiguous file answers: with two
+    widths stored, a build could read either, and over-billing beats inventing a hit.
+
+    :param cache: The family's cache file.
+    :param declared: The width the embedder already declares, when it declares one.
+    :return: The width to look up, or None when nothing can be looked up honestly.
+    """
+    if declared is not None:
+        return declared
+    widths = cache.stored_dimensions()
+    return widths[0] if len(widths) == 1 else None
+
+
 def embed_status(
     path: Path | str,
     content: Sequence[ContentType] = (ContentType.CODE,),
     embedder_spec: str | None = None,
     capsules: CapsuleOptions | None = None,
+    exclude: Sequence[str] = (),
 ) -> EmbedStatus:
     """Report what building an index over a root would chunk, embed, cost, and whether it is refused.
 
@@ -107,6 +125,8 @@ def embed_status(
     :param content: Content types a build would index.
     :param embedder_spec: An explicit embedder spec, or None for the environment default.
     :param capsules: Context-capsule knobs; None resolves the environment override.
+    :param exclude: Gitignore-style patterns the build would skip; the sanctioned way past a
+        refusal, so a report that cannot model it answers for a build nobody is running.
     :return: The pre-flight numbers.
     :raises FileNotFoundError: If the root does not exist.
     :raises EmbedderSpecError: If the spec cannot be parsed.
@@ -118,25 +138,31 @@ def embed_status(
 
     from zemble.cache import load_manifest_for_incremental
     from zemble.index.create import plan_files
-    from zemble.index.scope import estimate_tree, exceeds_work_limit, work_limit_bytes
+    from zemble.index.scope import measure_work, work_limit_bytes, work_refusal
 
     spec = resolve_embedder_spec(embedder_spec)
     resolved = build_embedder(spec)
     remote = is_remote(resolved.embedder)
     dimensions = declared_dimensions(resolved.embedder)
     resolved_capsules = CapsuleOptions.resolve(capsules)
-    # A remote model whose width is only knowable from a probe request has no model_id we may
-    # ask for, and without a width there is nothing to look up in the cache either.
+    # AIDEV-NOTE: a remote model whose width is only knowable from a probe request has no
+    # model_id we may ask for, so its previous index cannot be found and its files all count as
+    # pending. Its CACHE is still read, at the width that file itself holds, because that is
+    # what decides the bill; the manifest half of this lane stays pessimistic on purpose.
     model_id = resolved.embedder.model_id if not remote or dimensions is not None else None
 
     manifest = (
-        load_manifest_for_incremental(str(root), model_id, content, resolved_capsules) if model_id is not None else None
+        load_manifest_for_incremental(str(root), model_id, content, resolved_capsules, exclude)
+        if model_id is not None
+        else None
     )
 
     started = time.monotonic()
     reusable = 0
     texts: list[str] = []
-    for planned in plan_files(root, content, display_root=root, previous_manifest=manifest, capsules=resolved_capsules):
+    for planned in plan_files(
+        root, content, display_root=root, previous_manifest=manifest, capsules=resolved_capsules, exclude=exclude
+    ):
         if planned.reused:
             reusable += planned.count
             continue
@@ -147,12 +173,14 @@ def embed_status(
     covered: set[str] = set()
     lookup_seconds = 0.0
     digests = [text_hash(text) for text in texts]
-    if remote and dimensions is not None and caching_enabled():
+    if remote and caching_enabled():
         started = time.monotonic()
         cache = EmbeddingCache(resolved.family)
         cache_path = str(cache.path)
         try:
-            covered = cache.covered(digests, dimensions)
+            width = _cache_lookup_width(cache, dimensions)
+            if width is not None:
+                covered = cache.covered(digests, width)
         finally:
             cache.close()
         lookup_seconds = time.monotonic() - started
@@ -175,11 +203,14 @@ def embed_status(
     tokens = estimate_tokens(billed)
     price = price_per_million(resolved.family)
 
-    # AIDEV-NOTE: the verdict covers BOTH guards. Reporting only the bill is what let this
-    # report say "allowed" while the pre-parse work guard refused the very same tree, which is
-    # the bug the two-guard split fixes; the extra walk is the cheap half of what already ran.
-    source_bytes = estimate_tree(root, content, (), manifest).bytes
-    refused = exceeds_work_limit(source_bytes) or bill_refusal(tokens, resolved.family) is not None
+    # AIDEV-NOTE: the verdict covers BOTH guards, and reads each one's verdict from the guard's
+    # own home - `work_refusal` and `bill_refusal` - over the inputs the build would use,
+    # `exclude` included. Reporting only the bill is what let this report say "allowed" while
+    # the pre-parse work guard refused the very same tree; computing the work verdict here from
+    # different inputs was the same defect one layer down. The extra walk is the cheap half of
+    # what already ran.
+    estimate = measure_work(root, content, exclude, manifest)
+    refused = work_refusal(estimate) is not None or bill_refusal(tokens, resolved.family) is not None
 
     return EmbedStatus(
         path=str(root),
@@ -196,7 +227,7 @@ def embed_status(
         price_per_million_usd=price,
         estimated_usd=estimate_cost(tokens, price),
         cache_path=cache_path,
-        source_bytes=source_bytes,
+        source_bytes=estimate.bytes,
         work_limit_bytes=work_limit_bytes(),
         budget_usd=applicable_budget_usd(price),
         budget_tokens=budget_tokens(price),

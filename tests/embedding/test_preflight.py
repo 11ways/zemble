@@ -12,6 +12,7 @@ from zemble.chunking.capsule import embedding_text
 from zemble.embedding.cache import EmbeddingCache, text_hash
 from zemble.embedding.preflight import embed_status
 from zemble.embedding.registry import ResolvedEmbedder
+from zemble.index import ScopeRefused, ZembleIndex
 from zemble.index.create import plan_files
 from zemble.index.scope import WORK_LIMIT_ENV
 from zemble.types import ContentType
@@ -77,7 +78,6 @@ def test_embed_status_journey(tmp_project: Path, paid_embedder: PricedEmbedder) 
 
     # 4. With an index on disk, unchanged files are reusable and are never even looked up.
     from zemble.cache import save_index_to_cache
-    from zemble.index import ZembleIndex
 
     index = ZembleIndex.from_path(tmp_project, embedder=paid_embedder)
     save_index_to_cache(index, str(tmp_project))
@@ -116,6 +116,77 @@ def test_embed_status_reports_a_refusal(tmp_project: Path, paid_embedder: Priced
     assert status.source_bytes > 1_000_000, "step 2: and the report says how much work a build is"
     monkeypatch.setenv(WORK_LIMIT_ENV, "1")
     assert embed_status(tmp_project).would_refuse, "step 2: past the work ceiling the report says REFUSED"
+
+
+def test_embed_status_models_the_exclude_that_recovers_a_refused_build(
+    tmp_path: Path, paid_embedder: PricedEmbedder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`exclude` is the sanctioned way out of a refusal, so the report has to be able to model it.
+
+    It could not: the report passed no exclude to the walk and left it out of the manifest
+    lookup, so it answered REFUSED for exactly the call that succeeds.
+    """
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
+    (root / "vendored").mkdir()
+    for index in range(12):
+        (root / "vendored" / f"copy_{index}.py").write_text("x = 1\n" * 16_000, encoding="utf-8")
+    monkeypatch.setenv(WORK_LIMIT_ENV, "1")
+
+    # 1. The plain root is refused, by the report and by a build alike.
+    assert embed_status(root).would_refuse, "step 1: the fat tree is over the work ceiling"
+    with pytest.raises(ScopeRefused):
+        ZembleIndex.from_path(root, embedder=paid_embedder)
+
+    # 2. With the fat directory excluded the report says allowed, and reports only the small tree.
+    pruned = embed_status(root, exclude=("vendored/",))
+    assert not pruned.would_refuse, "step 2: the report models the recovery it advertises"
+    assert pruned.source_bytes < 1_000_000, f"step 2: and it measures the pruned walk, got {pruned.source_bytes}"
+
+    # 3. The build agrees, which is the whole point: one answer, two surfaces.
+    index = ZembleIndex.from_path(root, embedder=paid_embedder, exclude=["vendored/"])
+    assert index.stats.indexed_files == 1, "step 3: the pruned build holds only the small tree"
+
+
+def test_embed_status_reads_the_cache_of_a_model_whose_width_needs_a_probe(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A width nobody declared is not a reason to bill every chunk again.
+
+    An OpenAI-compatible endpoint with no `@dims` declares no width, so the report skipped the
+    cache lookup entirely and priced the whole tree - while the build probes the width once and
+    then reads that very cache. The file itself records the width, and asks nobody.
+    """
+
+    class UndeclaredWidth(PricedEmbedder):
+        """A remote embedder whose width only a provider request would tell."""
+
+        declared_dimensions = None
+
+    embedder = UndeclaredWidth(dimensions=8)
+    monkeypatch.setattr(
+        "zemble.embedding.preflight.build_embedder",
+        lambda spec: ResolvedEmbedder(spec=spec, embedder=embedder, scheme="openai", family=FAMILY),
+    )
+
+    # 1. Nothing is declared, and cold it is honestly the whole tree.
+    cold = embed_status(tmp_project)
+    assert cold.dimensions is None, "step 1: the width is unknown without a request"
+    assert cold.uncached > 0 and cold.estimated_tokens > 0, "step 1: an empty cache bills everything"
+
+    # 2. With every chunk already bought at one width, the report finds them, having asked nobody.
+    seed(chunk_texts(tmp_project), 8)
+    warm = embed_status(tmp_project)
+    assert warm.cached == cold.uncached, f"step 2: every bought chunk is a hit, got {warm.cached}"
+    assert (warm.uncached, warm.estimated_tokens) == (0, 0), "step 2: nothing left to buy is nothing to bill"
+    assert warm.cache_path is not None, "step 2: and the report names the file it read"
+    assert embedder.document_batches == [], "step 2: a pre-flight never contacts a provider"
+
+    # 3. A file holding two widths cannot say which one a build would read, so it bills again.
+    seed(chunk_texts(tmp_project)[:1], 16)
+    mixed = embed_status(tmp_project)
+    assert mixed.uncached == cold.uncached, f"step 3: an ambiguous cache over-bills rather than guess, got {mixed}"
 
 
 def test_embed_status_of_a_local_embedder(tmp_project: Path) -> None:
