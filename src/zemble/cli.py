@@ -6,6 +6,7 @@ import re
 import sys
 import warnings
 from collections.abc import Sequence
+from enum import Enum
 from importlib.util import find_spec
 from pathlib import Path
 from shutil import rmtree
@@ -254,10 +255,25 @@ def _resolve_content(content: list[str], include_text_files: bool) -> list[Conte
 #: `--yes` classifies on the marker alone - `path`, `repo` and `workspace` are one fact.
 ROOT_ARGUMENT_MARKER = "zemble_root_argument"
 
-#: The positional names that MEAN a filesystem root, for a parser that forgot the marker. The
-#: marker is the declaration; this list is the fail-closed half, so an argument spelled like a
-#: tree is classified as one whether or not anybody remembered to declare it.
-ROOT_ARGUMENT_NAMES = frozenset({"path", "paths", "repo", "root", "workspace"})
+#: Marks a parser that works on NO filesystem tree, and so can reach no seam that refuses one.
+#: The other half of the same declaration: absence of a root is a claim somebody makes, never
+#: something read off the spelling of an argument.
+NO_ROOT_MARKER = "zemble_declares_no_root"
+
+
+class RootUse(Enum):
+    """Whether a subcommand works on a filesystem tree, declared by the parser itself.
+
+    UNDECLARED is not a third answer, it is the absence of one, and the drift test that demands
+    ``--yes`` refuses it: a new subcommand is classified by the person who adds it. Reading a
+    fixed list of argument spellings instead was wrong twice - first it knew only ``path``, then
+    only five names - because a list of names nothing binds to the arguments actually shipped
+    exempts every spelling it has not heard of, which is the one direction this may not fail in.
+    """
+
+    NAMES_A_ROOT = "names a filesystem root"
+    NONE = "declared root-less"
+    UNDECLARED = "undeclared"
 
 
 def add_root_arg(parser: argparse.ArgumentParser, name: str = "path", **kwargs: Any) -> argparse.Action:
@@ -273,22 +289,33 @@ def add_root_arg(parser: argparse.ArgumentParser, name: str = "path", **kwargs: 
     return action
 
 
-def names_a_root(parser: argparse.ArgumentParser) -> bool:
-    """Return whether a subcommand declares an argument naming a filesystem root of its own.
+def declare_no_root(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Declare that a subcommand works on no filesystem tree, so nothing it does can be refused.
 
-    Its own only: a parent that merely groups subcommands names no tree, and every leaf under
-    it has to answer for itself. FAIL CLOSED: the marker is how a parser declares it, and a
-    POSITIONAL named like a tree counts too, because reading an opt-in marker alone exempts
-    every command whose author forgot it - the one direction this classification may not fail in.
+    :param parser: The subcommand's own parser.
+    :return: The same parser, so a call can wrap ``add_parser``.
+    """
+    setattr(parser, NO_ROOT_MARKER, True)
+    return parser
+
+
+def root_use(parser: argparse.ArgumentParser) -> RootUse:
+    """Return what a subcommand declares about the tree it works on.
+
+    Its own declaration only: a parent that merely groups subcommands names no tree, and every
+    leaf under it has to answer for itself.
 
     :param parser: The subcommand's parser.
-    :return: Whether one of its arguments names a tree, declared or merely spelled like one.
+    :return: Which of the two declarations it carries, or UNDECLARED when it carries neither.
+    :raises ValueError: If it carries both, which is a contradiction no reader can resolve.
     """
-    return any(
-        getattr(action, ROOT_ARGUMENT_MARKER, False)
-        or (not action.option_strings and action.dest in ROOT_ARGUMENT_NAMES)
-        for action in parser._actions
-    )
+    names_root = any(getattr(action, ROOT_ARGUMENT_MARKER, False) for action in parser._actions)
+    no_root = bool(getattr(parser, NO_ROOT_MARKER, False))
+    if names_root and no_root:
+        raise ValueError(f"{parser.prog!r} declares a root argument and no root at all; only one can be true")
+    if names_root:
+        return RootUse.NAMES_A_ROOT
+    return RootUse.NONE if no_root else RootUse.UNDECLARED
 
 
 def _add_confirm_arg(p: argparse.ArgumentParser) -> None:
@@ -579,7 +606,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_confirm_arg(stats_p)
     _add_daemon_arg(stats_p)
 
-    clear_p = sub.add_parser("clear", help="Clear the index cache.")
+    clear_p = declare_no_root(sub.add_parser("clear", help="Clear the index cache."))
     clear_p.add_argument(
         "type",
         choices=["all", "index", "savings", "orphans"],
@@ -604,7 +631,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_confirm_arg(related_p)
     _add_daemon_arg(related_p)
 
-    sub.add_parser("savings", help="Show token savings and usage stats.")
+    declare_no_root(sub.add_parser("savings", help="Show token savings and usage stats."))
 
     add_graph_parser(sub)
     add_dupes_parser(sub)
@@ -614,8 +641,10 @@ def _build_parser() -> argparse.ArgumentParser:
     add_daemon_parser(sub)
     add_status_parser(sub)
 
-    install_p = sub.add_parser("install", help="Configure zemble across coding agents.")
-    uninstall_p = sub.add_parser("uninstall", help="Remove zemble configuration from coding agents.")
+    # Both configure agents, never a tree: their own `--yes` skips the confirmation prompt and
+    # deliberately has nothing to do with confirming a bill.
+    install_p = declare_no_root(sub.add_parser("install", help="Configure zemble across coding agents."))
+    uninstall_p = declare_no_root(sub.add_parser("uninstall", help="Remove zemble configuration from coding agents."))
     for p, verb in ((install_p, "configure"), (uninstall_p, "remove configuration from")):
         p.add_argument(
             "--agent",

@@ -509,26 +509,39 @@ def _takes(subparser: argparse.ArgumentParser, option: str) -> bool:
     return any(option in action.option_strings or action.dest == option for action in subparser._actions)
 
 
-#: One runnable invocation per LEAF subcommand that names a workspace root but is claimed never
-#: to reach a seam that can refuse it. The claim is PROVED by running it with both refusable
-#: seams trip-wired - the index build AND the seam that buys vectors - so a command that grows
-#: either fails here instead of telling a user to pass a flag it lacks. `dupes` is not here: its
-#: logic lane buys vectors without building an index, which is exactly the gap this closed.
-_NEVER_BUILDS_PROOFS: dict[tuple[str, ...], list[str]] = {
-    ("outline",): ["outline", "{root}", "auth.py", "--no-daemon"],
-    ("signatures",): ["signatures", "{root}", "authenticate", "--no-daemon"],
-    ("graph", "build"): ["graph", "build", "{root}", "--no-daemon"],
-    ("graph", "facts", "status"): ["graph", "facts", "status", "{root}", "--no-daemon"],
+#: The runnable invocations, per LEAF subcommand, that PROVE the claim "this reaches no seam
+#: that can refuse it". Every one of them is run with both refusable seams trip-wired - the
+#: index build AND the seam that buys vectors - so a command that grows either fails here
+#: instead of telling a user to pass a flag it lacks. A LIST, not one invocation: an invocation
+#: proves what it runs and nothing else, so a leaf whose paid lane hides behind a non-default
+#: flag either drives that flag here or belongs in the `--yes` bucket instead. `dupes` is the
+#: case that taught it: at the default `--kind exact,renamed` it buys nothing, while `--kind
+#: logic` buys a vector per candidate body, so it takes `--yes` and is deliberately not here.
+_NEVER_BUILDS_PROOFS: dict[tuple[str, ...], list[list[str]]] = {
+    ("outline",): [["outline", "{root}", "auth.py", "--no-daemon"]],
+    ("signatures",): [["signatures", "{root}", "authenticate", "--no-daemon"]],
+    ("graph", "build"): [["graph", "build", "{root}", "--no-daemon"]],
+    ("graph", "facts", "status"): [["graph", "facts", "status", "{root}", "--no-daemon"]],
     **{
-        ("graph", command): ["graph", command, "{root}", "authenticate", "--no-daemon"]
+        ("graph", command): [["graph", command, "{root}", "authenticate", "--no-daemon"]]
         for command in ("definition", "callers", "callees", "references", "implementations")
     },
     **{
-        ("graph", command): ["graph", command, "{root}", "authenticate", "--no-daemon"]
+        ("graph", command): [["graph", command, "{root}", "authenticate", "--no-daemon"]]
         for command in ("supertypes", "overrides-of", "overridden-by", "tests-of", "neighbors")
     },
-    ("embed-status",): ["embed-status", "{root}"],
+    # Every content type, because content selection is the closest thing this command has to a
+    # lane: the report chunks whatever a build would, and must still embed none of it.
+    ("embed-status",): [["embed-status", "{root}"], ["embed-status", "{root}", "--content", "all", "--json"]],
 }
+
+#: The three buckets a leaf subcommand may answer for itself in, spelled once so the refusal
+#: below can name all of them: there is no fourth, and no silent exemption.
+_DECLARED_BUCKETS = (
+    "take --yes (_add_confirm_arg), the flag its refusals advertise",
+    "prove it reaches no refusable seam, by naming invocations in _NEVER_BUILDS_PROOFS",
+    "declare it works on no tree at all (declare_no_root)",
+)
 
 
 def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
@@ -540,14 +553,18 @@ def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
     """Every refusal ends with "or pass --yes", so every command that can be refused must take it.
 
     `zemble home ... --yes` exited 2 with `unrecognized arguments` for as long as the flag was
-    on three subcommands only. Nothing here is asserted from a list of names: a leaf subcommand
-    is exempt only when it declares no filesystem root through `add_root_arg` - the marker, not
-    the spelling, so a command naming its tree `repo` is classified like every other - or when
-    running it proves it never reaches a seam that can refuse it. "Never builds an index" was
-    the wrong claim to prove: `dupes --kind logic` buys a vector per candidate body without
-    building one, so it could be refused by a budget whose remedy it did not accept.
+    on three subcommands only. FAIL CLOSED, and by DECLARATION: every leaf has to land in one
+    of the three buckets above, and one in none of them fails here until somebody classifies it.
+    Classifying by the spelling of a positional was wrong twice - `path` only, then five names -
+    because a fixed list nothing binds to the shipped arguments exempts every spelling it has
+    not heard of, which is exactly the command this test exists to catch.
+
+    What a proof establishes is only what its invocations do: each one is run and must touch
+    neither seam. "Never builds an index" was the wrong claim to prove in the first place -
+    `dupes --kind logic` buys a vector per candidate body without building one, so it could be
+    refused by a budget whose remedy it did not accept.
     """
-    from zemble.cli import names_a_root
+    from zemble.cli import RootUse, root_use
     from zemble.embedding import pricing
     from zemble.embedding.registry import ResolvedEmbedder
     from zemble.index import ZembleIndex
@@ -584,64 +601,80 @@ def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
     assert reached == ["require_affordable_bill"], "step 1: and on the seam a paid non-build run buys through"
     reached.clear()
 
-    # 2. Every leaf is classified, and a new one cannot slip through unclassified.
+    # 2. Every leaf lands in exactly one declared bucket, and a new one that lands in none of
+    #    them fails right here instead of shipping an unclassified command.
     leaves = _leaf_commands(_build_parser())
     assert ("graph", "callers") in leaves and ("home",) in leaves, (
         f"step 2: leaves not enumerated, got {sorted(leaves)}"
     )
+    buckets = "; ".join(f"{index + 1}. {bucket}" for index, bucket in enumerate(_DECLARED_BUCKETS))
     for words, subparser in sorted(leaves.items()):
-        if _takes(subparser, "confirm_embedding"):
-            continue
-        if not names_a_root(subparser):
-            continue  # It names no tree, so it cannot build one.
-        assert words in _NEVER_BUILDS_PROOFS, (
-            f"step 2: {' '.join(words)!r} names a workspace root but neither takes --yes nor proves it never builds"
+        classified = (
+            _takes(subparser, "confirm_embedding")
+            or words in _NEVER_BUILDS_PROOFS
+            or root_use(subparser) is RootUse.NONE
+        )
+        assert classified, (
+            f"step 2: {' '.join(words)!r} is unclassified (root_use {root_use(subparser).name}). It must {buckets}"
         )
 
-    # 3. Every proof names a leaf that still exists, so a renamed command cannot leave a
-    #    proof standing over nothing.
+    # 3. Every proof names a leaf that still exists and is in no other bucket, so a renamed
+    #    command cannot leave a proof standing over nothing and a proof cannot go quietly dead.
     assert set(_NEVER_BUILDS_PROOFS) <= set(leaves), (
         f"step 3: proofs for commands that no longer exist: {sorted(set(_NEVER_BUILDS_PROOFS) - set(leaves))}"
     )
+    for words in sorted(_NEVER_BUILDS_PROOFS):
+        subparser = leaves[words]
+        assert not _takes(subparser, "confirm_embedding") and root_use(subparser) is RootUse.NAMES_A_ROOT, (
+            f"step 3: {' '.join(words)!r} answers for itself already, so its proof is dead weight; delete it"
+        )
 
-    # 4. Each claimed non-builder is run for real: it must answer, and both seams must stay
-    #    untouched.
-    for words, template in sorted(_NEVER_BUILDS_PROOFS.items()):
-        argv = ["zemble", *(part.format(root=str(tmp_project)) for part in template)]
-        monkeypatch.setattr(sys, "argv", argv)
-        with pytest.raises(SystemExit):
-            _cli_main()
-        streams = capsys.readouterr()
+    # 4. Every listed invocation of every claimed non-builder is run for real: it must answer,
+    #    and both seams must stay untouched. A proof proves what it RUNS, which is why a leaf
+    #    with a lane behind a flag lists that flag here or takes --yes instead.
+    for words, invocations in sorted(_NEVER_BUILDS_PROOFS.items()):
         name = " ".join(words)
-        assert "usage:" not in streams.err, f"step 4: {name!r} never ran, argparse rejected {argv}: {streams.err}"
-        assert streams.out.strip(), f"step 4: {name!r} answered nothing, so it proves nothing"
-        assert reached == [], f"step 4: {name!r} reached a refusable seam, so it must accept --yes; got {reached}"
+        assert invocations, f"step 4: {name!r} claims to build nothing and runs nothing to show it"
+        for template in invocations:
+            argv = ["zemble", *(part.format(root=str(tmp_project)) for part in template)]
+            monkeypatch.setattr(sys, "argv", argv)
+            with pytest.raises(SystemExit):
+                _cli_main()
+            streams = capsys.readouterr()
+            assert "usage:" not in streams.err, f"step 4: {name!r} never ran, argparse rejected {argv}: {streams.err}"
+            assert streams.out.strip(), f"step 4: {argv} answered nothing, so it proves nothing"
+            assert reached == [], f"step 4: {argv} reached a refusable seam, so it must accept --yes; got {reached}"
 
 
-def test_an_argument_that_names_a_tree_is_classified_even_when_the_marker_is_missing() -> None:
-    """The `--yes` classification fails CLOSED: forgetting the marker may not exempt a command.
+def test_a_subcommand_is_classified_by_what_it_declares_never_by_what_it_spells() -> None:
+    """A parser answers the root question by declaring, and silence is UNDECLARED, never "no".
 
-    Reading an opt-in marker alone let a subcommand declaring a plain positional `repo` - or
-    even a plain `path`, which the older name-based rule did catch - out of the requirement to
-    accept the flag its own refusals advertise. The marker is the declaration; the shipped
-    spellings are the floor under it.
+    Two earlier rules read the answer off the spelling of a positional - first the literal name
+    `path`, then five names - and each exempted every spelling it had not heard of: a leaf
+    taking a `tree` passed the drift test with no `--yes` and no proof. The fixed vocabulary is
+    gone; what is left is two declarations, their absence, and a contradiction that refuses.
     """
-    from zemble.cli import ROOT_ARGUMENT_NAMES, add_root_arg, names_a_root
+    from zemble.cli import RootUse, add_root_arg, declare_no_root, root_use
 
     # 1. A command that declares its tree through the marker is classified, whatever it calls it.
     declared = argparse.ArgumentParser()
     add_root_arg(declared, "tree_nobody_would_guess")
-    assert names_a_root(declared), "step 1: the marker is the declaration"
+    assert root_use(declared) is RootUse.NAMES_A_ROOT, "step 1: the marker is the declaration"
 
-    # 2. A command that spells a tree positionally and forgets the marker is classified too.
-    for spelling in sorted(ROOT_ARGUMENT_NAMES):
+    # 2. A command that declares it works on no tree says so, and is believed.
+    assert root_use(declare_no_root(argparse.ArgumentParser())) is RootUse.NONE, "step 2: the other declaration"
+
+    # 3. Anything else is UNDECLARED - including the spellings the old name list knew, which is
+    #    the whole point: nothing may be classified by what an argument happens to be called.
+    for spelling in ("path", "paths", "repo", "root", "workspace", "tree", "directory", "target"):
         forgot = argparse.ArgumentParser()
         forgot.add_argument(spelling)
-        assert names_a_root(forgot), f"step 2: a bare positional {spelling!r} still names a tree"
+        assert root_use(forgot) is RootUse.UNDECLARED, f"step 3: a bare positional {spelling!r} declares nothing"
+    assert root_use(argparse.ArgumentParser()) is RootUse.UNDECLARED, "step 3: and neither does an empty parser"
 
-    # 3. And nothing else is: a grouping parser and an unrelated argument name no tree.
-    assert not names_a_root(argparse.ArgumentParser()), "step 3: a parser with no arguments names no tree"
-    other = argparse.ArgumentParser()
-    other.add_argument("symbol")
-    other.add_argument("--paths", nargs="+")
-    assert not names_a_root(other), "step 3: a symbol is not a tree, and an option is not a positional"
+    # 4. Declaring both is a contradiction no reader can resolve, so it refuses instead of picking.
+    both = argparse.ArgumentParser(prog="contradiction")
+    add_root_arg(both, "path")
+    declare_no_root(both)
+    with pytest.raises(ValueError, match="only one can be true"):
+        root_use(both)

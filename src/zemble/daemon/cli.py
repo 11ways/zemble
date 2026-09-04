@@ -33,10 +33,16 @@ EXIT_ERROR = 1
 
 def add_daemon_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `daemon` subcommand tree on the main parser."""
+    # Imported here rather than at module scope: `zemble.cli` imports this module to build the
+    # parser, so the reverse import can only happen once that one is already running.
+    from zemble.cli import declare_no_root
+
     daemon_p = sub.add_parser("daemon", help="Manage the warm index daemon (started on demand, never at login).")
     daemon_sub = daemon_p.add_subparsers(dest="daemon_command", required=True)
 
-    run_p = daemon_sub.add_parser("run", help="Run the daemon in the foreground.")
+    # Every leaf here manages the daemon PROCESS and names no tree: whatever a daemon indexes,
+    # it is asked for by the client command that names the root, which answers for itself.
+    run_p = declare_no_root(daemon_sub.add_parser("run", help="Run the daemon in the foreground."))
     run_p.add_argument(
         "--max-indexes",
         type=int,
@@ -58,10 +64,10 @@ def add_daemon_parser(sub: argparse._SubParsersAction) -> None:
         help="Log to the daemon log through a size-bounded rotating handler instead of stderr.",
     )
 
-    daemon_sub.add_parser("start", help="Start a detached daemon if none is running.")
-    daemon_sub.add_parser("stop", help="Ask a running daemon to exit.")
-    daemon_sub.add_parser("restart", help="Stop a running daemon and start a fresh one.")
-    status_p = daemon_sub.add_parser("status", help="Show what a running daemon holds.")
+    declare_no_root(daemon_sub.add_parser("start", help="Start a detached daemon if none is running."))
+    declare_no_root(daemon_sub.add_parser("stop", help="Ask a running daemon to exit."))
+    declare_no_root(daemon_sub.add_parser("restart", help="Stop a running daemon and start a fresh one."))
+    status_p = declare_no_root(daemon_sub.add_parser("status", help="Show what a running daemon holds."))
     status_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
 
 

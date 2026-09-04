@@ -17,7 +17,13 @@ STATUS_COMMANDS = ("status",)
 
 def add_status_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `status` subcommand."""
-    parser = sub.add_parser("status", help="Show which zemble code this install runs, and the daemon's.")
+    # Imported here rather than at module scope: `zemble.cli` imports this module to build the
+    # parser. It reports which code this install runs, and names no tree.
+    from zemble.cli import declare_no_root
+
+    parser = declare_no_root(
+        sub.add_parser("status", help="Show which zemble code this install runs, and the daemon's.")
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable output.")
 
 
