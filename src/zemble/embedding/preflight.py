@@ -16,10 +16,10 @@ from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.embedding.base import declared_dimensions, is_remote
 from zemble.embedding.cache import EmbeddingCache, text_hash
 from zemble.embedding.pricing import (
+    bill_refusal,
     budget_tokens,
     estimate_cost,
     estimate_tokens,
-    exceeds_budget,
     format_cost,
     price_per_million,
 )
@@ -45,7 +45,7 @@ class EmbedStatus:
     price_per_million_usd: float | None
     estimated_usd: float | None
     cache_path: str | None
-    budget_tokens: int
+    budget_tokens: int | None
     would_refuse: bool
     chunk_seconds: float
     cache_lookup_seconds: float
@@ -53,6 +53,10 @@ class EmbedStatus:
     def to_dict(self) -> dict:
         """Return the JSON shape."""
         return asdict(self)
+
+    def _ceilings(self) -> str:
+        """Render every ceiling that governs this build, in the unit each one is set in."""
+        return "no ceiling" if self.budget_tokens is None else f"{self.budget_tokens:,} tokens"
 
     def to_text(self) -> str:
         """Render the report for a human."""
@@ -67,8 +71,7 @@ class EmbedStatus:
             f"cost       ~{format_cost(self.estimated_tokens, price)}"
             + (f" at ${price:.2f} per million tokens" if price else ""),
             f"cache      {self.cache_path or 'not used by this embedder'}",
-            f"budget     {self.budget_tokens:,} tokens; a build would be "
-            f"{'REFUSED' if self.would_refuse else 'allowed'}",
+            f"budget     {self._ceilings()}; a build would be {'REFUSED' if self.would_refuse else 'allowed'}",
             f"timing     {self.chunk_seconds:.1f}s chunking, {self.cache_lookup_seconds:.1f}s cache lookup",
         ]
         return "\n".join(lines)
@@ -155,8 +158,8 @@ def embed_status(
         price_per_million_usd=price,
         estimated_usd=estimate_cost(tokens, price),
         cache_path=cache_path,
-        budget_tokens=budget_tokens(remote),
-        would_refuse=exceeds_budget(tokens, remote),
+        budget_tokens=budget_tokens(price),
+        would_refuse=bill_refusal(tokens, resolved.family) is not None,
         chunk_seconds=round(chunk_seconds, 2),
         cache_lookup_seconds=round(lookup_seconds, 2),
     )

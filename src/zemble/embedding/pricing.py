@@ -2,6 +2,9 @@
 
 The price table is data with one declaring home: a model that is not in it has an
 unknown price, never a guessed one, and an unknown price never silently becomes free.
+Money is refused in money: the ceiling is USD, and the token ceiling beside it exists for
+the one case a bill cannot be computed. Runaway WORK is a different harm with its own
+guard, in bytes, in :mod:`zemble.index.scope`.
 """
 
 from __future__ import annotations
@@ -16,16 +19,22 @@ from pathlib import Path
 #: is pessimistic on purpose so a batch cannot overshoot a provider ceiling.
 ESTIMATE_CHARS_PER_TOKEN = 3.6
 
-#: Names the token budget a single build may spend before it is refused.
+#: Names the ceiling on what one build may SPEND.
+BUDGET_USD_ENV = "ZEMBLE_EMBED_BUDGET_USD"
+#: 16x the measured full javaweb index at the configured model ($0.31, docs/voyage.md) and
+#: 2.7x the same index at the dearest code model ($1.86), so a legitimate workspace index
+#: never prompts and a runaway still does.
+DEFAULT_BUDGET_USD = 5.00
+
+#: Names the volume ceiling that applies when a model has NO documented price, and an
+#: additional token cap on every lane when a caller sets it deliberately.
 BUDGET_ENV = "ZEMBLE_EMBED_BUDGET_TOKENS"
+#: An unpriced model's bill cannot be bounded, so its VOLUME is. 2M tokens is $0.26 even at
+#: the dearest documented rate, so an unknown model can never surprise by more than that.
+DEFAULT_UNPRICED_BUDGET_TOKENS = 2_000_000
+
 #: Set to 1 to embed whatever the budget would have refused.
 CONFIRM_ENV = "ZEMBLE_EMBED_CONFIRM"
-#: Roughly a full javaweb index; a bill of a few tens of cents passes, a runaway one does not.
-DEFAULT_BUDGET_TOKENS = 2_000_000
-#: A local build spends minutes, not money, so its ceiling is set where runaway WORK begins:
-#: ~180 MB of source. A real multi-repo workspace (javaweb: 46 MB, ~12.8M tokens) is normal
-#: local work and must not be refused; a tree carrying thirteen copies of itself is not.
-DEFAULT_LOCAL_BUDGET_TOKENS = 50_000_000
 
 #: Schemes that run on this machine: no round trip, no bill, never gated.
 FREE_SCHEMES = frozenset({"model2vec"})
@@ -48,7 +57,16 @@ PRICES_USD_PER_MILLION_TOKENS: dict[str, dict[str, float]] = {
 
 
 class EmbeddingBudgetExceeded(RuntimeError):
-    """A build would have embedded more tokens than the budget allows, so nothing was sent."""
+    """A build would have cost more than the budget allows, so nothing was sent."""
+
+    def __init__(self, message: str, knob: str = BUDGET_USD_ENV) -> None:
+        """Refuse a bill, carrying the ceiling's own environment variable rather than a guess.
+
+        :param message: The refusal text, which already names the ceiling in its own unit.
+        :param knob: The environment variable that raises the ceiling this refusal hit.
+        """
+        super().__init__(message)
+        self.knob = knob
 
 
 def model_of_family(family: str) -> tuple[str, str]:
@@ -91,24 +109,39 @@ def format_cost(tokens: int, price: float | None) -> str:
     return f"${cost:.2f}" if cost >= 0.01 or cost == 0 else f"${cost:.4f}"
 
 
-def budget_tokens(remote: bool = True) -> int:
-    """Return the per-build token budget; 0 or less disables the guard entirely.
+def budget_usd() -> float:
+    """Return the per-build spending ceiling in USD; 0 or less disables the money half.
 
-    One environment variable governs both lanes, because a caller who names a ceiling means
-    it whatever the embedder is; only the DEFAULT differs, since a paid build is refused on
-    the bill and a local one on the hours.
-
-    :param remote: Whether the build would be billed; False asks for the local default.
-    :return: The token ceiling for this build.
+    :return: The USD ceiling for this build.
     """
-    default = DEFAULT_BUDGET_TOKENS if remote else DEFAULT_LOCAL_BUDGET_TOKENS
-    raw = os.environ.get(BUDGET_ENV, "").strip()
+    raw = os.environ.get(BUDGET_USD_ENV, "").strip()
     if not raw:
-        return default
+        return DEFAULT_BUDGET_USD
     try:
-        return int(raw)
+        return float(raw)
     except ValueError:
-        return default
+        return DEFAULT_BUDGET_USD
+
+
+def budget_tokens(price: float | None = None) -> int | None:
+    """Return the token ceiling this build is capped by, or None when tokens do not cap it.
+
+    A caller who names a token ceiling means it, so an explicit value applies to any model
+    that costs anything. Without one, only a model with NO documented price is capped by
+    volume: a priced model is capped by :func:`budget_usd`, and a free one by nothing.
+
+    :param price: The model's USD per million tokens; 0.0 when free, None when undocumented.
+    :return: The ceiling in tokens, 0 or less when disabled, or None when no token cap applies.
+    """
+    if price == 0.0:
+        return None
+    raw = os.environ.get(BUDGET_ENV, "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return None if price is not None else DEFAULT_UNPRICED_BUDGET_TOKENS
 
 
 def confirmed() -> bool:
@@ -116,10 +149,42 @@ def confirmed() -> bool:
     return os.environ.get(CONFIRM_ENV, "").strip().lower() in {"1", "true", "yes"}
 
 
-def exceeds_budget(tokens: int, remote: bool = True) -> bool:
-    """Return whether this many tokens would be refused right now."""
-    budget = budget_tokens(remote)
-    return budget > 0 and not confirmed() and tokens > budget
+def _bill_refusal(tokens: int, family: str) -> tuple[str, str] | None:
+    """Decide a bill refusal once, returning both its wording and the knob that named the ceiling."""
+    if confirmed():
+        return None
+    price = price_per_million(family)
+    ceiling = budget_tokens(price)
+    if ceiling is not None and 0 < ceiling < tokens:
+        unpriced = "" if price is not None else " for a model with no documented price"
+        return (
+            f"~{tokens:,} estimated tokens exceeds the ceiling of {ceiling:,} tokens{unpriced} ({BUDGET_ENV})",
+            BUDGET_ENV,
+        )
+    if price is None:
+        # FAIL CLOSED: an unknown price is never treated as free, only as un-billable, which is
+        # why the volume ceiling above is the one that governs it.
+        return None
+    limit = budget_usd()
+    cost = estimate_cost(tokens, price)
+    if cost is not None and 0 < limit < cost:
+        return (
+            f"~{tokens:,} estimated tokens (~{format_cost(tokens, price)}) exceeds the budget of "
+            f"${limit:.2f} ({BUDGET_USD_ENV})",
+            BUDGET_USD_ENV,
+        )
+    return None
+
+
+def bill_refusal(tokens: int, family: str) -> str | None:
+    """Return why buying this many uncached tokens is refused, or None when it is affordable.
+
+    :param tokens: The estimated token count of the texts that would actually be bought.
+    :param family: The cache family key, used to price them.
+    :return: The reason, naming the ceiling and the knob that sets it, or None.
+    """
+    refusal = _bill_refusal(tokens, family)
+    return None if refusal is None else refusal[0]
 
 
 def check_budget(model_id: str, family: str, count: int, tokens: int) -> None:
@@ -131,13 +196,12 @@ def check_budget(model_id: str, family: str, count: int, tokens: int) -> None:
     :param tokens: The estimated token count for them.
     :raises EmbeddingBudgetExceeded: If the estimate is over budget and nothing confirmed it.
     """
-    if not exceeds_budget(tokens):
+    refusal = _bill_refusal(tokens, family)
+    if refusal is None:
         return
-    price = price_per_million(family)
+    reason, knob = refusal
     raise EmbeddingBudgetExceeded(
-        f"Refusing to embed {count} uncached chunk(s) with {model_id}: "
-        f"~{tokens:,} estimated tokens (~{format_cost(tokens, price)}) exceeds the budget of "
-        f"{budget_tokens():,} tokens. {remedies()}"
+        f"Refusing to embed {count} uncached chunk(s) with {model_id}: {reason}. {remedies(None, knob)}", knob
     )
 
 
@@ -161,7 +225,7 @@ def embedder_family(embedder: object) -> str:
     return f"{scheme}{separator}{body if at else rest}"
 
 
-def remedies(root: str | Path | None = None, knob: str = BUDGET_ENV) -> str:
+def remedies(root: str | Path | None = None, knob: str = BUDGET_USD_ENV) -> str:
     """Name the ways past a refusal, cheapest first, in the one wording every guard uses.
 
     :param root: The tree being indexed, named in the paths; None renders a placeholder.

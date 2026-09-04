@@ -9,17 +9,19 @@ import pytest
 from zemble.embedding.cache import CachingEmbedder
 from zemble.embedding.pricing import (
     BUDGET_ENV,
+    BUDGET_USD_ENV,
     CONFIRM_ENV,
-    DEFAULT_BUDGET_TOKENS,
-    DEFAULT_LOCAL_BUDGET_TOKENS,
+    DEFAULT_BUDGET_USD,
+    DEFAULT_UNPRICED_BUDGET_TOKENS,
     FREE_SCHEMES,
     PRICES_USD_PER_MILLION_TOKENS,
     EmbeddingBudgetExceeded,
+    bill_refusal,
     budget_tokens,
+    budget_usd,
     check_budget,
     estimate_cost,
     estimate_tokens,
-    exceeds_budget,
     format_cost,
     price_per_million,
 )
@@ -102,24 +104,34 @@ def test_estimate_arithmetic() -> None:
 
 
 def test_budget_reading(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The budget comes from the environment, and nonsense falls back to the default."""
-    assert budget_tokens() == DEFAULT_BUDGET_TOKENS, "unset means the default"
+    """Both ceilings come from the environment, and nonsense falls back to the default."""
+    assert budget_usd() == DEFAULT_BUDGET_USD, "unset means the default spending ceiling"
+    monkeypatch.setenv(BUDGET_USD_ENV, "0.50")
+    assert budget_usd() == 0.50, "a number is honoured"
+    monkeypatch.setenv(BUDGET_USD_ENV, "plenty")
+    assert budget_usd() == DEFAULT_BUDGET_USD, "nonsense falls back rather than crashing a build"
+
+    assert budget_tokens(price=None) == DEFAULT_UNPRICED_BUDGET_TOKENS, "an unpriced model is capped by volume"
+    assert budget_tokens(price=0.02) is None, "a priced model is capped by money, not by volume"
+    assert budget_tokens(price=0.0) is None, "a free model is capped by nothing at all"
     monkeypatch.setenv(BUDGET_ENV, "500")
-    assert budget_tokens() == 500, "an integer is honoured"
+    assert budget_tokens(price=0.02) == 500, "an explicitly named token ceiling applies to a priced model too"
+    assert budget_tokens(price=0.0) is None, "but a free model still costs nothing to cap"
     monkeypatch.setenv(BUDGET_ENV, "many")
-    assert budget_tokens() == DEFAULT_BUDGET_TOKENS, "nonsense falls back rather than crashing a build"
+    assert budget_tokens(price=None) == DEFAULT_UNPRICED_BUDGET_TOKENS, "nonsense falls back to the default"
 
 
 def test_check_budget_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The refusal names the estimate, the price, the budget and both ways out."""
-    monkeypatch.setenv(BUDGET_ENV, "100")
-    check_budget("voyage:voyage-4-lite@1024", "voyage:voyage-4-lite", 1, 100)
+    """The refusal names the estimate, the cost, the ceiling that refused and every way out."""
+    monkeypatch.setenv(BUDGET_USD_ENV, "0.05")
+    check_budget("voyage:voyage-4-lite@1024", "voyage:voyage-4-lite", 1, 2_500_000)
     with pytest.raises(EmbeddingBudgetExceeded) as raised:
-        check_budget("voyage:voyage-4-lite@1024", "voyage:voyage-4-lite", 3, 101)
+        check_budget("voyage:voyage-4-lite@1024", "voyage:voyage-4-lite", 3, 5_000_000)
     message = str(raised.value)
-    remedy_fragments = (".zembleignore", "sub-path", "--yes", CONFIRM_ENV, BUDGET_ENV)
-    for fragment in ("101", "100", "voyage:voyage-4-lite@1024", *remedy_fragments):
+    remedy_fragments = (".zembleignore", "sub-path", "--yes", CONFIRM_ENV, BUDGET_USD_ENV)
+    for fragment in ("5,000,000", "$0.10", "$0.05", "voyage:voyage-4-lite@1024", *remedy_fragments):
         assert fragment in message, f"the refusal must name {fragment}"
+    assert BUDGET_ENV not in message, "the money ceiling is the one that refused, so it is the one named"
 
 
 def test_budget_guard_journey(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -173,14 +185,32 @@ def test_local_embed_announces_nothing(tmp_path: Path, caplog: pytest.LogCapture
     assert caplog.records == [], "a local embed is not a paid embed"
 
 
-def test_the_two_lanes_have_two_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A paid build is refused on the bill, a local one on the hours, so the defaults differ."""
-    assert budget_tokens(remote=True) == DEFAULT_BUDGET_TOKENS, "the paid default is the billed one"
-    assert budget_tokens(remote=False) == DEFAULT_LOCAL_BUDGET_TOKENS, "a local build gets the work ceiling"
-    assert DEFAULT_LOCAL_BUDGET_TOKENS > DEFAULT_BUDGET_TOKENS, "a free build may do far more work than a paid one"
-    # A real multi-repo workspace (javaweb: 46.2 MB, ~12.8M tokens) is ordinary local work.
-    assert not exceeds_budget(12_800_000, remote=False), "a normal workspace is never refused locally"
-    assert exceeds_budget(12_800_000, remote=True), "the same tree is a real bill on a paid embedder"
+def test_the_two_harms_have_two_ceilings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bill is refused in money, an unpriced model in volume, and a free one never."""
+    # 1. The measured full javaweb index is affordable at the configured model, and at the dearest.
+    javaweb = 15_500_000
+    assert bill_refusal(javaweb, "voyage:voyage-4-lite") is None, "step 1: $0.31 is not a runaway bill"
+    assert bill_refusal(javaweb, "openai:https://api.openai.com/v1#text-embedding-3-large") is None, (
+        "step 1: the same index at $0.13 per million ($2.02) is still an ordinary workspace index"
+    )
 
+    # 2. A build that would really spend money is refused, in money, naming the money knob.
+    runaway = bill_refusal(2_500_000_000, "voyage:voyage-4-lite")
+    assert runaway is not None and "$50.00" in runaway, f"step 2: a $50 build is refused, got {runaway}"
+    assert BUDGET_USD_ENV in runaway, "step 2: the refusal names the ceiling a caller would raise"
+
+    # 3. A model with no documented price cannot be billed, so its VOLUME is what is capped.
+    unpriced = bill_refusal(DEFAULT_UNPRICED_BUDGET_TOKENS + 1, "voyage:voyage-9-imaginary")
+    assert unpriced is not None, "step 3: an unknown price is never treated as unlimited"
+    assert "no documented price" in unpriced, f"step 3: and the reason says why it is capped, got {unpriced}"
+    assert BUDGET_ENV in unpriced, "step 3: naming the volume knob, not the money one"
+    assert bill_refusal(DEFAULT_UNPRICED_BUDGET_TOKENS, "voyage:voyage-9-imaginary") is None, "step 3: at the ceiling"
+
+    # 4. A local family is never billed, however much of it there is.
+    assert bill_refusal(2_500_000_000, "model2vec:minishlab/potion-code-16M-v2") is None, "step 4: free stays free"
+
+    # 5. An explicitly named token ceiling is an additional cap on the priced lane.
     monkeypatch.setenv(BUDGET_ENV, "500")
-    assert budget_tokens(remote=True) == budget_tokens(remote=False) == 500, "one knob governs both lanes"
+    explicit = bill_refusal(501, "voyage:voyage-4-lite")
+    assert explicit is not None and BUDGET_ENV in explicit, "step 5: a caller who names a ceiling means it"
+    assert bill_refusal(501, "model2vec:minishlab/potion-code-16M-v2") is None, "step 5: except where nothing is paid"
