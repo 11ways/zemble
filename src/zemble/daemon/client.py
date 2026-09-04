@@ -139,7 +139,9 @@ def spawn(timeout: float = START_TIMEOUT_SECONDS) -> None:
         raise DaemonUnavailable(f"cannot open daemon log {log_file}: {exc}") from exc
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "zemble.daemon", "run"],
+            # --log-file: the child logs through a rotating handler instead of the inherited
+            # stderr, so the log below only ever collects crash output written before that.
+            [sys.executable, "-m", "zemble.daemon", "run", "--log-file"],
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=handle,

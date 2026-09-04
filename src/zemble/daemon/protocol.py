@@ -18,6 +18,10 @@ LINE_SEPARATOR = b"\n"
 
 DEFAULT_MAX_INDEXES = 4
 DEFAULT_IDLE_MINUTES = 30
+#: Size one daemon log file may reach before it is rotated.
+LOG_MAX_BYTES = 4 * 1024 * 1024
+#: How many rotated daemon logs are kept beside the live one.
+LOG_BACKUP_COUNT = 3
 #: How long a client waits for a freshly spawned daemon to accept connections.
 START_TIMEOUT_SECONDS = 10.0
 #: How long a client waits for the socket itself, once it exists.

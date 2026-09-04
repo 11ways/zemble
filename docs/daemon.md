@@ -207,6 +207,15 @@ request (default 30; `0` never exits), and `zemble daemon stop` ends it immediat
 | Lock | `daemon.sock.lock`, beside the socket: a `flock` held for the daemon's lifetime, so two daemons can never own one socket. |
 | Log | `~/.cache/zemble/daemon.log` (the resolved cache folder), appended by detached daemons. |
 
+A detached daemon is spawned with `--log-file`, which points its logging at that path
+through a `RotatingFileHandler`: `LOG_MAX_BYTES` (4 MB) per file, `LOG_BACKUP_COUNT` (3)
+backups kept as `daemon.log.1` .. `daemon.log.3`, so the log costs at most 16 MB no matter
+how long the daemon lives. Both constants are declared in `daemon/protocol.py` beside the
+other daemon defaults. A foreground `zemble daemon run` still logs to stderr. The child's
+raw stdout/stderr are pointed at the same file so a crash before logging is configured is
+still recorded; that inherited descriptor follows the inode across a rotation, so such
+output can end up in a backup.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ZEMBLE_DAEMON=0` | unset | Never use or start a daemon in this process. |

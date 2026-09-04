@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import socket
 import textwrap
@@ -18,7 +19,10 @@ import pytest
 
 from tests.conftest import FakeEmbedder
 from zemble.daemon import client, server
+from zemble.daemon.cli import rotating_log_handler
 from zemble.daemon.protocol import (
+    LOG_BACKUP_COUNT,
+    LOG_MAX_BYTES,
     CommandFailed,
     CommandRefused,
     DaemonError,
@@ -899,3 +903,30 @@ def test_the_daemon_carries_paths_and_exclude(tmp_path: Path, no_embedder_load: 
 
         status = client.call("status", timeout=30)
         assert len(status["indexes"]) == 1, "one index served every filtered answer"
+
+
+def test_daemon_log_handler_rotates(tmp_path: Path) -> None:
+    """The daemon's log handler bounds the file it writes and keeps a fixed number of backups."""
+    log_file = tmp_path / "logs" / "daemon.log"
+    handler = rotating_log_handler(log_file)
+    logger = logging.getLogger("zemble.tests.rotation")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        # 1. Write well past the size limit, in records far smaller than it.
+        payload = "x" * 4096
+        written = 0
+        while written < LOG_MAX_BYTES * 2:
+            logger.info(payload)
+            written += len(payload)
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+
+    assert log_file.exists(), "the live log is still the file the daemon was pointed at"
+    assert log_file.stat().st_size < LOG_MAX_BYTES, "the live log stays under the limit"
+    assert (log_file.with_name(log_file.name + ".1")).exists(), "the rotated log is kept beside it"
+    backups = sorted(p.name for p in log_file.parent.iterdir() if p.name != log_file.name)
+    assert len(backups) <= LOG_BACKUP_COUNT, "no more than the declared number of backups survives"
+    assert all(p.stat().st_size <= LOG_MAX_BYTES for p in log_file.parent.iterdir()), "every file is bounded"

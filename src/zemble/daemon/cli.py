@@ -11,12 +11,16 @@ import json
 import logging
 import sys
 import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 from zemble.daemon import client
 from zemble.daemon.protocol import (
     DEFAULT_IDLE_MINUTES,
     DEFAULT_MAX_INDEXES,
+    LOG_BACKUP_COUNT,
+    LOG_MAX_BYTES,
     DaemonError,
     log_path,
     read_pid,
@@ -48,6 +52,11 @@ def add_daemon_parser(sub: argparse._SubParsersAction) -> None:
         help=f"Exit after this long without a request; 0 never exits (default: {DEFAULT_IDLE_MINUTES}).",
     )
     run_p.add_argument("--no-watch", action="store_true", help="Do not watch loaded roots for changes.")
+    run_p.add_argument(
+        "--log-file",
+        action="store_true",
+        help="Log to the daemon log through a size-bounded rotating handler instead of stderr.",
+    )
 
     daemon_sub.add_parser("start", help="Start a detached daemon if none is running.")
     daemon_sub.add_parser("stop", help="Ask a running daemon to exit.")
@@ -71,17 +80,32 @@ def run_daemon(args: argparse.Namespace) -> int:
     return _status(getattr(args, "json", False))
 
 
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def rotating_log_handler(path: Path) -> RotatingFileHandler:
+    """Return the daemon's size-bounded log handler, so a long-lived daemon cannot fill the disk.
+
+    AIDEV-NOTE: a detached daemon also has its raw stdout/stderr pointed at this same file
+    (crash output that happens before logging is configured). That inherited fd follows the
+    inode across a rotation, so such output can land in a backup; the total stays bounded.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    return handler
+
+
 def _run_foreground(args: argparse.Namespace) -> int:
     """Run the daemon in this process until it stops."""
     import asyncio
 
     from zemble.daemon.server import SocketInUse, run
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    if getattr(args, "log_file", False):
+        logging.basicConfig(level=logging.INFO, handlers=[rotating_log_handler(log_path())])
+    else:
+        logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, stream=sys.stderr)
     try:
         asyncio.run(run(max_indexes=args.max_indexes, idle_minutes=args.idle_minutes, watch=not args.no_watch))
     except SocketInUse as exc:
@@ -191,4 +215,4 @@ def main(argv: list[str] | None = None) -> int:
     return run_daemon(args)
 
 
-__all__ = ["add_daemon_parser", "main", "run_daemon"]
+__all__ = ["add_daemon_parser", "main", "rotating_log_handler", "run_daemon"]
