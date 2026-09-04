@@ -308,7 +308,9 @@ def test_mcp_server_registers_the_dupes_tool() -> None:
     assert {clone["lane"] for clone in lane_only["classes"]} == {"test"}, "step 6: --lane is available over MCP"
 
 
-def test_a_refused_logic_run_is_the_answer_on_both_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_refused_logic_run_is_the_answer_on_both_surfaces(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """`dupes --kind logic` buys vectors, so it can be refused - and a refusal is an ANSWER.
 
     `dedup/detect.py` is a paid seam: the logic lane buys one vector per candidate body and
@@ -349,6 +351,47 @@ def test_a_refused_logic_run_is_the_answer_on_both_surfaces(monkeypatch: pytest.
     server = create_server(IndexCache())
     answer = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "logic"}))
     assert bill in answer[0].text, f"step 3: the refusal reaches the caller, got {answer[0].text}"
+
+    # 4. A caller that asked for JSON gets the refusal as JSON: an answer it cannot parse is
+    #    not an answer, and prose on stderr is what a machine consumer got instead.
+    monkeypatch.setattr(sys, "argv", ["zemble", "dupes", str(FIXTURES), "--kind", "logic", "--json"])
+    with pytest.raises(SystemExit) as exit_code:
+        _cli_main()
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == {"error": bill}, f"step 4: the CLI answered {printed!r}"
+    assert exit_code.value.code == 1, f"step 4: and still failed, got {exit_code.value.code!r}"
+
+    # 5. The same on the MCP surface, where `format="json"` answers with an object, not a sentence.
+    structured = asyncio.run(server.call_tool("dupes", {"repo": str(FIXTURES), "kind": "logic", "format": "json"}))
+    assert json.loads(structured[0].text) == {"error": bill}, f"step 5: the tool answered {structured[0].text}"
+
+
+def test_a_bad_embedder_spec_is_the_answer_too(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unusable `--embedder` is printed the way every other lane prints one, never a traceback.
+
+    `zemble.cli` catches `EmbedderSpecError` for search, stats, find-related and explain; the
+    dupes lane resolves an embedder of its own for `--kind logic` and let it escape out of
+    `main()` as a raw traceback.
+    """
+    from zemble.cli import _cli_main
+
+    # 1. On the CLI the message is the answer, and the command fails with it.
+    monkeypatch.setattr(sys, "argv", ["zemble", "dupes", str(FIXTURES), "--kind", "logic", "--embedder", "nope:what"])
+    with pytest.raises(SystemExit) as exit_code:
+        _cli_main()
+    assert "nope:what" in str(exit_code.value.code), f"step 1: the spec is named, got {exit_code.value.code!r}"
+
+    # 2. And in JSON mode it is an object, for the same reason a refusal is.
+    monkeypatch.setattr(
+        sys, "argv", ["zemble", "dupes", str(FIXTURES), "--kind", "logic", "--embedder", "nope:what", "--json"]
+    )
+    with pytest.raises(SystemExit) as json_exit:
+        _cli_main()
+    printed = json.loads(capsys.readouterr().out)
+    assert "nope:what" in printed["error"], f"step 2: the CLI answered {printed!r}"
+    assert json_exit.value.code == 1, f"step 2: and still failed, got {json_exit.value.code!r}"
 
 
 def test_nothing_scanned_is_never_a_clean_report(tmp_path: Path) -> None:

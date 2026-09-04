@@ -14,10 +14,14 @@ from zemble.dedup.detect import DupeOptions, find_duplication
 from zemble.dedup.languages import supported_extensions, supported_languages
 from zemble.dedup.model import CloneKind, Lane
 from zemble.dedup.report import baseline_diff_json, format_baseline_diff, format_report, report_json
+from zemble.embedding.registry import EmbedderSpecError
 from zemble.refusal import Refused
 
 _KIND_CHOICES = [kind.value for kind in CloneKind] + ["all"]
 _LANE_CHOICES = [lane.value for lane in Lane] + ["all"]
+
+#: What a run that could not answer exits with, whichever shape it answered in.
+EXIT_ERROR = 1
 
 
 def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
@@ -111,6 +115,22 @@ def _kinds(raw: str) -> tuple[CloneKind, ...]:
     return tuple(kind for kind in CloneKind if kind in selected)
 
 
+def _fail(message: str, as_json: bool) -> SystemExit:
+    """Return the exit that answers a run nobody can complete, in the shape the caller asked for.
+
+    A machine consumer of ``--json`` cannot parse a sentence: a refusal is the ANSWER to a
+    ``--kind logic`` run, so it comes back as JSON when JSON was asked for.
+
+    :param message: The refusal or error, already worded for a reader.
+    :param as_json: Whether the caller asked for machine-readable output.
+    :return: The exit to raise.
+    """
+    if not as_json:
+        return SystemExit(message)
+    print(json.dumps({"error": message}, indent=2))
+    return SystemExit(EXIT_ERROR)
+
+
 def run_dupes(args: argparse.Namespace) -> int:
     """Run `zemble dupes` and return its exit code, which is 0 however much it finds."""
     options = DupeOptions(
@@ -130,15 +150,16 @@ def run_dupes(args: argparse.Namespace) -> int:
     try:
         report = find_duplication(args.path, options)
     # A deliberate refusal - the spending budget of the logic lane - is the answer, printed the
-    # way every other surface prints one, never a traceback out of `main`.
-    except (Refused, FileNotFoundError) as error:
-        raise SystemExit(str(error)) from None
+    # way every other surface prints one, never a traceback out of `main`. The embedder spec is
+    # here for the same reason: `zemble.cli` catches it for every other lane that resolves one.
+    except (Refused, FileNotFoundError, EmbedderSpecError) as error:
+        raise _fail(str(error), args.json) from None
     baseline = None
     if args.baseline:
         try:
             baseline = load_baseline(args.baseline)
         except ValueError as error:
-            raise SystemExit(str(error)) from None
+            raise _fail(str(error), args.json) from None
     if args.save_baseline:
         written = save_baseline(args.save_baseline, report)
         print(f"Wrote {len(report.classes)} clone class key(s) to {written}")

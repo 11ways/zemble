@@ -148,6 +148,8 @@ def register_dupes_tool(server: FastMCP) -> None:
             )
         # `kind="logic"` buys a vector per candidate body, so this call can be refused by the
         # spending budget. A refusal is the ANSWER an agent has to read and act on, the way
-        # `home` reports one, never a tool failure with the reason inside a traceback.
+        # `home` reports one, never a tool failure with the reason inside a traceback - and it
+        # comes back in the shape that was asked for, because a caller that asked for `json`
+        # parses the answer instead of reading it.
         except Refused as error:
-            return str(error)
+            return {"error": str(error)} if format == "json" else str(error)
