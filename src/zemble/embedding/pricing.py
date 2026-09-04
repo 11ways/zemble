@@ -28,6 +28,15 @@ logger = logging.getLogger(__name__)
 #: is pessimistic on purpose so a batch cannot overshoot a provider ceiling.
 ESTIMATE_CHARS_PER_TOKEN = 3.6
 
+#: How much bigger the text a build embeds is than the source bytes it came from: a context
+#: capsule prefixes every chunk with a header whose size is roughly constant, so the overhead
+#: scales with FILE SIZE rather than with the tree. Measured over real builds: 1.05x on 20 KB
+#: files, 1.10x at 400 B, 1.50x at 80 B, 2.60x at 20 B. THE declaring home of that range - the
+#: argument that the volume backstop binds needs the LOW end, and the worst-case bill a build
+#: at the work ceiling can carry needs the HIGH one, so both are quoted, never re-typed.
+CAPSULE_OVERHEAD_LOW = 1.05
+CAPSULE_OVERHEAD_HIGH = 2.60
+
 #: Names the ceiling on what one build may SPEND.
 BUDGET_USD_ENV = "ZEMBLE_EMBED_BUDGET_USD"
 #: 16x the measured full javaweb index at the configured model ($0.31, docs/voyage.md) and
@@ -85,10 +94,10 @@ DEAREST_DOCUMENTED_RATE = max(price for prices in PRICES_USD_PER_MILLION_TOKENS.
 #: tokens even the dearest model in the table bills exactly the default budget - so a rate
 #: mistyped low for any other model NARROWS the ceiling instead of deleting it. A mistyped
 #: dearest entry does lift it, which is what ``PRICES_CHECKED_ON`` and the unit-sanity test are
-#: for. It has to sit BELOW what the 180 MB work ceiling can produce, and the capsule overhead
-#: that decides how much that is scales with FILE SIZE, not with the tree: measured 1.05x on
-#: 20 KB files up to 2.60x on 20 B ones, i.e. ~52M estimated tokens at the low end and ~130M at
-#: the high. 38.5M sits under even the low end, so it binds whatever a tree is made of; a
+#: for. It has to sit BELOW what the 180 MB work ceiling can produce, which is that volume over
+#: :data:`ESTIMATE_CHARS_PER_TOKEN` times the measured capsule overhead: ~52M estimated tokens at
+#: :data:`CAPSULE_OVERHEAD_LOW` and ~130M at :data:`CAPSULE_OVERHEAD_HIGH`.
+#: 38.5M sits under even the low end, so it binds whatever a tree is made of; a
 #: legitimate build that big names ``ZEMBLE_EMBED_BUDGET_TOKENS`` deliberately. Raising the
 #: money knob does NOT raise it.
 MAX_BUDGET_TOKENS = int(DEFAULT_BUDGET_USD / DEAREST_DOCUMENTED_RATE * 1_000_000)

@@ -26,6 +26,8 @@ from zemble.embedding.preflight import embed_status
 from zemble.embedding.pricing import (
     BUDGET_ENV,
     BUDGET_USD_ENV,
+    CAPSULE_OVERHEAD_HIGH,
+    CAPSULE_OVERHEAD_LOW,
     DEAREST_DOCUMENTED_RATE,
     DEFAULT_BUDGET_USD,
     DEFAULT_UNPRICED_BUDGET_TOKENS,
@@ -36,6 +38,7 @@ from zemble.embedding.pricing import (
     bill_refusal,
     check_budget,
     estimate_cost,
+    format_usd,
 )
 from zemble.embedding.registry import CACHE_ENV, ResolvedEmbedder, build_embedder, caching_enabled
 from zemble.index import ScopeRefused, ZembleIndex
@@ -49,17 +52,17 @@ FAMILY = "voyage:voyage-4-lite"
 #: The dearest family the price table documents, named the way a cache family key is spelled.
 DEAREST_FAMILY = "openai:https://api.openai.com/v1#text-embedding-3-large"
 
-#: How much bigger an embedded chunk is than the file bytes it came from: a capsule prefixes
-#: every chunk with its context header. Measured at +21% over this repo and +52% over the small
-#: fixture tree, so the SMALLER multiplier is the honest floor under "tokens a build can carry".
-CAPSULE_MULTIPLIER = 1.21
+#: The FEWEST estimated tokens a build the work guard admits can carry: 180 MB of source at the
+#: measured capsule floor, over the pricing density. The backstop has to sit under this one -
+#: a tree of large files is the cheapest thing 180 MB can be, so binding here binds everywhere.
+WORK_CEILING_TOKENS = int(DEFAULT_WORK_LIMIT_BYTES * CAPSULE_OVERHEAD_LOW / ESTIMATE_CHARS_PER_TOKEN)
 
-#: The most estimated tokens a build the work guard admits can carry: 180 MB of source at the
-#: capsule floor, over the pricing density. Measured, and the number the backstop must sit under.
-WORK_CEILING_TOKENS = int(DEFAULT_WORK_LIMIT_BYTES * CAPSULE_MULTIPLIER / ESTIMATE_CHARS_PER_TOKEN)
+#: The MOST it can carry: the same volume in files small enough for the capsule header to
+#: double them. The worst real bill a build at the work ceiling can run up is priced from this.
+WORST_CASE_CEILING_TOKENS = int(DEFAULT_WORK_LIMIT_BYTES * CAPSULE_OVERHEAD_HIGH / ESTIMATE_CHARS_PER_TOKEN)
 
 #: The javaweb workspace, measured on the real tree: 73.7 MB of code and docs, 17.8M tokens from
-#: bytes, x1.21 for capsules. The build the backstop may never refuse.
+#: bytes and +21% for capsules at that mix of file sizes. The build the backstop may never refuse.
 JAVAWEB_ESTIMATED_TOKENS = 21_600_000
 
 #: The byte volume the pre-parse guard used to refuse: it converted bytes to tokens at the
@@ -296,6 +299,45 @@ def test_the_volume_backstop_admits_a_full_workspace_index() -> None:
     # 2. So no lane refuses it: not at the configured model ($0.43), not at the dearest ($2.81).
     assert bill_refusal(JAVAWEB_ESTIMATED_TOKENS, FAMILY) is None, "step 2: the configured model is affordable"
     assert bill_refusal(JAVAWEB_ESTIMATED_TOKENS, DEAREST_FAMILY) is None, "step 2: and so is the dearest one"
+
+
+#: What each prose file quotes off the constants, and which figure it quotes. Prose cannot import,
+#: so this is the binding: the numbers are rendered from the constants here and must appear in the
+#: file. ``docs/plan.md`` is deliberately absent - it is a dated decision log, not current prose.
+_DOCUMENTED_FIGURES: dict[str, tuple[str, ...]] = {
+    "docs/embedders.md": ("low_overhead", "high_overhead", "low_tokens", "high_tokens", "backstop", "worst_bill"),
+    "README.md": ("low_tokens", "high_tokens", "backstop"),
+    "CLAUDE.md": ("low_overhead", "high_overhead", "low_tokens", "high_tokens", "backstop", "worst_bill"),
+}
+
+
+def _rendered_figures() -> dict[str, str]:
+    """Render every capsule/backstop figure the prose quotes, the way the prose spells it."""
+    worst_bill = estimate_cost(WORST_CASE_CEILING_TOKENS, DEAREST_DOCUMENTED_RATE)
+    assert worst_bill is not None, "the dearest documented rate must price the worst case"
+    return {
+        "low_overhead": f"{CAPSULE_OVERHEAD_LOW:.2f}x",
+        "high_overhead": f"{CAPSULE_OVERHEAD_HIGH:.2f}x",
+        "low_tokens": f"{WORK_CEILING_TOKENS // 1_000_000}M",
+        "high_tokens": f"{WORST_CASE_CEILING_TOKENS // 1_000_000}M",
+        "backstop": f"{MAX_BUDGET_TOKENS / 1_000_000:.1f}M",
+        "worst_bill": format_usd(worst_bill),
+    }
+
+
+def test_the_prose_quotes_the_capsule_constants_it_argues_from() -> None:
+    """Every number the prose argues the guards from is derived here, so neither can drift alone.
+
+    The binding argument ("the backstop sits under what 180 MB can carry") and the worst-case
+    bill are the two figures a reader checks the design against, and both are hand-typed in
+    Markdown. Moving a constant without moving the prose leaves the repo asserting the old one.
+    """
+    root = Path(__file__).resolve().parents[2]
+    figures = _rendered_figures()
+    for relative, names in _DOCUMENTED_FIGURES.items():
+        prose = (root / relative).read_text(encoding="utf-8")
+        for name in names:
+            assert figures[name] in prose, f"{relative} does not quote {name} as {figures[name]}"
 
 
 def _buy_chunks(embedder: Embedder) -> None:

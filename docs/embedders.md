@@ -355,12 +355,14 @@ and the unit-sanity test are for.
 
 It has to BIND, and it does. What 180 MB of source carries in estimated tokens depends on the
 capsule overhead, and that scales with FILE SIZE rather than with the tree: measured over real
-builds, 1.05x on 20 KB files, 1.10x at 400 B, 1.50x at 80 B and 2.60x at 20 B. So the work
+builds, 1.05x on 20 KB files, 1.10x at 400 B, 1.50x at 80 B and 2.60x at 20 B. The ends of that
+range are declared once, as `CAPSULE_OVERHEAD_LOW` and `CAPSULE_OVERHEAD_HIGH` in
+`embedding/pricing.py`, and a test fails when this prose stops quoting them. So the work
 ceiling admits roughly 52M estimated tokens for a tree of large files and up to ~130M for one
 of tiny ones, and 38.5M sits under even the low end - it binds whatever the tree is made of -
 while the measured full javaweb code-and-docs index (~21.6M estimated tokens) passes with room
 over it. The binding argument needs the LOW end; the reader who wants the worst case wants the
-high one - a build at the work ceiling can really bill up to ~$16.87 at the dearest documented
+high one - a build at the work ceiling can really bill up to ~$16.90 at the dearest documented
 rate, which is what the work ceiling, not this backstop, bounds. At 100,000,000 it sat *above* the work ceiling and could
 therefore refuse nothing at all: with `voyage-code-4` mistyped one order of magnitude low, a
 build at the work ceiling billed $7.26 for real while the guard computed $0.73 and allowed
