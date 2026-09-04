@@ -30,13 +30,18 @@ def make_chunk(content: str, file_path: str = "src/module.py") -> Chunk:
 
 @pytest.fixture(autouse=True)
 def no_real_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Keep the suite off the user's real daemon: a test must never spawn or reuse one.
+    """Keep the suite off the user's real daemon and real cache: a test owns neither.
 
-    The daemon's own tests point the socket at a temporary directory and re-enable it there.
+    The daemon's own tests point the socket at a temporary directory and re-enable it there,
+    and the `cache`/`graph_cache` fixtures point ZEMBLE_CACHE_LOCATION somewhere of their own;
+    this is the floor under every other test. Without it `stats.py` appended a row per tool
+    call to the developer's real ~/.cache/zemble/savings.jsonl - measured at +11 rows from one
+    test file - so a suite run silently edited the numbers `zemble savings` reports.
     """
     monkeypatch.setenv("ZEMBLE_DAEMON", "0")
     # Never read the developer's real ~/.config/zemble/env (keys, hosted providers) in a test.
     monkeypatch.setenv("ZEMBLE_ENV_FILE", str(tmp_path_factory.mktemp("userenv") / "absent"))
+    monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(tmp_path_factory.mktemp("zemble-cache")))
 
 
 @pytest.fixture
