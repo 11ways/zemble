@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 import sqlite3
 import threading
@@ -19,9 +18,6 @@ from zemble.embedding.base import (
     normalize_rows,
     semantic_weight_bonus,
 )
-from zemble.embedding.pricing import check_budget, estimate_tokens, format_cost, price_per_million
-
-logger = logging.getLogger(__name__)
 
 _SLUG_UNSAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 
@@ -139,6 +135,22 @@ class EmbeddingCache:
             ).fetchall()
         return {row[0] for row in rows}
 
+    def stored_dimensions(self, limit: int = 2) -> list[int]:
+        """Return up to `limit` distinct vector widths this family's cache file already holds.
+
+        A model whose width only a provider request could tell has still been bought at SOME
+        width by every earlier build, and this file is the one place to read it without asking
+        anybody. Two is enough to tell an unambiguous file from a mixed one.
+
+        :param limit: How many distinct widths to look for.
+        :return: The widths, ascending.
+        """
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT DISTINCT dims FROM embeddings ORDER BY dims LIMIT ?", (limit,)
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
     def put_many(self, rows: list[tuple[str, int, np.ndarray]]) -> None:
         """Store vectors, ignoring any key another process wrote first.
 
@@ -197,27 +209,28 @@ class CachingEmbedder:
         """The wrapped embedder's fusion bonus; caching does not change how good its vectors are."""
         return semantic_weight_bonus(self.inner)
 
-    def _announce(self, texts: list[str]) -> None:
-        """Refuse or announce a paid embed of the whole pending set, before the first slice is sent.
+    def pending_documents(self, texts: list[str]) -> list[str]:
+        """Return the distinct texts this cache would still have to buy out of these.
 
-        This is the one point in a build where the uncached set is known, so it is the one
-        place the budget is checked: every surface (CLI, MCP, daemon) reaches a build through
-        here, and a per-slice check would compare 512 chunks against a whole build's budget.
+        Duplicates collapse, because :meth:`embed_documents` gives every copy of one text a
+        single provider slot; pricing the answer therefore prices what is really bought. This
+        is the cache's half of the bill guard - it answers WHAT would be bought, and
+        :func:`zemble.embedding.pricing.require_affordable_bill` decides whether it may be.
 
-        :param texts: The uncached texts about to be embedded.
-        :raises EmbeddingBudgetExceeded: If the estimate exceeds the budget.
+        :param texts: The texts a build is about to embed.
+        :return: Those with no usable vector stored, first occurrence first.
         """
-        if not texts or not self.is_remote:
-            return
-        tokens = estimate_tokens(texts)
-        check_budget(self.model_id, self.cache.family, len(texts), tokens)
-        logger.info(
-            "embedding %d uncached chunk(s), ~%d tokens, ~%s with %s",
-            len(texts),
-            tokens,
-            format_cost(tokens, price_per_million(self.cache.family)),
-            self.model_id,
-        )
+        dims = self.dimensions
+        digests = [text_hash(text) for text in texts]
+        covered = self.cache.covered(digests, dims)
+        pending: list[str] = []
+        seen: set[str] = set()
+        for text, digest in zip(texts, digests, strict=True):
+            if digest in covered or digest in seen:
+                continue
+            seen.add(digest)
+            pending.append(text)
+        return pending
 
     def embed_documents(self, texts: list[str]) -> EmbeddingMatrix:
         """Embed documents, calling the provider only for texts not already stored.
@@ -247,8 +260,6 @@ class CachingEmbedder:
                 continue
             first_position[digest] = position
             missing_positions.append(position)
-
-        self._announce([texts[position] for position in missing_positions])
 
         for start in range(0, len(missing_positions), FLUSH_EVERY):
             slice_positions = missing_positions[start : start + FLUSH_EVERY]

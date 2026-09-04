@@ -251,7 +251,10 @@ class ZembleIndex:
         :return: An indexed ZembleIndex. Chunk file paths are relative to ``path``.
         :raises FileNotFoundError: If `path` does not exist.
         :raises NotADirectoryError: If `path` exists but is not a directory.
-        :raises ScopeRefused: If the root is too broad, or too big for the token budget.
+        :raises ScopeRefused: If the root is too broad, or holds more source than one build
+            may chunk (``ZEMBLE_INDEX_WORK_LIMIT_MB``).
+        :raises EmbeddingBudgetExceeded: If buying vectors for the uncached chunks would cost
+            more than the budget allows (``ZEMBLE_EMBED_BUDGET_USD``).
         """
         path = Path(path)
         if not path.exists():

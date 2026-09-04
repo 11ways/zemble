@@ -10,6 +10,7 @@ from vicinity.utils import normalize
 
 from zemble.chunking.capsule import embedding_text
 from zemble.embedding.base import Embedder
+from zemble.embedding.pricing import require_affordable_bill
 from zemble.index.columnar import atomic_save
 from zemble.types import Chunk
 
@@ -17,13 +18,19 @@ from zemble.types import Chunk
 def embed_chunks(embedder: Embedder, chunks: list[Chunk]) -> npt.NDArray[np.float32]:
     """Embed chunk contents as documents, each prefixed by its context capsule when it has one.
 
+    Every chunk a build embeds passes here in ONE call, incremental builds included, so this
+    is where the bill for the whole build is judged - never per provider batch.
+
     :param embedder: The embedder to use.
     :param chunks: The chunks to embed.
     :return: A float32 matrix, one row per chunk.
+    :raises EmbeddingBudgetExceeded: If buying the uncached part of these chunks is over budget.
     """
     if not chunks:
         return np.empty((0, embedder.dimensions), dtype=np.float32)
-    return embedder.embed_documents([embedding_text(chunk) for chunk in chunks])
+    texts = [embedding_text(chunk) for chunk in chunks]
+    require_affordable_bill(embedder, texts)
+    return embedder.embed_documents(texts)
 
 
 class SelectableBasicBackend(CosineBasicBackend):

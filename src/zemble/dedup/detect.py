@@ -275,7 +275,9 @@ def logic_classes(
     :param options: The run's options, naming the embedder and the similarity threshold.
     :param embedder: An explicit embedder; None loads the configured one.
     :return: The classes and any notes worth printing (timings, skipped work).
+    :raises EmbeddingBudgetExceeded: If buying vectors for the candidate bodies is over budget.
     """
+    from zemble.embedding.pricing import require_affordable_bill
     from zemble.embedding.registry import load_embedder
 
     candidates = _logic_candidates(units)
@@ -284,7 +286,11 @@ def logic_classes(
         return [], notes
     started = time.perf_counter()
     embedder = embedder or load_embedder(options.embedder)
-    vectors = embedder.embed_documents([unit.text or "" for unit in candidates])
+    # Logic mode buys one vector per candidate body, so it is a paid seam like an index build
+    # and passes the same bill guard. The default embedder is local, where the guard is a no-op.
+    texts = [unit.text or "" for unit in candidates]
+    require_affordable_bill(embedder, texts)
+    vectors = embedder.embed_documents(texts)
     embedded = time.perf_counter() - started
     finder = _UnionFind(len(candidates))
     reasons: dict[tuple[int, int], PairReason] = {}
