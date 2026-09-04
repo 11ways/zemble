@@ -85,10 +85,12 @@ DEAREST_DOCUMENTED_RATE = max(price for prices in PRICES_USD_PER_MILLION_TOKENS.
 #: tokens even the dearest model in the table bills exactly the default budget - so a rate
 #: mistyped low for any other model NARROWS the ceiling instead of deleting it. A mistyped
 #: dearest entry does lift it, which is what ``PRICES_CHECKED_ON`` and the unit-sanity test are
-#: for. It has to sit BELOW what the 180 MB work ceiling can produce - 60.5M estimated tokens at
-#: the +21% capsule overhead measured on this repo, 76.0M at the +52% measured on a small tree -
-#: or it would bind nothing the work guard did not already refuse; a legitimate build that big
-#: names ``ZEMBLE_EMBED_BUDGET_TOKENS`` deliberately. Raising the money knob does NOT raise it.
+#: for. It has to sit BELOW what the 180 MB work ceiling can produce, and the capsule overhead
+#: that decides how much that is scales with FILE SIZE, not with the tree: measured 1.05x on
+#: 20 KB files up to 2.60x on 20 B ones, i.e. ~52M estimated tokens at the low end and ~130M at
+#: the high. 38.5M sits under even the low end, so it binds whatever a tree is made of; a
+#: legitimate build that big names ``ZEMBLE_EMBED_BUDGET_TOKENS`` deliberately. Raising the
+#: money knob does NOT raise it.
 MAX_BUDGET_TOKENS = int(DEFAULT_BUDGET_USD / DEAREST_DOCUMENTED_RATE * 1_000_000)
 
 
@@ -140,7 +142,9 @@ def format_usd(amount: float) -> str:
     not zero ever renders as one. Below a picodollar the digits stop being readable at all and
     the exponent is what a reader can act on.
     """
-    if amount == 0 or abs(amount) >= 0.01:
+    # A money formatter that raises takes the refusal message down with it, and this one exists
+    # to make refusals readable, so a non-finite amount renders rather than reaching math.floor.
+    if amount == 0 or not math.isfinite(amount) or abs(amount) >= 0.01:
         return f"${amount:.2f}"
     digits = -math.floor(math.log10(abs(amount)))
     return f"${amount:.{digits}f}" if digits <= 12 else f"${amount:.2e}"

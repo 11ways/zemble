@@ -233,10 +233,13 @@ build would be refused over.
 The report asks that question UNPROBED (`pending_purchase(..., may_probe=False)`), because
 deciding what is already bought reads a vector width and reading one off a model that declares
 none is a provider request this report never makes. The width then comes from what the family's
-own cache file holds, which leaves exactly one case where the two lanes differ: a file holding
-two widths, where the report cannot tell which one a build would read and counts nothing as
-stored. That over-reports and never under-reports - the report can say REFUSED for a build that
-would be allowed, never the reverse.
+own cache file holds, which leaves two cases where the lanes differ, both confined to a model
+that declares no width. A file holding two widths over-reports: the report cannot tell which one
+a build would read, so it counts nothing as stored. A file holding ONE width that is not the
+width the build resolves under-reports: the report matches every digest at the stored width and
+can answer "nothing to buy" for a build that then buys the lot. Neither is a spending hole - the
+build's own guard measures the real set through `pending_documents` - but `would_refuse` is
+advisory for such a model, in both directions.
 
 On the javaweb workspace (77,092 chunks) a cold pass costs about 11 s of chunking plus
 0.3 s of cache lookup; when the previous index covers every file the walk alone answers
@@ -350,14 +353,15 @@ bills exactly $5.00 - so a rate mistyped low for any other model NARROWS the cei
 of deleting it. A mistyped *dearest* entry does lift it, which is what `PRICES_CHECKED_ON`
 and the unit-sanity test are for.
 
-It has to BIND, and it does: 180 MB of source carries between ~60.5M and ~76M estimated tokens
-(file bytes plus a capsule overhead measured at +21% on this repo and +52% on a small fixture
-tree, over chars/3.6), so 38.5M sits under even the low end of what the work guard admits,
+It has to BIND, and it does. What 180 MB of source carries in estimated tokens depends on the
+capsule overhead, and that scales with FILE SIZE rather than with the tree: measured over real
+builds, 1.05x on 20 KB files, 1.10x at 400 B, 1.50x at 80 B and 2.60x at 20 B. So the work
+ceiling admits roughly 52M estimated tokens for a tree of large files and up to ~130M for one
+of tiny ones, and 38.5M sits under even the low end - it binds whatever the tree is made of -
 while the measured full javaweb code-and-docs index (~21.6M estimated tokens) passes with room
-over it. The binding argument needs the LOW end, which is why the test uses +21%; the reader
-who wants the worst case wants the high one - a build at the work ceiling can really bill up to
-~$9.88 at the dearest documented rate, which is what the work ceiling, not this backstop,
-bounds. At 100,000,000 it sat *above* the work ceiling and could
+over it. The binding argument needs the LOW end; the reader who wants the worst case wants the
+high one - a build at the work ceiling can really bill up to ~$16.87 at the dearest documented
+rate, which is what the work ceiling, not this backstop, bounds. At 100,000,000 it sat *above* the work ceiling and could
 therefore refuse nothing at all: with `voyage-code-4` mistyped one order of magnitude low, a
 build at the work ceiling billed $7.26 for real while the guard computed $0.73 and allowed
 it. Raising `ZEMBLE_EMBED_BUDGET_USD` does not raise the backstop; a build that is genuinely

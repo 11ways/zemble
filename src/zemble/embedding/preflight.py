@@ -179,8 +179,10 @@ def embed_status(
     # chunk either way. The question is asked UNPROBED, because reading a width off a model that
     # declares none costs a provider request this report never makes: skipping the buyer there
     # instead billed every copy again, 20x, on the default configuration. What is left is the
-    # cache file that holds two widths, where the report cannot tell which one a build would
-    # read and counts nothing as stored - pessimistic, never a discount nobody can prove.
+    # cache file of such a model: two widths and the report counts nothing as stored
+    # (pessimistic); one width that is not the one the build resolves and it counts everything
+    # as stored (optimistic). Both are advisory only - the build's own guard measures the real
+    # set, so neither can buy more than it announces.
     uncached_texts = [text for text, digest in zip(texts, digests, strict=True) if digest not in covered]
     uncached = len(uncached_texts)
     cached = len(texts) - uncached

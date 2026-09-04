@@ -160,9 +160,9 @@ cost more than `ZEMBLE_EMBED_BUDGET_USD` (default $5.00) is refused before a sin
 naming the cost and how to proceed; a model with no documented price is capped by volume
 instead, at `ZEMBLE_EMBED_BUDGET_TOKENS` (default 2,000,000), and every priced model carries
 an absolute volume backstop underneath the money ceiling - the $5.00 budget at the dearest
-rate the price table documents, 38.5M tokens - which sits below even the ~60.5M tokens the
-work ceiling admits at the lowest measured capsule overhead (~76M at the highest), so a price
-mistyped low narrows that ceiling instead of deleting it.
+rate the price table documents, 38.5M tokens - which sits below even the ~52M tokens the work
+ceiling admits at the lowest measured capsule overhead (~130M at the highest, which is a tree
+of tiny files), so a price mistyped low narrows that ceiling instead of deleting it.
 Separately, and for every embedder including the local ones, a tree holding more than
 `ZEMBLE_INDEX_WORK_LIMIT_MB` of source (default 180 MB) is refused from the walk alone,
 before any file is parsed - a tree big enough to refuse is a tree big enough for the parse
