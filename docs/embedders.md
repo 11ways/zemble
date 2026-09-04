@@ -375,10 +375,12 @@ of tiny ones, and 38.5M sits under even the low end - it binds whatever the tree
 while the measured full javaweb code-and-docs index (~21.6M estimated tokens) passes with room
 over it. The binding argument needs the LOW end; the reader who wants the worst case wants the
 high one - a build at the work ceiling can really bill up to ~$16.90 at the dearest documented
-rate, which is what the work ceiling, not this backstop, bounds. At 100,000,000 it sat *above* the work ceiling and could
-therefore refuse nothing at all: with `voyage-code-4` mistyped one order of magnitude low, a
-build at the work ceiling billed $7.26 for real while the guard computed $0.73 and allowed
-it. Raising `ZEMBLE_EMBED_BUDGET_USD` does not raise the backstop; a build that is genuinely
+rate, which is what the work ceiling, not this backstop, bounds.
+
+The backstop has not always bound. At its first value, 100,000,000 tokens, it sat *above* the
+work ceiling and could therefore refuse nothing at all: with `voyage-code-4` mistyped one order
+of magnitude low, a build at the work ceiling billed $7.26 for real while the guard computed
+$0.73 and allowed it. Raising `ZEMBLE_EMBED_BUDGET_USD` does not raise the backstop; a build that is genuinely
 bigger names `ZEMBLE_EMBED_BUDGET_TOKENS` deliberately, which the refusal says. The price
 table carries the date it was last read (`PRICES_CHECKED_ON`) and a test fails once that is
 more than 180 days old.
