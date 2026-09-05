@@ -7,6 +7,7 @@ payload without caring whether a warm daemon or this process produced it.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from zemble.graph.model import TYPE_KINDS, Resolution, Symbol, SymbolKind
@@ -39,6 +40,7 @@ def home_payload(
     description: str,
     top_k: int = DEFAULT_TOP_K,
     use_tables: bool = True,
+    requested_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Answer "does this exist, and where should it live" and carry both renderings.
 
@@ -48,10 +50,23 @@ def home_payload(
     :param description: The feature someone is about to build.
     :param top_k: How many code results to weigh.
     :param use_tables: Whether declared-home tables may answer; False measures the rest.
+    :param requested_root: Original caller scope, before workspace resolution.
     :return: The answer as data, plus its markdown rendering.
     """
     answer = build_answer(index, graph, config, description, top_k=top_k, use_tables=use_tables)
-    return {"home": answer.to_dict(), "markdown": answer.render()}
+    requested = Path(requested_root).resolve() if requested_root is not None else config.root.resolve()
+    scope = {
+        "requested_root": str(requested),
+        "workspace_root": str(config.root.resolve()),
+        "config_file": str(config.source) if config.source else None,
+    }
+    if requested != config.root.resolve():
+        answer.notes.insert(
+            0,
+            f"Requested {requested}; searching declared workspace {config.root} "
+            f"using {config.source}. All evidence paths are relative to that workspace.",
+        )
+    return {"home": {**answer.to_dict(), "scope": scope}, "markdown": answer.render()}
 
 
 def build_answer(

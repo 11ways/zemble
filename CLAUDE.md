@@ -66,8 +66,9 @@ overwrite each other. Never tune on individual eval queries.
 
 - ASCII only in files. Docblocks: one-sentence summary, gotchas only. `AIDEV-NOTE:`
   for surprising logic; never delete one without instruction.
-- Linear git history: no merge commits. Work on a branch/worktree, `git rebase main`,
-  fast-forward. Commit subject starts with a real Unicode gitmoji, max 3 lines.
+- Linear git history: no merge commits. Work directly on `main`; do not create fix
+  branches unless the user explicitly requests one. Commit subject starts with a
+  real Unicode gitmoji, max 3 lines.
 - Vocabularies have one home (enum/sealed type, exhaustive dispatch); unknown members
   fail closed. A language is one spec in `languages/catalog.py`; the graph and dedup both
   read it, and `tests/test_languages.py` fails the build on a node kind the grammar lacks
@@ -97,6 +98,8 @@ overwrite each other. Never tune on individual eval queries.
   sub-tree. Every tool speaks paths relative to the path the caller passed (the view rebases
   chunk paths in and out; graph, `dupes`, `explain`, `home` use that path's own graph/config),
   and the capsule's path segment is repo-relative (`<git-root name>/<inner path>`) so both
-  roots embed the same text.
+  roots embed the same text. `home` is the exception: its surfaces first resolve the
+  nearest ancestor `.zemble/home.toml`, then use that workspace for index, graph and
+  config together, reporting the expanded scope. No config means `UNCERTAIN`.
 - Upstream remote is `upstream` (MinishLab/semble); origin is `11ways/zemble`. Keep
   Semble's attribution in README, CITATION.cff and LICENSE.

@@ -143,3 +143,41 @@ def test_a_malformed_config_is_loud(tmp_path: Path, body: str, message: str) -> 
     _write(tmp_path, body)
     with pytest.raises(ConfigError, match=message):
         HomeConfig.load(tmp_path)
+
+
+def test_home_root_resolution_prefers_nearest_declaration(tmp_path: Path) -> None:
+    """Nested repos inherit a declaration, local declarations override, missing ones stay local."""
+    from zemble.workspace import resolve_home_root
+
+    nested = tmp_path / "workspace" / "app" / "src"
+    nested.mkdir(parents=True)
+    assert resolve_home_root(nested) == nested, "step 1: no unbounded fallback to filesystem root"
+    root = tmp_path / "workspace"
+    (root / ".zemble").mkdir()
+    (root / ".zemble/home.toml").write_text('order = ["core", "app"]\n')
+    (root / "app/.git").mkdir()
+    assert resolve_home_root(nested) == root, "step 2: nested git root does not hide workspace declaration"
+    (root / "app/.zemble").mkdir()
+    declaration = root / "app/.zemble/home.toml"
+    declaration.write_text("broken = [")
+    assert resolve_home_root(nested) == root / "app", "step 3: nearest malformed file is not skipped"
+    with pytest.raises(ConfigError):
+        HomeConfig.load(resolve_home_root(nested))
+    declaration.write_text('order = ["local"]\n')
+    assert HomeConfig.load(resolve_home_root(nested)).order == ("local",)
+
+
+def test_invalid_declaration_is_not_treated_as_missing(tmp_path: Path) -> None:
+    """A directory or dangling link at the declaration path fails rather than guessing."""
+    from zemble.workspace import resolve_home_root
+
+    declaration = tmp_path / ".zemble/home.toml"
+    declaration.mkdir(parents=True)
+    assert resolve_home_root(tmp_path) == tmp_path
+    with pytest.raises(ConfigError, match="expected a readable configuration file"):
+        HomeConfig.load(tmp_path)
+    declaration.rmdir()
+    declaration.symlink_to(tmp_path / "absent.toml")
+    assert resolve_home_root(tmp_path) == tmp_path
+    with pytest.raises(ConfigError, match="expected a readable configuration file"):
+        HomeConfig.load(tmp_path)

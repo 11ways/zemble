@@ -372,3 +372,20 @@ def test_a_consumer_copy_is_not_the_mechanism(siblings: HomeConfig) -> None:
     assert answer.verdict is Verdict.NEW_MECHANISM, "the copy in the consumer is not extended"
     assert answer.home == "zenit" and answer.suggested_home == "zenit", "the demand's own module is the home"
     assert any("cannot depend on zenit-flow" in reason for reason in answer.reasons), "and the answer says why"
+
+
+@pytest.mark.parametrize("consumers", [(), ("app", "tests")])
+def test_missing_configuration_cannot_recommend_a_mechanism(tmp_path: Path, consumers: tuple[str, ...]) -> None:
+    """Both weak and strong search hits remain leads when architectural boundaries are unknown."""
+    answer = decide(
+        HomeConfig.load(tmp_path),
+        "session cookies",
+        [hit("src", "Cookies", 0.9)],
+        [mechanism("src", "Cookies", 0.9, consumers)],
+    )
+    assert answer.verdict is Verdict.UNCERTAIN
+    assert answer.confidence is Confidence.LOW
+    assert answer.home is None and answer.extend is None and answer.suggested_home is None
+    assert answer.mechanisms and answer.candidates, "evidence remains available"
+    assert "configuration is missing" in answer.reasons[0]
+    assert "UNCERTAIN" in answer.render().split("## Existing mechanisms")[0], "warning is prominent"

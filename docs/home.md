@@ -16,6 +16,25 @@ to the candidates.
 Everything it knows about a workspace comes from `<root>/.zemble/home.toml`.
 Nothing about any particular workspace lives in zemble.
 
+A `home` call from a nested directory searches upward for the nearest declaration,
+including across nested Git repositories. That workspace supplies the index, graph,
+module globs, rules and skills together, so a subrepo call can find mechanisms in
+sibling modules. A local declaration wins over a parent declaration; a malformed
+local declaration fails instead of being skipped. With no declaration, the query
+stays at the requested directory and always answers `UNCERTAIN` with low confidence.
+Search hits remain visible as leads, never a recommendation to create a mechanism.
+
+Expanded answers name the requested path, resolved workspace and config file at the
+top. JSON carries these in `scope`; all evidence paths are workspace-relative.
+This expansion is specific to `home`: search, graph and dedup retain their existing
+path-scoping contracts. `HomeConfig.load` still loads exactly the root given to it;
+the home surfaces resolve the root first through `resolve_home_root`.
+
+This changes query scope, not scoring or candidate ranking. Regression journeys
+compare nested and root requests against the same index and real graph across
+CLI, MCP and daemon, requiring identical mechanisms, candidates and verdicts.
+Existing root queries with a declaration retain their decision algorithm.
+
 ## The answer
 
 ### Existing mechanisms
@@ -126,8 +145,8 @@ and has no build files is told exactly that instead: "no dependency information 
 workspace: whether X may depend on Y is unknown, not confirmed".
 
 Confidence is `high` / `medium` / `low`, and a lead of less than 40% of the
-leader's score is never called high. A workspace without a config never gets more
-than medium.
+leader's score is never called high. A workspace without a config always returns
+`UNCERTAIN` with low confidence, even when a search hit has multiple consumers.
 
 ### Checklist
 

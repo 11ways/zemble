@@ -606,7 +606,8 @@ def decide(
     notes = []
     if config.generic:
         notes.append(
-            "No .zemble/home.toml in this workspace: modules are guessed from the first path segment, and no"
+            "UNCERTAIN: no .zemble/home.toml in this directory or its ancestors: modules are guessed from"
+            " the first path segment, and no"
             " declared homes, forbidden dependencies, rules or skills were available."
         )
     decided = _verdict(config, candidates, judged, row_matches)
@@ -654,6 +655,18 @@ def _verdict(
     a row that shares words with the description says which capability family this is, and
     a reader has to be able to see that that is all it said.
     """
+    if config.generic:
+        return _Decision(
+            Verdict.UNCERTAIN,
+            Confidence.LOW,
+            None,
+            None,
+            [
+                "Workspace configuration is missing; search hits are leads, not evidence that a new mechanism"
+                " is needed.",
+                "Declare .zemble/home.toml or pass a configured workspace before deciding where to implement it.",
+            ],
+        )
     reasons: list[str] = []
     strong = [mechanism for mechanism in mechanisms if mechanism.strong]
     lexical = _lexical_notes(row_matches, mechanisms)
@@ -700,8 +713,6 @@ def _verdict(
         reasons.extend(top.violations)
     reasons.extend(lexical)
     confidence = Confidence.HIGH if relative >= CONFIDENT_MARGIN else Confidence.MEDIUM
-    if config.generic:
-        confidence = Confidence.LOW if confidence is Confidence.MEDIUM else Confidence.MEDIUM
     return _Decision(Verdict.NEW_MECHANISM, confidence, top.module, None, reasons)
 
 

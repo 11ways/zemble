@@ -660,16 +660,18 @@ async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Answer where a capability belongs, over the warm index and the daemon's graph."""
     from zemble.home.answers import DEFAULT_TOP_K, home_payload
     from zemble.home.config import HomeConfig
+    from zemble.workspace import resolve_home_root
 
-    _cache_key, index = await daemon.index_for(args)
-    root = _root_of(args)
+    requested = str(args.get("requested_path", _root_of(args)))
+    root = str(resolve_home_root(_root_of(args)))
     description = str(args.get("description", ""))
     top_k = int(args.get("top_k", DEFAULT_TOP_K))
     config = await asyncio.to_thread(HomeConfig.load, root)
+    _cache_key, index = await daemon.index_for({**args, "path": root})
     return await asyncio.to_thread(
         _with_graph,
         root,
-        lambda graph: home_payload(index, graph, config, description, top_k),
+        lambda graph: home_payload(index, graph, config, description, top_k, requested_root=requested),
     )
 
 

@@ -245,6 +245,8 @@ class HomeConfig:
         base = Path(root)
         path = base / CONFIG_RELATIVE_PATH
         if not path.is_file():
+            if path.exists() or path.is_symlink():
+                raise ConfigError(f"{path}: expected a readable configuration file")
             return cls(root=base)
         if tomllib is None:  # pragma: no cover - Python 3.10 only
             raise ConfigError(f"{path}: reading it needs Python 3.11 or newer (tomllib)")

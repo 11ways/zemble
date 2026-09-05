@@ -17,6 +17,7 @@ from zemble.home.answers import DEFAULT_TOP_K, home_payload
 from zemble.home.config import ConfigError, HomeConfig
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
+from zemble.workspace import resolve_home_root
 
 HOME_COMMANDS = ("home",)
 
@@ -59,7 +60,8 @@ def run_home(args: argparse.Namespace) -> int:
 def _daemon_args(args: argparse.Namespace) -> dict[str, Any]:
     """Shape the subcommand as daemon command arguments."""
     return {
-        "path": args.path,
+        "path": str(resolve_home_root(args.path)),
+        "requested_path": args.path,
         "description": args.description,
         "top_k": args.top_k,
         "content": [item.value for item in HOME_CONTENT],
@@ -69,16 +71,15 @@ def _daemon_args(args: argparse.Namespace) -> dict[str, Any]:
 def _in_process(args: argparse.Namespace) -> dict[str, Any]:
     """Answer in this process, building the index and the graph as needed.
 
-    A sub-directory of an indexed tree searches that tree's index as a view speaking paths
-    relative to the sub-directory, so its own config and graph are the ones that match.
+    Home queries use the same declared workspace for the index, graph and configuration.
     """
-    index, _source_key = _load_index(args.path, args.embedder)
-    root = args.path
+    root = str(resolve_home_root(args.path))
     config = HomeConfig.load(root)
+    index, _source_key = _load_index(root, args.embedder)
     ensure_graph(root)
     provider = SqliteGraphProvider(root)
     try:
-        return home_payload(index, provider, config, args.description, args.top_k)
+        return home_payload(index, provider, config, args.description, args.top_k, requested_root=args.path)
     finally:
         provider.close()
 

@@ -17,6 +17,7 @@ from zemble.home.config import ConfigError, HomeConfig
 from zemble.index import ZembleIndex
 from zemble.mcp_repo import resolve_repo, with_default_note
 from zemble.types import ContentType
+from zemble.workspace import resolve_home_root
 
 if TYPE_CHECKING:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP
@@ -24,18 +25,20 @@ if TYPE_CHECKING:  # pragma: no cover
 IndexGetter = Callable[[str, Sequence[ContentType]], Awaitable[ZembleIndex]]
 
 _REPO_DESCRIPTION = with_default_note(
-    "Local directory path of the workspace. Both the code index and the Java symbol graph are built "
+    "Local directory path; home queries expand to the nearest ancestor declaring .zemble/home.toml. "
+    "The answer identifies that workspace, and all evidence paths are relative to it. "
+    "Both the code index and the Java symbol graph are built "
     "on first use and refreshed once per server process."
 )
 
 
-def _here(index: ZembleIndex, repo: str, description: str, top_k: int) -> dict[str, Any]:
+def _here(index: ZembleIndex, repo: str, description: str, top_k: int, requested: str) -> dict[str, Any]:
     """Answer in this process, over a freshly opened graph."""
     config = HomeConfig.load(repo)
     ensure_graph(repo)
     provider = SqliteGraphProvider(repo)
     try:
-        return home_payload(index, provider, config, description, top_k)
+        return home_payload(index, provider, config, description, top_k, requested_root=requested)
     finally:
         provider.close()
 
@@ -65,18 +68,21 @@ def register_home_tool(server: FastMCP, get_index: IndexGetter) -> None:
         # only run once the server is being built.
         from zemble.mcp import _daemon_call
 
-        repo = resolve_repo(repo)
+        requested = resolve_repo(repo)
+        repo = str(resolve_home_root(requested))
         args = {
             "path": repo,
+            "requested_path": requested,
             "description": description,
             "top_k": top_k,
             "content": [item.value for item in HOME_CONTENT],
         }
         try:
+            HomeConfig.load(repo)
             payload = await _daemon_call("home", args)
             if payload is None:
                 index = await get_index(repo, HOME_CONTENT)
-                payload = await asyncio.to_thread(_here, index, repo, description, top_k)
+                payload = await asyncio.to_thread(_here, index, repo, description, top_k, requested)
         # A refusal is the answer, on both lanes: the daemon raises CommandRefused and the
         # in-process one arrives as the ValueError `zemble.mcp._get_index` wraps a refusal in.
         # An agent has to be able to read the reason and act on it, not a stack trace.

@@ -230,3 +230,49 @@ def test_mcp_tool_reports_a_refusal_as_the_answer(workspace: Path, cache: IndexC
         answer = asyncio.run(server.call_tool("home", {"description": "an area", "repo": str(workspace)}))
     assert bill in answer[0].text, f"step 3: a budget refusal reads as the refusal it is, got {answer[0].text}"
     assert "Failed to index" not in answer[0].text, "step 3: and never as a failure"
+
+
+def test_nested_home_uses_one_workspace_on_all_surfaces(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A call from the app finds its sibling mechanism through the CLI, MCP and daemon."""
+    from unittest.mock import AsyncMock
+
+    from zemble.daemon.server import _cmd_home
+
+    nested = workspace / "src/main/java/com/example/app"
+    nested.mkdir(parents=True, exist_ok=True)
+    query = "compute the area of a shape"
+
+    # 1. Root and nested CLI calls use identical evidence and module identities.
+    assert _run(monkeypatch, workspace, "home", str(workspace), query, "--json") == 0
+    baseline = json.loads(capsys.readouterr().out)
+    assert _run(monkeypatch, workspace, "home", str(nested), query, "--json") == 0
+    answer = json.loads(capsys.readouterr().out)
+    for field in ("mechanisms", "candidates", "verdict", "home"):
+        assert answer[field] == baseline[field], f"step 1: {field} matches a workspace-root call"
+    assert answer["scope"]["requested_root"] == str(nested)
+    assert answer["scope"]["workspace_root"] == str(workspace)
+    assert answer["scope"]["config_file"] == str(workspace / ".zemble/home.toml")
+    assert answer["mechanisms"][0]["module"] == "core", "step 1: sibling is not mislabelled as src"
+
+    # 2. MCP's in-process lane indexes the workspace and explains its path scope.
+    from mcp.server.fastmcp import FastMCP
+
+    from zemble.home.mcp import register_home_tool
+
+    get_index = AsyncMock(return_value=_fake_index(workspace))
+    server = FastMCP("home-test")
+    register_home_tool(server, get_index)
+    result = asyncio.run(server.call_tool("home", {"description": query, "repo": str(nested)}))
+    assert get_index.call_args.args[0] == str(workspace), "step 2: full workspace requested"
+    assert f"searching declared workspace {workspace}" in result[0].text
+    assert "core-shapes" in result[0].text, "step 2: parent skills are available"
+
+    # 3. Direct daemon requests resolve too, rather than depending on a new client.
+    daemon = MagicMock()
+    daemon.index_for = AsyncMock(return_value=("fixture", _fake_index(workspace)))
+    payload = asyncio.run(_cmd_home(daemon, {"path": str(nested), "description": query}))
+    assert daemon.index_for.call_args.args[0]["path"] == str(workspace)
+    assert payload["home"]["mechanisms"] == baseline["mechanisms"]
+    assert payload["home"]["scope"]["requested_root"] == str(nested)
