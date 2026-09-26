@@ -1,6 +1,7 @@
 # zemble-javac-facts: a standalone javac plugin, built with plain javac/jar.
 
 JAVAC ?= javac
+JAVA ?= java
 JAR ?= jar
 PYTHON ?= python3
 RELEASE ?= 17
@@ -36,6 +37,7 @@ test: build
 		-Xplugin:"ZembleFacts out=$(FACTS_FILE) root=$(FIXTURE_DIR)" \
 		-d $(TEST_BUILD)/classes $(FIXTURES)
 	$(PYTHON) $(TEST_DIR)/check_facts.py $(FACTS_FILE)
+	$(JAVA) --class-path $(JAR_FILE) $(TEST_DIR)/MergeFacts.java $(FIXTURE_DIR) $(TEST_BUILD)/merge
 
 clean:
 	rm -rf $(BUILD_DIR)

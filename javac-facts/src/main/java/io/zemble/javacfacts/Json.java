@@ -72,6 +72,59 @@ final class Json {
         }
     }
 
+    /**
+     * Reads the string value of a top-level key from one line this writer produced.
+     *
+     * <p>Not a general JSON parser: it finds the first {@code "key":"} occurrence, which is exact
+     * for the header and {@code file} lines because their keys come before any free-form value.
+     *
+     * @return the decoded value, or null when the key is absent or its value is not a string
+     */
+    static String stringField(String line, String key) {
+        StringBuilder needle = new StringBuilder();
+        string(needle, key);
+        needle.append(":\"");
+        int start = line.indexOf(needle.toString());
+        if (start < 0) {
+            return null;
+        }
+        StringBuilder value = new StringBuilder();
+        for (int i = start + needle.length(); i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '"') {
+                return value.toString();
+            }
+            if (c != '\\') {
+                value.append(c);
+                continue;
+            }
+            if (++i >= line.length()) {
+                return null;
+            }
+            char escaped = line.charAt(i);
+            switch (escaped) {
+                case 'n' -> value.append('\n');
+                case 'r' -> value.append('\r');
+                case 't' -> value.append('\t');
+                case 'b' -> value.append('\b');
+                case 'f' -> value.append('\f');
+                case 'u' -> {
+                    if (i + 4 >= line.length()) {
+                        return null;
+                    }
+                    try {
+                        value.append((char) Integer.parseInt(line.substring(i + 1, i + 5), 16));
+                    } catch (NumberFormatException exception) {
+                        return null;
+                    }
+                    i += 4;
+                }
+                default -> value.append(escaped);
+            }
+        }
+        return null;
+    }
+
     static void object(StringBuilder out, Map<String, Object> values) {
         out.append('{');
         boolean first = true;

@@ -18,15 +18,18 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
  * A javac plugin that emits compiler-resolved facts about the compiled sources as JSONL.
  *
- * <p>Enable with {@code -Xplugin:ZembleFacts out=<file> root=<dir> append=<bool>}; every failure is
- * swallowed after one stderr line so a broken plugin can never break a build.
+ * <p>Enable with {@code -Xplugin:ZembleFacts out=<file> root=<dir>}; every failure is swallowed after
+ * one stderr line so a broken plugin can never break a build. The retired {@code append} option is
+ * ignored: every compilation merges into the existing file (see {@link FactWriter}).
  */
 public final class FactsPlugin implements Plugin {
 
@@ -46,7 +49,6 @@ public final class FactsPlugin implements Plugin {
 
         Path out = workingDir.resolve(DEFAULT_OUT);
         Path root = workingDir;
-        boolean append = false;
 
         for (String arg : args) {
             int split = arg.indexOf('=');
@@ -58,21 +60,20 @@ public final class FactsPlugin implements Plugin {
             switch (key) {
                 case "out" -> out = workingDir.resolve(value).normalize();
                 case "root" -> root = workingDir.resolve(value).toAbsolutePath().normalize();
-                case "append" -> append = Boolean.parseBoolean(value);
                 default -> { }
             }
         }
 
-        task.addTaskListener(new FactsListener(task, out, root, append));
+        task.addTaskListener(new FactsListener(task, out, root));
     }
 
-    /** Runs after ANALYZE so every tree the scanner touches is attributed. */
+    /** Runs after ANALYZE so every tree the scanner touches is attributed; one instance per javac task. */
     private static final class FactsListener implements TaskListener {
 
         private final JavacTask task;
         private final FactWriter writer;
         private final Path root;
-        private final Set<String> seenFiles = new HashSet<>();
+        private final Map<String, String> fileHashes = new HashMap<>();
         private final Set<String> seenClasses = new HashSet<>();
 
         private Trees trees;
@@ -81,14 +82,23 @@ public final class FactsPlugin implements Plugin {
         private Refs refs;
         private boolean reported;
 
-        FactsListener(JavacTask task, Path out, Path root, boolean append) {
+        FactsListener(JavacTask task, Path out, Path root) {
             this.task = task;
-            this.writer = new FactWriter(out, append);
+            this.writer = new FactWriter(out, root, VERSION);
             this.root = root;
         }
 
         @Override
         public void finished(TaskEvent event) {
+            if (event.getKind() == TaskEvent.Kind.COMPILATION) {
+                try {
+                    writer.finish();
+                } catch (Throwable throwable) {
+                    writer.abandon();
+                    report(throwable);
+                }
+                return;
+            }
             if (event.getKind() != TaskEvent.Kind.ANALYZE) {
                 return;
             }
@@ -124,17 +134,13 @@ public final class FactsPlugin implements Plugin {
                 return;
             }
 
-            StringBuilder out = new StringBuilder();
-            if (seenFiles.add(relative)) {
-                out.append('{');
-                Json.field(out, "t", "file");
-                out.append(',');
-                Json.field(out, "path", relative);
-                out.append(',');
-                Json.field(out, "sha256", sha256(source));
-                out.append("}\n");
+            String sha256 = fileHashes.get(relative);
+            if (sha256 == null) {
+                sha256 = sha256(source);
+                fileHashes.put(relative, sha256);
             }
 
+            StringBuilder out = new StringBuilder();
             TreePath path = trees.getPath(typeElement);
             if (path == null) {
                 path = new TreePath(unit);
@@ -142,7 +148,7 @@ public final class FactsPlugin implements Plugin {
             new FactScanner(trees, elements, types, refs, unit, relative, out)
                     .scan(path, null);
 
-            writer.write(VERSION, root.toString(), out.toString());
+            writer.write(relative, sha256, out.toString());
         }
 
         private String relativize(JavaFileObject source) {

@@ -75,12 +75,15 @@ Options are space-separated `key=value` pairs inside the `-Xplugin:` value.
 | --- | --- | --- |
 | `out` | `build/zemble/facts.jsonl` | Output file, resolved against the compiler's working directory. |
 | `root` | the working directory | Emitted `path` values are relative to this, with forward slashes. |
-| `append` | `false` | Keep whatever the file already holds instead of truncating it on the first write. |
 
-With `append=false` the file is truncated once per JVM, on the first write, so a javac run that
-calls the plugin over several rounds or many compilation units still produces one file with one
-header. With `append=true` a header is written only when the file is empty, so several javac
-invocations can fill one facts file (a multi-module build).
+Every compilation MERGES into the file it finds: blocks for the sources it analyzed are replaced,
+blocks for sources that no longer exist under `root` are dropped, and every other block is kept. An
+incremental compile, which hands javac only the changed sources, therefore leaves facts for the
+whole source set, and several sequential javac invocations can share one file (a multi-module
+build). The merged file is written to a temp file and moved into place when the compilation ends,
+so it always has exactly one header. A file written by another tool or for another `root` is
+replaced whole. Two compilations writing one file at the same time are not supported. The retired
+`append` option is ignored.
 
 Any failure inside the plugin is caught: one line is printed to stderr as
 `zemble-javac-facts: <msg>` and compilation continues. Whatever was written before the failure is
