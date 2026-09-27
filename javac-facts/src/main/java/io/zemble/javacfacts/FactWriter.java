@@ -9,9 +9,11 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Writes one compilation's facts into the output file, merged with the facts earlier compilations
@@ -104,8 +106,10 @@ final class FactWriter {
         }
         Path parent = output.getParent();
         Files.createDirectories(parent);
-        temp = Files.createTempFile(parent, "." + output.getFileName() + ".", ".tmp");
-        writer = Files.newBufferedWriter(temp, StandardCharsets.UTF_8);
+        // Not Files.createTempFile: its owner-only permissions would survive the move onto the output.
+        temp = parent.resolve("." + output.getFileName() + "." + UUID.randomUUID() + ".tmp");
+        writer = Files.newBufferedWriter(temp, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.WRITE);
         writer.write(header());
     }
 

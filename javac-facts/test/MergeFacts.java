@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -79,6 +80,10 @@ public final class MergeFacts {
             List<Path> temps = left.filter(path -> path.getFileName().toString().endsWith(".tmp")).toList();
             expect(temps.isEmpty(), "step 4: no temp file left, got " + temps);
         }
+
+        // 5. The merged file keeps ordinary permissions: readable by the group, like javac's own output.
+        expect(Files.getPosixFilePermissions(out).contains(PosixFilePermission.GROUP_READ),
+                "step 5: the facts file is group-readable, got " + Files.getPosixFilePermissions(out));
 
         if (!problems.isEmpty()) {
             problems.forEach(problem -> System.out.println("FAIL: " + problem));
