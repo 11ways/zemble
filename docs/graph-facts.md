@@ -283,8 +283,8 @@ compiler's own, applied forwards.
 ### The format relied upon
 
 `IRTranspiler` emits a `// @hwk:<template line>` comment before each transpiled
-unit, and `SourceMapBuilder` collects those comments into a sidecar written beside
-the class:
+unit, and protoblast-compile's `SourceMapEmitter` collects those comments into a map
+that `CompileOutput` writes as a sidecar beside the class:
 
 ```
 zenit-widget/build/generated-sources/hawkeye/common/java/be/elevenways/hawkeye/
@@ -294,21 +294,23 @@ zenit-widget/build/generated-sources/hawkeye/common/java/be/elevenways/hawkeye/
 
 ```json
 {
-    "templatePath": "widget-display/markdown",
+    "sourcePath": "widget-display/markdown",
     "generatedClass": "be.elevenways.hawkeye.generated.zenitwidget.Tpl_WidgetDisplayMarkdown",
     "mappings": [
-        {"javaLine": 61, "templateLine": 6},
-        {"javaLine": 73, "templateLine": 8}
+        {"javaLine": 61, "sourceLine": 6},
+        {"javaLine": 73, "sourceLine": 8}
     ]
 }
 ```
 
-The sidecar is read for **identity** - `templatePath` - and the `.java` is read for
-**positions**. That split is not a preference: the compiler builds the sidecar from
-the generated source and only then injects its own `SourceMapRegistry` registration
-into the same file, so the sidecar's `javaLine` numbers sit two lines above the file
-javac actually compiled (61 and 73 above are 63 and 75 on disk). Falling back to the
-sidecar's positions happens only when the `.java` cannot be read at all.
+The sidecar is read for **identity** - `sourcePath`, the template id - and the `.java`
+is read for **positions**. That split is not a preference: the compiler can build the
+sidecar from the generated source before it injects its own `SourceMapRegistry`
+registration into the same file, and then the sidecar's `javaLine` numbers sit two
+lines above the file javac actually compiled (61 and 73 above are 63 and 75 on disk).
+Falling back to the sidecar's positions happens only when the `.java` yields no
+markers. Until 2026-09-03 Hawkeye wrote the same sidecar as `templatePath` /
+`templateLine`; no build writes those keys any more and zemble does not read them.
 
 A Java line resolves to the template line of the nearest marker **at or above** it,
 which is the same floor lookup `TemplateSourceMap.getTemplateLine` does.
@@ -317,14 +319,17 @@ which is the same floor lookup `TemplateSourceMap.getTemplateLine` does.
 
 | Generated class | Mapped by | Line |
 | --- | --- | --- |
-| `Tpl_*` with a sidecar | the sidecar's `templatePath` | the `// @hwk:` markers |
+| `Tpl_*` with a sidecar | the sidecar's `sourcePath` | the `// @hwk:` markers |
 | `Tpl_*` without one | `Tpl_` + `camelCaseIdentifier(template id)`, applied forward to every template zemble extracted | none: the template symbol's own line |
-| a tag class (`X`, `XImpl`, `Tpl_X` under `...generated.tags.<ns>`) | `toKebabCase(X)` = the element tag, matched against the tag the template declares | none |
+| a tag class (`X`, `XImpl`, `Tpl_X` under `...generated.tags.<ns>`) | `toKebabCase(X)` = the element tag, matched against the tag the template declares, and only inside the template its sidecar's `sourcePath` names when it has one | the `// @hwk:` markers when it has a sidecar, else none |
 
-Where two templates answer to one name, the one under the generating module's own
-`src/<source set>/templates/` wins; anything still ambiguous is reported, never
-picked. The symbol a fact lands on is the narrowest `BLOCK` or tag region containing
-the mapped line, falling back to the template itself.
+A tag class's sidecar names the FILE it was compiled from, which is coarser than the
+tag: the tag decides the symbol and the sidecar only narrows it to that file. Where two
+templates answer to one name, the one under the generating module's own source set
+(`src/<source set>/`, whose `templates/` or `resources/templates/` it read) wins;
+anything still ambiguous is reported, never picked. The symbol a fact lands on is the
+narrowest `BLOCK` or tag region containing the mapped line, falling back to the
+template itself.
 
 ### Which edges are replaced
 

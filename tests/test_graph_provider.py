@@ -94,6 +94,87 @@ def test_hierarchy_journey(built_graph: SqliteGraphProvider) -> None:
     assert built_graph.overrides_of(area.id)[0].resolution is Resolution.UNIQUE_NAME, "step 6: overrides are by-name"
 
 
+_GENERIC_HIERARCHY = {
+    "src/main/java/com/example/reg/Snapshottable.java": (
+        "package com.example.reg;\n\nimport java.util.List;\n\n"
+        "public interface Snapshottable<E> {\n    List<E> snapshot();\n}\n"
+    ),
+    "src/main/java/com/example/reg/KeyedRegistry.java": (
+        "package com.example.reg;\n\nimport java.util.List;\n\n"
+        "public abstract class KeyedRegistry<V> implements Snapshottable<KeyedRegistry.Entry<V>> {\n"
+        "    public static final class Entry<V> {\n    }\n\n"
+        "    @Override\n    public List<Entry<V>> snapshot() {\n        return List.of();\n    }\n}\n"
+    ),
+    "src/main/java/com/example/reg/Themes.java": (
+        "package com.example.reg;\n\npublic final class Themes extends KeyedRegistry<String> {\n}\n"
+    ),
+    "src/main/java/com/example/reg/Ordered.java": (
+        "package com.example.reg;\n\n"
+        "public interface Ordered<E> extends Snapshottable<E>, Comparable<Ordered<E>> {\n}\n"
+    ),
+    "src/main/java/com/example/reg/Tagged.java": (
+        "package com.example.reg;\n\nimport java.lang.annotation.ElementType;\n"
+        "import java.lang.annotation.Target;\n\n@Target(ElementType.TYPE_USE)\npublic @interface Tagged {\n}\n"
+    ),
+    "src/main/java/com/example/reg/Marked.java": (
+        "package com.example.reg;\n\npublic abstract class Marked implements @Tagged Snapshottable<Integer> {\n}\n"
+    ),
+    "src/main/java/com/example/app/Feeds.java": (
+        "package com.example.app;\n\nimport java.util.List;\n\n"
+        "public final class Feeds implements com.example.reg.Snapshottable<String> {\n"
+        "    @Override\n    public List<String> snapshot() {\n        return List.of();\n    }\n}\n"
+    ),
+}
+
+
+def test_generic_supertypes_journey(graph_cache: Path, tmp_path: Path) -> None:
+    """A supertype written with type arguments resolves like a plain one, through every hierarchy query."""
+    from zemble.graph.store import build_graph
+
+    workspace = tmp_path / "generic"
+    for relative, text in _GENERIC_HIERARCHY.items():
+        (workspace / relative).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / relative).write_text(text, encoding="utf-8")
+    build_graph(str(workspace))
+    provider = SqliteGraphProvider(str(workspace))
+    try:
+        snapshottable = provider.definition("com.example.reg.Snapshottable")[0]
+        hits = provider.implementations(snapshottable.id)
+        by_depth = {hit.symbol.qualified_name: hit.depth for hit in hits}
+
+        # 1. `implements X<A>`, `extends X<A>` on an interface, a qualified `x.X<A>` and `@T X<A>` all land.
+        direct = {"com.example.reg.KeyedRegistry", "com.example.reg.Ordered", "com.example.app.Feeds"}
+        assert {name for name, depth in by_depth.items() if depth == 1} == direct | {"com.example.reg.Marked"}, (
+            "step 1: every generic way of naming Snapshottable is one hop away"
+        )
+
+        # 2. A generic superclass carries the walk on: Themes reaches it through KeyedRegistry<String>.
+        assert by_depth.get("com.example.reg.Themes") == 2, "step 2: Themes is found two hops out"
+        themes = provider.definition("com.example.reg.Themes")[0]
+        assert _by_name(provider.supertypes(themes.id)) == {
+            "com.example.reg.KeyedRegistry",
+            "com.example.reg.Snapshottable",
+        }, "step 2: and the walk inverts"
+
+        # 3. Each of those edges was resolved exactly, not guessed by name.
+        assert {hit.resolution for hit in hits} == {Resolution.EXACT}, "step 3: every hop is exact"
+
+        # 4. Overrides are derived through the generic supertype too.
+        snapshot = provider.definition("Snapshottable.snapshot")[0]
+        assert _by_name(provider.overridden_by(snapshot.id)) == {
+            "com.example.reg.KeyedRegistry.snapshot",
+            "com.example.app.Feeds.snapshot",
+        }, "step 4: both implementations of snapshot() override it"
+
+        # 5. The declaration still reads as written: only the edge is erased.
+        registry = provider.definition("com.example.reg.KeyedRegistry")[0]
+        assert registry.signature.endswith("implements Snapshottable<KeyedRegistry.Entry<V>>"), (
+            "step 5: the signature keeps its type arguments"
+        )
+    finally:
+        provider.close()
+
+
 def test_tests_of_journey(built_graph: SqliteGraphProvider) -> None:
     """Naming matches come first, then tests that merely use the symbol."""
     circle = built_graph.definition("com.example.core.Circle")[0]

@@ -10,10 +10,10 @@ The compiler leaves two things behind, and this module is written against both:
 
 - `// @hwk:<template line>` comments in the generated Java, one before each transpiled unit,
   which is the line map. The `Tpl_*.sourcemap.json` sidecar beside the class is BUILT FROM
-  those same comments, but it is built BEFORE the compiler injects the source-map
-  self-registration into the class, so its `javaLine` numbers are two lines short of the file
-  javac actually compiled. The sidecar is therefore read for identity - `templatePath`,
-  `generatedClass` - and the markers in the `.java` for the positions.
+  those same comments, but it can be built BEFORE the compiler injects the source-map
+  self-registration into the class, so its `javaLine` numbers can be two lines short of the
+  file javac actually compiled. The sidecar is therefore read for identity - its `sourcePath`,
+  the template id - and the markers in the `.java` for the positions.
 - The two deterministic class-naming rules: a template class is `Tpl_` plus the camel-cased
   template id, and a tag class is the PascalCase tag name, whose kebab-case form is the
   element tag. Both are applied FORWARD - from a template zemble already extracted to the
@@ -43,6 +43,10 @@ GENERATED_ROOT = "/build/generated-sources/hawkeye/"
 _JAVA_SEGMENT = "java"
 #: Sidecar written beside each generated template class, replacing the `.java` suffix.
 SOURCEMAP_SUFFIX = ".sourcemap.json"
+#: The sidecar's template id key, as protoblast-compile's `CompileOutput` writes it.
+SIDECAR_SOURCE_PATH = "sourcePath"
+#: The template line key of one sidecar mapping, beside its `javaLine`.
+SIDECAR_SOURCE_LINE = "sourceLine"
 #: The comment `IRTranspiler` emits before each transpiled unit; the number is a template line.
 SOURCE_MARKER = re.compile(r"//\s*@hwk:(\d+)")
 #: Prefix of a generated template class, both for a template file and for a declared tag.
@@ -116,10 +120,10 @@ class GeneratedOrigin:
         return f"{self.package}.{self.class_name}" if self.package else self.class_name
 
     @property
-    def template_root(self) -> str:
-        """Where the templates this class was generated from live, by Hawkeye's layout."""
+    def source_set_root(self) -> str:
+        """The source set this class was generated from, whose `templates/` or `resources/templates/` it read."""
         prefix = f"{self.module}/" if self.module else ""
-        return f"{prefix}src/{self.source_set}/templates/"
+        return f"{prefix}src/{self.source_set}/"
 
 
 def parse_generated_path(relative_path: str) -> GeneratedOrigin | None:
@@ -304,22 +308,27 @@ class GeneratedSourceMapper:
         if len(found) <= 1:
             return found
         # Two modules may hold a template of the same id; the generated file names its own.
-        inside = [symbol for symbol in found if symbol.file_path.startswith(origin.template_root)]
+        inside = [symbol for symbol in found if symbol.file_path.startswith(origin.source_set_root)]
         return inside or found
 
     def _by_name(self, origin: GeneratedOrigin, sidecar: dict | None) -> list[Symbol]:
-        """Look a generated class up under every name Hawkeye's naming rules give a template."""
-        if sidecar is not None:
-            declared = sidecar.get("templatePath")
-            if isinstance(declared, str) and declared:
-                return list(self._by_id.get(declared, []))
+        """Look a generated class up by Hawkeye's naming rules, inside the template its sidecar names.
+
+        The sidecar names the FILE a class was compiled from, which for a tag class is coarser than
+        the tag itself: the tag decides the symbol, and the sidecar only narrows it to that file.
+        """
+        declared = sidecar.get(SIDECAR_SOURCE_PATH) if sidecar is not None else None
+        template_id = declared if isinstance(declared, str) and declared else None
         name = origin.class_name
         if name.startswith(TEMPLATE_CLASS_PREFIX):
             name = name[len(TEMPLATE_CLASS_PREFIX) :]
         elif origin.is_tag_class and name.endswith(TAG_IMPL_SUFFIX):
             name = name[: -len(TAG_IMPL_SUFFIX)]
         if origin.is_tag_class:
-            return list(self._by_tag.get(to_kebab_case(name), []))
+            tags = self._by_tag.get(to_kebab_case(name), [])
+            return [tag for tag in tags if template_id is None or template_id_path(tag.file_path) == template_id]
+        if template_id is not None:
+            return list(self._by_id.get(template_id, []))
         return list(self._by_class.get(name, []))
 
     def _read_sidecar(self, source_path: str) -> dict | None:
@@ -335,18 +344,18 @@ class GeneratedSourceMapper:
         """Read the line map out of the generated Java itself, falling back to the sidecar.
 
         The markers in the `.java` are the positions javac compiled; the sidecar's `javaLine`
-        numbers were recorded before the compiler injected its source-map registration into the
-        same file, so they sit two lines higher than the truth. The sidecar is only trusted for
-        positions when the generated file cannot be read at all.
+        numbers can be recorded before the compiler injected its source-map registration into
+        the same file, so they can sit two lines higher than the truth. The sidecar is only
+        trusted for positions when the generated file yields no markers.
         """
         pairs = self._markers(source_path)
         if not pairs:
             pairs = [
-                (entry["javaLine"], entry["templateLine"])
+                (entry["javaLine"], entry[SIDECAR_SOURCE_LINE])
                 for entry in sidecar.get("mappings", [])
                 if isinstance(entry, dict)
                 and isinstance(entry.get("javaLine"), int)
-                and isinstance(entry.get("templateLine"), int)
+                and isinstance(entry.get(SIDECAR_SOURCE_LINE), int)
             ]
         pairs.sort()
         found.java_lines = [java for java, _ in pairs]

@@ -218,6 +218,9 @@ class _JavaExtractor:
         if node.type == "generic_type":
             base = node.child_by_field_name("type") or next((c for c in node.children if c.is_named), None)
             return self._erase(base)
+        if node.type == "annotated_type":
+            # `@A Foo<T>`: the annotations come first, the type they annotate last.
+            return self._erase(node.named_children[-1] if node.named_children else None)
         if node.type == "array_type":
             element = self._erase(node.child_by_field_name("element"))
             return f"{element}[]" if element else None
@@ -395,24 +398,26 @@ class _JavaExtractor:
         return " ".join(parts).replace(" <", "<").replace(" (", "(")
 
     def _emit_supertypes(self, node: Node, symbol: Symbol) -> None:
-        """Emit EXTENDS and IMPLEMENTS edges for a type declaration."""
+        """Emit EXTENDS and IMPLEMENTS edges for a type declaration, naming each supertype erased.
+
+        AIDEV-NOTE: kept as written, `Registry<Entry>` resolved to nothing, and every generic
+        supertype dropped out of the hierarchy, the derived overrides and inherited-call resolution.
+        """
         superclass = node.child_by_field_name("superclass")
-        if superclass is not None:
-            for child in superclass.named_children:
-                self._add_edge(symbol.id, self.text(child), EdgeKind.EXTENDS, self._line(child))
         interfaces = node.child_by_field_name("interfaces")
         extends_interfaces = next((c for c in node.children if c.type == "extends_interfaces"), None)
-        for holder, kind in ((interfaces, EdgeKind.IMPLEMENTS), (extends_interfaces, EdgeKind.EXTENDS)):
+        for holder, kind in (
+            (superclass, EdgeKind.EXTENDS),
+            (interfaces, EdgeKind.IMPLEMENTS),
+            (extends_interfaces, EdgeKind.EXTENDS),
+        ):
             if holder is None:
                 continue
             type_list = next((c for c in holder.named_children if c.type == "type_list"), holder)
             for child in type_list.named_children:
-                self._add_edge(
-                    symbol.id,
-                    self.text(child),
-                    EdgeKind.EXTENDS if kind is EdgeKind.EXTENDS else kind,
-                    self._line(child),
-                )
+                name = self._erase(child)
+                if name:
+                    self._add_edge(symbol.id, name, kind, self._line(child))
 
     def _record_components(self, node: Node, owner: Symbol) -> dict[str, str]:
         """Turn record components into FIELD symbols and return the type's field table."""

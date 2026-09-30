@@ -2,9 +2,13 @@
 
 The fixture workspace under `tests/fixtures/generated` carries REAL Hawkeye output, copied
 verbatim out of the javaweb workspace: `zenit-widget`'s `widget-display/markdown.hwk` with its
-`Tpl_WidgetDisplayMarkdown.java` and `Tpl_WidgetDisplayMarkdown.sourcemap.json`. The two
+`Tpl_WidgetDisplayMarkdown.java` and `Tpl_WidgetDisplayMarkdown.sourcemap.json`. The sidecar's
+keys are the ones protoblast-compile's `CompileOutput` writes since 2026-09-03 (`sourcePath`,
+`sourceLine`); its lines are the two-short ones the `.java` markers correct. The two
 generated classes that carry no source map - a tag class and `HawkeyeClassSerializers` - are
-written by hand, because Hawkeye emits no map for either and there is nothing real to copy.
+written by hand. Hawkeye emits no map for the serializers, and one for a tag class only when
+it holds markers (220 of the workspace's 479 `*Impl` classes); the test that needs a tag
+class's map writes one.
 """
 
 import hashlib
@@ -16,15 +20,25 @@ from pathlib import Path
 import pytest
 
 from zemble.cli import _cli_main
-from zemble.graph.generated import camel_case_identifier, parse_generated_path
+from zemble.graph.generated import (
+    SIDECAR_SOURCE_PATH,
+    GeneratedSourceMapper,
+    camel_case_identifier,
+    parse_generated_path,
+)
+from zemble.graph.model import Symbol, SymbolKind
 from zemble.graph.store import build_graph, connect
 
 TEMPLATE = "src/common/templates/widget-display/markdown.hwk"
+#: A template whose id camel-cases to the same class name as TEMPLATE's.
+TWIN = "src/common/templates/widget/display-markdown.hwk"
 CARD = "src/common/templates/components/card.hwk"
 GENERATED_ROOT = "build/generated-sources/hawkeye/common/java/be/elevenways/hawkeye/generated"
 TPL = f"{GENERATED_ROOT}/zenitwidget/Tpl_WidgetDisplayMarkdown.java"
+SIDECAR = f"{GENERATED_ROOT}/zenitwidget/Tpl_WidgetDisplayMarkdown.sourcemap.json"
 SERIALIZERS = f"{GENERATED_ROOT}/zenitwidget/HawkeyeClassSerializers.java"
 TAG_IMPL = f"{GENERATED_ROOT}/tags/demo/DemoCardImpl.java"
+TAG_SIDECAR = f"{GENERATED_ROOT}/tags/demo/DemoCardImpl.sourcemap.json"
 PANEL = "src/common/templates/components/panel.hwk"
 PANEL_IMPL = f"{GENERATED_ROOT}/tags/demo/DemoPanelImpl.java"
 
@@ -146,7 +160,7 @@ def test_generated_facts_journey(workspace: Path, monkeypatch: pytest.MonkeyPatc
     assert all(edge["origin_ref"] for edge in mapped), "step 4: the detour is visible on the edge"
     assert {edge["origin_ref"] for edge in mapped} == {RENDER_ROOT, BRANCH2}, "step 4: and names the real source"
 
-    # 5. A tag class carries no source map at all, so it maps by class name, without a line.
+    # 5. A tag class without markers carries no source map, so it maps by its tag, without a line.
     tag_calls = _calls(workspace, CARD)
     assert [edge["source"] for edge in tag_calls] == ["zemble-javac-facts"], "step 5: the tag class mapped too"
     assert tag_calls[0]["origin_ref"] == TAG_RENDER, "step 5: through DemoCardImpl"
@@ -185,6 +199,71 @@ def test_a_template_edited_after_generation_is_stale(workspace: Path) -> None:
     assert {edge["source"] for edge in _calls(workspace, TEMPLATE)} == {"zemble-javac-facts"}, "step 2: mapped again"
 
 
+def test_the_sidecar_names_the_template_and_its_lines(workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """A sidecar in the shape the compiler writes decides identity, and positions when the markers are gone."""
+    # 1. A second template whose id camel-cases to the same class makes the class name ambiguous.
+    (workspace / TWIN).parent.mkdir(parents=True)
+    (workspace / TWIN).write_text('<p>{{ Markdown.render("twin") }}</p>\n', encoding="utf-8")
+    os.utime(workspace / TWIN, (1_000_000, 1_000_000))
+    assert camel_case_identifier("widget/display-markdown") == camel_case_identifier("widget-display/markdown"), (
+        "step 1: both template ids name Tpl_WidgetDisplayMarkdown"
+    )
+
+    # 2. The sidecar's `sourcePath` names the one template the class came from, so the calls still map.
+    sidecar = json.loads((workspace / SIDECAR).read_text(encoding="utf-8"))
+    assert sidecar[SIDECAR_SOURCE_PATH] == "widget-display/markdown", "step 2: the fixture carries the writer's key"
+    _facts(workspace)
+    build_graph(str(workspace))
+    assert {edge["source"] for edge in _calls(workspace, TEMPLATE)} == {"zemble-javac-facts"}, "step 2: mapped"
+    assert {edge["source"] for edge in _calls(workspace, TWIN)} == {"tree-sitter"}, "step 2: and the twin is untouched"
+
+    # 3. A tag class's sidecar names only the file around the tag, so the call still lands on the tag itself.
+    tag_sidecar = {"sourcePath": "components/card", "generatedClass": TAG_RENDER.split("#")[0], "mappings": []}
+    (workspace / TAG_SIDECAR).write_text(json.dumps(tag_sidecar), encoding="utf-8")
+    build_graph(str(workspace), force=True)
+    tag_calls = _calls(workspace, CARD)
+    assert [edge["source"] for edge in tag_calls] == ["zemble-javac-facts"], "step 3: the tag class still maps"
+    assert tag_calls[0]["src_id"].endswith("#demo-card"), "step 3: onto the demo-card tag, not the whole file"
+
+    # 4. Without `// @hwk:` markers the sidecar's `sourceLine`s place the calls: Java line 74 floors to 73, line 8.
+    java = workspace / TPL
+    java.write_text(java.read_text(encoding="utf-8").replace("// @hwk:", "// hwk "), encoding="utf-8")
+    _facts(workspace)
+    build_graph(str(workspace), force=True)
+    positions = {(edge["line"], edge["dst_name"]) for edge in _calls(workspace, TEMPLATE)}
+    assert positions == {(8, "localizedConfig"), (8, "render")}, "step 4: every call sits on the sidecar's line 8"
+
+    # 5. A sidecar naming no template leaves only the ambiguous class name, which is reported, never picked.
+    del sidecar[SIDECAR_SOURCE_PATH]
+    (workspace / SIDECAR).write_text(json.dumps(sidecar), encoding="utf-8")
+    build_graph(str(workspace), force=True)
+    assert {edge["source"] for edge in _calls(workspace, TEMPLATE)} == {"tree-sitter"}, "step 5: nothing mapped"
+    no_template = _bucket(_status(monkeypatch, workspace, capsys), "generated_no_template")
+    reasons = {entry["reason"] for entry in no_template["top"]}
+    assert f"2 templates answer to generated class {RENDER_ROOT.split('#')[0]}" in reasons, "step 5: and why"
+
+
+def test_a_module_s_own_template_wins_in_either_layout(tmp_path: Path) -> None:
+    """Of two same-id templates, the one in the generating module's source set wins, under `resources/` too."""
+    own = "zenit/src/browserTemplates/resources/templates/form-action-test.hwk"
+    other = "hawkeye/hawkeye-core/src/browserTest/resources/templates/form-action-test.hwk"
+    symbols = [
+        Symbol(
+            id=f"{path}#{path}",
+            kind=SymbolKind.TEMPLATE,
+            name=path,
+            qualified_name=path,
+            file_path=path,
+            start_line=1,
+            end_line=9,
+        )
+        for path in (own, other)
+    ]
+    generated = f"zenit/{GENERATED_ROOT.replace('/common/', '/browserTemplates/')}/zenittest/Tpl_FormActionTest.java"
+    mapping = GeneratedSourceMapper(tmp_path, symbols).resolve(generated, 0)
+    assert mapping.template_path == own, f"the zenit template is the one meant, not {mapping.reason or 'the other'}"
+
+
 def test_template_extends_survives_a_mapped_call(workspace: Path) -> None:
     """The overlay owns only a mapped template's CALLS; what it renders stays the extractor's."""
     _facts(workspace)
@@ -206,7 +285,7 @@ def test_generated_paths_and_class_names_are_read_by_the_compiler_rules() -> Non
     origin = parse_generated_path(f"zenit-cms/{GENERATED_ROOT}/zenitcms/Tpl_PagesResourceList.java")
     assert origin is not None, "a generated template class is recognised"
     assert (origin.module, origin.source_set) == ("zenit-cms", "common"), "module and source set are split off"
-    assert origin.template_root == "zenit-cms/src/common/templates/", "which names where its templates live"
+    assert origin.source_set_root == "zenit-cms/src/common/", "which names the source set its templates live in"
     assert not origin.is_tag_class, "and it is a template class, not a tag class"
     assert camel_case_identifier("pages/resource-list") == "PagesResourceList", "the class-name rule"
 

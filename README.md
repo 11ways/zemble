@@ -39,7 +39,10 @@ name, ambiguous, unresolved) and a one-line reason, because the extractor is tre
 plus a name resolver and not a compiler. Names only resolve within a language family (a
 Python `get` never lands on a Java `get`; Kotlin may land on Java). Where a build emits
 [compiler facts](docs/graph-facts.md), those replace the guessed edges for the files they
-cover. See [docs/graph.md](docs/graph.md).
+cover. A graph holds only the tree it was built for, so a relationship that crosses
+repositories (an interface in one, its implementations in another) is answered by querying
+their common parent, such as the workspace root, never by one repository's own path.
+See [docs/graph.md](docs/graph.md).
 
 **Evidence bundles** (`zemble explain`, `outline`, `signatures`). `explain` searches,
 follows the graph one hop out of what it found, and packs the result under a token budget
