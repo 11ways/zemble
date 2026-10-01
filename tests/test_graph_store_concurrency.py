@@ -18,6 +18,7 @@ from zemble.graph.store import (
     GRAPH_LOCK_NAME,
     GRAPH_POINTER_NAME,
     LEGACY_GRAPH_DB_NAME,
+    _hold_version,
     _is_version_name,
     _read_pointer,
     build_graph,
@@ -207,17 +208,8 @@ def test_a_killed_full_build_leaves_the_previous_graph_current(
     assert leftovers == [], f"step 3: and so are its sidecars, found {leftovers}"
 
 
-def test_a_single_file_store_is_migrated_on_first_open(
-    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
-) -> None:
-    """The store an older zemble wrote is copied into the versioned layout by its first reader, not rebuilt."""
-    workspace = _workspace(graph_fixture_root, tmp_path)
-    path = str(workspace)
-    build_graph(path)
-    counts = _counts(path)
-    folder = graph_folder(path)
-
-    # 1. Recreate the old layout: one rollback-journal `graph.sqlite` and nothing else.
+def _legacy_layout(path: str, folder: Path) -> bytes:
+    """Turn a built graph back into the old layout: one rollback-journal `graph.sqlite` and nothing else."""
     built = graph_db_path(path)
     assert built is not None
     source = sqlite3.connect(built)
@@ -229,13 +221,30 @@ def test_a_single_file_store_is_migrated_on_first_open(
     for entry in os.listdir(folder):
         if entry.startswith("graph-") or entry in (GRAPH_POINTER_NAME, GRAPH_LOCK_NAME):
             (folder / entry).unlink()
-    legacy_bytes = (folder / LEGACY_GRAPH_DB_NAME).read_bytes()
+    return (folder / LEGACY_GRAPH_DB_NAME).read_bytes()
+
+
+def test_an_unheld_single_file_store_is_moved_on_first_open(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
+) -> None:
+    """The store an older zemble wrote is renamed into the versioned layout when no process has it open."""
+    workspace = _workspace(graph_fixture_root, tmp_path)
+    path = str(workspace)
+    build_graph(path)
+    counts = _counts(path)
+    folder = graph_folder(path)
+
+    # 1. Recreate the old layout; nobody has the file open.
+    _legacy_layout(path, folder)
+    inode = (folder / LEGACY_GRAPH_DB_NAME).stat().st_ino
     assert graph_present(path), "step 1: the old layout counts as a present graph"
 
-    # 2. The first reader migrates it and reads the same graph.
+    # 2. The first reader migrates it by renaming it, and reads the same graph.
     assert _counts(path) == counts, "step 2: the first reader sees every row"
     pointer = _read_pointer(folder)
     assert pointer is not None and _versions(folder) == [pointer.current], "step 2: it became one version"
+    assert (folder / pointer.current).stat().st_ino == inode, "step 2: the very same file, renamed, not copied"
+    assert not (folder / LEGACY_GRAPH_DB_NAME).exists(), "step 2: so no second copy is left behind"
     connection = connect(path)
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal", "step 2: in WAL mode"
     connection.close()
@@ -244,8 +253,38 @@ def test_a_single_file_store_is_migrated_on_first_open(
     stats = refresh_graph(path)
     assert stats is not None and stats.extracted_files == 0, "step 3: the migration kept the extraction"
 
-    # 4. The old file is left untouched for processes still running older code.
-    assert (folder / LEGACY_GRAPH_DB_NAME).read_bytes() == legacy_bytes, "step 4: the legacy file is untouched"
+
+def test_a_held_single_file_store_is_copied_and_deleted_once_released(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
+) -> None:
+    """While an older process holds `graph.sqlite` open it is copied; the first writer after its release deletes it."""
+    workspace = _workspace(graph_fixture_root, tmp_path)
+    path = str(workspace)
+    build_graph(path)
+    counts = _counts(path)
+    folder = graph_folder(path)
+
+    # 1. Recreate the old layout, and hold the file open the way a process running older code does.
+    legacy_bytes = _legacy_layout(path, folder)
+    holder = open(folder / LEGACY_GRAPH_DB_NAME, "rb")  # noqa: SIM115 - held across the steps below
+    try:
+        # 2. The first reader copies it: the held original is left exactly as it was.
+        assert _counts(path) == counts, "step 2: the first reader sees every row"
+        pointer = _read_pointer(folder)
+        assert pointer is not None and _versions(folder) == [pointer.current], "step 2: it became one version"
+        assert (folder / LEGACY_GRAPH_DB_NAME).read_bytes() == legacy_bytes, "step 2: the held original is untouched"
+
+        # 3. A writer that runs while it is still held keeps it.
+        assert refresh_graph(path) is not None, "step 3: the refresh ran"
+        assert (folder / LEGACY_GRAPH_DB_NAME).exists(), "step 3: a held original is never deleted"
+    finally:
+        holder.close()
+
+    # 4. Released, the next writer deletes it, and the graph is unchanged.
+    stats = refresh_graph(path)
+    assert stats is not None and stats.extracted_files == 0, "step 4: the copy kept the extraction"
+    assert not (folder / LEGACY_GRAPH_DB_NAME).exists(), "step 4: the released original is gone"
+    assert _counts(path) == counts, "step 4: with every row"
 
 
 def test_a_forced_build_never_reads_a_legacy_store(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path) -> None:
@@ -263,13 +302,15 @@ def test_a_forced_build_never_reads_a_legacy_store(graph_fixture_root: Path, gra
     assert not stats.rebuilt_from_corruption, "step 2: the legacy file was never opened"
     pointer = _read_pointer(folder)
     assert pointer is not None and _versions(folder) == [pointer.current], "step 2: one fresh version"
-    assert (folder / LEGACY_GRAPH_DB_NAME).read_bytes() == b"not a database at all", "step 2: left untouched"
+
+    # 3. Superseded and open nowhere, it is deleted by the writer that superseded it.
+    assert not (folder / LEGACY_GRAPH_DB_NAME).exists(), "step 3: the superseded file is gone"
 
 
-def test_old_versions_are_swept_but_never_current_or_previous(
+def test_a_previous_version_lives_exactly_as_long_as_a_reader_holds_it(
     graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
 ) -> None:
-    """Each full build keeps exactly the version it replaced, and a reader on that one keeps reading."""
+    """A replaced version stays while a reader holds it and is retired by the first writer after its release."""
     workspace = _workspace(graph_fixture_root, tmp_path)
     path = str(workspace)
     build_graph(path)
@@ -279,28 +320,62 @@ def test_old_versions_are_swept_but_never_current_or_previous(
     unrelated.write_bytes(b"index data")
 
     # 1. Debris from killed builds lies beside the store: a version and orphaned sidecars.
-    for name in ("graph-7.sqlite", "graph-7.sqlite-wal", "graph-0.sqlite-shm"):
+    for name in ("graph-7.sqlite", "graph-7.sqlite-wal", "graph-0.sqlite-shm", "graph-0.sqlite-readers"):
         (folder / name).write_bytes(b"debris")
 
-    # 2. A reader is open on the current version when the next full build lands.
+    # 2. A reader is open on the current version when the next full build lands: that version stays.
     first = _read_pointer(folder)
+    assert first is not None
     reader = connect(path)
     build_graph(path, force=True)
     second = _read_pointer(folder)
-    assert second is not None and second.previous == first.current, "step 2: the replaced version is kept"
-    assert _versions(folder) == sorted([first.current, second.current]), "step 2: current and previous only"
+    assert second is not None and second.previous == first.current, "step 2: the held version is named previous"
+    assert _versions(folder) == sorted([first.current, second.current]), "step 2: current and the held one only"
     assert not any(entry.startswith(("graph-7", "graph-0")) for entry in os.listdir(folder)), "step 2: debris swept"
     assert reader.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == counts[0], "step 2: the reader reads on"
 
-    # 3. Another full build retires the oldest; the reader's file is gone yet its open handle still reads.
+    # 3. Another full build: the version nobody holds goes at once, the held one still stays.
     build_graph(path, force=True)
     third = _read_pointer(folder)
-    assert third is not None and third.previous == second.current, "step 3: the newest replaced version is kept"
-    assert _versions(folder) == sorted([second.current, third.current]), "step 3: the oldest is swept"
+    assert third is not None and third.previous is None, "step 3: the pointer names no retired file"
+    assert _versions(folder) == sorted([first.current, third.current]), "step 3: the unheld one is gone at once"
     assert reader.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == counts[0], "step 3: still readable"
-    reader.close()
 
-    # 4. Nothing outside the version files was touched, and readers see the same graph.
-    assert unrelated.read_bytes() == b"index data", "step 4: an unrelated file in the folder survived"
-    assert (folder / GRAPH_LOCK_NAME).is_file(), "step 4: the lock file is never deleted"
-    assert _counts(path) == counts, "step 4: the graph is unchanged by its rebuilds"
+    # 4. Released, the held version goes with the next writer, even an incremental one.
+    reader.close()
+    assert refresh_graph(path) is not None, "step 4: the refresh ran"
+    assert _versions(folder) == [third.current], "step 4: only the current version is left"
+    assert not any(entry.startswith(first.current) for entry in os.listdir(folder)), "step 4: with its sidecars"
+
+    # 5. Nothing outside the version files was touched, and readers see the same graph.
+    assert unrelated.read_bytes() == b"index data", "step 5: an unrelated file in the folder survived"
+    assert (folder / GRAPH_LOCK_NAME).is_file(), "step 5: the lock file is never deleted"
+    assert _counts(path) == counts, "step 5: the graph is unchanged by its rebuilds"
+
+
+def test_a_reader_that_loses_the_race_to_a_retirement_reads_the_new_version(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
+) -> None:
+    """A hold on a version retired after the pointer was read reports it gone, and a reader re-resolves."""
+    workspace = _workspace(graph_fixture_root, tmp_path)
+    path = str(workspace)
+    build_graph(path)
+    folder = graph_folder(path)
+    first = _read_pointer(folder)
+    assert first is not None
+
+    # 1. The pointer named `first`, and a full build retires it before the reader takes its hold.
+    build_graph(path, force=True)
+    assert not (folder / first.current).exists(), "step 1: the version the reader resolved is gone"
+
+    # 2. Taking the hold on it now fails cleanly instead of opening nothing, and leaves no lock behind once swept.
+    assert _hold_version(folder, first.current) is None, "step 2: a retired version cannot be held"
+
+    # 3. The pointer is read again, so a reader always lands on the current version.
+    connection = connect(path)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] > 0, "step 3: the new version reads"
+    finally:
+        connection.close()
+    assert refresh_graph(path) is not None
+    assert not (folder / f"{first.current}-readers").exists(), "step 3: the stray lock file is swept"

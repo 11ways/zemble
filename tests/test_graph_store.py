@@ -250,7 +250,8 @@ def test_a_bloated_store_is_compacted(tmp_path: Path) -> None:
 
     # 3. The next build's compaction hands them back as the next version, with the rows intact.
     assert _compact_if_drifted(folder, db.name), "step 3: the drift is compacted"
-    assert _read_pointer(folder) == _Pointer("graph-2.sqlite", db.name), "step 3: the copy is current"
+    assert _read_pointer(folder) == _Pointer("graph-2.sqlite"), "step 3: the copy is current"
+    assert not db.exists(), "step 3: and the version it replaced, which no reader held, is gone"
     compact = folder / "graph-2.sqlite"
     assert compact.stat().st_size < grown // 2, "step 3: and the file actually shrank"
     connection = open_db(compact, read_only=True)

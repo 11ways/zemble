@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from zemble.graph.cli import EXIT_NOT_FOUND, ensure_graph
-from zemble.graph.provider import SqliteGraphProvider
+from zemble.graph.provider import open_provider
 from zemble.home.answers import DEFAULT_TOP_K, home_payload
 from zemble.home.config import ConfigError, HomeConfig
 from zemble.index import ZembleIndex
@@ -77,7 +77,7 @@ def _in_process(args: argparse.Namespace) -> dict[str, Any]:
     config = HomeConfig.load(root)
     index, _source_key = _load_index(root, args.embedder)
     ensure_graph(root)
-    provider = SqliteGraphProvider(root)
+    provider = open_provider(root)
     try:
         return home_payload(index, provider, config, args.description, args.top_k, requested_root=args.path)
     finally:

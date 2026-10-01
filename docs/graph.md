@@ -311,22 +311,54 @@ compiles.
 
 Readers resolve the pointer and open that version read-only (`mode=ro`, 30 s busy
 timeout); in WAL they read the last committed snapshot and never wait on the
-writer. Only one process writes: every build holds an `flock` on `graph.lock` (the
-kernel drops it when the holder dies, so a killed build leaves no stale lock).
-`build_graph` waits for it; `refresh_graph`, the once-per-process refresh
-`ensure_graph` runs, skips when it is held and reads the current version, because
-the holder is already refreshing. The daemon's watcher calls `build_graph`, so its
-change set lands after any other writer.
+writer. Each reader first takes a shared `flock` on the version's `-readers` sidecar
+and keeps it until it closes; the lock is on a sidecar, never on the database,
+because closing any descriptor of a sqlite file drops every POSIX lock sqlite holds
+on it in that process. Only one process writes: every build holds an `flock` on
+`graph.lock` (the kernel drops it when the holder dies, so a killed build leaves no
+stale lock). `build_graph` waits for it; `refresh_graph`, the once-per-process
+refresh `ensure_graph` runs, skips when it is held and reads the current version,
+because the holder is already refreshing. The daemon's watcher calls `build_graph`,
+so its change set lands after any other writer.
 
-Under the lock, each build first deletes every version file and sidecar the
-pointer does not name - a killed build's half-written version, or a retired one -
-and each newly published version keeps the one it replaced, for readers that
-resolved the pointer just before it moved. A single-file `graph.sqlite` left by an
-older zemble is copied into a version through sqlite's backup API by the first
-reader or incremental build that finds no pointer, without a rebuild (a forced
-build ignores it). It is copied rather
-than renamed and then left alone, because processes still running the older code
-keep opening it by name in rollback-journal mode.
+Under the lock, each build first retires every version but the current one that it
+can lock **exclusively** - a killed build's half-written version, or a replaced one
+no reader holds any more - deleting the database, its sidecars and the readers lock
+last. A replaced version a reader still holds stays, named on the pointer's second
+line, until the first writer after its release; it lives exactly as long as it is
+read, rather than "one install". A reader whose version was retired between reading
+the pointer and taking its lock sees the sidecar's inode change (or the database
+gone) once the lock is granted, and reads the pointer again.
+
+A single-file `graph.sqlite` left by an older zemble is moved into a version by the
+first reader or incremental build that finds no pointer, without a rebuild (a
+forced build ignores it). When no process has it (or a journal of it) open - judged
+from `/proc/<pid>/fd`, never by opening it - it is **renamed** and sealed as the
+first WAL version, so no second copy is left. While a process still running the
+older code holds it, it is copied through sqlite's backup API instead, because that
+process opens it by name in rollback-journal mode and turning the held inode into a
+WAL database would give one database two journals; the original is then deleted by
+the first writer that finds it unheld. Where `/proc` cannot answer, it counts as
+held.
+
+### Sub-directories
+
+A graph request for a directory with no graph of its own is answered from the
+nearest ancestor that has one, filtered to the sub-directory, the way search answers
+from an ancestor index (`resolve_graph_root`, `SubtreeGraphProvider`). Precedence is
+search's: a graph of exactly that path, then the nearest ancestor's, else a graph
+of its own. `ensure_graph` refreshes the ancestor and builds nothing for the
+sub-directory; a sub-directory the ancestor's walk skips (ignored, a nested repo it
+excludes) is not covered and gets its own graph. The view speaks ids and paths
+relative to the sub-directory and answers only with in-folder symbols, so its
+answers equal what a graph of the sub-directory gives (pinned symbol by symbol by
+`tests/test_graph_subtree.py`), with one difference by design: resolution and walks
+run over the whole ancestor graph. A call into a sibling module resolves against its
+real target instead of staying unresolved or landing by name on an in-folder
+namesake, and a hierarchy chain that passes through a sibling module (`Leaf extends
+Middle` in another module, `Middle extends Base`) reaches in-folder subtypes a
+module-only graph cannot see. `graph facts status` on a sub-directory reports the
+ancestor's graph, which owns the facts.
 
 An incremental refresh writes **in place** in the current version: copying a
 1.9 GB store per saved file would cost more than the refresh, and the WAL makes it

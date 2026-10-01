@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from typing import Protocol, runtime_checkable
 
 from zemble.graph.facts import TREE_SITTER_SOURCE
 from zemble.graph.model import NAMED_KINDS, TYPE_KINDS, Edge, EdgeKind, Hit, Resolution, Symbol
-from zemble.graph.store import connect, edge_from_row, symbol_from_row
+from zemble.graph.store import connect, edge_from_row, resolve_graph_root, symbol_from_row
 
 _HIERARCHY_KINDS = (EdgeKind.EXTENDS.value, EdgeKind.IMPLEMENTS.value)
 
@@ -370,3 +371,139 @@ class SqliteGraphProvider:
             f"{language} ({files})" for language, files in sorted(skipped.items(), key=lambda item: -item[1])[:6]
         )
         return f"{summary[:-1]}; no grammar for: {listed}."
+
+
+class SubtreeGraphProvider:
+    """A sub-directory's view of an ancestor's graph: its symbols only, ids and paths relative to it.
+
+    AIDEV-NOTE: this is how a sub-directory is answered without a graph of its own, the way an
+    ancestor's search index answers it through `ZembleIndex.subtree`. Every Symbol leaving the
+    view is rebased (`id`, `container_id`, `file_path` lose the prefix) and every id entering it
+    gets the prefix back, so a caller sees exactly the spelling a graph built for the sub-directory
+    would use. Edges and walks run over the whole ancestor graph and only their answers are
+    filtered: a hierarchy chain through a sibling module still reaches in-folder symbols, and a
+    call into a sibling module resolves against its real target instead of by name.
+    """
+
+    def __init__(self, graph: SqliteGraphProvider, prefix: str, path: str) -> None:
+        """Wrap an open ancestor provider.
+
+        :param graph: The provider on the ancestor's graph; this view closes it.
+        :param prefix: The sub-directory, relative to the ancestor root, in POSIX form.
+        :param path: The path the caller asked about.
+        """
+        self.graph = graph
+        self.path = path
+        self.prefix = prefix.strip("/")
+        self._lead = f"{self.prefix}/"
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The ancestor graph's connection; raw SQL over it is NOT filtered to the sub-directory."""
+        return self.graph.connection
+
+    def close(self) -> None:
+        """Close the ancestor provider."""
+        self.graph.close()
+
+    def _inbound(self, symbol_id: str) -> str:
+        """Spell a view id the way the ancestor graph stores it."""
+        return self._lead + symbol_id
+
+    def _strip(self, value: str) -> str:
+        """Drop the prefix from an ancestor-relative id or path."""
+        return value[len(self._lead) :] if value.startswith(self._lead) else value
+
+    def _rebased(self, symbol: Symbol | None) -> Symbol | None:
+        """Return the symbol as the view spells it, or None when it lies outside the sub-directory."""
+        if symbol is None or not symbol.file_path.startswith(self._lead):
+            return None
+        return replace(
+            symbol,
+            id=self._strip(symbol.id),
+            file_path=self._strip(symbol.file_path),
+            container_id=self._strip(symbol.container_id) if symbol.container_id is not None else None,
+        )
+
+    def _symbols(self, symbols: Iterable[Symbol]) -> list[Symbol]:
+        """Keep and rebase the in-folder symbols, in their order."""
+        return [rebased for symbol in symbols if (rebased := self._rebased(symbol)) is not None]
+
+    def _hits(self, hits: Iterable[Hit]) -> list[Hit]:
+        """Keep and rebase the hits whose symbol is in the sub-directory, in their order."""
+        return [replace(hit, symbol=rebased) for hit in hits if (rebased := self._rebased(hit.symbol)) is not None]
+
+    def symbol(self, symbol_id: str) -> Symbol | None:
+        """Load one in-folder symbol by its view id."""
+        return self._rebased(self.graph.symbol(self._inbound(symbol_id)))
+
+    def symbols_in_file(self, file_path: str) -> list[Symbol]:
+        """List every symbol declared in one file under the sub-directory."""
+        return self._symbols(self.graph.symbols_in_file(self._lead + file_path))
+
+    def symbols_at(self, file_path: str, start_line: int, end_line: int) -> list[Symbol]:
+        """List the symbols whose line span contains a region of a file under the sub-directory."""
+        return self._symbols(self.graph.symbols_at(self._lead + file_path, start_line, end_line))
+
+    def definition(self, name: str) -> list[Symbol]:
+        """Find in-folder declarations matching a simple name, a qualified name or `Type.member`."""
+        return self._symbols(self.graph.definition(name))
+
+    def callers(self, symbol_id: str) -> list[Hit]:
+        """Find every in-folder call site that reaches a callable."""
+        return self._hits(self.graph.callers(self._inbound(symbol_id)))
+
+    def callees(self, symbol_id: str) -> list[Hit]:
+        """Find every in-folder callable invoked from a symbol's body."""
+        return self._hits(self.graph.callees(self._inbound(symbol_id)))
+
+    def references(self, symbol_id: str) -> list[Hit]:
+        """Find every in-folder edge of any kind pointing at a symbol."""
+        return self._hits(self.graph.references(self._inbound(symbol_id)))
+
+    def implementations(self, type_id: str) -> list[Hit]:
+        """Find the in-folder direct and transitive subtypes of a type."""
+        return self._hits(self.graph.implementations(self._inbound(type_id)))
+
+    def supertypes(self, type_id: str) -> list[Hit]:
+        """Find the in-folder direct and transitive supertypes of a type."""
+        return self._hits(self.graph.supertypes(self._inbound(type_id)))
+
+    def overrides_of(self, method_id: str) -> list[Hit]:
+        """Find the in-folder supertype method a method overrides."""
+        return self._hits(self.graph.overrides_of(self._inbound(method_id)))
+
+    def overridden_by(self, method_id: str) -> list[Hit]:
+        """Find the in-folder subtype methods that override a method."""
+        return self._hits(self.graph.overridden_by(self._inbound(method_id)))
+
+    def tests_of(self, symbol_id: str) -> list[Hit]:
+        """Find the in-folder tests covering a symbol."""
+        return self._hits(self.graph.tests_of(self._inbound(symbol_id)))
+
+    def neighbors(self, symbol_id: str, hops: int = 1, kinds: Sequence[EdgeKind] | None = None) -> list[Hit]:
+        """Walk outward from a symbol through the whole ancestor graph, answering with in-folder symbols."""
+        return self._hits(self.graph.neighbors(self._inbound(symbol_id), hops, kinds))
+
+    def meta(self) -> dict[str, str]:
+        """Return the ancestor graph's stored metadata."""
+        return self.graph.meta()
+
+    def coverage_note(self) -> str:
+        """Explain what the ancestor graph covers, naming the sub-directory it is filtered to."""
+        return f"{self.graph.coverage_note()} Answered from the graph of {self.graph.path}, filtered to {self.prefix}/."
+
+
+#: What `open_provider` hands back: a root's own graph, or an ancestor's filtered to a sub-directory.
+AnyProvider = SqliteGraphProvider | SubtreeGraphProvider
+
+
+def open_provider(path: str) -> AnyProvider:
+    """Open the graph that answers for a path: its own, else an ancestor's filtered to it.
+
+    The caller runs `zemble.graph.cli.ensure_graph` first; both route through
+    `zemble.graph.store.resolve_graph_root`, so they agree on which graph that is.
+    """
+    root, prefix = resolve_graph_root(path)
+    graph = SqliteGraphProvider(root)
+    return graph if prefix is None else SubtreeGraphProvider(graph, prefix, path)

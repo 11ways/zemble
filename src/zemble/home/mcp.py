@@ -10,7 +10,7 @@ from pydantic import Field
 
 from zemble.daemon.protocol import CommandRefused
 from zemble.graph.cli import ensure_graph
-from zemble.graph.provider import SqliteGraphProvider
+from zemble.graph.provider import open_provider
 from zemble.home.answers import DEFAULT_TOP_K, home_payload
 from zemble.home.cli import HOME_CONTENT
 from zemble.home.config import ConfigError, HomeConfig
@@ -36,7 +36,7 @@ def _here(index: ZembleIndex, repo: str, description: str, top_k: int, requested
     """Answer in this process, over a freshly opened graph."""
     config = HomeConfig.load(repo)
     ensure_graph(repo)
-    provider = SqliteGraphProvider(repo)
+    provider = open_provider(repo)
     try:
         return home_payload(index, provider, config, description, top_k, requested_root=requested)
     finally:

@@ -10,7 +10,7 @@ from pydantic import Field
 
 from zemble.graph.cli import PROVIDER_METHODS, ensure_graph, select_symbol
 from zemble.graph.model import EdgeKind, Hit, Symbol
-from zemble.graph.provider import SqliteGraphProvider, display_name
+from zemble.graph.provider import AnyProvider, display_name, open_provider
 from zemble.mcp_repo import resolve_repo, with_default_note
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -59,10 +59,10 @@ def _hit_json(hit: Hit) -> dict[str, Any]:
     }
 
 
-def _open(repo: str) -> SqliteGraphProvider:
+def _open(repo: str) -> AnyProvider:
     """Build the graph if needed and open a provider on it."""
     ensure_graph(repo)
-    return SqliteGraphProvider(repo)
+    return open_provider(repo)
 
 
 def _capped(items: list[Any], limit: int, render: Any) -> dict[str, Any]:

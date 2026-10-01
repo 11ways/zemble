@@ -54,6 +54,7 @@ from zemble.graph.resolve import Resolver
 from zemble.index.file_walker import ignored_prefix, walk_files
 from zemble.index.files import detect_language, get_extensions
 from zemble.languages.catalog import SPECS
+from zemble.openfiles import held_open
 from zemble.parallel import pool_context, pooled
 from zemble.types import ContentType
 
@@ -64,12 +65,18 @@ GRAPH_FORMAT_VERSION = 6
 GRAPH_POINTER_NAME = "graph.current"
 #: The file whose OS lock is held by the one process allowed to write a workspace's graph.
 GRAPH_LOCK_NAME = "graph.lock"
-#: The single-file store older zemble kept; it is copied into the versioned layout on first open.
+#: The single-file store older zemble kept; it is moved into the versioned layout on first open.
 LEGACY_GRAPH_DB_NAME = "graph.sqlite"
 #: The sidecars sqlite keeps beside a store.
 _DB_SIDECARS = ("-journal", "-wal", "-shm")
-#: A graph version file, `graph-<n>.sqlite`, or one of the sidecars sqlite keeps beside it.
-_VERSION_FILE = re.compile(r"graph-(\d+)\.sqlite(" + "|".join(map(re.escape, _DB_SIDECARS)) + ")?")
+#: The sidecar whose shared flock marks a version as being read; see `_hold_version`.
+READERS_SUFFIX = "-readers"
+#: Every sidecar a version file may have: sqlite's own, then the readers lock.
+_VERSION_SIDECARS = (*_DB_SIDECARS, READERS_SUFFIX)
+#: A graph version file, `graph-<n>.sqlite`, or one of its sidecars.
+_VERSION_FILE = re.compile(r"graph-(\d+)\.sqlite(" + "|".join(map(re.escape, _VERSION_SIDECARS)) + ")?")
+#: How often a reader re-resolves the pointer when the version it named was retired under it.
+_HOLD_ATTEMPTS = 8
 #: How long a reader waits on sqlite's own locks; in WAL mode only recovery holds one that long.
 _READ_TIMEOUT_SECONDS = 30.0
 #: How long a writer waits on sqlite's own locks, which only a checkpoint or recovery takes.
@@ -213,8 +220,8 @@ def _graph_dir(path: str) -> Path:
 def graph_db_path(path: str) -> Path | None:
     """Return the sqlite file of a project's current graph version, or None before the first build.
 
-    Creates the graph folder, and first copies a single-file store an older zemble left into the
-    versioned layout.
+    Creates the graph folder, and first moves a single-file store an older zemble left into the
+    versioned layout. The file is not held: a writer may retire it once it stops being current.
     """
     folder = _graph_dir(path)
     pointer = _readable_pointer(folder)
@@ -222,14 +229,96 @@ def graph_db_path(path: str) -> Path | None:
 
 
 def connect(path: str) -> sqlite3.Connection:
-    """Open a project's current graph version for reading.
+    """Open a project's current graph version for reading, holding it against retirement until closed.
 
     :raises GraphStoreMissing: If no graph has been built for the path yet.
     """
-    db_path = graph_db_path(path)
-    if db_path is None:
+    connection = _connect_current(_graph_dir(path))
+    if connection is None:
         raise GraphStoreMissing(f"no symbol graph has been built for {path!r}")
-    return open_db(db_path, read_only=True)
+    return connection
+
+
+class _HeldConnection(sqlite3.Connection):
+    """A read-only connection that owns the shared lock keeping its version file on disk."""
+
+    _hold: int | None = None
+
+    def close(self) -> None:
+        """Close the connection, then release the version it held."""
+        try:
+            super().close()
+        finally:
+            self._release()
+
+    def _release(self) -> None:
+        """Drop the shared lock; the writer may retire the version from now on."""
+        hold, self._hold = self._hold, None
+        if hold is not None:
+            os.close(hold)
+
+    def __del__(self) -> None:
+        """Release the version of a connection nobody closed."""
+        self._release()
+
+
+def _connect_current(folder: Path) -> sqlite3.Connection | None:
+    """Open the current version read-only under a shared hold, or None before the first build.
+
+    A writer may retire the version a pointer named between the read of that pointer and the
+    hold; the hold then reports it gone and the pointer is read again.
+
+    :raises GraphStoreCorrupt: If the pointer keeps naming versions that vanish.
+    """
+    for _ in range(_HOLD_ATTEMPTS):
+        pointer = _readable_pointer(folder)
+        if pointer is None:
+            return None
+        hold = _hold_version(folder, pointer.current)
+        if hold is None:
+            continue
+        try:
+            connection = open_db(folder / pointer.current, read_only=True)
+        except BaseException:
+            os.close(hold)
+            raise
+        assert isinstance(connection, _HeldConnection)
+        connection._hold = hold
+        return connection
+    raise GraphStoreCorrupt(f"graph pointer in {folder} kept naming retired versions")
+
+
+def _hold_version(folder: Path, name: str) -> int | None:
+    """Take the shared lock marking a version as read, or None when it was retired meanwhile.
+
+    AIDEV-NOTE: the lock is on a `-readers` sidecar, never on the sqlite file. Closing ANY
+    descriptor of a sqlite file drops every POSIX lock sqlite holds on it in this process, so a
+    flock descriptor on the database itself would break sqlite's own locking the moment it was
+    released. The writer retires a version only while holding this lock exclusively, and unlinks
+    the sidecar last; a reader that reached the old sidecar or a recreated one sees, after its
+    lock is granted, that the path no longer names its inode or that the database is gone.
+
+    :return: The descriptor holding the lock, which the caller closes to release it.
+    """
+    lock_path = folder / f"{name}{READERS_SUFFIX}"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        held = os.fstat(descriptor)
+        try:
+            named = os.stat(lock_path)
+        except FileNotFoundError:
+            named = None
+        if named is None or (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino):
+            os.close(descriptor)
+            return None
+        if not (folder / name).is_file():
+            os.close(descriptor)
+            return None
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def open_db(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
@@ -239,7 +328,12 @@ def open_db(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
     last committed snapshot while a refresh is still mid-transaction.
     """
     if read_only:
-        connection = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=_READ_TIMEOUT_SECONDS)
+        connection = sqlite3.connect(
+            f"{db_path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            timeout=_READ_TIMEOUT_SECONDS,
+            factory=_HeldConnection,
+        )
         connection.row_factory = sqlite3.Row
         return connection
     connection = sqlite3.connect(db_path, timeout=_WRITE_TIMEOUT_SECONDS)
@@ -382,9 +476,9 @@ def _next_version(folder: Path) -> str:
 
 
 def _discard(db_path: Path) -> None:
-    """Delete a version file and every sidecar sqlite may have left beside it."""
+    """Delete a version file and every sidecar it may have, the readers lock last."""
     db_path.unlink(missing_ok=True)
-    for suffix in _DB_SIDECARS:
+    for suffix in _VERSION_SIDECARS:
         db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
 
 
@@ -409,57 +503,188 @@ def _publish(folder: Path, pointer: _Pointer) -> None:
 
 
 def _install(folder: Path, built: str, replaced: str | None) -> None:
-    """Make a finished version current, keep the one it replaced, and delete every other version.
+    """Make a finished version current, then retire every other version no reader holds.
 
-    The replaced version stays because a reader may have resolved the pointer just before it
-    moved; a reader would have to have resolved it two installs ago to lose its file.
+    The pointer still names the replaced version while it stays on disk, so a process running
+    older code, which keeps exactly the version the pointer names second, never sweeps it.
     """
-    pointer = _Pointer(built, replaced)
-    _publish(folder, pointer)
-    _sweep(folder, pointer)
+    _sweep(folder, _Pointer(built, replaced), publish=True)
 
 
-def _sweep(folder: Path, pointer: _Pointer) -> None:
-    """Delete, one path at a time, every version file and sidecar the pointer does not name.
+def _sweep(folder: Path, pointer: _Pointer, *, publish: bool = False) -> _Pointer:
+    """Retire every version but the current one that no reader holds, and a legacy store nobody has open.
 
-    Only the writer-lock holder sweeps, so an unnamed version is either retired or a killed
-    build's leftover that was never published.
+    Only the writer-lock holder sweeps, so a version the pointer does not name is either retired
+    or a killed build's leftover that was never published. The pointer is rewritten when it
+    named a previous version that is gone now, so it never names a file that is not there.
+
+    :param publish: Publish the pointer first even when nothing was retired.
+    :return: The pointer as it now stands on disk.
     """
-    keep = {pointer.current, pointer.previous}
+    if publish:
+        _publish(folder, pointer)
+    for name in sorted(_retired_versions(folder, pointer.current)):
+        _retire(folder, name)
+    _drop_legacy_if_unheld(folder)
+    if pointer.previous is not None and not (folder / pointer.previous).is_file():
+        pointer = _Pointer(pointer.current)
+        _publish(folder, pointer)
+    return pointer
+
+
+def _retired_versions(folder: Path, current: str) -> dict[str, list[str]]:
+    """Group every version file and sidecar on disk that is not the current version's, by version."""
+    retired: dict[str, list[str]] = {}
     for entry in sorted(os.listdir(folder)):
         match = _VERSION_FILE.fullmatch(entry)
-        if match is not None and _version_name(int(match.group(1))) not in keep:
-            (folder / entry).unlink(missing_ok=True)
+        if match is None:
+            continue
+        name = _version_name(int(match.group(1)))
+        if name != current:
+            retired.setdefault(name, []).append(entry)
+    return retired
+
+
+@contextmanager
+def _exclusive_hold(folder: Path, name: str, *, create: bool = True) -> Iterator[bool]:
+    """Hold a version's readers lock exclusively for the block, yielding False when a reader has it.
+
+    :param create: Create a missing lock file to lock it. A writer about to delete must, since a
+        reader creating it at the same moment would otherwise hold a lock nobody checked; a probe
+        that deletes nothing passes False and counts a missing lock file as unheld.
+    """
+    lock_path = folder / f"{name}{READERS_SUFFIX}"
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | (os.O_CREAT if create else 0), 0o644)
+    except FileNotFoundError:
+        yield True
+        return
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(descriptor)
+
+
+def _retire(folder: Path, name: str) -> bool:
+    """Delete one retired version and its sidecars unless a reader holds it.
+
+    :return: Whether it was deleted.
+    """
+    with _exclusive_hold(folder, name) as free:
+        if not free:
+            logger.info("graph: keeping %s in %s, a reader still holds it", name, folder)
+            return False
+        _discard(folder / name)
+    return True
+
+
+def retired_graph_files(folder: Path) -> list[Path]:
+    """List the files a sweep of this graph folder would delete now, deleting nothing.
+
+    A held version is probed with the same non-blocking exclusive lock the sweep takes, which is
+    released at once; a legacy store is listed only once the versioned layout exists.
+    """
+    pointer = _read_pointer(folder)
+    if pointer is None:
+        return []
+    files: list[Path] = []
+    for name, entries in sorted(_retired_versions(folder, pointer.current).items()):
+        with _exclusive_hold(folder, name, create=False) as free:
+            if free:
+                files.extend(folder / entry for entry in entries)
+    if _legacy_unheld(folder):
+        files.extend(_legacy_files(folder))
+    return files
+
+
+def sweep_graph_folder(folder: Path) -> list[Path] | None:
+    """Delete what `retired_graph_files` lists, as the writer, or None when another process is writing.
+
+    :return: The files that were there before the sweep and are gone after it.
+    """
+    with _writer_lock(folder, wait=False) as taken:
+        if not taken:
+            return None
+        before = retired_graph_files(folder)
+        pointer = _read_pointer(folder)
+        if pointer is not None:
+            _sweep(folder, pointer)
+        return [path for path in before if not path.exists()]
+
+
+def _legacy_files(folder: Path) -> list[Path]:
+    """Return the legacy store and whichever of its sidecars exist."""
+    legacy = folder / LEGACY_GRAPH_DB_NAME
+    candidates = [legacy, *(legacy.with_name(legacy.name + suffix) for suffix in _DB_SIDECARS)]
+    return [path for path in candidates if path.exists()]
+
+
+def _legacy_unheld(folder: Path) -> bool:
+    """Return whether a legacy store exists that no process has open, sidecars included."""
+    files = _legacy_files(folder)
+    if not files or files[0].name != LEGACY_GRAPH_DB_NAME:
+        return False
+    return not any(held_open(path) for path in files)
+
+
+def _drop_legacy_if_unheld(folder: Path) -> None:
+    """Delete the legacy store a copy-migration had to leave behind, once nobody has it open.
+
+    Called only by the writer, after the versioned layout exists.
+    """
+    if not _legacy_unheld(folder):
+        return
+    for path in _legacy_files(folder):
+        path.unlink(missing_ok=True)
+    logger.info("graph: deleted the superseded single-file store in %s", folder)
 
 
 def _migrate_legacy(folder: Path) -> _Pointer:
-    """Copy the single-file store an older zemble left into the versioned layout, without a rebuild.
+    """Move the single-file store an older zemble left into the versioned layout, without a rebuild.
 
-    AIDEV-NOTE: a copy through sqlite's backup API, never a rename: a process still running the
-    older code opens `graph.sqlite` by name in rollback-journal mode, and turning that same inode
-    into a WAL database under a second name would give one database two journals. The legacy
-    file is left to those processes and is never read here again once the pointer exists.
+    AIDEV-NOTE: a rename when no process has `graph.sqlite` (or a journal of it) open: nothing
+    can then be using it, and sealing turns it into the first WAL version in place. A process
+    still running the older code opens `graph.sqlite` by name in rollback-journal mode, so while
+    one holds it the file is copied through sqlite's backup API instead - turning a held inode
+    into a WAL database under a second name would give one database two journals - and the
+    original is deleted later by the first writer that finds it unheld (`_drop_legacy_if_unheld`).
     """
     name = _next_version(folder)
     target = folder / name
     _discard(target)
-    try:
-        source = sqlite3.connect(folder / LEGACY_GRAPH_DB_NAME, timeout=_WRITE_TIMEOUT_SECONDS)
+    legacy = folder / LEGACY_GRAPH_DB_NAME
+    if _legacy_unheld(folder) and _legacy_files(folder) == [legacy]:
+        os.rename(legacy, target)
         try:
-            copy = sqlite3.connect(target)
+            _seal(target)
+        except BaseException:
+            os.rename(target, legacy)
+            raise
+        verb = "moved"
+    else:
+        try:
+            source = sqlite3.connect(legacy, timeout=_WRITE_TIMEOUT_SECONDS)
             try:
-                source.backup(copy)
+                copy = sqlite3.connect(target)
+                try:
+                    source.backup(copy)
+                finally:
+                    copy.close()
             finally:
-                copy.close()
-        finally:
-            source.close()
-        _seal(target)
-    except BaseException:
-        _discard(target)
-        raise
+                source.close()
+            _seal(target)
+        except BaseException:
+            _discard(target)
+            raise
+        verb = "copied"
     pointer = _Pointer(name)
     _publish(folder, pointer)
-    logger.info("graph: copied the single-file store in %s into version %s", folder, name)
+    logger.info("graph: %s the single-file store in %s into version %s", verb, folder, name)
     return pointer
 
 
@@ -527,10 +752,9 @@ def graph_exists(path: str) -> bool:
     folder = graph_folder(path)
     connection = None
     try:
-        pointer = _readable_pointer(folder)
-        if pointer is None:
+        connection = _connect_current(folder)
+        if connection is None:
             return False
-        connection = open_db(folder / pointer.current, read_only=True)
         return connection.execute("SELECT 1 FROM symbols LIMIT 1").fetchone() is not None
     except (sqlite3.Error, GraphStoreCorrupt) as exc:
         if is_corruption(exc):
@@ -540,6 +764,85 @@ def graph_exists(path: str) -> bool:
     finally:
         if connection is not None:
             connection.close()
+
+
+def graph_root_of(folder: Path) -> str | None:
+    """Return the workspace root a graph folder was built from, migrating and writing nothing.
+
+    :return: The root its metadata names, or None when no readable graph is there.
+    """
+    try:
+        pointer = _read_pointer(folder)
+    except GraphStoreCorrupt:
+        return None
+    hold = None
+    if pointer is not None:
+        hold = _hold_version(folder, pointer.current)
+        db_path = folder / pointer.current
+    else:
+        db_path = folder / LEGACY_GRAPH_DB_NAME
+    try:
+        if not db_path.is_file():
+            return None
+        connection = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=_READ_TIMEOUT_SECONDS)
+        try:
+            row = connection.execute("SELECT value FROM meta WHERE key = 'root'").fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+    finally:
+        if hold is not None:
+            os.close(hold)
+    return str(row[0]) if row is not None and row[0] else None
+
+
+def graph_ancestor(path: str) -> tuple[str, str] | None:
+    """Return the nearest ancestor with a graph and the path's prefix under it, when the path has no graph of its own.
+
+    The precedence is search's (`zemble.cache.resolve_index_root`): a graph of exactly this
+    path wins, then the nearest ancestor's, else the path needs one of its own.
+
+    :return: The ancestor root and the root-relative POSIX prefix, or None.
+    """
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_dir() or graph_present(str(resolved)):
+        return None
+    for ancestor in resolved.parents:
+        if graph_present(str(ancestor)):
+            return str(ancestor), resolved.relative_to(ancestor).as_posix()
+    return None
+
+
+def graph_covers(root: str, prefix: str) -> bool:
+    """Return whether a root's current graph holds any file under a root-relative prefix.
+
+    A sub-tree the ancestor's walk ignores (a nested repository it excludes, a build folder)
+    is absent from its graph, and is then answered by a graph of its own.
+    """
+    try:
+        connection = connect(root)
+    except GraphStoreMissing:
+        return False
+    try:
+        # A key range on the primary key, not LIKE: `_` and `%` are ordinary characters in a path.
+        row = connection.execute(
+            "SELECT 1 FROM files WHERE path >= ? AND path < ? LIMIT 1", (f"{prefix}/", f"{prefix}0")
+        ).fetchone()
+        return row is not None
+    finally:
+        connection.close()
+
+
+def resolve_graph_root(path: str) -> tuple[str, str | None]:
+    """Route a graph request for a path to the graph that answers it.
+
+    :return: The root whose graph to open, and the root-relative prefix to restrict it to (None = all of it).
+    """
+    ancestor = graph_ancestor(path)
+    if ancestor is not None and graph_covers(*ancestor):
+        return ancestor
+    return path, None
 
 
 # ---- serialisation ------------------------------------------------------

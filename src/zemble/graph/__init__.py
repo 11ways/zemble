@@ -15,6 +15,8 @@ from zemble.graph.model import Edge, EdgeKind, Hit, Resolution, Symbol, SymbolKi
 _LAZY = {
     "GraphProvider": "zemble.graph.provider",
     "SqliteGraphProvider": "zemble.graph.provider",
+    "SubtreeGraphProvider": "zemble.graph.provider",
+    "open_provider": "zemble.graph.provider",
     "GraphStats": "zemble.graph.store",
     "build_graph": "zemble.graph.store",
     "graph_db_path": "zemble.graph.store",
@@ -39,10 +41,12 @@ __all__ = [
     "Hit",
     "Resolution",
     "SqliteGraphProvider",
+    "SubtreeGraphProvider",
     "Symbol",
     "SymbolKind",
     "build_graph",
     "graph_db_path",
     "graph_exists",
     "graph_present",
+    "open_provider",
 ]

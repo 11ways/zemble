@@ -21,8 +21,16 @@ from zemble.graph.facts import (
     load_overlay,
 )
 from zemble.graph.model import TYPE_KINDS, EdgeKind, Hit, Symbol, SymbolKind
-from zemble.graph.provider import SqliteGraphProvider, display_name
-from zemble.graph.store import build_graph, graph_exists, refresh_graph, symbol_from_row
+from zemble.graph.provider import AnyProvider, SqliteGraphProvider, display_name, open_provider
+from zemble.graph.store import (
+    build_graph,
+    graph_ancestor,
+    graph_covers,
+    graph_exists,
+    refresh_graph,
+    resolve_graph_root,
+    symbol_from_row,
+)
 
 QUERY_COMMANDS = (
     "definition",
@@ -113,8 +121,15 @@ def run_graph(args: argparse.Namespace) -> int:
 
 
 def _run_build(args: argparse.Namespace) -> int:
-    """Build the graph and report what it did."""
-    stats = build_graph(args.path, force=args.force)
+    """Build the graph that answers for a path, an ancestor's for a sub-directory it covers, and report it."""
+    ancestor = graph_ancestor(args.path)
+    stats = None
+    if ancestor is not None:
+        stats = build_graph(ancestor[0], force=args.force)
+        if not graph_covers(*ancestor):
+            stats = None
+    if stats is None:
+        stats = build_graph(args.path, force=args.force)
     if args.json:
         print(json.dumps(stats.to_dict(), indent=2))
         return 0
@@ -132,12 +147,17 @@ def _run_build(args: argparse.Namespace) -> int:
 
 
 def _run_facts_status(args: argparse.Namespace) -> int:
-    """Report every facts file found for a workspace and what the graph made of it."""
+    """Report every facts file found for a workspace and what the graph made of it.
+
+    For a sub-directory answered from an ancestor's graph the report is the ancestor's: facts
+    files and their coverage belong to the graph, and the root it names says so.
+    """
     ensure_graph(args.path)
-    provider = SqliteGraphProvider(args.path)
+    root, _prefix = resolve_graph_root(args.path)
+    provider = SqliteGraphProvider(root)
     try:
         symbols = [symbol_from_row(row) for row in provider.connection.execute("SELECT * FROM symbols")]
-        overlay = load_overlay(Path(args.path).expanduser().resolve(), symbols)
+        overlay = load_overlay(Path(root).expanduser().resolve(), symbols)
         calls = _call_grades(provider)
         by_source = {
             row["source"] or TREE_SITTER_SOURCE: row["n"]
@@ -148,7 +168,7 @@ def _run_facts_status(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(_facts_json(overlay, by_source, calls, args.limit), indent=2))
         return 0
-    _print_facts_status(args.path, overlay, by_source, calls, args.limit)
+    _print_facts_status(root, overlay, by_source, calls, args.limit)
     return 0
 
 
@@ -311,6 +331,20 @@ def ensure_graph(path: str, *, refresh: bool = True, allow_daemon: bool = True) 
         passes False, because asking a daemon to ensure the graph it is already ensuring
         recurses through its own socket.
     """
+    # A sub-directory of a tree that has a graph is answered from that graph (see
+    # `open_provider`), so it is the ancestor that is kept fresh, never a second graph built.
+    # The ancestor is refreshed BEFORE asking whether it covers the sub-directory, so a folder
+    # created since its last build is not mistaken for one it excludes.
+    ancestor = graph_ancestor(path)
+    if ancestor is not None:
+        _ensure_one(ancestor[0], refresh=refresh, allow_daemon=allow_daemon)
+        if graph_covers(*ancestor):
+            return
+    _ensure_one(path, refresh=refresh, allow_daemon=allow_daemon)
+
+
+def _ensure_one(path: str, *, refresh: bool, allow_daemon: bool) -> None:
+    """Build one root's graph if it is missing, and refresh it once per process."""
     if not graph_exists(path):
         _refreshed.add(path)
         if not (allow_daemon and _ensure_via_daemon(path)):
@@ -360,14 +394,14 @@ def select_symbol(symbols: Sequence[Symbol], name: str) -> tuple[Symbol | None, 
 def _run_query(args: argparse.Namespace) -> int:
     """Run one graph query and print its answer."""
     ensure_graph(args.path)
-    provider = SqliteGraphProvider(args.path)
+    provider = open_provider(args.path)
     try:
         return _answer_query(args, provider)
     finally:
         provider.close()
 
 
-def _answer_query(args: argparse.Namespace, provider: SqliteGraphProvider) -> int:
+def _answer_query(args: argparse.Namespace, provider: AnyProvider) -> int:
     """Resolve the written name and print the requested relationship."""
     symbols = provider.definition(args.symbol)
     if args.graph_command == "definition":
@@ -392,7 +426,7 @@ def _answer_query(args: argparse.Namespace, provider: SqliteGraphProvider) -> in
     return 0
 
 
-def _print_definitions(args: argparse.Namespace, provider: SqliteGraphProvider, symbols: Sequence[Symbol]) -> int:
+def _print_definitions(args: argparse.Namespace, provider: AnyProvider, symbols: Sequence[Symbol]) -> int:
     """Print every declaration matching a name."""
     if args.json:
         print(json.dumps({"results": [_symbol_json(symbol) for symbol in symbols]}, indent=2))
@@ -405,9 +439,7 @@ def _print_definitions(args: argparse.Namespace, provider: SqliteGraphProvider, 
     return 0
 
 
-def _report_selection_failure(
-    args: argparse.Namespace, provider: SqliteGraphProvider, candidates: Sequence[Symbol]
-) -> int:
+def _report_selection_failure(args: argparse.Namespace, provider: AnyProvider, candidates: Sequence[Symbol]) -> int:
     """Report an unknown or ambiguous name with the exit code that says which."""
     if not candidates:
         message = f"No symbol named {args.symbol!r}. {provider.coverage_note()}"

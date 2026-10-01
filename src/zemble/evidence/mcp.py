@@ -11,7 +11,7 @@ from pydantic import Field
 from zemble.daemon.protocol import CommandRefused
 from zemble.evidence.answers import explain_payload, outline_payload, signatures_payload
 from zemble.graph.cli import ensure_graph
-from zemble.graph.provider import SqliteGraphProvider
+from zemble.graph.provider import AnyProvider, open_provider
 from zemble.index import ZembleIndex
 from zemble.mcp_repo import resolve_repo, with_default_note
 from zemble.types import ContentType
@@ -44,10 +44,10 @@ _EXCLUDE_DESCRIPTION = (
 )
 
 
-def _open(repo: str) -> SqliteGraphProvider:
+def _open(repo: str) -> AnyProvider:
     """Build the graph if needed and open a provider on it."""
     ensure_graph(repo)
-    return SqliteGraphProvider(repo)
+    return open_provider(repo)
 
 
 async def _remote(cmd: str, args: dict[str, Any]) -> dict[str, Any] | None:

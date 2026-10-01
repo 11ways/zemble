@@ -595,10 +595,10 @@ def _with_graph(root: str, work: Callable[[Any], Any]) -> Any:
     and a provider is not shared across threads.
     """
     from zemble.graph.cli import ensure_graph
-    from zemble.graph.provider import SqliteGraphProvider
+    from zemble.graph.provider import open_provider
 
     ensure_graph(root, allow_daemon=False)
-    provider = SqliteGraphProvider(root)
+    provider = open_provider(root)
     try:
         return work(provider)
     finally:
@@ -620,9 +620,9 @@ def _root_of(args: dict[str, Any]) -> str:
 async def _cmd_explain(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Build an evidence bundle over the warm index and the daemon's own symbol graph.
 
-    The graph is the REQUESTED path's, even when the index is an ancestor's view: the view
-    already speaks paths relative to that path, which is what the graph, `outline` and
-    `dupes` for it speak, so chunks and symbols join on one spelling.
+    The graph is opened for the REQUESTED path (its own, or an ancestor's filtered view), even
+    when the index is an ancestor's view: both speak paths relative to that path, as `outline`
+    and `dupes` for it do, so chunks and symbols join on one spelling.
     """
     from zemble.evidence.answers import DEFAULT_BUDGET, DEFAULT_TOP_K, explain_payload
 
