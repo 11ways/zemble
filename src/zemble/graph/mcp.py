@@ -81,6 +81,8 @@ def answer(repo: str, symbol: str, method: str, *, limit: int = DEFAULT_LIMIT, *
     `method` arrives over the wire, so it fails closed against the query vocabulary
     instead of reaching getattr on the provider.
     """
+    if limit < 1:
+        raise ValueError("limit must be positive")
     if method not in PROVIDER_METHODS:
         return {"error": f"Unknown graph command {method!r}."}
     provider = _open(repo)
@@ -98,12 +100,22 @@ def answer(repo: str, symbol: str, method: str, *, limit: int = DEFAULT_LIMIT, *
                 "error": f"{symbol!r} is ambiguous; pass a qualified name.",
                 "candidates": [_symbol_json(found) for found in competing],
             }
+        traversal = method in {"neighbors", "implementations", "supertypes"}
+        if traversal:
+            # One lookahead hit proves truncation without materializing the rest of the graph.
+            kwargs["limit"] = limit + 1
         hits = getattr(provider, method)(chosen.id, **kwargs)
         payload: dict[str, Any] = {
             "symbol": _symbol_json(chosen),
             "display": display_name(chosen),
             **_capped(hits, limit, _hit_json),
         }
+        if traversal and provider.traversal_truncated:
+            payload["total_exact"] = False
+            payload["truncated"] = (
+                f"showing {min(limit, len(hits))} of at least {len(hits)}; traversal stopped at its cap; "
+                "raise `limit` to explore further"
+            )
         if not hits:
             payload["note"] = provider.coverage_note()
         return payload

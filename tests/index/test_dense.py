@@ -42,3 +42,47 @@ def test_load_maps_the_vectors_and_query_results_are_unchanged(tmp_path: Path) -
     assert writable.vectors.flags.writeable
     writable.vectors[0] = 0.0
     np.testing.assert_array_equal(SelectableBasicBackend.load(tmp_path).vectors, backend.vectors)
+
+
+def test_subtree_scoring_bounds_embedding_row_copies_and_preserves_rankings() -> None:
+    """Contiguous subtrees copy no rows; scattered selectors copy at most 4 MiB per block."""
+    from vicinity.utils import normalize
+
+    copies = []
+
+    class BoundedRowCopies(np.ndarray):
+        def __getitem__(self, key):
+            if isinstance(key, np.ndarray):
+                size = len(key) * self.shape[1] * self.dtype.itemsize
+                assert size <= 4 * 1024**2, "a scattered subtree must not copy its whole matrix"
+                copies.append(size)
+            return super().__getitem__(key)
+
+    rng = np.random.default_rng(20261001)
+    vectors = rng.standard_normal((4096, 1024)).astype(np.float32)
+    backend = SelectableBasicBackend(vectors, BasicArgs())
+    queries = rng.standard_normal((3, 1024)).astype(np.float32)
+    backend._vectors = backend.vectors.view(BoundedRowCopies)
+    contiguous = np.arange(10, 4000)
+    expected = 1 - normalize(queries).dot(np.asarray(backend.vectors)[contiguous].T)
+    np.testing.assert_array_equal(backend._selector_dist(queries, contiguous), expected)
+    assert not copies, "a contiguous subtree must use a slice, not a gather"
+
+    selector = np.arange(0, len(vectors), 3)
+    expected = 1 - normalize(queries).dot(np.asarray(backend.vectors)[selector].T)
+    actual = backend._selector_dist(queries, selector)
+    # Blocking can change the BLAS tail kernel by a float32 rounding unit, not the ranking.
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-7)
+    assert len(copies) == 2
+    expected_single = 1 - normalize(queries[:1]).dot(np.asarray(backend.vectors)[selector].T)
+    indices, distances = backend.query(queries[:1], 10, selector)[0]
+    positions = np.argsort(expected_single[0])[:10]
+    np.testing.assert_array_equal(indices, selector[positions])
+    np.testing.assert_allclose(distances, expected_single[0, positions], rtol=0, atol=2e-7)
+
+    # A slice must not silently clip invalid row IDs or reinterpret negative NumPy IDs.
+    negative = np.array([-3, -2, -1])
+    expected = 1 - normalize(queries).dot(np.asarray(backend.vectors)[negative].T)
+    np.testing.assert_array_equal(backend._selector_dist(queries, negative), expected)
+    with np.testing.assert_raises(IndexError):
+        backend._selector_dist(queries, np.array([len(vectors) - 1, len(vectors)]))

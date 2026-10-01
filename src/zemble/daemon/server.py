@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import gc
 import logging
 import os
 import time
+import traceback
 from collections.abc import Awaitable, Callable, Sequence
 from functools import partial
 from pathlib import Path
@@ -180,6 +182,9 @@ class Daemon:
         self.locks: dict[CacheKey, asyncio.Lock] = {}
         self.pending: set[CacheKey] = set()
         self.rebuilding: set[CacheKey] = set()
+        self._rebuild_tasks: dict[CacheKey, asyncio.Task[dict[str, Any]]] = {}
+        self._rebuild_changes: dict[CacheKey, set[Path]] = {}
+        self._rebuild_graph: set[CacheKey] = set()
         self.last_rebuild: dict[CacheKey, dict[str, Any]] = {}
         #: Why a root's last rebuild did not happen, e.g. a refused paid embed. Kept until one succeeds.
         self.last_error: dict[CacheKey, dict[str, Any]] = {}
@@ -270,15 +275,62 @@ class Daemon:
     async def rebuild(
         self, cache_key: CacheKey, *, java_changed: bool = True, changed_paths: Sequence[Path] | None = None
     ) -> dict[str, Any]:
-        """Reindex one root beside the index serving it and swap the result in atomically.
+        """Join one complete rebuild per index, including persistence and graph work.
 
-        :param cache_key: The root and content types to rebuild.
-        :param java_changed: Whether the symbol graph should be refreshed too.
-        :param changed_paths: The paths a watcher saw move; None re-walks the whole tree.
-        :return: What the rebuild did.
+        A cancelled waiter cannot cancel the shared job. Watcher changes arriving during a
+        job are coalesced into a follow-up pass, so joining never loses a named edit.
         """
+        if java_changed:
+            self._rebuild_graph.add(cache_key)
+        task = self._rebuild_tasks.get(cache_key)
+        if task is None:
+            self.rebuilding.add(cache_key)
+            # Queries serve the LRU generation; staleness must not start a second build mid-job.
+            self.cache._revalidate_after[cache_key] = float("inf")
+            task = asyncio.create_task(self._run_rebuild(cache_key, java_changed, changed_paths))
+            self._rebuild_tasks[cache_key] = task
+            task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        elif changed_paths:
+            self._rebuild_changes.setdefault(cache_key, set()).update(changed_paths)
+        return await asyncio.shield(task)
+
+    async def _run_rebuild(
+        self, cache_key: CacheKey, java_changed: bool, changed_paths: Sequence[Path] | None
+    ) -> dict[str, Any]:
+        """Own a rebuild until its last phase and release build-only objects before trimming."""
+        result: dict[str, Any] = {}
+        try:
+            while True:
+                result = await self._rebuild_once(cache_key, java_changed=java_changed, changed_paths=changed_paths)
+                changes = self._rebuild_changes.pop(cache_key, None)
+                if not changes:
+                    return result
+                changed_paths = sorted(changes)
+                java_changed = True
+        except Exception as exc:
+            # Keep traceback locations for logging, not failed builds' matrices and buffers.
+            traceback.clear_frames(exc.__traceback__)
+            raise
+        finally:
+            self._rebuild_tasks.pop(cache_key, None)
+            self._rebuild_changes.pop(cache_key, None)
+            self.rebuilding.discard(cache_key)
+            self._rebuild_graph.discard(cache_key)
+            # AIDEV-NOTE: the phase helper has returned, so its old index, persistence buffers
+            # and graph working set are gone. Trimming before those phases kept their peak RSS.
+            gc.collect()
+            release_free_heap()
+            if cache_key in self.cache._tasks:
+                # Start the cooldown AFTER collection too; a tiny/refused build must still
+                # serve its LRU generation rather than instantly launching a second build.
+                self.cache._revalidate_after[cache_key] = time.monotonic() + max(1.0, result.get("ms", 0) / 1000 * 3)
+
+    async def _rebuild_once(
+        self, cache_key: CacheKey, *, java_changed: bool, changed_paths: Sequence[Path] | None
+    ) -> dict[str, Any]:
+        """Build beside the serving generation, then drop both local generations before graph work."""
         lock = self.rebuild_lock_for(cache_key)
-        self.rebuilding.add(cache_key)
+        current = index = None
         started = time.monotonic()
         try:
             async with lock:
@@ -299,12 +351,10 @@ class Daemon:
                 elapsed = time.monotonic() - started
                 # The swap is the only step a query could observe, and it is one dict write
                 # on this event loop: an in-flight search keeps answering from the old index.
-                self.cache.replace(cache_key, index, cooldown_seconds=elapsed * 3)
+                self.cache.replace(cache_key, index, cooldown_seconds=float("inf"))
         finally:
-            self.rebuilding.discard(cache_key)
-        # The index this replaced is unreachable now, and so is everything the build allocated
-        # on the way. Hand it back: a long-lived daemon otherwise stays at its largest build.
-        release_free_heap()
+            # Only in-flight searches may still own the replaced generation, never a graph wait.
+            current = None
         result: dict[str, Any] = {**counts, "ms": round(elapsed * 1000), "chunks": len(index.chunks)}
         logger.info(
             "rebuilt %s: %d added, %d changed, %d removed, %d chunks in %d ms",
@@ -317,7 +367,9 @@ class Daemon:
         )
         if await self._persist(cache_key, index):
             await self._reload_definitions(cache_key, index)
-        if java_changed:
+        index = None
+        if java_changed or cache_key in self._rebuild_graph:
+            self._rebuild_graph.discard(cache_key)
             result["graph_ms"] = await self._refresh_graph(cache_key[0], changed_paths)
         self.last_rebuild[cache_key] = result
         self.last_error.pop(cache_key, None)
@@ -402,6 +454,8 @@ class Daemon:
             return {"id": request_id, "ok": False, "error": message, "kind": kind.value}
         finally:
             self.last_request_at = time.monotonic()
+            # Concurrent queries can finish after the rebuild's trim; release their freed buffers too.
+            release_free_heap()
         return {"id": request_id, "ok": True, "result": result}
 
     async def serve_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -679,6 +733,7 @@ async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
 async def _cmd_refresh(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Force a rebuild check for a root, loading it first if it is not resident."""
     cache_key, _index = await daemon.index_for(args)
+    del _index
     return await daemon.rebuild(cache_key)
 
 

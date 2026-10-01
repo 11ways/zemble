@@ -33,12 +33,27 @@ def embed_chunks(embedder: Embedder, chunks: list[Chunk]) -> npt.NDArray[np.floa
     return embedder.embed_documents(texts)
 
 
+#: Maximum temporary embedding-row copy for a scattered selector, per query worker.
+_SELECTOR_COPY_BYTES = 4 * 1024 * 1024
+
+
 class SelectableBasicBackend(CosineBasicBackend):
     def _selector_dist(self, x: npt.NDArray, selector: npt.NDArray[np.int_]) -> npt.NDArray:
-        """Compute cosine distance."""
+        """Score contiguous subtrees through a view, gathering scattered rows in bounded blocks."""
         x_norm = normalize(x)
-        sim = x_norm.dot(self._vectors[selector].T)
-        return 1 - sim
+        if not len(selector):
+            return np.empty((len(x), 0), dtype=self._vectors.dtype)
+        start, end = int(selector[0]), int(selector[-1]) + 1
+        if 0 <= start < end <= len(self._vectors) and end - start == len(selector) and np.all(np.diff(selector) == 1):
+            return 1 - x_norm.dot(self._vectors[start:end].T)
+        # AIDEV-NOTE: advanced indexing allocates rows x dimensions; fifty requests must
+        # never each gather the whole selected matrix. Contiguous subtrees need no copy.
+        rows = max(1, _SELECTOR_COPY_BYTES // (self._vectors.shape[1] * self._vectors.dtype.itemsize))
+        distances = np.empty((len(x), len(selector)), dtype=np.result_type(x_norm, self._vectors))
+        for offset in range(0, len(selector), rows):
+            block = selector[offset : offset + rows]
+            distances[:, offset : offset + len(block)] = 1 - x_norm.dot(self._vectors[block].T)
+        return distances
 
     def query(self, vectors: npt.NDArray, k: int, selector: npt.NDArray[np.int_] | None = None) -> QueryResult:
         """Batched distance query.

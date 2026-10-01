@@ -1,0 +1,63 @@
+{
+  "date": "2026-10-01",
+  "command": ".venv/bin/python -m tests.measure_daemon_memory --repo /home/skerit/projects/sketerm/src --compare-revision 34f0826",
+  "baseline_revision": "34f082665038d7b8efbf4cfaabccd94d056a4380",
+  "after_state": "Working-tree fixes committed together with this measurement record",
+  "isolation": "Fresh /tmp/opencode/zemble-memory-* workspace, socket and cache for each run; offline FakeEmbedder without call history; no real indexes opened",
+  "comparison": "One frozen input copied into both workspaces; baseline source exported by git archive; child verifies the checkout it imports",
+  "snapshot_sha256": "f7e84b173108fb5079e5402d1a3ca33c4c8988a475b013ad0c186635171a45e0",
+  "source_files": 112,
+  "source_bytes": 3145539,
+  "probe_callers": 2000,
+  "chunks": 5296,
+  "dimensions": 1024,
+  "rebuilds_per_run": 10,
+  "concurrent_queries_per_round": 50,
+  "queries_per_run": 500,
+  "rss_sampling_seconds": 0.02,
+  "rss_abort_mib": 2500,
+  "before": {
+    "warm_rss_mib": 138.7,
+    "peak_rss_mib": 427.0,
+    "final_rss_mib": 391.4,
+    "round_rss_mib": [308.2, 331.4, 337.3, 312.0, 337.2, 330.2, 372.2, 378.1, 373.9, 391.4]
+  },
+  "after": {
+    "warm_rss_mib": 136.9,
+    "peak_rss_mib": 303.3,
+    "final_rss_mib": 236.1,
+    "round_rss_mib": [137.5, 179.9, 180.1, 222.0, 220.7, 263.8, 300.0, 260.2, 256.5, 236.1]
+  },
+  "earlier_unpaired_runs": [
+    {
+      "state": "Original HEAD before production edits",
+      "source_files": 111, "source_bytes": 3145046, "chunks": 5295,
+      "warm_rss_mib": 134.6, "peak_rss_mib": 496.2, "final_rss_mib": 474.4,
+      "round_rss_mib": [410.6, 399.3, 398.8, 369.6, 429.6, 412.1, 389.1, 452.4, 444.0, 474.4]
+    },
+    {
+      "state": "Initial fixes; query buffers freed after the rebuild trim exposed a need for request-completion trimming",
+      "source_files": 111, "source_bytes": 3145046, "chunks": 5295,
+      "warm_rss_mib": 135.0, "peak_rss_mib": 337.8, "final_rss_mib": 313.2,
+      "round_rss_mib": [172.2, 214.1, 257.2, 217.7, 197.2, 216.4, 257.7, 286.3, 314.5, 313.2]
+    },
+    {
+      "state": "Request-completion trimming added, before cooldown regression was fixed",
+      "source_files": 111, "source_bytes": 3145046, "chunks": 5295,
+      "warm_rss_mib": 135.1, "peak_rss_mib": 236.1, "final_rss_mib": 190.3,
+      "round_rss_mib": [136.3, 157.9, 158.1, 141.6, 160.8, 140.3, 160.2, 192.5, 192.7, 190.3]
+    },
+    {
+      "state": "Final production code; live source gained a file, prompting the frozen-input comparison above",
+      "source_files": 112, "source_bytes": 3145539, "chunks": 5296,
+      "warm_rss_mib": 138.0, "peak_rss_mib": 308.4, "final_rss_mib": 298.7,
+      "round_rss_mib": [138.4, 178.3, 199.2, 239.2, 218.9, 238.0, 279.4, 238.1, 242.0, 298.7]
+    }
+  ],
+  "verification": {
+    "suite": "ZEMBLE_DAEMON=0 .venv/bin/pytest",
+    "passed": 1004,
+    "coverage_percent": 94,
+    "lint": "ruff check src tests and ruff format --check src tests passed"
+  }
+}

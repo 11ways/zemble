@@ -562,6 +562,12 @@ with a `candidates` list rather than as a failure. Every answer is capped at
 the cap bit, so a cap is never silent. A wire command outside the query
 vocabulary fails closed with an `error` instead of reaching the provider.
 
+Neighbor and hierarchy walks enforce the cap during traversal, with one lookahead
+hit. A stopped walk sets `total_exact: false`: `total` is then a lower bound, and
+`truncated` explicitly says "at least". Subtree walks still cross sibling modules,
+but bound visited symbols to `max(4096, (limit + 1) * 32)` so filtering cannot
+materialize the whole ancestor graph before finding an in-folder answer.
+
 ## The provider seam
 
 `GraphProvider` (`zemble/graph/provider.py`) is a `Protocol` holding

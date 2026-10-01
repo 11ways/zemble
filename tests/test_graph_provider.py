@@ -236,3 +236,90 @@ def test_coverage_note_names_missing_extractors(graph_cache: Path, tmp_path: Pat
         provider.close()
     assert "no grammar for: cobol (1)" in note, "the note names the gap"
     assert "languages" in note, "and says how wide the coverage is"
+
+
+def test_capped_walk_streams_only_lookahead_hits_and_reports_a_lower_bound(tmp_path, graph_cache, monkeypatch):
+    """A capped high-fanout graph query stops reading once its lookahead proves truncation."""
+    from zemble.graph.mcp import answer
+    from zemble.graph.store import build_graph
+
+    source = tmp_path / "fanout.py"
+    source.write_text(
+        "def hub():\n    return 0\n" + "\n".join(f"def caller_{i}():\n    return hub()\n" for i in range(100))
+    )
+    build_graph(str(tmp_path), workers=1)
+    pulled = 0
+    real = SqliteGraphProvider._hits
+
+    def counted(self, edges, **kwargs):
+        nonlocal pulled
+        assert len(edges) == 1, "a walk must stream, not materialize the whole adjacency list"
+        pulled += 1
+        return real(self, edges, **kwargs)
+
+    monkeypatch.setattr(SqliteGraphProvider, "_hits", counted)
+    result = answer(str(tmp_path), "hub", "neighbors", hops=3, limit=10)
+    assert len(result["results"]) == 10
+    assert result["total"] == 11 and result["total_exact"] is False
+    assert "at least 11" in result["truncated"]
+    assert pulled == 11, "stop at one lookahead, not after walking a hundred callers"
+
+
+def test_hierarchy_cap_and_subtree_filter_are_applied_during_the_walk(tmp_path, graph_cache):
+    """Capped subtree walks keep crossing siblings but stop after enough in-folder hits."""
+    from zemble.graph.provider import SubtreeGraphProvider
+    from zemble.graph.store import build_graph
+
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "sibling").mkdir()
+    (tmp_path / "keep" / "Base.java").write_text("class Base {}")
+    (tmp_path / "sibling" / "Middle.java").write_text("class Middle extends Base {}")
+    (tmp_path / "keep" / "Children.java").write_text(
+        "\n".join(f"class Child{i} extends Middle {{}}" for i in range(100))
+    )
+    build_graph(str(tmp_path), workers=1)
+    graph = SqliteGraphProvider(str(tmp_path))
+    view = SubtreeGraphProvider(graph, "keep", str(tmp_path / "keep"))
+    try:
+        base = view.definition("Base")[0]
+        hits = view.implementations(base.id, limit=3)
+        assert len(hits) == 3 and all(hit.depth == 2 for hit in hits)
+        assert all(hit.symbol.file_path == "Children.java" for hit in hits)
+        assert view.traversal_truncated
+        # An exhausted small traversal retains an exact count.
+        assert len(view.supertypes(view.definition("Child0")[0].id, limit=10)) == 1
+        assert not view.traversal_truncated
+    finally:
+        view.close()
+
+
+def test_subtree_walk_bounds_visited_siblings_even_when_no_result_passes(tmp_path, graph_cache, monkeypatch):
+    """Filtering cannot force a capped walk to retain every node of a large sibling module."""
+    from zemble.graph.provider import SubtreeGraphProvider
+    from zemble.graph.store import build_graph
+
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "sibling").mkdir()
+    (tmp_path / "keep" / "Hub.java").write_text("class Hub { static int hub() { return 0; } }")
+    for batch in range(43):
+        (tmp_path / "sibling" / f"Calls{batch}.java").write_text(
+            "\n".join(f"class Caller{batch}_{i} {{ int call() {{ return Hub.hub(); }} }}" for i in range(100))
+        )
+    build_graph(str(tmp_path), workers=1)
+    graph = SqliteGraphProvider(str(tmp_path))
+    view = SubtreeGraphProvider(graph, "keep", str(tmp_path / "keep"))
+    pulls = 0
+    real = graph._hits
+
+    def counted(edges, **kwargs):
+        nonlocal pulls
+        pulls += len(edges)
+        return real(edges, **kwargs)
+
+    monkeypatch.setattr(graph, "_hits", counted)
+    try:
+        hits = view.neighbors(view.definition("hub")[0].id, hops=3, limit=10)
+        assert hits == [] and view.traversal_truncated
+        assert pulls < 4300, "a filtered-out fanout still stops at the visited-node budget"
+    finally:
+        view.close()

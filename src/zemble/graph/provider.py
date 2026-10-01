@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import replace
+from itertools import chain
 from typing import Protocol, runtime_checkable
 
 from zemble.graph.facts import TREE_SITTER_SOURCE
@@ -72,11 +73,11 @@ class GraphProvider(Protocol):
         """Find every edge of any kind pointing at a symbol."""
         ...
 
-    def implementations(self, type_id: str) -> list[Hit]:
+    def implementations(self, type_id: str, *, limit: int | None = None) -> list[Hit]:
         """Find direct and transitive subtypes of a type."""
         ...
 
-    def supertypes(self, type_id: str) -> list[Hit]:
+    def supertypes(self, type_id: str, *, limit: int | None = None) -> list[Hit]:
         """Find direct and transitive supertypes of a type."""
         ...
 
@@ -100,7 +101,9 @@ class GraphProvider(Protocol):
         """List the symbols whose line span contains a region, innermost first."""
         ...
 
-    def neighbors(self, symbol_id: str, hops: int = 1, kinds: Sequence[EdgeKind] | None = None) -> list[Hit]:
+    def neighbors(
+        self, symbol_id: str, hops: int = 1, kinds: Sequence[EdgeKind] | None = None, *, limit: int | None = None
+    ) -> list[Hit]:
         """Walk outward from a symbol in both directions."""
         ...
 
@@ -141,6 +144,7 @@ class SqliteGraphProvider:
         """Open the graph database of a workspace path."""
         self.path = path
         self.connection: sqlite3.Connection = connect(path)
+        self.traversal_truncated = False
 
     def close(self) -> None:
         """Close the underlying database connection."""
@@ -228,6 +232,10 @@ class SqliteGraphProvider:
 
     def _edges(self, column: str, symbol_id: str, kinds: Sequence[str] | None) -> list[Edge]:
         """Load edges on one side of a symbol, optionally filtered by kind."""
+        return list(self._iter_edges(column, symbol_id, kinds))
+
+    def _iter_edges(self, column: str, symbol_id: str, kinds: Sequence[str] | None) -> Iterator[Edge]:
+        """Stream one adjacency list, closing its cursor even when a traversal stops early."""
         query = f"SELECT * FROM edges WHERE {column} = ?"  # noqa: S608
         params: list[object] = [symbol_id]
         if kinds:
@@ -235,7 +243,12 @@ class SqliteGraphProvider:
             params.extend(kinds)
         if column == "src_id":
             query += " AND dst_id IS NOT NULL"
-        return [edge_from_row(row) for row in self.connection.execute(query, params)]
+        cursor = self.connection.execute(query, params)
+        try:
+            for row in cursor:
+                yield edge_from_row(row)
+        finally:
+            cursor.close()
 
     def _hits(self, edges: Sequence[Edge], *, side: str, depth: int = 1) -> list[Hit]:
         """Turn edges into hits by loading the symbol on the requested side."""
@@ -271,34 +284,63 @@ class SqliteGraphProvider:
         """Find every edge of any kind pointing at a symbol."""
         return self._sorted(self._hits(self._incoming(symbol_id), side="src"))
 
-    def implementations(self, type_id: str) -> list[Hit]:
-        """Find direct and transitive subtypes of a type."""
-        return self._walk_hierarchy(type_id, incoming=True)
+    def implementations(self, type_id: str, *, limit: int | None = None, prefix: str = "") -> list[Hit]:
+        """Find direct and transitive subtypes, bounding a capped walk while it runs."""
+        return self._walk(type_id, 32, _HIERARCHY_KINDS, incoming=True, limit=limit, prefix=prefix)
 
-    def supertypes(self, type_id: str) -> list[Hit]:
-        """Find direct and transitive supertypes of a type."""
-        return self._walk_hierarchy(type_id, incoming=False)
+    def supertypes(self, type_id: str, *, limit: int | None = None, prefix: str = "") -> list[Hit]:
+        """Find direct and transitive supertypes, bounding a capped walk while it runs."""
+        return self._walk(type_id, 32, _HIERARCHY_KINDS, incoming=False, limit=limit, prefix=prefix)
 
-    def _walk_hierarchy(self, type_id: str, *, incoming: bool) -> list[Hit]:
-        """Breadth-first walk of the type hierarchy, recording the depth of each hop."""
+    def _walk(
+        self,
+        symbol_id: str,
+        hops: int,
+        kinds: Sequence[str] | None,
+        *,
+        incoming: bool | None,
+        limit: int | None,
+        prefix: str,
+    ) -> list[Hit]:
+        """Walk breadth-first with bounded results and visited nodes for capped requests.
+
+        Subtree walks may pass through siblings, but cannot accumulate an entire ancestor
+        graph to find a few in-folder hits. A stopped walk reports a lower bound, not a total.
+        """
+        self.traversal_truncated = False
+        if limit is not None and limit < 1:
+            raise ValueError("traversal limit must be positive")
+        visit_limit = max(4096, limit * 32) if limit is not None else None
         hits: list[Hit] = []
-        seen = {type_id}
-        frontier = [type_id]
-        depth = 0
-        while frontier and depth < 32:
-            depth += 1
+        seen = {symbol_id}
+        frontier = [symbol_id]
+        for depth in range(1, max(1, hops) + 1):
             next_frontier: list[str] = []
             for current in frontier:
-                edges = (
-                    self._incoming(current, _HIERARCHY_KINDS) if incoming else self._outgoing(current, _HIERARCHY_KINDS)
-                )
-                for hit in self._hits(edges, side="src" if incoming else "dst", depth=depth):
-                    if hit.symbol.id in seen:
-                        continue
-                    seen.add(hit.symbol.id)
-                    hits.append(hit)
-                    next_frontier.append(hit.symbol.id)
+                outgoing = self._iter_edges("src_id", current, kinds)
+                ingoing = self._iter_edges("dst_id", current, kinds)
+                edges = ingoing if incoming is True else outgoing if incoming is False else chain(outgoing, ingoing)
+                try:
+                    for edge in edges:
+                        side = "src" if incoming is True or (incoming is None and edge.dst_id == current) else "dst"
+                        for hit in self._hits([edge], side=side, depth=depth):
+                            if hit.symbol.id in seen:
+                                continue
+                            seen.add(hit.symbol.id)
+                            next_frontier.append(hit.symbol.id)
+                            if hit.symbol.file_path.startswith(prefix):
+                                hits.append(hit)
+                            if (limit is not None and len(hits) >= limit) or (
+                                visit_limit is not None and len(seen) >= visit_limit
+                            ):
+                                self.traversal_truncated = True
+                                return hits
+                finally:
+                    outgoing.close()
+                    ingoing.close()
             frontier = next_frontier
+            if not frontier:
+                break
         return hits
 
     def overrides_of(self, method_id: str) -> list[Hit]:
@@ -326,25 +368,24 @@ class SqliteGraphProvider:
             ordered.append(hit)
         return ordered
 
-    def neighbors(self, symbol_id: str, hops: int = 1, kinds: Sequence[EdgeKind] | None = None) -> list[Hit]:
-        """Walk outward from a symbol in both directions."""
-        kind_values = [kind.value for kind in kinds] if kinds else None
-        hits: list[Hit] = []
-        seen = {symbol_id}
-        frontier = [symbol_id]
-        for depth in range(1, max(1, hops) + 1):
-            next_frontier: list[str] = []
-            for current in frontier:
-                found = self._hits(self._outgoing(current, kind_values), side="dst", depth=depth)
-                found += self._hits(self._incoming(current, kind_values), side="src", depth=depth)
-                for hit in found:
-                    if hit.symbol.id in seen:
-                        continue
-                    seen.add(hit.symbol.id)
-                    hits.append(hit)
-                    next_frontier.append(hit.symbol.id)
-            frontier = next_frontier
-        return hits
+    def neighbors(
+        self,
+        symbol_id: str,
+        hops: int = 1,
+        kinds: Sequence[EdgeKind] | None = None,
+        *,
+        limit: int | None = None,
+        prefix: str = "",
+    ) -> list[Hit]:
+        """Walk outward in both directions, stopping during traversal when a cap is reached."""
+        return self._walk(
+            symbol_id,
+            hops,
+            [kind.value for kind in kinds] if kinds else None,
+            incoming=None,
+            limit=limit,
+            prefix=prefix,
+        )
 
     @staticmethod
     def _sorted(hits: list[Hit]) -> list[Hit]:
@@ -401,6 +442,11 @@ class SubtreeGraphProvider:
     def connection(self) -> sqlite3.Connection:
         """The ancestor graph's connection; raw SQL over it is NOT filtered to the sub-directory."""
         return self.graph.connection
+
+    @property
+    def traversal_truncated(self) -> bool:
+        """Whether the ancestor walk stopped before counting every reachable symbol."""
+        return self.graph.traversal_truncated
 
     def close(self) -> None:
         """Close the ancestor provider."""
@@ -461,13 +507,13 @@ class SubtreeGraphProvider:
         """Find every in-folder edge of any kind pointing at a symbol."""
         return self._hits(self.graph.references(self._inbound(symbol_id)))
 
-    def implementations(self, type_id: str) -> list[Hit]:
+    def implementations(self, type_id: str, *, limit: int | None = None) -> list[Hit]:
         """Find the in-folder direct and transitive subtypes of a type."""
-        return self._hits(self.graph.implementations(self._inbound(type_id)))
+        return self._hits(self.graph.implementations(self._inbound(type_id), limit=limit, prefix=self._lead))
 
-    def supertypes(self, type_id: str) -> list[Hit]:
+    def supertypes(self, type_id: str, *, limit: int | None = None) -> list[Hit]:
         """Find the in-folder direct and transitive supertypes of a type."""
-        return self._hits(self.graph.supertypes(self._inbound(type_id)))
+        return self._hits(self.graph.supertypes(self._inbound(type_id), limit=limit, prefix=self._lead))
 
     def overrides_of(self, method_id: str) -> list[Hit]:
         """Find the in-folder supertype method a method overrides."""
@@ -481,9 +527,11 @@ class SubtreeGraphProvider:
         """Find the in-folder tests covering a symbol."""
         return self._hits(self.graph.tests_of(self._inbound(symbol_id)))
 
-    def neighbors(self, symbol_id: str, hops: int = 1, kinds: Sequence[EdgeKind] | None = None) -> list[Hit]:
-        """Walk outward from a symbol through the whole ancestor graph, answering with in-folder symbols."""
-        return self._hits(self.graph.neighbors(self._inbound(symbol_id), hops, kinds))
+    def neighbors(
+        self, symbol_id: str, hops: int = 1, kinds: Sequence[EdgeKind] | None = None, *, limit: int | None = None
+    ) -> list[Hit]:
+        """Walk through the ancestor, applying the result cap to in-folder symbols during traversal."""
+        return self._hits(self.graph.neighbors(self._inbound(symbol_id), hops, kinds, limit=limit, prefix=self._lead))
 
     def meta(self) -> dict[str, str]:
         """Return the ancestor graph's stored metadata."""
