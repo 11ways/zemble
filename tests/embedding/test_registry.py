@@ -9,6 +9,8 @@ from zemble.embedding.openai_compat import OpenAICompatibleEmbedder
 from zemble.embedding.registry import (
     DEFAULT_EMBEDDER_SPEC,
     EmbedderSpecError,
+    build_embedder,
+    cached_family,
     caching_enabled,
     parse_embedder_spec,
     resolve_embedder_spec,
@@ -134,3 +136,14 @@ def test_fusion_bonus_is_declared_per_family(spec: str, expected: float) -> None
 def test_fusion_bonus_of_an_undeclared_embedder_is_zero() -> None:
     """An embedder from outside this registry never silently retunes ranking."""
     assert semantic_weight_bonus(object()) == pytest.approx(0.0)
+
+
+def test_cached_family_reads_an_index_model_id_without_building_anything() -> None:
+    """An index's stored model id names the cache file its vectors live in; an uncached scheme names none."""
+    assert cached_family("voyage:voyage-4-lite@1024") == "voyage:voyage-4-lite"
+    assert cached_family("openai:http://localhost:11434/v1/#nomic-embed-text@768") == (
+        "openai:http://localhost:11434/v1#nomic-embed-text"
+    )
+    assert cached_family("model2vec:minishlab/potion-code-16M") is None
+    assert cached_family("nonsense") is None
+    assert cached_family("voyage:voyage-4-lite@1024") == build_embedder("voyage:voyage-4-lite@1024").family

@@ -2,7 +2,6 @@ import argparse
 import io
 import json
 import os
-import re
 import sys
 import warnings
 from collections.abc import Sequence
@@ -10,25 +9,27 @@ from enum import Enum
 from importlib.util import find_spec
 from pathlib import Path
 from shutil import rmtree
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from zemble.cache import (
-    cache_key,
     has_cached_index,
     indexed_ancestor_hint,
     resolve_cache_folder,
     resolve_index_root,
     save_index_to_cache,
 )
+from zemble.cache_orphans import DEFAULT_MAX_AGE_DAYS, KEY_DIR_NAME, OrphanKind, find_orphans, remove_orphan
 from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser, run_embed_status
+from zemble.embedding.gc import DEFAULT_GRACE_DAYS, collect_embeddings, day_text
 from zemble.embedding.pricing import CONFIRM_ENV, EmbeddingBudgetExceeded, confirmed
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
 from zemble.index import ZembleIndex, resolve_embedder
+from zemble.index.scope import megabytes
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
 from zemble.refusal import Refused
@@ -62,7 +63,7 @@ _CLI_DISPATCH_ARGS = frozenset(
         "daemon",
     }
 )
-_CLEAR_CHOICE = Literal["all", "index", "savings", "orphans"]
+_CLEAR_CHOICE = Literal["all", "index", "savings", "orphans", "embeddings"]
 
 #: Subcommands that own their own runner and return an exit code.
 _SUBCOMMAND_RUNNERS = {
@@ -74,8 +75,6 @@ _SUBCOMMAND_RUNNERS = {
     **dict.fromkeys(EMBED_STATUS_COMMANDS, run_embed_status),
     **dict.fromkeys(STATUS_COMMANDS, run_status),
 }
-
-_SHA_256_REGEX = re.compile(r"^[a-f0-9]{64}$")
 
 
 def _build_index(
@@ -506,7 +505,7 @@ def _clear_indexes(cache_folder: Path) -> None:
     """Remove all valid index entries from the cache folder."""
     indexes: set[Path] = set()
     for path in cache_folder.glob("*/index*"):
-        if not _SHA_256_REGEX.match(path.parent.name):
+        if not KEY_DIR_NAME.match(path.parent.name):
             continue
         if PersistencePath.from_path(path).non_existing():
             continue
@@ -530,41 +529,81 @@ def _clear_savings(cache_folder: Path) -> None:
         print(f"Cleared savings at `{path}`")
 
 
-def _clear_orphans(cache_folder: Path) -> None:
-    """Remove index entries whose local root_path no longer exists."""
-    orphans: dict[Path, str] = {}
-    for path in cache_folder.glob("*/index*"):
-        if not _SHA_256_REGEX.match(path.parent.name):
-            continue
-        try:
-            with open(path / "metadata.json", encoding="utf-8") as f:
-                metadata = json.load(f)
-                root_path = metadata.get("root_path") if isinstance(metadata, dict) else None
-        except (OSError, json.JSONDecodeError):
-            continue
-        # Git-URL entries store their temp clone dir as root_path, so only trust entries whose key matches.
-        if not isinstance(root_path, str) or not root_path or cache_key(root_path) != path.parent.name:
-            continue
-        if not Path(root_path).exists():
-            orphans[path.parent] = root_path
-
+def _clear_orphans(cache_folder: Path, *, dry_run: bool, max_age_days: int) -> None:
+    """Remove (or with dry_run list) every cache entry nothing will read again, with its size."""
+    orphans = find_orphans(cache_folder, max_age_days=max_age_days)
     if not orphans:
         print("No orphaned indexes found")
-    else:
-        for index_folder, root_path in orphans.items():
-            rmtree(index_folder)
-            print(f"Cleared orphaned index for `{root_path}`")
+        return
+    total = 0
+    for orphan in orphans:
+        where = f"`{orphan.detail}`" if orphan.detail else f"`{orphan.target}`"
+        if dry_run:
+            print(f"Would clear {orphan.kind.label} {where} ({megabytes(orphan.size)})")
+            total += orphan.size
+            continue
+        if not remove_orphan(orphan):
+            print(f"Kept {orphan.kind.label} {where}: in use")
+            continue
+        total += orphan.size
+        if orphan.kind is OrphanKind.INDEX_ROOT_GONE:
+            print(f"Cleared orphaned index for {where} ({megabytes(orphan.size)})")
+        else:
+            print(f"Cleared {orphan.kind.label} {where} ({megabytes(orphan.size)})")
+    print(f"{'Would free' if dry_run else 'Freed'} {megabytes(total)} in total")
 
 
-def _run_clear(clear_type: _CLEAR_CHOICE) -> None:
+def _clear_embeddings(cache_folder: Path, *, dry_run: bool, grace_days: int) -> None:
+    """Sweep (or with dry_run size up) the embedding vectors no index references and nobody used lately."""
+    reports = collect_embeddings(cache_folder, grace_days=grace_days, dry_run=dry_run)
+    if not reports:
+        print(f"No embedding cache found in `{cache_folder / 'embeddings'}`")
+        return
+    for report in reports:
+        name = report.path.name
+        if report.refused is not None:
+            print(f"Skipped {name}: {report.refused}")
+            continue
+        unreferenced = report.rows - report.referenced
+        since = day_text(report.stamps_since) if report.stamps_since is not None else "today"
+        print(
+            f"{name}: {report.rows} vectors, {report.referenced} referenced by {report.indexes} index(es), "
+            f"{unreferenced} unreferenced; {report.swept} of those last used on {day_text(report.cutoff_day)} "
+            f"or earlier, {unreferenced - report.swept} kept by the {grace_days}-day grace period "
+            f"(vectors stored before use stamps existed count as used on {since})"
+        )
+        if dry_run:
+            print(
+                f"  would free about {megabytes(report.swept_bytes + report.slack_bytes)} of "
+                f"{megabytes(report.size_before)} ({megabytes(report.swept_bytes)} of vectors, "
+                f"{megabytes(report.slack_bytes)} of free pages and WAL)"
+            )
+            if report.holders:
+                print(f"  a real run is refused while pid {', '.join(map(str, report.holders))} hold(s) it open")
+        else:
+            after = report.size_after if report.size_after is not None else report.size_before
+            print(f"  {megabytes(report.size_before)} -> {megabytes(after)}")
+
+
+def _run_clear(
+    clear_type: _CLEAR_CHOICE,
+    *,
+    dry_run: bool = False,
+    grace_days: int = DEFAULT_GRACE_DAYS,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+) -> None:
     """Run the `clear` subcommand."""
     cache_folder = resolve_cache_folder()
+    if dry_run and clear_type not in ("orphans", "embeddings"):
+        raise SystemExit("--dry-run applies to `clear orphans` and `clear embeddings` only")
     if clear_type == "index" or clear_type == "all":
         _clear_indexes(cache_folder)
     if clear_type == "savings" or clear_type == "all":
         _clear_savings(cache_folder)
     if clear_type == "orphans":
-        _clear_orphans(cache_folder)
+        _clear_orphans(cache_folder, dry_run=dry_run, max_age_days=max_age_days)
+    if clear_type == "embeddings":
+        _clear_embeddings(cache_folder, dry_run=dry_run, grace_days=grace_days)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -609,8 +648,30 @@ def _build_parser() -> argparse.ArgumentParser:
     clear_p = declare_no_root(sub.add_parser("clear", help="Clear the index cache."))
     clear_p.add_argument(
         "type",
-        choices=["all", "index", "savings", "orphans"],
-        help="Type of cache to clear. `orphans` removes indexes whose source path no longer exists.",
+        choices=list(get_args(_CLEAR_CHOICE)),
+        help=(
+            "Type of cache to clear. `orphans` removes entries nothing reads again (roots gone, stale git-URL "
+            "indexes, unused embedder files, retired graph versions, temp leftovers); `embeddings` sweeps "
+            "vectors no index references and VACUUMs."
+        ),
+    )
+    clear_p.add_argument(
+        "--dry-run", action="store_true", help="List what `orphans`/`embeddings` would free, deleting nothing."
+    )
+    clear_p.add_argument(
+        "--grace-days",
+        type=int,
+        default=DEFAULT_GRACE_DAYS,
+        help=f"`embeddings`: keep unreferenced vectors used within this many days, 0 for none (default: {DEFAULT_GRACE_DAYS}).",
+    )
+    clear_p.add_argument(
+        "--max-age-days",
+        type=int,
+        default=DEFAULT_MAX_AGE_DAYS,
+        help=(
+            "`orphans`: git-URL indexes and unused embedder files older than this go "
+            f"(default: {DEFAULT_MAX_AGE_DAYS})."
+        ),
     )
 
     related_p = sub.add_parser("find-related", help="Find code similar to a specific location.")
@@ -690,7 +751,7 @@ def _cli_main() -> None:
         integration_ids = None if not args.type or "all" in args.type else [IntegrationType(t) for t in args.type]
         run(args.command, agent_ids=args.agent, integration_ids=integration_ids, yes=args.yes)
     elif args.command == "clear":
-        _run_clear(args.type)
+        _run_clear(args.type, dry_run=args.dry_run, grace_days=args.grace_days, max_age_days=args.max_age_days)
     elif args.command == "search":
         _run_search(
             args.path,

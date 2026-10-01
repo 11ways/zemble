@@ -57,11 +57,22 @@ def _split_dimensions(rest: str) -> tuple[str, int | None]:
     return body, dimensions
 
 
-def _build(spec: str) -> tuple[Embedder, str, str]:
-    """Build the raw (uncached) embedder for a spec.
+@dataclass(frozen=True)
+class _ParsedSpec:
+    """A spec string taken apart, before anything is built from it."""
+
+    scheme: str
+    family: str
+    model: str
+    dimensions: int | None
+    base_url: str = ""
+
+
+def _parse(spec: str) -> _ParsedSpec:
+    """Take a spec apart into the keys the cache, the price table and the builder read.
 
     :param spec: The spec string.
-    :return: The embedder, its scheme, and its cache family key.
+    :return: Its scheme, cache family, model, width and (OpenAI-compatible only) base URL.
     :raises EmbedderSpecError: If the spec is empty, has an unknown scheme, or is malformed.
     """
     spec = spec.strip()
@@ -76,23 +87,17 @@ def _build(spec: str) -> tuple[Embedder, str, str]:
         raise EmbedderSpecError(f"Embedder spec {spec!r} names no model")
 
     if scheme == "model2vec":
-        from zemble.embedding.model2vec import Model2VecEmbedder
-
         if "@" in rest:
             raise EmbedderSpecError(
                 f"Embedder spec {spec!r} sets dimensions, but a Model2Vec model's width is fixed by the model"
             )
-        return Model2VecEmbedder(rest), scheme, f"model2vec:{rest}"
+        return _ParsedSpec(scheme, f"model2vec:{rest}", rest, None)
 
     if scheme == "voyage":
-        from zemble.embedding.voyage import VoyageEmbedder
-
         model, dimensions = _split_dimensions(rest)
         if not model:
             raise EmbedderSpecError(f"Embedder spec {spec!r} names no model")
-        return VoyageEmbedder(model, dimensions), scheme, f"voyage:{model}"
-
-    from zemble.embedding.openai_compat import DEFAULT_API_KEY_ENV, OpenAICompatibleEmbedder
+        return _ParsedSpec(scheme, f"voyage:{model}", model, dimensions)
 
     base_url, separator, tail = rest.partition("#")
     if not separator or not base_url.strip() or not tail.strip():
@@ -101,11 +106,46 @@ def _build(spec: str) -> tuple[Embedder, str, str]:
     if not model:
         raise EmbedderSpecError(f"Embedder spec {spec!r} names no model")
     base_url = base_url.rstrip("/")
+    return _ParsedSpec(scheme, f"openai:{base_url}#{model}", model, dimensions, base_url)
+
+
+def cached_family(spec: str) -> str | None:
+    """Return the embedding-cache family a spec (or an index's stored model id) reads and writes, or None.
+
+    :return: The family, or None for a scheme that is never cached or a spec that does not parse.
+    """
+    try:
+        parsed = _parse(spec)
+    except EmbedderSpecError:
+        return None
+    return parsed.family if parsed.scheme in _CACHED_SCHEMES else None
+
+
+def _build(spec: str) -> tuple[Embedder, str, str]:
+    """Build the raw (uncached) embedder for a spec.
+
+    :param spec: The spec string.
+    :return: The embedder, its scheme, and its cache family key.
+    :raises EmbedderSpecError: If the spec is empty, has an unknown scheme, or is malformed.
+    """
+    parsed = _parse(spec)
+    if parsed.scheme == "model2vec":
+        from zemble.embedding.model2vec import Model2VecEmbedder
+
+        return Model2VecEmbedder(parsed.model), parsed.scheme, parsed.family
+
+    if parsed.scheme == "voyage":
+        from zemble.embedding.voyage import VoyageEmbedder
+
+        return VoyageEmbedder(parsed.model, parsed.dimensions), parsed.scheme, parsed.family
+
+    from zemble.embedding.openai_compat import DEFAULT_API_KEY_ENV, OpenAICompatibleEmbedder
+
     key_env = os.environ.get(KEY_ENV_ENV, "").strip() or DEFAULT_API_KEY_ENV
     return (
-        OpenAICompatibleEmbedder(base_url, model, dimensions, api_key_env=key_env),
-        scheme,
-        f"openai:{base_url}#{model}",
+        OpenAICompatibleEmbedder(parsed.base_url, parsed.model, parsed.dimensions, api_key_env=key_env),
+        parsed.scheme,
+        parsed.family,
     )
 
 

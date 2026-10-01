@@ -6,6 +6,8 @@ import hashlib
 import re
 import sqlite3
 import threading
+import time
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -27,14 +29,32 @@ _SLUG_UNSAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 #: without a flush boundary one failure at the end throws away every vector already bought.
 FLUSH_EVERY = 512
 
+#: The WAL is truncated back to this size whenever a checkpoint empties it. Without a limit
+#: it keeps the high-water mark of the largest write burst forever (720 MB measured).
+JOURNAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS embeddings (
     text_sha256 TEXT NOT NULL,
     dims INTEGER NOT NULL,
     vec BLOB NOT NULL,
     PRIMARY KEY (text_sha256, dims)
-)
+);
+CREATE TABLE IF NOT EXISTS used (
+    text_sha256 TEXT PRIMARY KEY,
+    day INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS cache_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
+
+#: `cache_meta` key: the day the `used` stamps began. A vector stored before it has no stamp,
+#: and counts as used that day, never as unused forever: an unknown age fails closed.
+STAMPS_SINCE_KEY = "used_stamps_since"
+
+
+def today() -> int:
+    """Return the current day number (days since the epoch, UTC), the unit of a use stamp."""
+    return int(time.time() // 86400)
 
 
 def cache_root() -> Path:
@@ -42,6 +62,11 @@ def cache_root() -> Path:
     from zemble.cache import resolve_cache_folder
 
     return resolve_cache_folder() / "embeddings"
+
+
+def cache_file(family: str, directory: Path) -> Path:
+    """Return the sqlite file an embedder family's vectors live in."""
+    return directory / f"{family_slug(family)}.sqlite"
 
 
 def family_slug(family: str) -> str:
@@ -55,6 +80,32 @@ def family_slug(family: str) -> str:
 def text_hash(text: str) -> str:
     """Return the sha256 hex digest of a text."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def connect_cache(path: Path) -> sqlite3.Connection:
+    """Open (creating if needed) one family's cache file: WAL mode, a bounded WAL, the stamp tables."""
+    connection = sqlite3.connect(path, check_same_thread=False)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute(f"PRAGMA journal_size_limit={JOURNAL_SIZE_LIMIT_BYTES}")
+    connection.executescript(_SCHEMA)
+    # Read first: a no-op INSERT OR IGNORE still takes the write lock, and would make every open
+    # wait on whichever process is in the middle of a write burst.
+    if stamps_since(connection) is None:
+        connection.execute(
+            "INSERT OR IGNORE INTO cache_meta (key, value) VALUES (?, ?)", (STAMPS_SINCE_KEY, str(today()))
+        )
+        connection.commit()
+    return connection
+
+
+def stamps_since(connection: sqlite3.Connection) -> int | None:
+    """Return the day use stamps began in this file, or None before any zemble that writes them opened it."""
+    try:
+        row = connection.execute("SELECT value FROM cache_meta WHERE key = ?", (STAMPS_SINCE_KEY,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return int(row[0]) if row is not None else None
 
 
 class EmbeddingCache:
@@ -73,13 +124,9 @@ class EmbeddingCache:
         self.family = family
         root = directory if directory is not None else cache_root()
         root.mkdir(parents=True, exist_ok=True)
-        self.path = root / f"{family_slug(family)}.sqlite"
+        self.path = cache_file(family, root)
         self._lock = threading.Lock()
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA synchronous=NORMAL")
-        self._connection.execute(_SCHEMA)
-        self._connection.commit()
+        self._connection = connect_cache(self.path)
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -190,7 +237,7 @@ class EmbeddingCache:
         return pending
 
     def put_many(self, rows: list[tuple[str, int, np.ndarray]]) -> None:
-        """Store vectors, ignoring any key another process wrote first.
+        """Store vectors, ignoring any key another process wrote first, and stamp them as used today.
 
         :param rows: ``(text hash, dims, vector)`` triples.
         """
@@ -201,7 +248,29 @@ class EmbeddingCache:
             self._connection.executemany(
                 "INSERT OR REPLACE INTO embeddings (text_sha256, dims, vec) VALUES (?, ?, ?)", payload
             )
+            self._stamp({digest for digest, _dims, _vector in rows})
             self._connection.commit()
+
+    def touch(self, digests: Iterable[str]) -> None:
+        """Stamp served vectors as used today, so a garbage collection keeps them through its grace period.
+
+        :param digests: The text hashes a caller was served from this file.
+        """
+        distinct = set(digests)
+        if not distinct:
+            return
+        with self._lock:
+            self._stamp(distinct)
+            self._connection.commit()
+
+    def _stamp(self, digests: set[str]) -> None:
+        """Write today's stamp for these hashes; a stamp already at today is left unwritten."""
+        day = today()
+        self._connection.executemany(
+            "INSERT INTO used (text_sha256, day) VALUES (?, ?) "
+            "ON CONFLICT(text_sha256) DO UPDATE SET day = excluded.day WHERE day < excluded.day",
+            [(digest, day) for digest in digests],
+        )
 
 
 class CachingEmbedder:
@@ -296,10 +365,12 @@ class CachingEmbedder:
         first_position: dict[str, int] = {}
         duplicates: list[tuple[int, int]] = []
 
+        served: list[str] = []
         for position, digest in enumerate(digests):
             cached = self.cache.get(digest, dims)
             if cached is not None:
                 result[position] = cached
+                served.append(digest)
                 continue
             seen = first_position.get(digest)
             if seen is not None:
@@ -319,6 +390,7 @@ class CachingEmbedder:
 
         for position, source in duplicates:
             result[position] = result[source]
+        self.cache.touch(served)
         return result
 
     def embed_queries(self, texts: list[str]) -> EmbeddingMatrix:

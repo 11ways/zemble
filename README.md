@@ -298,7 +298,11 @@ candidates on stderr; `zemble home` exits `1` when nothing matched at all.
 `--no-daemon` (or `ZEMBLE_DAEMON=0`) answers in the calling process instead.
 `zemble savings` reports how many tokens searches saved against reading the matched
 files outright, and `zemble clear index|savings|orphans|all` empties the
-caches. If `zemble` is not on `$PATH`, use `uvx --from "/path/to/zemble[mcp]" zemble`.
+caches. `zemble clear orphans` removes what nothing reads again (indexes and graphs
+whose root is gone, git-URL indexes past `--max-age-days`, embedder caches no index
+uses, retired graph versions, temp leftovers); `zemble clear embeddings` sweeps the
+vectors no index references and nobody used within `--grace-days`, then VACUUMs.
+Both take `--dry-run`, which lists what would go with its size. If `zemble` is not on `$PATH`, use `uvx --from "/path/to/zemble[mcp]" zemble`.
 
 <details>
 <summary>Controlling which files are indexed</summary>

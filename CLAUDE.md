@@ -90,13 +90,19 @@ overwrite each other. Never tune on individual eval queries.
 - Caches: `~/.cache/zemble/` (indexes, `embeddings/*.sqlite`, `javac-facts/`,
   `daemon.log`); daemon socket `$XDG_RUNTIME_DIR/zemble/daemon.sock`. The embedding
   cache is keyed by chunk text + dims: changing capsule text means a full re-embed.
+  Each vector carries a last-used day (`used` table); `zemble clear embeddings` keeps
+  what any index references or used within the grace period, `zemble clear orphans`
+  the rest of the cache's dead weight. Never probe a live sqlite file by opening and
+  closing it (that drops sqlite's POSIX locks in the process): `zemble.openfiles`.
 - Every MCP tool's `repo` is optional: `zemble.mcp_repo` fixes the default to the server
   process's start directory once at import and announces the resolved path in each tool's
   parameter description. Graph tools cap answers at `limit` (default 50) and always carry
   `total`, plus a `truncated` note when the cap bit.
 - A path inside an already indexed root is served from that root's index, filtered to the
   sub-tree. Every tool speaks paths relative to the path the caller passed (the view rebases
-  chunk paths in and out; graph, `dupes`, `explain`, `home` use that path's own graph/config),
+  chunk paths in and out; graph tools and `explain` read the nearest ancestor's graph through
+  `SubtreeGraphProvider`, which rebases ids and paths the same way; `dupes` and `home` use
+  that path's own config),
   and the capsule's path segment is repo-relative (`<git-root name>/<inner path>`) so both
   roots embed the same text. `home` is the exception: its surfaces first resolve the
   nearest ancestor `.zemble/home.toml`, then use that workspace for index, graph and
