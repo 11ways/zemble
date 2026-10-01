@@ -271,8 +271,10 @@ scanned and turned into symbols and edges in 0.33 s, single process.
 
 ## Storage and incremental updates
 
-Sqlite at `<index cache folder>/graph.sqlite`, created on demand: the graph is
-buildable with no search index present (`zemble/graph/store.py`). Tables:
+Sqlite in the index cache folder, created on demand: the graph is buildable with
+no search index present (`zemble/graph/store.py`). The folder holds versions,
+`graph-<n>.sqlite`, and a pointer, `graph.current`, naming the current version on
+its first line and the one it replaced on its second. Tables:
 `symbols`, `edges` (each carrying the `source` that produced it), `files` (path,
 mtime, size, package, imports), `decl_keys` (the Hawkeye registration keys a symbol
 declares - element tag, template tag, template id, function name and namespaced
@@ -286,39 +288,60 @@ rebuilt; a graph is derived data either way.
 
 ### Durability
 
-The store is written under `journal_mode=DELETE` + `synchronous=FULL`: the
-rollback journal stays on disk and every commit fsyncs, so a build that is killed
-mid-write leaves a file sqlite can roll back rather than a torn one. It was
-written under `synchronous=OFF` + `journal_mode=MEMORY` until 2026-09-04, and
-three OOM kills tore the javaweb store: 1.28 GB of pages reachable from neither a
-btree nor the freelist, an `edges` tree with out-of-order rowids, 1.26 M of its
-1.4 M edges gone, and 4,751 "database disk image is malformed" lines the daemon
-logged and ignored while it kept serving what was left.
+The store is written under `journal_mode=WAL` + `synchronous=FULL`: the log stays
+on disk and every commit fsyncs, so a build that is killed mid-write leaves a file
+sqlite recovers rather than a torn one. It was written under `synchronous=OFF` +
+`journal_mode=MEMORY` until 2026-09-04, and three OOM kills tore the javaweb store:
+1.28 GB of pages reachable from neither a btree nor the freelist, an `edges` tree
+with out-of-order rowids, 1.26 M of its 1.4 M edges gone, and 4,751 "database disk
+image is malformed" lines the daemon logged and ignored while it kept serving what
+was left.
 
 A build that reads the whole workspace anyway - a cold build, `--force`, or the
-rebuild a malformed store triggers - writes a **new generation** beside the store
-(`graph.sqlite.building-<pid>`) and swaps it in with one `os.replace`, so a kill
-leaves the previous store untouched and the new file is compact by construction.
-Sqlite's sidecars (`-journal`, `-wal`, `-shm`) are removed after the rename: a hot
-journal is matched by NAME, so one left by a killed writer would otherwise be
-replayed into the file that replaced it. This is also why the store is not in WAL
-mode, unlike the embedding cache - a `-wal` pointing at a replaced inode is the
-torn read the discipline exists to end.
+rebuild a malformed store triggers - writes a **new version** with the next free
+number and publishes it by rewriting the pointer (a fsynced temp file renamed over
+`graph.current`), so a kill leaves the previous version current and untouched, and
+the new file is compact by construction. No database file is ever renamed over
+another, which is what makes WAL safe here: a `-wal` left pointing at a replaced
+inode would be a torn read. From 2026-09-04 to 2026-10-01 the store was one
+`graph.sqlite` in rollback-journal mode, renamed into place, and that mode made
+every reader wait on a refresh's transaction once it spilled past sqlite's page
+cache: "database is locked" after 5 s while the daemon re-resolved under heavy
+compiles.
 
-An incremental refresh writes **in place**: copying a 1.9 GB store per saved file
-would cost more than the refresh, and the live file's journal makes it safe. What
-it cannot do is give freed pages back, so a refresh that leaves more than a
-quarter of the store on the freelist is followed by a `VACUUM INTO` a generation
-and the same rename (`_compact_if_drifted`; stores under 4096 pages are left
-alone). Size alone is not drift: the javaweb graph is genuinely 1.9 GB, 953 MB of
-it the `edges` table and 644 MB its indexes.
+Readers resolve the pointer and open that version read-only (`mode=ro`, 30 s busy
+timeout); in WAL they read the last committed snapshot and never wait on the
+writer. Only one process writes: every build holds an `flock` on `graph.lock` (the
+kernel drops it when the holder dies, so a killed build leaves no stale lock).
+`build_graph` waits for it; `refresh_graph`, the once-per-process refresh
+`ensure_graph` runs, skips when it is held and reads the current version, because
+the holder is already refreshing. The daemon's watcher calls `build_graph`, so its
+change set lands after any other writer.
 
-A store sqlite calls malformed is never repaired and never read past. `build_graph`
-catches it, says so at ERROR naming the file, discards it and rebuilds from source
-into a generation, reporting `rebuilt_from_corruption` on the build statistics;
-`graph_exists` is false for it (and logs), and the daemon's watcher keys off
-`graph_present` - the file - so a torn store is the one it keeps driving rather
-than the one it quietly stops refreshing.
+Under the lock, each build first deletes every version file and sidecar the
+pointer does not name - a killed build's half-written version, or a retired one -
+and each newly published version keeps the one it replaced, for readers that
+resolved the pointer just before it moved. A single-file `graph.sqlite` left by an
+older zemble is copied into a version through sqlite's backup API by the first
+reader or build that finds no pointer, without a rebuild. It is copied rather
+than renamed and then left alone, because processes still running the older code
+keep opening it by name in rollback-journal mode.
+
+An incremental refresh writes **in place** in the current version: copying a
+1.9 GB store per saved file would cost more than the refresh, and the WAL makes it
+safe. What it cannot do is give freed pages back, so a refresh that leaves more
+than a quarter of the store on the freelist is followed by a `VACUUM INTO` the next
+version, published the same way (`_compact_if_drifted`; stores under 4096 pages
+are left alone). Size alone is not drift: the javaweb graph is genuinely 1.9 GB,
+953 MB of it the `edges` table and 644 MB its indexes.
+
+A store sqlite calls malformed, or a pointer naming no version that exists, is
+never repaired and never read past. `build_graph` catches it, says so at ERROR
+naming the folder, and rebuilds from source into a new version that replaces the
+malformed one outright, reporting `rebuilt_from_corruption` on the build
+statistics; `graph_exists` is false for it (and logs), and the daemon's watcher
+keys off `graph_present` - the pointer or the legacy file - so a torn store is the
+one it keeps driving rather than the one it quietly stops refreshing.
 
 A rebuild re-extracts only files whose mtime or size changed, then re-resolves
 (a) those files, (b) their **dependents**: every file holding an edge whose

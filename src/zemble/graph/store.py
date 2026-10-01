@@ -7,13 +7,16 @@ the other.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -57,12 +60,20 @@ from zemble.types import ContentType
 logger = logging.getLogger(__name__)
 
 GRAPH_FORMAT_VERSION = 6
-GRAPH_DB_NAME = "graph.sqlite"
-#: Suffix of the generation a full build writes before renaming it over the live store.
-GRAPH_BUILD_SUFFIX = ".building"
-#: The sidecars sqlite keeps beside a store; a leftover one must never be applied to a
-#: generation that replaced the file it belonged to.
+#: The file naming the current graph version (first line) and the one it replaced (second).
+GRAPH_POINTER_NAME = "graph.current"
+#: The file whose OS lock is held by the one process allowed to write a workspace's graph.
+GRAPH_LOCK_NAME = "graph.lock"
+#: The single-file store older zemble kept; it is copied into the versioned layout on first open.
+LEGACY_GRAPH_DB_NAME = "graph.sqlite"
+#: The sidecars sqlite keeps beside a store.
 _DB_SIDECARS = ("-journal", "-wal", "-shm")
+#: A graph version file, `graph-<n>.sqlite`, or one of the sidecars sqlite keeps beside it.
+_VERSION_FILE = re.compile(r"graph-(\d+)\.sqlite(" + "|".join(map(re.escape, _DB_SIDECARS)) + ")?")
+#: How long a reader waits on sqlite's own locks; in WAL mode only recovery holds one that long.
+_READ_TIMEOUT_SECONDS = 30.0
+#: How long a writer waits on sqlite's own locks, which only a checkpoint or recovery takes.
+_WRITE_TIMEOUT_SECONDS = 30.0
 #: What sqlite says when the file it opened is not a graph any more. A store that reports
 #: any of these is never repaired in place: it is rebuilt from source, which is cheap
 #: because a graph is derived data.
@@ -192,42 +203,70 @@ def graph_folder(path: str) -> Path:
     return find_index_from_cache_folder(path, (ContentType.CODE,))
 
 
-def graph_db_path(path: str) -> Path:
-    """Return the sqlite path of a project's graph, creating its folder if needed."""
+def _graph_dir(path: str) -> Path:
+    """Return a project's graph folder, creating it if needed."""
     folder = graph_folder(path)
     folder.mkdir(parents=True, exist_ok=True)
-    return folder / GRAPH_DB_NAME
+    return folder
 
 
-def connect(path: str, *, read_only: bool = False) -> sqlite3.Connection:
-    """Open (and if needed create) the graph database for a project path."""
-    return open_db(graph_db_path(path), read_only=read_only)
+def graph_db_path(path: str) -> Path | None:
+    """Return the sqlite file of a project's current graph version, or None before the first build.
+
+    Creates the graph folder, and first copies a single-file store an older zemble left into the
+    versioned layout.
+    """
+    folder = _graph_dir(path)
+    pointer = _readable_pointer(folder)
+    return None if pointer is None else folder / pointer.current
+
+
+def connect(path: str) -> sqlite3.Connection:
+    """Open a project's current graph version for reading.
+
+    :raises GraphStoreMissing: If no graph has been built for the path yet.
+    """
+    db_path = graph_db_path(path)
+    if db_path is None:
+        raise GraphStoreMissing(f"no symbol graph has been built for {path!r}")
+    return open_db(db_path, read_only=True)
 
 
 def open_db(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
-    """Open one graph database file, applying the durability the store is written under."""
-    connection = sqlite3.connect(db_path)
+    """Open one graph version file, read-only, or writable under the durability the store is written with.
+
+    A read-only connection never writes and never waits on a writer: in WAL mode it reads the
+    last committed snapshot while a refresh is still mid-transaction.
+    """
+    if read_only:
+        connection = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=_READ_TIMEOUT_SECONDS)
+        connection.row_factory = sqlite3.Row
+        return connection
+    connection = sqlite3.connect(db_path, timeout=_WRITE_TIMEOUT_SECONDS)
     connection.row_factory = sqlite3.Row
     _apply_durability(connection)
-    if not read_only:
-        connection.executescript(_SCHEMA)
-        _migrate(connection)
+    connection.executescript(_SCHEMA)
+    _migrate(connection)
     return connection
 
 
 def _apply_durability(connection: sqlite3.Connection) -> None:
-    """Keep the rollback journal on disk and fsync every commit.
+    """Write through a WAL and fsync every commit.
 
     AIDEV-NOTE: this replaced `synchronous=OFF` + `journal_mode=MEMORY`, which threw the
     rollback journal away: a build killed mid-write (three OOM kills in one week) left a torn
     file that still answered queries. The javaweb store reached 1.95 GB with 1.28 GB of pages
     reachable from neither a tree nor the freelist, an `edges` btree with out-of-order rowids,
     and 4,751 ignored "database disk image is malformed" lines in the daemon log.
-    Deliberately NOT WAL, unlike the embedding cache: a full build is swapped in by renaming
-    a new inode over this file, and a `-wal`/`-shm` pair left pointing at a replaced inode is
-    the very torn read this discipline exists to end.
+    It was then rollback-journal (DELETE) mode, because a full build was renamed over the one
+    live file and a `-wal`/`-shm` pair left pointing at a replaced inode is a torn read. That
+    mode made every reader wait on a refresh's minutes-long transaction once it spilled past
+    the page cache ("database is locked" after 5 s). Now no file is ever renamed over another:
+    each full build writes a new version, `graph-<n>.sqlite`, and readers find it through the
+    `graph.current` pointer (see `_install`), so WAL is safe and readers never wait on the
+    writer. Only one process writes at a time (`_writer_lock`).
     """
-    connection.execute("PRAGMA journal_mode=DELETE")
+    connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA synchronous=FULL")
 
 
@@ -235,35 +274,193 @@ class GraphStoreCorrupt(RuntimeError):
     """The graph store on disk cannot be read and has to be rebuilt from source."""
 
 
+class GraphStoreMissing(RuntimeError):
+    """No graph has been built for a workspace yet."""
+
+
 def is_corruption(exc: BaseException) -> bool:
-    """Return whether a sqlite error says the file itself is unreadable rather than the query."""
+    """Return whether an error says the store itself is unreadable rather than the query."""
+    if isinstance(exc, GraphStoreCorrupt):
+        return True
     if not isinstance(exc, sqlite3.DatabaseError):
         return False
     message = str(exc).lower()
     return any(marker in message for marker in _CORRUPTION_MARKERS)
 
 
-def _generation_path(db_path: Path) -> Path:
-    """The temporary file a full build writes before it is renamed over the live store."""
-    return db_path.with_name(f"{db_path.name}{GRAPH_BUILD_SUFFIX}-{os.getpid()}")
+# ---- the versioned layout -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Pointer:
+    """The version file readers open, and the one it replaced, kept for readers still on it."""
+
+    current: str
+    previous: str | None = None
+
+
+def _version_name(number: int) -> str:
+    """Name the file of one graph version; `_VERSION_FILE` is the pattern it must match."""
+    return f"graph-{number}.sqlite"
+
+
+def _is_version_name(name: str) -> bool:
+    """Return whether a name is a version file itself rather than a sidecar or anything else."""
+    match = _VERSION_FILE.fullmatch(name)
+    return match is not None and match.group(2) is None
+
+
+def _read_pointer(folder: Path) -> _Pointer | None:
+    """Read which version is current, or None when nothing was published in this layout yet.
+
+    :raises GraphStoreCorrupt: If the pointer is unreadable or names a version that is not there.
+    """
+    pointer_path = folder / GRAPH_POINTER_NAME
+    try:
+        names = pointer_path.read_text(encoding="ascii").split()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise GraphStoreCorrupt(f"graph pointer {pointer_path} is unreadable: {exc}") from exc
+    if not 1 <= len(names) <= 2 or not all(_is_version_name(name) for name in names):
+        raise GraphStoreCorrupt(f"graph pointer {pointer_path} names no graph version: {names!r}")
+    if not (folder / names[0]).is_file():
+        raise GraphStoreCorrupt(f"graph pointer {pointer_path} names {names[0]}, which is missing")
+    return _Pointer(names[0], names[1] if len(names) == 2 else None)
+
+
+def _readable_pointer(folder: Path) -> _Pointer | None:
+    """Resolve the current version for a reader, migrating a legacy store under the writer lock first."""
+    pointer = _read_pointer(folder)
+    if pointer is not None or not (folder / LEGACY_GRAPH_DB_NAME).is_file():
+        return pointer
+    with _writer_lock(folder, wait=True):
+        return _locked_pointer(folder)
+
+
+def _locked_pointer(folder: Path) -> _Pointer | None:
+    """Resolve the current version for the writer-lock holder, migrating a legacy store first."""
+    pointer = _read_pointer(folder)
+    if pointer is None and (folder / LEGACY_GRAPH_DB_NAME).is_file():
+        pointer = _migrate_legacy(folder)
+    return pointer
+
+
+@contextmanager
+def _writer_lock(folder: Path, *, wait: bool) -> Iterator[bool]:
+    """Hold a workspace's single-writer lock for the block, yielding whether it was taken.
+
+    AIDEV-NOTE: an flock on `graph.lock`, never a PID file: the kernel drops it when its holder
+    dies, however it dies, so a killed build leaves nothing to clean up. It belongs to the open
+    file description, so two threads of one process exclude each other as well. With
+    `wait=False` a held lock yields False at once instead of blocking.
+    """
+    descriptor = os.open(folder / GRAPH_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            taken = True
+        except BlockingIOError:
+            taken = False
+        if not taken and wait:
+            logger.info("graph: waiting for the process writing %s to finish", folder)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            taken = True
+        try:
+            yield taken
+        finally:
+            if taken:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def _next_version(folder: Path) -> str:
+    """Name a version above every one on disk, so a new build never reuses a published name."""
+    numbers = [int(match.group(1)) for entry in os.listdir(folder) if (match := _VERSION_FILE.fullmatch(entry))]
+    return _version_name(max(numbers, default=0) + 1)
 
 
 def _discard(db_path: Path) -> None:
-    """Delete a store and every sidecar sqlite may have left beside it."""
+    """Delete a version file and every sidecar sqlite may have left beside it."""
     db_path.unlink(missing_ok=True)
     for suffix in _DB_SIDECARS:
         db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
 
 
-def _install_generation(built: Path, db_path: Path) -> None:
-    """Move a finished generation over the live store in one atomic step.
+def _seal(db_path: Path) -> None:
+    """Give a finished copy the store's journal mode and schema before any reader can resolve it."""
+    open_db(db_path).close()
 
-    The sidecars go after the rename, not before: sqlite matches a hot journal by NAME, so
-    one left behind by a killed writer would otherwise be replayed into the new file.
+
+def _publish(folder: Path, pointer: _Pointer) -> None:
+    """Point readers at a version in one atomic step: a fsynced temp file renamed over the pointer."""
+    temp = folder / f"{GRAPH_POINTER_NAME}.tmp"
+    with temp.open("w", encoding="ascii") as handle:
+        handle.write("".join(f"{name}\n" for name in (pointer.current, pointer.previous) if name))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, folder / GRAPH_POINTER_NAME)
+    directory = os.open(folder, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _install(folder: Path, built: str, replaced: str | None) -> None:
+    """Make a finished version current, keep the one it replaced, and delete every other version.
+
+    The replaced version stays because a reader may have resolved the pointer just before it
+    moved; a reader would have to have resolved it two installs ago to lose its file.
     """
-    os.replace(built, db_path)
-    for suffix in _DB_SIDECARS:
-        db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
+    pointer = _Pointer(built, replaced)
+    _publish(folder, pointer)
+    _sweep(folder, pointer)
+
+
+def _sweep(folder: Path, pointer: _Pointer) -> None:
+    """Delete, one path at a time, every version file and sidecar the pointer does not name.
+
+    Only the writer-lock holder sweeps, so an unnamed version is either retired or a killed
+    build's leftover that was never published.
+    """
+    keep = {pointer.current, pointer.previous}
+    for entry in sorted(os.listdir(folder)):
+        match = _VERSION_FILE.fullmatch(entry)
+        if match is not None and _version_name(int(match.group(1))) not in keep:
+            (folder / entry).unlink(missing_ok=True)
+
+
+def _migrate_legacy(folder: Path) -> _Pointer:
+    """Copy the single-file store an older zemble left into the versioned layout, without a rebuild.
+
+    AIDEV-NOTE: a copy through sqlite's backup API, never a rename: a process still running the
+    older code opens `graph.sqlite` by name in rollback-journal mode, and turning that same inode
+    into a WAL database under a second name would give one database two journals. The legacy
+    file is left to those processes and is never read here again once the pointer exists.
+    """
+    name = _next_version(folder)
+    target = folder / name
+    _discard(target)
+    try:
+        source = sqlite3.connect(folder / LEGACY_GRAPH_DB_NAME, timeout=_WRITE_TIMEOUT_SECONDS)
+        try:
+            copy = sqlite3.connect(target)
+            try:
+                source.backup(copy)
+            finally:
+                copy.close()
+        finally:
+            source.close()
+        _seal(target)
+    except BaseException:
+        _discard(target)
+        raise
+    pointer = _Pointer(name)
+    _publish(folder, pointer)
+    logger.info("graph: copied the single-file store in %s into version %s", folder, name)
+    return pointer
 
 
 def _migrate(connection: sqlite3.Connection) -> None:
@@ -320,23 +517,25 @@ def _backfill_declaration_keys(connection: sqlite3.Connection) -> None:
 
 
 def graph_present(path: str) -> bool:
-    """Return True if a graph database file exists for a path, readable or not."""
-    return (graph_folder(path) / GRAPH_DB_NAME).is_file()
+    """Return True if a graph exists for a path in either layout, readable or not."""
+    folder = graph_folder(path)
+    return (folder / GRAPH_POINTER_NAME).is_file() or (folder / LEGACY_GRAPH_DB_NAME).is_file()
 
 
 def graph_exists(path: str) -> bool:
     """Return True if a graph database with symbols already exists for a path."""
-    db_path = graph_folder(path) / GRAPH_DB_NAME
-    if not db_path.is_file():
-        return False
+    folder = graph_folder(path)
     connection = None
     try:
-        connection = sqlite3.connect(db_path)
+        pointer = _readable_pointer(folder)
+        if pointer is None:
+            return False
+        connection = open_db(folder / pointer.current, read_only=True)
         return connection.execute("SELECT 1 FROM symbols LIMIT 1").fetchone() is not None
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, GraphStoreCorrupt) as exc:
         if is_corruption(exc):
-            # Loud, and false: a malformed file is not a graph, so the next build makes one.
-            logger.error("graph store %s is malformed (%s); it will be rebuilt from source", db_path, exc)
+            # Loud, and false: a malformed store is not a graph, so the next build makes one.
+            logger.error("graph store in %s is malformed (%s); it will be rebuilt from source", folder, exc)
         return False
     finally:
         if connection is not None:
@@ -556,7 +755,7 @@ def build_graph(
     workers: int | None = None,
     changed_paths: Iterable[Path] | None = None,
 ) -> GraphStats:
-    """Build or incrementally refresh the symbol graph for a workspace.
+    """Build or incrementally refresh the symbol graph for a workspace, after any other writer finishes.
 
     :param path: Local directory to index.
     :param force: Re-extract every file instead of only changed ones.
@@ -566,22 +765,61 @@ def build_graph(
     :return: Statistics describing the build.
     :raises ValueError: If the path is not a local directory.
     """
+    root = _local_root(path)
+    folder = _graph_dir(str(root))
+    with _writer_lock(folder, wait=True):
+        return _build_locked(root, folder, force=force, workers=workers, changed_paths=changed_paths)
+
+
+def refresh_graph(path: str) -> GraphStats | None:
+    """Incrementally refresh the symbol graph for a workspace unless another process is writing it.
+
+    :param path: Local directory to index.
+    :return: Statistics describing the refresh, or None when another writer held the lock; the
+        current version stays readable meanwhile.
+    :raises ValueError: If the path is not a local directory.
+    """
+    root = _local_root(path)
+    folder = _graph_dir(str(root))
+    with _writer_lock(folder, wait=False) as taken:
+        if not taken:
+            logger.info("graph: another process is writing the graph of %s; reading the current one", root)
+            return None
+        return _build_locked(root, folder, force=False, workers=None, changed_paths=None)
+
+
+def _local_root(path: str) -> Path:
+    """Resolve a workspace path, refusing anything that is not a local directory."""
     root = Path(path).expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"{path!r} is not a local directory")
+    return root
+
+
+def _build_locked(
+    root: Path,
+    folder: Path,
+    *,
+    force: bool,
+    workers: int | None,
+    changed_paths: Iterable[Path] | None,
+) -> GraphStats:
+    """Run one build for the writer-lock holder, rebuilding from source when the store is unreadable."""
     started = time.perf_counter()
     workers = workers if workers is not None else min(10, (os.cpu_count() or 2))
-    db_path = graph_db_path(str(root))
-    whole = force or not db_path.is_file()
-
     try:
-        stats = _build_into(root, db_path, force=force, workers=workers, changed_paths=changed_paths, whole=whole)
-    except sqlite3.DatabaseError as exc:
+        pointer = _locked_pointer(folder)
+        current = None
+        if pointer is not None:
+            # Whatever a killed build left is swept now, not only when the next version lands.
+            _sweep(folder, pointer)
+            current = pointer.current
+        stats = _build_into(root, folder, current, force=force, workers=workers, changed_paths=changed_paths)
+    except (sqlite3.DatabaseError, GraphStoreCorrupt) as exc:
         if not is_corruption(exc):
             raise
-        logger.error("graph store %s is malformed (%s); rebuilding it from source", db_path, exc)
-        _discard(db_path)
-        stats = _build_into(root, db_path, force=True, workers=workers, changed_paths=None, whole=True)
+        logger.error("graph store in %s is malformed (%s); rebuilding it from source", folder, exc)
+        stats = _build_into(root, folder, None, force=True, workers=workers, changed_paths=None)
         stats.rebuilt_from_corruption = True
     stats.duration_seconds = time.perf_counter() - started
     return stats
@@ -589,22 +827,25 @@ def build_graph(
 
 def _build_into(
     root: Path,
-    db_path: Path,
+    folder: Path,
+    current: str | None,
     *,
     force: bool,
     workers: int,
     changed_paths: Iterable[Path] | None,
-    whole: bool,
 ) -> GraphStats:
-    """Run one build, as a renamed-in generation when it rewrites the store, in place otherwise.
+    """Run one build, into a new version when it rewrites the store, in the current one otherwise.
 
-    A build that reads the whole workspace anyway writes a brand-new file and swaps it in with
-    a single rename, so a kill leaves the previous store untouched instead of a torn one - and
-    the generation is compact by construction. An incremental refresh writes in place, because
-    copying the store per saved file would cost more than the refresh; it is safe there because
-    the live file carries a real rollback journal (see `_apply_durability`).
+    A build that reads the whole workspace anyway writes a brand-new version and publishes it
+    with one pointer rename, so a kill leaves the current version untouched instead of a torn
+    one - and the version is compact by construction. An incremental refresh writes the current
+    version in place, because copying the store per saved file would cost more than the
+    refresh; its WAL makes that safe against a kill and invisible to readers until it commits.
+    A None `current` also drops the version it replaced, which is how a corrupt one goes.
     """
-    target = _generation_path(db_path) if whole else db_path
+    name = current if current is not None and not force else _next_version(folder)
+    whole = name != current
+    target = folder / name
     if whole:
         _discard(target)
     connection = open_db(target)
@@ -626,33 +867,39 @@ def _build_into(
             _discard(target)
         raise
     if whole:
-        _install_generation(target, db_path)
+        _install(folder, name, current)
     else:
-        stats.compacted = _compact_if_drifted(db_path)
+        stats.compacted = _compact_if_drifted(folder, name)
     return stats
 
 
-def _compact_if_drifted(db_path: Path) -> bool:
-    """Rewrite a store whose deleted rows have left too much of it free, as a fresh generation.
+def _compact_if_drifted(folder: Path, current: str) -> bool:
+    """Rewrite a version whose deleted rows have left too much of it free, as a new version.
 
     Sqlite never returns freed pages to the filesystem, and an incremental refresh is mostly
     deletes: the store only ever grows unless something compacts it. `VACUUM INTO` writes the
-    compact copy beside it, so the live file is replaced by the same rename a full build uses
-    rather than rewritten under a reader.
+    compact copy as the next version, published the way a full build is, rather than rewriting
+    the current one under its readers. The caller holds the writer lock.
     """
-    connection = sqlite3.connect(db_path)
+    connection = sqlite3.connect(folder / current, timeout=_WRITE_TIMEOUT_SECONDS)
     try:
         pages = connection.execute("PRAGMA page_count").fetchone()[0]
         free = connection.execute("PRAGMA freelist_count").fetchone()[0]
         if pages < _COMPACT_MIN_PAGES or free < pages * _COMPACT_FREE_FRACTION:
             return False
-        target = _generation_path(db_path)
+        name = _next_version(folder)
+        target = folder / name
         _discard(target)
-        logger.info("graph: compacting %s (%d of %d pages free)", db_path, free, pages)
-        connection.execute("VACUUM INTO ?", (str(target),))
+        logger.info("graph: compacting %s (%d of %d pages free)", folder / current, free, pages)
+        try:
+            connection.execute("VACUUM INTO ?", (str(target),))
+        except BaseException:
+            _discard(target)
+            raise
     finally:
         connection.close()
-    _install_generation(target, db_path)
+    _seal(target)
+    _install(folder, name, current)
     return True
 
 

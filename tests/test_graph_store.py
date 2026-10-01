@@ -5,10 +5,12 @@ import shutil
 from pathlib import Path
 
 from zemble.graph.store import (
-    GRAPH_BUILD_SUFFIX,
-    GRAPH_DB_NAME,
     GRAPH_FORMAT_VERSION,
+    GRAPH_POINTER_NAME,
     _compact_if_drifted,
+    _Pointer,
+    _publish,
+    _read_pointer,
     build_graph,
     connect,
     graph_db_path,
@@ -28,7 +30,7 @@ def test_build_journey(graph_fixture_root: Path, graph_cache: Path) -> None:
     """A first build creates the database, records meta, and is a no-op when repeated."""
     # 1. The graph is buildable with no search index present.
     folder = graph_folder(str(graph_fixture_root))
-    assert not (folder / GRAPH_DB_NAME).exists(), "step 1: no graph exists before the first build"
+    assert not (folder / GRAPH_POINTER_NAME).exists(), "step 1: no graph exists before the first build"
     stats = build_graph(str(graph_fixture_root))
     assert graph_exists(str(graph_fixture_root)), "step 1: the build creates the database"
 
@@ -116,9 +118,11 @@ def test_graph_db_path_creates_its_folder(graph_cache: Path, tmp_path: Path) -> 
     """The graph folder is created on demand, so no search index is required first."""
     target = tmp_path / "empty"
     target.mkdir()
+    assert graph_db_path(str(target)) is None, "no version exists before the first build"
+    assert graph_folder(str(target)).is_dir(), "the cache folder is created when the graph path is asked for"
+    build_graph(str(target))
     path = graph_db_path(str(target))
-    assert path.parent.is_dir(), "the cache folder is created when the graph path is asked for"
-    assert path.name == GRAPH_DB_NAME, "the graph lives in graph.sqlite"
+    assert path is not None and path.name == "graph-1.sqlite", "the first build is version 1"
 
 
 def test_files_without_a_grammar_are_counted_not_extracted(graph_cache: Path, tmp_path: Path) -> None:
@@ -182,11 +186,12 @@ def test_torn_store_journey(graph_fixture_root: Path, graph_cache: Path, tmp_pat
     path = str(workspace)
     first = build_graph(path)
     db = graph_db_path(path)
+    assert db is not None
 
-    # 1. The live store is written durably, so a kill leaves a journal to roll back rather
+    # 1. The live store is written durably, so a kill leaves a log to recover from rather
     #    than a torn file: that is what `synchronous=OFF` + `journal_mode=MEMORY` discarded.
-    connection = connect(path)
-    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete", "step 1: the journal is on disk"
+    connection = open_db(db)
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal", "step 1: the log is on disk"
     assert connection.execute("PRAGMA synchronous").fetchone()[0] == 2, "step 1: and commits fsync"
     connection.close()
 
@@ -208,9 +213,10 @@ def test_torn_store_journey(graph_fixture_root: Path, graph_cache: Path, tmp_pat
     assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "step 4: the file is sound"
     connection.close()
 
-    # 5. The generation it built through is renamed into place, never left beside the store.
-    leftovers = list(db.parent.glob(f"{db.name}{GRAPH_BUILD_SUFFIX}*"))
-    assert leftovers == [], f"step 5: no generation is left behind, found {leftovers}"
+    # 5. The rebuild is a new version, and the malformed one is gone rather than kept as previous.
+    pointer = _read_pointer(db.parent)
+    assert pointer is not None and pointer.current != db.name, "step 5: the rebuild is a new version"
+    assert pointer.previous is None and not db.exists(), "step 5: the malformed version was dropped"
 
     # 6. A refresh after the rebuild is an ordinary no-op again.
     again = build_graph(path)
@@ -218,18 +224,21 @@ def test_torn_store_journey(graph_fixture_root: Path, graph_cache: Path, tmp_pat
 
 
 def test_a_bloated_store_is_compacted(tmp_path: Path) -> None:
-    """Deleted rows are returned to the filesystem, and a small store is left alone."""
-    db = tmp_path / "graph.sqlite"
+    """Deleted rows are returned to the filesystem as a new version, and a small store is left alone."""
+    folder = tmp_path / "graph"
+    folder.mkdir()
+    db = folder / "graph-1.sqlite"
     connection = open_db(db)
     connection.executemany(
         "INSERT INTO symbols (id, name) VALUES (?, ?)", [(f"id{i}", "x" * 400) for i in range(20_000)]
     )
     connection.commit()
     connection.close()
+    _publish(folder, _Pointer(db.name))
     grown = db.stat().st_size
 
     # 1. A store with nothing free is left exactly as it is.
-    assert not _compact_if_drifted(db), "step 1: nothing to reclaim"
+    assert not _compact_if_drifted(folder, db.name), "step 1: nothing to reclaim"
     assert db.stat().st_size == grown, "step 1: and nothing was rewritten"
 
     # 2. Deleting most of it frees pages that sqlite keeps in the file.
@@ -239,9 +248,12 @@ def test_a_bloated_store_is_compacted(tmp_path: Path) -> None:
     connection.close()
     assert db.stat().st_size == grown, "step 2: a delete never shrinks the file on its own"
 
-    # 3. The next build's compaction hands them back, in place, with the rows intact.
-    assert _compact_if_drifted(db), "step 3: the drift is compacted"
-    assert db.stat().st_size < grown // 2, "step 3: and the file actually shrank"
-    connection = open_db(db)
+    # 3. The next build's compaction hands them back as the next version, with the rows intact.
+    assert _compact_if_drifted(folder, db.name), "step 3: the drift is compacted"
+    assert _read_pointer(folder) == _Pointer("graph-2.sqlite", db.name), "step 3: the copy is current"
+    compact = folder / "graph-2.sqlite"
+    assert compact.stat().st_size < grown // 2, "step 3: and the file actually shrank"
+    connection = open_db(compact, read_only=True)
     assert connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 1, "step 3: the surviving row survived"
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal", "step 3: in the store's journal mode"
     connection.close()

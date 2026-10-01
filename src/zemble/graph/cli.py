@@ -22,7 +22,7 @@ from zemble.graph.facts import (
 )
 from zemble.graph.model import TYPE_KINDS, EdgeKind, Hit, Symbol, SymbolKind
 from zemble.graph.provider import SqliteGraphProvider, display_name
-from zemble.graph.store import build_graph, graph_exists, symbol_from_row
+from zemble.graph.store import build_graph, graph_exists, refresh_graph, symbol_from_row
 
 QUERY_COMMANDS = (
     "definition",
@@ -319,7 +319,8 @@ def ensure_graph(path: str, *, refresh: bool = True, allow_daemon: bool = True) 
     if refresh and path not in _refreshed:
         _refreshed.add(path)
         if not (allow_daemon and _ensure_via_daemon(path)):
-            build_graph(path)
+            # Skipped when another process is writing the graph: that writer is refreshing it.
+            refresh_graph(path)
 
 
 def _ensure_via_daemon(path: str) -> bool:

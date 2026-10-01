@@ -357,7 +357,8 @@ class Daemon:
         """Incrementally refresh the symbol graph for a root that already has one.
 
         The watcher's change set is handed straight to the graph build, which then stats the
-        named files instead of walking the workspace for them.
+        named files instead of walking the workspace for them. The build waits for any other
+        process writing the graph rather than skipping, so the change set always lands.
         """
         from zemble.graph.store import build_graph, graph_present
 
