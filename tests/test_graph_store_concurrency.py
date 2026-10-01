@@ -248,6 +248,24 @@ def test_a_single_file_store_is_migrated_on_first_open(
     assert (folder / LEGACY_GRAPH_DB_NAME).read_bytes() == legacy_bytes, "step 4: the legacy file is untouched"
 
 
+def test_a_forced_build_never_reads_a_legacy_store(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path) -> None:
+    """A forced build over the old layout builds from source instead of copying the old file first."""
+    workspace = _workspace(graph_fixture_root, tmp_path)
+    path = str(workspace)
+    folder = graph_folder(path)
+    folder.mkdir(parents=True)
+
+    # 1. The old single-file store is unreadable, so any attempt to copy it would fail as corrupt.
+    (folder / LEGACY_GRAPH_DB_NAME).write_bytes(b"not a database at all")
+
+    # 2. The forced build ignores it: no corruption to recover from, one fresh version.
+    stats = build_graph(path, force=True)
+    assert not stats.rebuilt_from_corruption, "step 2: the legacy file was never opened"
+    pointer = _read_pointer(folder)
+    assert pointer is not None and _versions(folder) == [pointer.current], "step 2: one fresh version"
+    assert (folder / LEGACY_GRAPH_DB_NAME).read_bytes() == b"not a database at all", "step 2: left untouched"
+
+
 def test_old_versions_are_swept_but_never_current_or_previous(
     graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
 ) -> None:

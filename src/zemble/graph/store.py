@@ -808,7 +808,8 @@ def _build_locked(
     started = time.perf_counter()
     workers = workers if workers is not None else min(10, (os.cpu_count() or 2))
     try:
-        pointer = _locked_pointer(folder)
+        # A forced build rebuilds from source, so a legacy store is not worth copying first.
+        pointer = _read_pointer(folder) if force else _locked_pointer(folder)
         current = None
         if pointer is not None:
             # Whatever a killed build left is swept now, not only when the next version lands.

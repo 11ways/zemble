@@ -323,7 +323,8 @@ pointer does not name - a killed build's half-written version, or a retired one 
 and each newly published version keeps the one it replaced, for readers that
 resolved the pointer just before it moved. A single-file `graph.sqlite` left by an
 older zemble is copied into a version through sqlite's backup API by the first
-reader or build that finds no pointer, without a rebuild. It is copied rather
+reader or incremental build that finds no pointer, without a rebuild (a forced
+build ignores it). It is copied rather
 than renamed and then left alone, because processes still running the older code
 keep opening it by name in rollback-journal mode.
 
