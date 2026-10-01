@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tests.conftest import make_chunk
@@ -73,10 +74,15 @@ def test_clear_orphans_finds_every_kind_and_removes_only_those(
     # An embedder file no index reads, untouched for 40 days; a recent one is kept.
     unused = EmbeddingCache("voyage:voyage-code-4", cache / "embeddings")
     unused.close()
-    for suffix in ("", "-wal"):
-        if (candidate := unused.path.with_name(unused.path.name + suffix)).exists():
-            _age(candidate, 40)
+    _age(unused.path, 40)
+    # Merely opening it today leaves an empty WAL dated today, which dates an open, not a use.
+    unused.path.with_name(unused.path.name + "-wal").write_bytes(b"")
     EmbeddingCache("openai:http://localhost:1/v1#recent", cache / "embeddings").close()
+    # A file no index reads but whose vectors were served lately (its use stamps say so) is kept.
+    served = EmbeddingCache("voyage:voyage-3", cache / "embeddings")
+    served.put_many([("digest", 8, np.ones(8, dtype=np.float32))])
+    served.close()
+    _age(served.path, 40)
     # A column temp file a killed save left an hour and more ago; a fresh one may still be renamed.
     leftover = live_index / "semantic_index" / "vectors.npy.123.456.tmp.npy"
     leftover.parent.mkdir(parents=True)
@@ -123,7 +129,11 @@ def test_clear_orphans_finds_every_kind_and_removes_only_those(
     ], "step 5: only the current graph version is left"
     assert live_index.exists() and fresh_url.exists() and fresh_temp.exists(), "step 5: live entries stay"
     remaining = sorted(path.name for path in (cache / "embeddings").glob("*.sqlite"))
-    assert remaining == ["openai-http-localhost-1-v1-recent.sqlite", "voyage-voyage-4-lite.sqlite"], remaining
+    assert remaining == [
+        "openai-http-localhost-1-v1-recent.sqlite",
+        "voyage-voyage-3.sqlite",
+        "voyage-voyage-4-lite.sqlite",
+    ], remaining
 
     # 6. A second run finds nothing more.
     assert "No orphaned indexes found" in _clear(monkeypatch, capsys), "step 6: idempotent"

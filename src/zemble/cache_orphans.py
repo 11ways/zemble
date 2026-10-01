@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 
 from zemble.cache import cache_key
-from zemble.embedding.gc import indexes_by_family
+from zemble.embedding.gc import indexes_by_family, last_activity
 from zemble.graph.store import graph_root_of, retired_graph_files, sweep_graph_folder
 from zemble.openfiles import held_open
 
@@ -186,9 +186,7 @@ def _unused_embedders(cache_folder: Path, oldest: float) -> list[Orphan]:
             continue
         files = [path, *(path.with_name(path.name + suffix) for suffix in ("-wal", "-shm"))]
         present = tuple(candidate for candidate in files if candidate.exists())
-        # -shm is rewritten by every open, so only the database and its WAL date the last write.
-        written = max(candidate.stat().st_mtime for candidate in present if not candidate.name.endswith("-shm"))
-        if written >= oldest or any(held_open(candidate) for candidate in present):
+        if any(held_open(candidate) for candidate in present) or last_activity(path) >= oldest:
             continue
         orphans.append(
             Orphan(OrphanKind.EMBEDDER_UNUSED, path, sum(_size(candidate) for candidate in present), present)

@@ -61,6 +61,33 @@ def file_size(path: Path) -> int:
     return total
 
 
+def last_activity(path: Path) -> float:
+    """Return when a cache file was last written to or served from, as far as the disk records it.
+
+    An empty WAL is ignored: sqlite truncates it on every open and close, so its time dates an
+    open, not a write. A served vector leaves only its `used` stamp, a day, read as that day's start.
+    Call it only on a file no process holds: it opens the file read-only.
+
+    :return: A POSIX timestamp.
+    """
+    times = [path.stat().st_mtime]
+    wal = path.with_name(path.name + "-wal")
+    if wal.exists() and wal.stat().st_size > 0:
+        times.append(wal.stat().st_mtime)
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            if _has_table(connection, "used"):
+                day = connection.execute("SELECT MAX(day) FROM used").fetchone()[0]
+                if day is not None:
+                    times.append(float(day) * 86400)
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        pass
+    return max(times)
+
+
 def indexes_by_family(cache_folder: Path) -> dict[str, list[Path]]:
     """Group every saved index folder by the slug of the embedding-cache file its embedder reads.
 

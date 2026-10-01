@@ -1,5 +1,7 @@
 import hashlib
+import os
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ def make_chunk(content: str, file_path: str = "src/module.py") -> Chunk:
 
 
 @pytest.fixture(autouse=True)
-def no_real_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+def no_real_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     """Keep the suite off the user's real daemon and real cache: a test owns neither.
 
     The daemon's own tests point the socket at a temporary directory and re-enable it there,
@@ -42,6 +44,10 @@ def no_real_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.Tem
     # Never read the developer's real ~/.config/zemble/env (keys, hosted providers) in a test.
     monkeypatch.setenv("ZEMBLE_ENV_FILE", str(tmp_path_factory.mktemp("userenv") / "absent"))
     monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(tmp_path_factory.mktemp("zemble-cache")))
+    yield
+    # Checked before monkeypatch restores anything: a `monkeypatch.undo()` inside a test drops this
+    # floor too, and the rest of that test then wrote the developer's real cache.
+    assert os.environ.get("ZEMBLE_CACHE_LOCATION"), "the test dropped the cache isolation (monkeypatch.undo()?)"
 
 
 @pytest.fixture

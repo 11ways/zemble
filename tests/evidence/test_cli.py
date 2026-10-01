@@ -173,6 +173,7 @@ def test_cli_explain_prefers_the_daemon_then_falls_back(
     from zemble.evidence import cli as evidence_cli
 
     root = str(graph_fixture_root)
+    in_process_ensure = evidence_cli.ensure_graph
 
     # 1. A daemon answer is rendered as-is, without scanning the workspace here.
     warm = {"bundle": {"items": [{"reason": "from the daemon"}]}, "markdown": "# Evidence for: warm"}
@@ -181,8 +182,10 @@ def test_cli_explain_prefers_the_daemon_then_falls_back(
     assert _run(monkeypatch, graph_fixture_root, "explain", root, "warm") == 0, "step 1: the daemon answer is a success"
     assert capsys.readouterr().out.startswith("# Evidence for: warm"), "step 1: printed verbatim"
 
-    # 2. An unreachable daemon is one stderr line, then the real in-process bundle.
-    monkeypatch.undo()
+    # 2. An unreachable daemon is one stderr line, then the real in-process bundle. Only the two
+    # patches above are reverted: `monkeypatch.undo()` would also drop the cache and daemon
+    # isolation the fixtures set, and build the fixture graph in the developer's real cache.
+    monkeypatch.setattr(evidence_cli, "ensure_graph", in_process_ensure)
 
     def _refuse(*args: Any, **kwargs: Any) -> Any:
         raise DaemonUnavailable("not running (ENOENT)")

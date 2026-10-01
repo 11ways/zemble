@@ -76,10 +76,11 @@ def test_oversized_root_refusal_journey(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setenv(WORK_LIMIT_ENV, "1")
 
     # 1. Refused before anything is chunked, and before the embedder is touched.
-    _no_parsing(monkeypatch)
-    before = len(mock_embedder.document_calls)
-    with pytest.raises(OversizedRootRefused) as raised:
-        ZembleIndex.from_path(root, embedder=mock_embedder)
+    with monkeypatch.context() as unparsed:
+        _no_parsing(unparsed)
+        before = len(mock_embedder.document_calls)
+        with pytest.raises(OversizedRootRefused) as raised:
+            ZembleIndex.from_path(root, embedder=mock_embedder)
     message = str(raised.value)
     assert len(mock_embedder.document_calls) == before, "step 1: nothing was embedded"
 
@@ -104,8 +105,6 @@ def test_oversized_root_refusal_journey(tmp_path: Path, monkeypatch: pytest.Monk
 
     # 5. A .zembleignore for the fat directory is enough to make the same root affordable.
     (root / ".zembleignore").write_text("vendored/\n", encoding="utf-8")
-    monkeypatch.undo()
-    monkeypatch.setenv(WORK_LIMIT_ENV, "1")
     index = ZembleIndex.from_path(root, embedder=mock_embedder)
     assert index.stats.indexed_files == 1, "step 5: only the small tree was indexed"
 
