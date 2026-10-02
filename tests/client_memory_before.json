@@ -1,0 +1,98 @@
+{
+  "client_revision": "f424be3",
+  "dimensions": 1024,
+  "peak_client_rss_mib": 768.2,
+  "peak_daemon_rss_mib": 525.5,
+  "initial": {
+    "pid": 3168400,
+    "rss_mib": 90.6,
+    "local_builds": 0,
+    "local_indexes": 0,
+    "local_model_loaded": true,
+    "daemon_revision": null
+  },
+  "cases": [
+    {
+      "case": "healthy",
+      "answer": "{\n  \"query\": \"operation value\",\n  \"results\": [\n    {\n      \"file_path\": \"service_0.py\",\n      \"start_line\": 2,\n      \"end_line\": 39,\n      \"score\": 0.009575852198803018,\n      \"content\": \"def operation_0(self, value):\\n        return value + 0\\n\\n    def operation_1(self, value):\\n        return value + 1\\n\\n    def operation_2(self, value):\\n        return value + 2\\n\\n    def operation_3(self, value):\"\n    },\n    {\n      \"file_path\": \"service_1990.py\",\n      \"start_line\": 2,\n      \"end_line\": 39,\n      \"score\": 0.008489901677755448,\n      \"content\": \"def operation_0(self, value):\\n        return value + 1990\\n\\n    def operation_1(self, value):\\n        return value + 1991\\n\\n    def operation_2(self, value):\\n        return value + 1992\\n\\n    def operation_3(self, value):\"\n    },\n    {",
+      "answer_sha256": "1a0872d89c7782049c1dd9d264511d7e1c78750bd7a14e199b3b7dbe0ba54733",
+      "state": {
+        "pid": 3168400,
+        "rss_mib": 90.9,
+        "local_builds": 0,
+        "local_indexes": 0,
+        "local_model_loaded": true,
+        "daemon_revision": null
+      }
+    },
+    {
+      "case": "unavailable",
+      "answer": "{\n  \"query\": \"operation value\",\n  \"results\": [\n    {\n      \"file_path\": \"service_0.py\",\n      \"start_line\": 2,\n      \"end_line\": 39,\n      \"score\": 0.009575852198803018,\n      \"content\": \"def operation_0(self, value):\\n        return value + 0\\n\\n    def operation_1(self, value):\\n        return value + 1\\n\\n    def operation_2(self, value):\\n        return value + 2\\n\\n    def operation_3(self, value):\"\n    },\n    {\n      \"file_path\": \"service_1990.py\",\n      \"start_line\": 2,\n      \"end_line\": 39,\n      \"score\": 0.008489901677755448,\n      \"content\": \"def operation_0(self, value):\\n        return value + 1990\\n\\n    def operation_1(self, value):\\n        return value + 1991\\n\\n    def operation_2(self, value):\\n        return value + 1992\\n\\n    def operation_3(self, value):\"\n    },\n    {",
+      "answer_sha256": "1a0872d89c7782049c1dd9d264511d7e1c78750bd7a14e199b3b7dbe0ba54733",
+      "state": {
+        "pid": 3168400,
+        "rss_mib": 228.6,
+        "local_builds": 1,
+        "local_indexes": 1,
+        "local_model_loaded": true,
+        "daemon_revision": null
+      }
+    },
+    {
+      "case": "busy",
+      "answer": "{\n  \"query\": \"operation value\",\n  \"results\": [\n    {\n      \"file_path\": \"service_178.py\",\n      \"start_line\": 119,\n      \"end_line\": 156,\n      \"score\": 0.009836065573770493,\n      \"content\": \"def operation_39(self, value):\\n        return value + 217\\n\\n    def operation_40(self, value):\\n        return value + 218\\n\\n    def operation_41(self, value):\\n        return value + 219\\n\\n    def operation_42(self, value):\"\n    },\n    {\n      \"file_path\": \"service_3385.py\",\n      \"start_line\": 77,\n      \"end_line\": 111,\n      \"score\": 0.008553893841730298,\n      \"content\": \"def operation_25(self, value):\\n        return value + 3410\\n\\n    def operation_26(self, value):\\n        return value + 3411\\n\\n    def operation_27(self, value):\\n        return value + 3412\\n\\n    def operation_28(self, ",
+      "answer_sha256": "60eb9a8cd53be06e77fe8b879639f1629e2a2c6ef1a534d28f89f7460df132f2",
+      "state": {
+        "pid": 3168400,
+        "rss_mib": 511.1,
+        "local_builds": 2,
+        "local_indexes": 2,
+        "local_model_loaded": true,
+        "daemon_revision": null
+      }
+    },
+    {
+      "case": "failed",
+      "answer": "{\n  \"query\": \"operation value\",\n  \"results\": [\n    {\n      \"file_path\": \"service_166.py\",\n      \"start_line\": 119,\n      \"end_line\": 156,\n      \"score\": 0.009836065573770493,\n      \"content\": \"def operation_39(self, value):\\n        return value + 205\\n\\n    def operation_40(self, value):\\n        return value + 206\\n\\n    def operation_41(self, value):\\n        return value + 207\\n\\n    def operation_42(self, value):\"\n    },\n    {\n      \"file_path\": \"service_397.py\",\n      \"start_line\": 1,\n      \"end_line\": 1,\n      \"score\": 0.008553893841730298,\n      \"content\": \"class Service397:\"\n    },\n    {\n      \"file_path\": \"service_15.py\",\n      \"start_line\": 158,\n      \"end_line\": 195,\n      \"score\": 0.00841592781202497,\n      \"content\": \"def operation_52(self, value):\\n        return value + 67\\",
+      "answer_sha256": "3887ccca5b56a949fff9adc83311269283fea36e3b0811cde880e26722afe653",
+      "state": {
+        "pid": 3168400,
+        "rss_mib": 649.7,
+        "local_builds": 3,
+        "local_indexes": 3,
+        "local_model_loaded": true,
+        "daemon_revision": null
+      }
+    },
+    {
+      "case": "refused",
+      "answer": "injected refused",
+      "answer_sha256": "730bf2589b6c0f64471aec64c2d84012794403340b34196bf7fb650d03f6d0ed",
+      "state": {
+        "pid": 3168400,
+        "rss_mib": 649.7,
+        "local_builds": 3,
+        "local_indexes": 3,
+        "local_model_loaded": true,
+        "daemon_revision": null
+      }
+    }
+  ],
+  "before_restart": {
+    "pid": 3168400,
+    "rss_mib": 649.7,
+    "local_builds": 3,
+    "local_indexes": 3,
+    "local_model_loaded": true,
+    "daemon_revision": null
+  },
+  "after_restart": {
+    "pid": 3168400,
+    "rss_mib": 649.7,
+    "local_builds": 3,
+    "local_indexes": 3,
+    "local_model_loaded": true,
+    "daemon_revision": null
+  },
+  "mcp_log": "Processing request of type CallToolRequest\nProcessing request of type ListToolsRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\ndaemon unavailable (injected startup/connection failure); answering in-process\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\ndaemon unavailable (injected busy); answering in-process\nembedding 34000 uncached chunk(s), ~6558924 tokens, ~unknown price with fake:test@1024\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\ndaemon unavailable (injected failed); answering in-process\nembedding 17000 uncached chunk(s), ~3264063 tokens, ~unknown price with fake:test@1024\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\n"
+}

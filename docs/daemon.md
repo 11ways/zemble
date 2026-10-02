@@ -10,7 +10,7 @@ holds, and answers CLI and MCP requests over a unix socket.
 | Piece | What it is |
 | --- | --- |
 | `zemble/daemon/protocol.py` | Wire format (newline-delimited JSON), socket/pidfile/lock/log locations, error types. Imports nothing heavy: every short-lived process loads it. |
-| `zemble/daemon/client.py` | Connect, auto-start, one request, one response. Raises `DaemonError`; every caller falls back in-process. |
+| `zemble/daemon/client.py` | Connect, auto-start, one request, one response. Reports errors without authorizing local indexing. |
 | `zemble/daemon/server.py` | The `Daemon` object (warm indexes, watchers, per-root locks) plus the `COMMANDS` dispatch table. |
 | `zemble/daemon/memory.py` | RAM-derived memory budget, memory refusal, and kernel allocation backstop. |
 | `zemble/daemon/watch.py` | `IgnoreRules` (the file walker's own gitignore machinery, reused) and `RootWatcher` (watchfiles). |
@@ -53,10 +53,10 @@ its snapshot.
   time, a `stale` flag (a *.py file under the loaded package changed, or HEAD moved,
   since the daemon started) and a human `note` when it is stale.
   `zemble daemon status` prints it, with `STALE` where it applies.
-- Every response line carries `zemble_version` and `zemble_rev`. A client whose own
-  revision differs logs one WARNING per process ("run `zemble daemon restart` to match
-  them") and then answers normally: a daemon on another revision is never refused, only
-  reported.
+- Every response carries `zemble_version` and `zemble_rev`. Clients observe every
+  daemon revision transition and continue through the current socket. A mismatch
+  with a stale client is not a reason to restart a newer daemon or load a local index.
+  MCP `status` includes the daemon's runtime and its last observed revision.
 - `zemble status` prints this process's identity and the daemon's side by side.
 
 `zemble daemon restart` is the fix; nothing reloads source in place.
@@ -242,16 +242,18 @@ so a daemon that is still starting is never pulled out from under itself.
 
 ## Fallback rules
 
-The daemon is an accelerator, never a requirement, but a memory refusal does not
-fall back to an unbounded client build.
+Daemon-enabled clients never fall back to a local index. The explicit `--no-daemon`
+switch is the only client opt-out. The daemon itself may use shared local library
+code, but that is backend execution, not a client fallback.
 
 - `zemble search`, `find-related`, `stats`, `graph *`, `explain`, `outline` and `signatures`
   go through the client by default, as do their MCP tools.
 - If the socket is absent or dead, the client spawns `python -m zemble.daemon run`
   detached (new session, stdio to the log) and waits up to 10 s for it to answer.
-- Any failure (cannot start, connection lost, protocol error) raises `DaemonError`,
-  and the caller answers in-process after one stderr line:
-  `daemon unavailable (<reason>); running in-process`.
+- Startup failures, disconnects and response timeouts report `Daemon unavailable,
+  retry`. Busy execution/construction slots report `Daemon busy, retry`. Requests
+  have a default 30-second response deadline; a cold build may continue in the
+  daemon after the caller's deadline, so a later retry can use its result.
 - **A refusal is not an outage.** A deliberate, deterministic "no" - any `Refused`, which
   includes daemon memory admission, a root too broad or holding more source than one build may chunk
   (`ScopeRefused`) and a bill over the budget (`EmbeddingBudgetExceeded`) - is
@@ -260,17 +262,22 @@ fall back to an unbounded client build.
   work is not an outage. A fallback could allocate unbounded client memory or repeat a
   full paid build only to reproduce a work/bill refusal. `ErrorKind` in `protocol.py` is the
   one home for that vocabulary, and an unknown kind from a newer daemon is read as
-  `failed`, i.e. it falls back - unknown members fail closed toward the safe behaviour.
+  `failed` and reported without fallback; unknown members fail closed.
   The daemon logs the refusal's own text, and each refusal carries the environment variable
   that would raise the ceiling it hit (`knob` in the root's `last_error`). `knob` is declared
   once, on the `Refused` base in `zemble/refusal.py`, and `REFUSAL_TYPES` is that base rather
   than a hand-maintained union, so a new refusal type is reported here with no second edit and
   can never reach this handler without the field it reads.
-- `--no-daemon` and `ZEMBLE_DAEMON=0` skip the daemon silently: an opt-out is not a failure.
-- `--embedder` skips it too, silently: the daemon holds one embedder (the environment
-  default), and an override is answered in the calling process.
-- The MCP server tries the daemon first and falls back to its own in-process cache, so
-  several agent sessions share one RAM copy of a workspace index.
+- `--no-daemon` deliberately permits local indexes. MCP accepts it in either
+  `zemble --no-daemon` or `zemble mcp --no-daemon` form; local model loading is lazy.
+- `ZEMBLE_DAEMON=0` alone refuses access and tells the caller to unset it or pass the
+  explicit opt-out. `--embedder`, `--reranker`, `--intent` and confirmation similarly
+  cannot implicitly select local execution: unsupported overrides require the opt-out.
+- MCP keeps an empty local cache and no model while using the daemon. Availability,
+  command, budget and malformed/empty-reply errors do not populate it.
+- New callers send `accepts_busy: true`. Legacy callers receive the known `refused`
+  error kind for busy replies, with retry text, because old index clients would
+  otherwise treat an unknown `busy` kind as permission to fall back.
 - A request blocks until its index is ready; the first request after a start may still
   be a cold build. `zemble daemon status` shows a build in progress.
 
@@ -348,10 +355,10 @@ edge read back out of sqlite for one changed file - and it is what to attack nex
   definition lookup is built at save time; between a rebuild and the next write-back
   (10 s throttle) a symbol query reranks with its own scan instead. Results are the
   same, the query is slower.
-- **One embedder per daemon**, the environment default. `--embedder` is answered in-process.
+- **One embedder per daemon**, the environment default. `--embedder` requires explicit `--no-daemon`.
 - **Staleness is reported, never enforced.** A daemon that finds itself stale keeps
   serving; only a restart changes the code it runs. Staleness is judged from mtimes of
   the *.py files present at startup plus the HEAD revision, so a file added after the
   daemon started is only noticed through a moved revision.
-- **Unix sockets only.** No Windows named-pipe transport; there, everything falls back
-  in-process.
+- **Unix sockets only.** No Windows named-pipe transport; local client execution there
+  requires explicit `--no-daemon`, not an automatic transport fallback.

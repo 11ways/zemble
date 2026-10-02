@@ -1,7 +1,6 @@
 """Thin client for the zemble daemon: connect, auto-start, one request, one response.
 
-Every caller is expected to fall back to the in-process path when this module raises
-`DaemonError`; the daemon is an accelerator, never a requirement.
+Daemon errors are answers to report, not permission to load indexes in a client.
 """
 
 from __future__ import annotations
@@ -18,9 +17,12 @@ from itertools import count
 from typing import Any
 
 from zemble.daemon.protocol import (
+    ACCEPTS_BUSY_FIELD,
     CONNECT_TIMEOUT_SECONDS,
+    REQUEST_TIMEOUT_SECONDS,
     REVISION_FIELD,
     START_TIMEOUT_SECONDS,
+    CommandBusy,
     CommandFailed,
     CommandRefused,
     DaemonUnavailable,
@@ -39,8 +41,8 @@ from zemble.utils import is_git_url
 logger = logging.getLogger(__name__)
 
 _request_ids = count(1)
-#: Set once this process has complained about a daemon running different code.
-_warned_about_revision = False
+#: Last observed response revision; the next call connects to the current socket again.
+_daemon_revision: str | None = None
 #: Set once a process must never talk to a daemon: the daemon itself, or --no-daemon.
 _disabled_reason: str | None = None
 
@@ -74,6 +76,16 @@ def disabled_reason() -> str | None:
     if os.environ.get("ZEMBLE_DAEMON", "").strip() == "0":
         return "disabled by ZEMBLE_DAEMON=0"
     return None
+
+
+def in_process() -> bool:
+    """Allow local work only for explicit --no-daemon or inside the daemon itself."""
+    return _disabled_reason in {"--no-daemon", "running inside the daemon"}
+
+
+def daemon_revision() -> str | None:
+    """Return the revision observed on the last daemon response."""
+    return _daemon_revision
 
 
 def _connect(timeout: float = CONNECT_TIMEOUT_SECONDS) -> socket.socket:
@@ -162,44 +174,62 @@ def spawn(timeout: float = START_TIMEOUT_SECONDS) -> None:
     raise DaemonUnavailable(f"did not start within {timeout:.0f}s (see {log_file})")
 
 
-def _warn_on_revision_mismatch(response: dict[str, Any]) -> None:
-    """Warn once when the answering daemon runs a different checkout revision than this process.
-
-    A mismatch is never a refusal: the daemon is an accelerator, and an older one still
-    answers correctly for everything its snapshot already knew how to do.
-    """
-    global _warned_about_revision
-    if _warned_about_revision:
-        return
+def _observe_revision(response: dict[str, Any]) -> None:
+    """Notice each daemon revision transition without routing work back into a stale client."""
+    global _daemon_revision
     from zemble.runtime.identity import identity
 
     theirs = response.get(REVISION_FIELD)
     mine = identity().source_revision
-    if theirs is None or mine is None or theirs == mine:
+    if not isinstance(theirs, str) or theirs == _daemon_revision:
         return
-    _warned_about_revision = True
-    logger.warning(
-        "zemble daemon runs revision %s, this process runs %s; run `zemble daemon restart` to match them",
-        theirs,
-        mine,
-    )
+    previous = _daemon_revision
+    _daemon_revision = theirs
+    if previous is not None:
+        logger.info("zemble daemon revision changed %s -> %s; continuing through the new daemon", previous, theirs)
+    if mine is not None and theirs != mine:
+        logger.warning("zemble daemon runs revision %s, client runs %s; continuing through the daemon", theirs, mine)
 
 
-def call(cmd: str, args: dict[str, Any] | None = None, *, auto_start: bool = True, timeout: float | None = None) -> Any:
+def _response_result(response: dict[str, Any]) -> Any:
+    """Reject failed or empty replies rather than mistaking them for permission to answer locally."""
+    if response.get("ok") is not True:
+        message = str(response.get("error", "unknown daemon error"))
+        kind = error_kind(response.get("kind"))
+        if kind is ErrorKind.REFUSED:
+            raise CommandRefused(message)
+        if kind is ErrorKind.BUSY:
+            raise CommandBusy(message)
+        raise CommandFailed(message)
+    result = response.get("result")
+    if result is None:
+        raise CommandFailed("daemon returned no result")
+    return result
+
+
+def call(
+    cmd: str,
+    args: dict[str, Any] | None = None,
+    *,
+    auto_start: bool = True,
+    timeout: float | None = REQUEST_TIMEOUT_SECONDS,
+) -> Any:
     """Send one command to the daemon and return its result.
 
     :param cmd: Command name, as registered in the server's command table.
     :param args: Command arguments.
     :param auto_start: Whether to spawn a daemon when none is listening.
-    :param timeout: Seconds to wait for the response. None blocks until the daemon answers,
+    :param timeout: Response deadline (default 30 seconds). None blocks until the daemon answers,
         which is what a first, index-building request needs.
     :return: The command's result.
     :raises DaemonUnavailable: If this process may not use a daemon, or none could be reached.
     :raises CommandRefused: If the daemon deliberately refused the command.
-    :raises CommandFailed: If the daemon reported any other error for this command.
+    :raises CommandFailed: If the daemon reports an error, including retryable CommandBusy replies.
     """
     reason = disabled_reason()
     if reason is not None:
+        if not in_process() and os.environ.get("ZEMBLE_DAEMON", "").strip() == "0":
+            raise CommandRefused("ZEMBLE_DAEMON=0 disables daemon access; unset it or explicitly pass --no-daemon.")
         raise DaemonUnavailable(reason)
     try:
         client = _connect()
@@ -213,7 +243,9 @@ def call(cmd: str, args: dict[str, Any] | None = None, *, auto_start: bool = Tru
     try:
         client.settimeout(timeout)
         with client, client.makefile("rwb") as stream:
-            stream.write(encode({"id": request_id, "cmd": cmd, "args": absolutize_path(args or {})}))
+            stream.write(
+                encode({"id": request_id, "cmd": cmd, "args": absolutize_path(args or {}), ACCEPTS_BUSY_FIELD: True})
+            )
             stream.flush()
             line = stream.readline()
     except (OSError, TimeoutError) as exc:
@@ -222,10 +254,7 @@ def call(cmd: str, args: dict[str, Any] | None = None, *, auto_start: bool = Tru
         raise DaemonUnavailable("daemon closed the connection without answering")
 
     response = decode(line)
-    _warn_on_revision_mismatch(response)
-    if not response.get("ok"):
-        message = str(response.get("error", "unknown daemon error"))
-        if error_kind(response.get("kind")) is ErrorKind.REFUSED:
-            raise CommandRefused(message)
-        raise CommandFailed(message)
-    return response.get("result")
+    if response.get("id") != request_id:
+        raise CommandFailed("daemon response has a mismatched request id")
+    _observe_revision(response)
+    return _response_result(response)

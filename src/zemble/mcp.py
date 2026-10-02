@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import sys
@@ -14,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from zemble.daemon import client as daemon_client
-from zemble.daemon.protocol import CommandRefused, DaemonError
+from zemble.daemon.protocol import CommandFailed, DaemonError, failure_message
 from zemble.dedup.mcp import register_dupes_tool
 from zemble.evidence.mcp import register_evidence_tools
 from zemble.graph.mcp import register_graph_tools
@@ -51,26 +50,13 @@ _CACHE_MAX_SIZE = CACHE_MAX_SIZE
 
 
 async def _daemon_call(cmd: str, args: dict[str, Any]) -> Any | None:
-    """Try to answer one tool call from the warm daemon.
-
-    Several agent sessions then share one RAM copy of a workspace index instead of
-    each holding its own.
-
-    A refusal is not an outage: it is re-raised so the caller reports it once, instead of
-    rebuilding the very index the daemon just refused to build and being refused again.
-
-    :param cmd: Daemon command name.
-    :param args: Command arguments.
-    :return: The daemon's result, or None if this process must answer in-process.
-    :raises CommandRefused: If the daemon deliberately refused the command.
-    """
-    try:
-        return await asyncio.to_thread(daemon_client.call, cmd, args)
-    except CommandRefused:
-        raise
-    except DaemonError as exc:
-        logger.info("daemon unavailable (%s); answering in-process", exc)
+    """Answer through the daemon, returning None only for an explicit in-process opt-out."""
+    if daemon_client.in_process():
         return None
+    result = await asyncio.to_thread(daemon_client.call, cmd, args)
+    if result is None:
+        raise CommandFailed("daemon returned no result")
+    return result
 
 
 def unsafe_repo_reason(repo: str) -> str | None:
@@ -100,8 +86,8 @@ async def _answer_remotely(cmd: str, repo: str, args: dict[str, Any]) -> str | d
         return refusal
     try:
         return await _daemon_call(cmd, {"path": repo, **args})
-    except CommandRefused as exc:
-        return str(exc)
+    except DaemonError as exc:
+        return failure_message(exc)
 
 
 async def _get_index(
@@ -119,6 +105,9 @@ async def _get_index(
     reason = unsafe_repo_reason(repo)
     if reason is not None:
         raise ValueError(reason)
+    if not daemon_client.in_process():
+        raise ValueError("Local indexing requires explicit --no-daemon; the daemon owns indexes.")
+    await cache.load_embedder_once()
     try:
         index = await cache.get(repo, content=content, exclude=exclude)
     # Every deliberate refusal - scope, work ceiling, spending budget - is an ANSWER an agent
@@ -299,16 +288,11 @@ async def serve(
 ) -> None:
     """Start an MCP stdio server."""
     cache = IndexCache()
-    init_task = asyncio.create_task(cache.load_embedder_once())
     server = create_server(cache, default_content=content)
     try:
         await server.run_stdio_async()
     finally:
-        # The stdio loop returns on stdin EOF; nothing else stops this process, so every
-        # background task started here has to be settled before the loop is torn down.
-        init_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await init_task
+        # RPC threads may outlive cancellation; finish them before leaving the stdio loop.
         await asyncio.get_running_loop().shutdown_default_executor()
 
 

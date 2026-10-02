@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
@@ -15,8 +14,6 @@ from zemble.mcp_repo import resolve_repo, with_default_note
 
 if TYPE_CHECKING:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP
-
-logger = logging.getLogger(__name__)
 
 _REPO_DESCRIPTION = with_default_note(
     "Local directory path of the workspace to query. The symbol graph (every bundled grammar; Java and "
@@ -131,8 +128,8 @@ async def _dispatch(
     The daemon holds a graph it keeps fresh with its watcher, so the workspace scan
     `ensure_graph` would do here is skipped entirely.
     """
-    from zemble.daemon import client
-    from zemble.daemon.protocol import DaemonError
+    from zemble.daemon.protocol import DaemonError, failure_message
+    from zemble.mcp import _daemon_call
 
     repo = resolve_repo(repo)
     args: dict[str, Any] = {"path": repo, "symbol": symbol, "command": method, "limit": limit}
@@ -141,11 +138,13 @@ async def _dispatch(
         kinds = kwargs.get("kinds")
         args["kinds"] = [kind.value for kind in kinds] if kinds else None
     try:
-        remote = await asyncio.to_thread(client.call, "graph", args)
+        remote = await _daemon_call("graph", args)
         if isinstance(remote, dict):
             return remote
-    except DaemonError:
-        logger.debug("Falling back to an in-process graph query for %s", repo, exc_info=True)
+        if remote is not None:
+            return {"error": "Daemon returned an invalid graph payload; no in-process fallback."}
+    except DaemonError as error:
+        return {"error": failure_message(error)}
     return await asyncio.to_thread(answer, repo, symbol, method, limit=limit, **kwargs)
 
 

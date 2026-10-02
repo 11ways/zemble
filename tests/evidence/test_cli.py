@@ -164,7 +164,7 @@ def test_mcp_tools(graph_fixture_root: Path, graph_cache: Path, cache: IndexCach
     assert len(ambiguous["candidates"]) == 2, "step 4: with every candidate named"
 
 
-def test_cli_explain_prefers_the_daemon_then_falls_back(
+def test_cli_explain_prefers_the_daemon_and_reports_an_outage(
     graph_fixture_root: Path, graph_cache: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`explain` asks the daemon first, and answers in this process with one notice when it cannot."""
@@ -173,7 +173,7 @@ def test_cli_explain_prefers_the_daemon_then_falls_back(
     from zemble.evidence import cli as evidence_cli
 
     root = str(graph_fixture_root)
-    in_process_ensure = evidence_cli.ensure_graph
+    monkeypatch.setattr(client, "_disabled_reason", None)
 
     # 1. A daemon answer is rendered as-is, without scanning the workspace here.
     warm = {"bundle": {"items": [{"reason": "from the daemon"}]}, "markdown": "# Evidence for: warm"}
@@ -185,18 +185,15 @@ def test_cli_explain_prefers_the_daemon_then_falls_back(
     # 2. An unreachable daemon is one stderr line, then the real in-process bundle. Only the two
     # patches above are reverted: `monkeypatch.undo()` would also drop the cache and daemon
     # isolation the fixtures set, and build the fixture graph in the developer's real cache.
-    monkeypatch.setattr(evidence_cli, "ensure_graph", in_process_ensure)
 
     def _refuse(*args: Any, **kwargs: Any) -> Any:
         raise DaemonUnavailable("not running (ENOENT)")
 
     monkeypatch.setattr(client, "call", _refuse)
-    assert _run(monkeypatch, graph_fixture_root, "explain", root, "how is an area computed", "--budget", "1200") == 0, (
-        "step 2: the fallback still answers"
-    )
+    assert _run(monkeypatch, graph_fixture_root, "explain", root, "how is an area computed", "--budget", "1200") == 1
     captured = capsys.readouterr()
-    assert "daemon unavailable (not running (ENOENT)); running in-process" in captured.err, "step 2: one honest line"
-    assert captured.out.startswith("# Evidence for: how is an area computed"), "step 2: built here instead"
+    assert "Daemon unavailable, retry" in captured.err
+    assert captured.out == ""
 
 
 def test_mcp_explain_prefers_the_daemon(
@@ -207,6 +204,7 @@ def test_mcp_explain_prefers_the_daemon(
 
     from zemble.daemon import client
 
+    monkeypatch.setattr(client, "_disabled_reason", None)
     asked: list[str] = []
 
     def _answer(cmd: str, args: dict[str, Any], **kwargs: Any) -> dict[str, Any]:

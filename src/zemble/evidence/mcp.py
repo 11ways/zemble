@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
 
-from zemble.daemon.protocol import CommandRefused
+from zemble.daemon.protocol import DaemonError, failure_message
 from zemble.evidence.answers import explain_payload, outline_payload, signatures_payload
 from zemble.graph.cli import ensure_graph
 from zemble.graph.provider import AnyProvider, open_provider
@@ -127,7 +127,9 @@ async def _explain_answer(
         if payload is None:
             index = await get_index(repo, selected, paths, exclude)
             payload = await asyncio.to_thread(_explain_here, index, repo, query, budget, top_k)
-    except (CommandRefused, ValueError) as exc:
+    except DaemonError as exc:
+        return failure_message(exc)
+    except ValueError as exc:
         return str(exc)
     if not payload["bundle"]["items"]:
         return f"No evidence found for {query!r}."
@@ -194,8 +196,8 @@ def register_evidence_tools(
         repo = resolve_repo(repo)
         try:
             payload = await _remote("outline", {"path": repo, "target": target, "members": members})
-        except CommandRefused as exc:
-            return {"error": str(exc)}
+        except DaemonError as exc:
+            return {"error": failure_message(exc)}
         if payload is None:
             payload = await asyncio.to_thread(_outline_here, repo, target, members)
         return _as_payload(payload, "outline")
@@ -213,8 +215,8 @@ def register_evidence_tools(
         repo = resolve_repo(repo)
         try:
             payload = await _remote("signatures", {"path": repo, "symbol": symbol})
-        except CommandRefused as exc:
-            return {"error": str(exc)}
+        except DaemonError as exc:
+            return {"error": failure_message(exc)}
         if payload is None:
             payload = await asyncio.to_thread(_signatures_here, repo, symbol)
         return _as_payload(payload, "signatures")

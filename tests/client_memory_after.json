@@ -1,0 +1,98 @@
+{
+  "client_revision": "working-tree",
+  "dimensions": 1024,
+  "peak_client_rss_mib": 84.6,
+  "peak_daemon_rss_mib": 532.3,
+  "initial": {
+    "pid": 3175801,
+    "rss_mib": 83.9,
+    "local_builds": 0,
+    "local_indexes": 0,
+    "local_model_loaded": false,
+    "daemon_revision": null
+  },
+  "cases": [
+    {
+      "case": "healthy",
+      "answer": "{\n  \"query\": \"operation value\",\n  \"results\": [\n    {\n      \"file_path\": \"service_0.py\",\n      \"start_line\": 2,\n      \"end_line\": 39,\n      \"score\": 0.009575852198803018,\n      \"content\": \"def operation_0(self, value):\\n        return value + 0\\n\\n    def operation_1(self, value):\\n        return value + 1\\n\\n    def operation_2(self, value):\\n        return value + 2\\n\\n    def operation_3(self, value):\"\n    },\n    {\n      \"file_path\": \"service_1990.py\",\n      \"start_line\": 2,\n      \"end_line\": 39,\n      \"score\": 0.008489901677755448,\n      \"content\": \"def operation_0(self, value):\\n        return value + 1990\\n\\n    def operation_1(self, value):\\n        return value + 1991\\n\\n    def operation_2(self, value):\\n        return value + 1992\\n\\n    def operation_3(self, value):\"\n    },\n    {",
+      "answer_sha256": "1a0872d89c7782049c1dd9d264511d7e1c78750bd7a14e199b3b7dbe0ba54733",
+      "state": {
+        "pid": 3175801,
+        "rss_mib": 84.3,
+        "local_builds": 0,
+        "local_indexes": 0,
+        "local_model_loaded": false,
+        "daemon_revision": "daemon-one"
+      }
+    },
+    {
+      "case": "unavailable",
+      "answer": "Daemon unavailable, retry: injected startup/connection failure",
+      "answer_sha256": "ab4fd415d23ce716b8f2aa51e3953e13539993291898c8a64d4e67ac129b4e14",
+      "state": {
+        "pid": 3175801,
+        "rss_mib": 84.4,
+        "local_builds": 0,
+        "local_indexes": 0,
+        "local_model_loaded": false,
+        "daemon_revision": "daemon-one"
+      }
+    },
+    {
+      "case": "busy",
+      "answer": "Daemon busy, retry: injected busy",
+      "answer_sha256": "74b51175429b36472642a66701dacd341d6fe809cbc8b22a76e3cfd32fd50b2f",
+      "state": {
+        "pid": 3175801,
+        "rss_mib": 84.4,
+        "local_builds": 0,
+        "local_indexes": 0,
+        "local_model_loaded": false,
+        "daemon_revision": "daemon-one"
+      }
+    },
+    {
+      "case": "failed",
+      "answer": "Daemon command failed: injected failed; no in-process fallback.",
+      "answer_sha256": "89b305d3235e9aa3497aceb6cd3e82b5fc9c59b1f51b9d168866a2b55491a413",
+      "state": {
+        "pid": 3175801,
+        "rss_mib": 84.4,
+        "local_builds": 0,
+        "local_indexes": 0,
+        "local_model_loaded": false,
+        "daemon_revision": "daemon-one"
+      }
+    },
+    {
+      "case": "refused",
+      "answer": "injected refused",
+      "answer_sha256": "730bf2589b6c0f64471aec64c2d84012794403340b34196bf7fb650d03f6d0ed",
+      "state": {
+        "pid": 3175801,
+        "rss_mib": 84.4,
+        "local_builds": 0,
+        "local_indexes": 0,
+        "local_model_loaded": false,
+        "daemon_revision": "daemon-one"
+      }
+    }
+  ],
+  "before_restart": {
+    "pid": 3175801,
+    "rss_mib": 84.4,
+    "local_builds": 0,
+    "local_indexes": 0,
+    "local_model_loaded": false,
+    "daemon_revision": "daemon-one"
+  },
+  "after_restart": {
+    "pid": 3175801,
+    "rss_mib": 84.4,
+    "local_builds": 0,
+    "local_indexes": 0,
+    "local_model_loaded": false,
+    "daemon_revision": "daemon-two"
+  },
+  "mcp_log": "Processing request of type CallToolRequest\nProcessing request of type ListToolsRequest\nProcessing request of type CallToolRequest\nzemble daemon runs revision daemon-one, client runs f424be3; continuing through the daemon\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nProcessing request of type CallToolRequest\nzemble daemon revision changed daemon-one -> daemon-two; continuing through the new daemon\nzemble daemon runs revision daemon-two, client runs f424be3; continuing through the daemon\nProcessing request of type CallToolRequest\n"
+}

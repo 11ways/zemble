@@ -73,13 +73,15 @@ def run_evidence(args: argparse.Namespace) -> int:
     """Run one evidence subcommand, from the warm daemon where there is one, and return its exit code."""
     from zemble.cli import _via_daemon
 
-    # AIDEV-NOTE: an explicit --intent answers here rather than over the daemon; the
-    # daemon protocol has no intent argument, so asking it would silently ignore the override.
+    # AIDEV-NOTE: the daemon protocol has no intent argument; require an explicit local
+    # opt-out instead of silently loading an index in a client for an override.
     forced = getattr(args, "intent", AUTO_INTENT) != AUTO_INTENT
-    payload = (
-        None
-        if forced
-        else _via_daemon(args.command, _daemon_args(args), args.no_daemon, getattr(args, "embedder", None))
+    payload = _via_daemon(
+        args.command,
+        _daemon_args(args),
+        args.no_daemon,
+        getattr(args, "embedder", None),
+        local_option="--intent" if forced else None,
     )
     if payload is None:
         payload = _in_process(args)

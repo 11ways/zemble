@@ -26,6 +26,8 @@ LOG_BACKUP_COUNT = 3
 START_TIMEOUT_SECONDS = 10.0
 #: How long a client waits for the socket itself, once it exists.
 CONNECT_TIMEOUT_SECONDS = 5.0
+REQUEST_TIMEOUT_SECONDS = 30.0
+ACCEPTS_BUSY_FIELD = "accepts_busy"
 
 
 class ErrorKind(StrEnum):
@@ -39,6 +41,8 @@ class ErrorKind(StrEnum):
     FAILED = "failed"
     #: A deliberate, deterministic "no". Every process answers the same, so retrying is waste.
     REFUSED = "refused"
+    #: Capacity is occupied; retry through the daemon, never build locally.
+    BUSY = "busy"
 
 
 def error_kind(raw: object) -> ErrorKind:
@@ -50,7 +54,7 @@ def error_kind(raw: object) -> ErrorKind:
 
 
 class DaemonError(Exception):
-    """Base class for every daemon-related failure a caller may fall back from."""
+    """A daemon error to report, never permission to allocate an index in the client."""
 
 
 class DaemonUnavailable(DaemonError):
@@ -67,6 +71,21 @@ class CommandRefused(CommandFailed):
     A caller must surface this instead of falling back in-process: the refusal is the answer,
     and rebuilding the same index locally only pays for the same "no" a second time.
     """
+
+
+class CommandBusy(CommandFailed):
+    """The daemon has no free execution slot; the caller may retry."""
+
+
+def failure_message(error: DaemonError) -> str:
+    """Render retryable availability errors separately from refusals and command failures."""
+    if isinstance(error, CommandBusy):
+        return f"Daemon busy, retry: {error}"
+    if isinstance(error, DaemonUnavailable):
+        return f"Daemon unavailable, retry: {error}"
+    if isinstance(error, CommandRefused):
+        return str(error)
+    return f"Daemon command failed: {error}; no in-process fallback."
 
 
 def _preferred_directory() -> Path:

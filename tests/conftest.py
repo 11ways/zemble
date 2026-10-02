@@ -41,6 +41,8 @@ def no_real_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.Tem
     test file - so a suite run silently edited the numbers `zemble savings` reports.
     """
     monkeypatch.setenv("ZEMBLE_DAEMON", "0")
+    # Local unit journeys are explicit opt-outs, never simulations of an automatic fallback.
+    monkeypatch.setattr("zemble.daemon.client._disabled_reason", "--no-daemon")
     # Never read the developer's real ~/.config/zemble/env (keys, hosted providers) in a test.
     monkeypatch.setenv("ZEMBLE_ENV_FILE", str(tmp_path_factory.mktemp("userenv") / "absent"))
     monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(tmp_path_factory.mktemp("zemble-cache")))

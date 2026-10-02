@@ -448,8 +448,9 @@ The refusal names the root and all ways out: search a narrower project, declare 
 workspace, or deliberately override this check, the work ceiling and the budget at once
 with `--yes` / `ZEMBLE_EMBED_CONFIRM=1`. It shares a base class, `ScopeRefused`, with the
 work guard above, which is what lets every surface treat both as deliberate answers. A
-confirmed CLI request runs in-process because an already-running daemon cannot inherit an
-environment decision made by its client.
+confirmed CLI request requires explicit `--no-daemon` because an already-running
+daemon cannot inherit an environment decision made by its client. Confirmation alone
+does not authorize a local index.
 
 ### Prices
 

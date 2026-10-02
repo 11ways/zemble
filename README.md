@@ -66,8 +66,9 @@ about itself in `.zemble/home.toml`. See [docs/home.md](docs/home.md).
 
 **Warm daemon** (`zemble daemon`). One process per user holding the indexes and the graph
 in RAM, watching the roots it holds and reindexing incrementally. It starts on demand,
-never at login, and exits after 30 idle minutes. Every surface is daemon-first with an
-in-process fallback, so it is an accelerator and never a requirement. See
+never at login, and exits after 30 idle minutes. Index-backed clients use the daemon
+without automatic local fallback: an outage or busy daemon is a retryable answer,
+not permission to allocate another index. Only explicit `--no-daemon` permits local indexes. See
 [docs/daemon.md](docs/daemon.md).
 
 **Pluggable embedders and rerankers**. One spec string selects the embedder
@@ -295,7 +296,9 @@ zemble daemon stop
 `path` defaults to the current directory. The graph and evidence commands exit `0` when
 they answered, `1` when nothing matched and `2` when the name was ambiguous, with the
 candidates on stderr; `zemble home` exits `1` when nothing matched at all.
-`--no-daemon` (or `ZEMBLE_DAEMON=0`) answers in the calling process instead.
+`--no-daemon` explicitly answers in the calling process instead. `ZEMBLE_DAEMON=0`
+alone refuses daemon access; it does not authorize local indexes. Unsupported CLI
+overrides (`--embedder`, `--reranker`, `--intent`, `--yes`) also require `--no-daemon`.
 `zemble savings` reports how many tokens searches saved against reading the matched
 files outright, and `zemble clear index|savings|orphans|all` empties the
 caches. `zemble clear orphans` removes what nothing reads again (indexes and graphs
@@ -371,7 +374,9 @@ Running `zemble` with no subcommand **is** the MCP server, so an agent config po
 the `zemble` binary (or `uvx --from "/path/to/zemble[mcp]" zemble`) with no arguments.
 Repos are indexed on demand and cached, local paths are refreshed as files change, and
 the server asks the warm daemon first so several agent sessions share one copy of an
-index in RAM.
+index in RAM. `zemble mcp` is an explicit spelling of the same stdio server.
+Use `zemble mcp --no-daemon` only when intentionally allowing the MCP process to own
+local indexes. Daemon-enabled MCP startup loads neither an index nor an embedder.
 
 | Tool | Answers |
 | --- | --- |
@@ -413,11 +418,13 @@ before a pull keeps answering from the old code, silently. So:
 - `status` (MCP tool) and `zemble status` (CLI) report the version, revision and start
   time of the process answering, and set `stale` once the checkout has moved under it.
   `zemble status` also prints the daemon's identity when one is reachable.
-- A stale MCP server logs one WARNING to stderr on the next tool call, and the daemon
-  client logs one WARNING per process when the daemon runs another revision. Neither
-  refuses to answer.
-- The fix is always a restart: restart the MCP server in your agent, and
-  `zemble daemon restart` for the daemon.
+- A stale MCP server warns about its own source, but index work stays in the daemon.
+  Clients observe each daemon revision transition and keep using the current socket.
+  MCP `status` reports both identities and the last observed daemon revision.
+- Restart the daemon to load new backend code. An updated MCP client keeps working
+  against it without restarting for each daemon revision. Restart old pre-fix MCP
+  processes once to install strict routing and release any already-retained indexes;
+  no source edit can change modules or free caches in a process that loaded old code.
 
 ## How it works
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
 
-from zemble.daemon.protocol import CommandRefused
+from zemble.daemon.protocol import DaemonError, failure_message
 from zemble.graph.cli import ensure_graph
 from zemble.graph.provider import open_provider
 from zemble.home.answers import DEFAULT_TOP_K, home_payload
@@ -86,7 +86,9 @@ def register_home_tool(server: FastMCP, get_index: IndexGetter) -> None:
         # A refusal is the answer, on both lanes: the daemon raises CommandRefused and the
         # in-process one arrives as the ValueError `zemble.mcp._get_index` wraps a refusal in.
         # An agent has to be able to read the reason and act on it, not a stack trace.
-        except (ConfigError, CommandRefused, ValueError) as error:
+        except DaemonError as error:
+            return failure_message(error)
+        except (ConfigError, ValueError) as error:
             return str(error)
         return str(payload["markdown"])
 

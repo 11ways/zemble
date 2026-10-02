@@ -158,7 +158,7 @@ def test_mcp_tool_reports_a_broken_config(workspace: Path, cache: IndexCache) ->
     assert "needs a non-empty 'to'" in answer, "the tool explains what is wrong with the config"
 
 
-def test_cli_prefers_the_daemon_and_falls_back_when_it_is_gone(
+def test_cli_prefers_the_daemon_and_reports_when_it_is_gone(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A daemon answer is printed verbatim; an unavailable daemon is one line and an answer."""
@@ -174,7 +174,6 @@ def test_cli_prefers_the_daemon_and_falls_back_when_it_is_gone(
         "home": {"verdict": "NEW_MECHANISM", "mechanisms": [], "candidates": [{"module": "core"}]},
         "markdown": "# Home for: served by the daemon\n",
     }
-    real_in_process = home_cli._in_process
     monkeypatch.setattr(client, "call", lambda cmd, args, **kwargs: served)
     monkeypatch.setattr(home_cli, "_in_process", lambda args: pytest.fail("must not answer in-process"))
     assert _run(monkeypatch, workspace, "home", str(workspace), "anything") == 0, "step 1: the daemon answer is used"
@@ -185,11 +184,10 @@ def test_cli_prefers_the_daemon_and_falls_back_when_it_is_gone(
         raise DaemonUnavailable("not running (ENOENT)")
 
     monkeypatch.setattr(client, "call", _refuse)
-    monkeypatch.setattr(home_cli, "_in_process", real_in_process)
-    assert _run(monkeypatch, workspace, "home", str(workspace), "compute an area") == 0, "step 2: it still answers"
+    assert _run(monkeypatch, workspace, "home", str(workspace), "compute an area") == 1
     captured = capsys.readouterr()
-    assert "daemon unavailable (not running (ENOENT)); running in-process" in captured.err, "step 2: one honest line"
-    assert captured.out.startswith("# Home for: compute an area"), "step 2: answered here instead"
+    assert "Daemon unavailable, retry" in captured.err
+    assert captured.out == ""
 
 
 def test_mcp_tool_reports_a_refusal_as_the_answer(workspace: Path, cache: IndexCache) -> None:
@@ -209,7 +207,10 @@ def test_mcp_tool_reports_a_refusal_as_the_answer(workspace: Path, cache: IndexC
 
     # 1. The daemon lane: a CommandRefused comes back as its own text.
     graph_cli._refreshed.clear()
-    with patch.object(client, "call", side_effect=CommandRefused(refusal)):
+    with (
+        patch.object(client, "_disabled_reason", None),
+        patch.object(client, "call", side_effect=CommandRefused(refusal)),
+    ):
         server = create_server(cache)
         answer = asyncio.run(server.call_tool("home", {"description": "an area", "repo": str(workspace)}))
     assert refusal in answer[0].text, f"step 1: the daemon's refusal reaches the caller, got {answer[0].text}"

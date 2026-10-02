@@ -247,7 +247,7 @@ def test_call_without_a_daemon_and_no_autostart() -> None:
 def test_env_switch_disables_the_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
     """ZEMBLE_DAEMON=0 refuses before anything is spawned."""
     monkeypatch.setenv("ZEMBLE_DAEMON", "0")
-    with pytest.raises(DaemonUnavailable, match="ZEMBLE_DAEMON=0"):
+    with pytest.raises(CommandRefused, match="ZEMBLE_DAEMON=0"):
         client.call("ping")
     assert not socket_path().exists(), "no daemon was started"
 
@@ -645,26 +645,24 @@ def test_home_answers_over_a_real_socket(graph_fixture_root: Path, tmp_path: Pat
         assert [index["root"] for index in status["indexes"]] == [root], "4: one warm index for the workspace"
 
 
-def test_cli_search_falls_back_when_the_daemon_is_unavailable(
+def test_cli_search_reports_unavailable_without_loading_an_index(
     tmp_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The CLI prints one stderr line and answers in-process when the daemon cannot be reached."""
+    """An outage is reported without allocating an index in the client."""
     from zemble import cli
 
     def _refuse(*args: Any, **kwargs: Any) -> Any:
         raise DaemonUnavailable("not running (ENOENT)")
 
     monkeypatch.setattr(client, "call", _refuse)
-    fake_index = MagicMock()
-    fake_index.filtered.return_value = fake_index
-    fake_index.search.return_value = []
-    monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
-    monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: pytest.fail("must not load locally"))
 
-    cli._run_search(str(tmp_project), "anything", 5, [ContentType.CODE], None)
+    with pytest.raises(SystemExit) as error:
+        cli._run_search(str(tmp_project), "anything", 5, [ContentType.CODE], None)
+    assert error.value.code == 1
     captured = capsys.readouterr()
-    assert "daemon unavailable (not running (ENOENT)); running in-process" in captured.err, "one honest line"
-    assert '"error": "No results found."' in captured.out, "the in-process answer was printed"
+    assert "Daemon unavailable, retry" in captured.err
+    assert captured.out == ""
 
 
 def test_cli_search_uses_the_daemon_when_it_answers(
@@ -680,10 +678,10 @@ def test_cli_search_uses_the_daemon_when_it_answers(
     assert '"file_path": "a.py"' in capsys.readouterr().out, "the daemon's payload was printed"
 
 
-def test_cli_skips_the_daemon_for_an_embedder_override(
+def test_cli_embedder_override_requires_explicit_no_daemon(
     tmp_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The daemon holds one embedder, so an explicit --embedder is answered in-process silently."""
+    """An override is not implicit permission to allocate a local index."""
     from zemble import cli
 
     monkeypatch.setattr(client, "call", lambda *args, **kwargs: pytest.fail("must not ask the daemon"))
@@ -693,8 +691,10 @@ def test_cli_skips_the_daemon_for_an_embedder_override(
     monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
     monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
 
-    cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None, embedder="model2vec:other")
-    assert "daemon unavailable" not in capsys.readouterr().err, "an override is not a daemon failure"
+    with pytest.raises(SystemExit):
+        cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None, embedder="model2vec:other")
+    assert "requires explicit --no-daemon" in capsys.readouterr().err
+    cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None, embedder="model2vec:other", no_daemon=True)
 
 
 def test_cli_no_daemon_flag_is_silent(
@@ -755,19 +755,19 @@ def test_client_warns_once_about_a_daemon_on_another_revision(
     """A revision mismatch is a warning, once per process, never a refusal."""
     from zemble.daemon.protocol import REVISION_FIELD
 
-    monkeypatch.setattr(client, "_warned_about_revision", False)
+    monkeypatch.setattr(client, "_daemon_revision", None)
     response = {"ok": True, "result": None, REVISION_FIELD: "0000000"}
     with caplog.at_level("WARNING"):
-        client._warn_on_revision_mismatch(response)
-        client._warn_on_revision_mismatch(response)
+        client._observe_revision(response)
+        client._observe_revision(response)
     assert sum("runs revision 0000000" in record.getMessage() for record in caplog.records) == 1, (
         "exactly one warning per process"
     )
 
-    monkeypatch.setattr(client, "_warned_about_revision", False)
+    monkeypatch.setattr(client, "_daemon_revision", None)
     caplog.clear()
     with caplog.at_level("WARNING"):
-        client._warn_on_revision_mismatch({"ok": True, REVISION_FIELD: identity_revision()})
+        client._observe_revision({"ok": True, REVISION_FIELD: identity_revision()})
     assert caplog.records == [], "a matching revision says nothing"
 
 

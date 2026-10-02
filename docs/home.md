@@ -314,7 +314,8 @@ classified one.
 | MCP | tool `home(description, repo, top_k)` |
 | daemon | command `home` with `{path, description, top_k, content}` |
 
-All three are daemon-first with an in-process fallback, and all three ask for the
+All three use the daemon without automatic local fallback (local CLI/MCP execution
+requires explicit `--no-daemon`), and all three ask for the
 `code` and `docs` content lanes: a design note naming a module is evidence too.
 The CLI exits 1 when nothing matched at all.
 

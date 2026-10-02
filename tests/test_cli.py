@@ -32,11 +32,14 @@ def test_main_calls_asyncio_run(argv: list[str], monkeypatch: pytest.MonkeyPatch
     mock_run.assert_called_once()
 
 
-def test_embedding_confirmation_bypasses_a_running_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A CLI `--yes` decision stays in-process because an existing daemon cannot inherit it."""
+def test_embedding_confirmation_requires_no_daemon(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """Confirmation cannot silently switch the owner of index memory."""
+    monkeypatch.setattr("zemble.daemon.client._disabled_reason", None)
     monkeypatch.setenv(CONFIRM_ENV, "1")
     with patch("zemble.daemon.client.call") as call:
-        assert _via_daemon("search", {"path": "/tmp/project"}, False, None) is None
+        with pytest.raises(SystemExit):
+            _via_daemon("search", {"path": "/tmp/project"}, False, None)
+    assert "requires explicit --no-daemon" in capsys.readouterr().err
     call.assert_not_called()
 
 

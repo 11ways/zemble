@@ -25,8 +25,10 @@ from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
 from zemble.daemon import client
 from zemble.daemon.memory import MEMORY_ENV, MIB, MemoryRefused, allocation_backstop, default_budget_mb, virtual_mb
 from zemble.daemon.protocol import (
+    ACCEPTS_BUSY_FIELD,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_MAX_INDEXES,
+    CommandBusy,
     ErrorKind,
     decode,
     encode,
@@ -327,6 +329,8 @@ class Daemon:
             if warm[0] not in self.cache._tasks:
                 warm = None
         if warm is None:
+            if self._load_lock.locked():
+                raise CommandBusy("index construction is occupied")
             async with self._load_lock:
                 cache_key, index = await self._resident_for(path, ref, content, exclude)
         else:
@@ -662,6 +666,8 @@ class Daemon:
 
     async def with_graph(self, root: str, work: Callable[[Any], Any]) -> Any:
         """Serialize graph construction with index construction instead of multiplying scratch across roots."""
+        if self._load_lock.locked():
+            raise CommandBusy("graph/index construction is occupied")
         async with self._load_lock:
             return await asyncio.to_thread(_with_graph, root, work)
 
@@ -684,6 +690,8 @@ class Daemon:
         request_task = asyncio.current_task()
         self._request_tasks.add(request_task)
         try:
+            if command not in {"ping", "status", "shutdown"} and self._operation_lock.locked():
+                raise CommandBusy("request execution is occupied")
             if command in {"ping", "status", "shutdown", "refresh"}:
                 result = await handler(self, args)
             else:
@@ -691,6 +699,12 @@ class Daemon:
                     if not self._admit(32):
                         raise MemoryRefused(f"No query headroom within {self.max_rss_mb} MiB ({MEMORY_ENV}).")
                     result = await handler(self, args)
+        except CommandBusy as exc:
+            # AIDEV-NOTE: pre-fix clients fall back on unknown error kinds. REFUSED is their
+            # known no-fallback lane; advertise BUSY only to a caller that declares support.
+            kind = ErrorKind.BUSY if request.get(ACCEPTS_BUSY_FIELD) is True else ErrorKind.REFUSED
+            message = str(exc) if kind is ErrorKind.BUSY else f"Daemon busy, retry: {exc}"
+            return {"id": request_id, "ok": False, "error": message, "kind": kind.value}
         except MemoryError:
             gc.collect()
             release_free_heap()
@@ -894,6 +908,8 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
         raise ValueError("missing 'path'")
     command = str(args.get("command", "ensure"))
     if command == "ensure":
+        if daemon._load_lock.locked():
+            raise CommandBusy("graph/index construction is occupied")
         async with daemon._load_lock:
             await asyncio.to_thread(ensure_graph, path)
         return {"ensured": True}
@@ -905,6 +921,8 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
         from zemble.graph.model import EdgeKind
 
         extra.update({"hops": int(args.get("hops", 1)), "kinds": [EdgeKind(kind) for kind in kinds] if kinds else None})
+    if daemon._load_lock.locked():
+        raise CommandBusy("graph/index construction is occupied")
     async with daemon._load_lock:
         return await asyncio.to_thread(answer, path, str(args.get("symbol", "")), command, **extra)
 

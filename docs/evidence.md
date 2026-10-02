@@ -101,11 +101,11 @@ intent orders do not beat the fixed one on the javaweb set, so the default stays
 the fixed order and an intent order is opt-in:
 
 ```
-zemble explain <path> "<query>" --intent consumer
+zemble explain <path> "<query>" --intent consumer --no-daemon
 ```
 
-`--intent` answers in-process rather than through the daemon: the daemon protocol
-carries no intent argument, and asking it would silently ignore the override.
+`--intent` requires explicit `--no-daemon`: the daemon protocol carries no intent
+argument, and an override cannot silently authorize a local index.
 
 ### Packing and degrade rules
 
@@ -143,8 +143,9 @@ zemble outline <path> <file-or-type> [--members PATTERN] [--json]
 zemble signatures <path> <symbol> [--json]
 ```
 
-All three surfaces ask the warm daemon first and answer in-process only when it
-cannot be reached (see `docs/daemon.md`), so they share one RAM copy of the index
+All three surfaces use the warm daemon unless explicitly passed `--no-daemon`.
+An unavailable or busy daemon is reported without a local fallback (see
+`docs/daemon.md`), so they share one RAM copy of the index
 and the graph with `search`. Both the index and the symbol graph are built on
 demand and refreshed once per process, the same way `zemble graph` does it. `outline` takes a workspace
 relative file path or a simple or qualified type name; `--members` matches a

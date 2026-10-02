@@ -71,4 +71,14 @@ def register_status_tool(server: FastMCP) -> None:
         zemble is installed as an editable checkout, so a server keeps serving the snapshot
         it started with; `stale` means the checkout moved since and the server needs a restart.
         """
-        return await asyncio.to_thread(status_payload, identity())
+        from zemble.daemon import client
+        from zemble.daemon.protocol import DaemonError, failure_message
+
+        payload = await asyncio.to_thread(status_payload, identity())
+        daemon = None
+        if not client.in_process():
+            try:
+                daemon = await asyncio.to_thread(client.call, "status", auto_start=False, timeout=5)
+            except DaemonError as error:
+                daemon = {"error": failure_message(error)}
+        return {**payload, "daemon": daemon, "daemon_revision": client.daemon_revision()}

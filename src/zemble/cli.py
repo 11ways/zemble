@@ -218,7 +218,13 @@ def _mcp_main() -> None:
         description="Instant local code search for agents.",
     )
     _add_content_args(parser)
+    parser.add_argument("mode", nargs="?", choices=["mcp"], help="Run the MCP stdio server (also the default).")
+    _add_daemon_arg(parser)
     args = parser.parse_args()
+    if args.no_daemon:
+        from zemble.daemon import client
+
+        client.disable_for_this_process("--no-daemon")
     from model2vec.utils import get_package_extras
 
     if any(find_spec(dep) is None for dep in get_package_extras("zemble", "mcp")):
@@ -340,43 +346,45 @@ def _add_daemon_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--no-daemon",
         action="store_true",
-        help="Answer in this process instead of through the warm daemon (also: ZEMBLE_DAEMON=0).",
+        help="Explicitly allow local indexes instead of using the daemon; ZEMBLE_DAEMON=0 alone does not allow this.",
     )
 
 
-def _via_daemon(cmd: str, args: dict[str, object], no_daemon: bool, embedder: str | None) -> dict | None:
+def _via_daemon(
+    cmd: str, args: dict[str, object], no_daemon: bool, embedder: str | None, local_option: str | None = None
+) -> dict | None:
     """Try to answer one command from the warm daemon.
 
     :param cmd: Daemon command name.
     :param args: Command arguments.
     :param no_daemon: Whether the user asked for the in-process path.
     :param embedder: An explicit embedder spec, which the daemon does not serve.
+    :param local_option: Another override that requires an explicit local opt-out.
     :return: The daemon's result, or None when this process must answer itself.
     :raises SystemExit: If the daemon deliberately refused the command.
     """
     from zemble.daemon import client
-    from zemble.daemon.protocol import CommandRefused, DaemonError
+    from zemble.daemon.protocol import CommandFailed, DaemonError, failure_message
 
     if no_daemon:
         # An explicit opt-out is not a failure: no fallback line is printed for it.
         client.disable_for_this_process("--no-daemon")
         return None
-    if confirmed():
-        # The daemon cannot inherit a confirmation set by this short-lived client process.
+    if client.in_process():
         return None
-    if embedder is not None:
-        # The daemon holds one embedder, the environment default; an override is answered here.
-        return None
+    option = local_option or ("--embedder" if embedder is not None else "--yes" if confirmed() else None)
+    if option is not None:
+        print(f"{option} requires explicit --no-daemon; the daemon uses its own configuration.", file=sys.stderr)
+        raise SystemExit(1)
     try:
-        return client.call(cmd, args)
-    except CommandRefused as exc:
-        # A refusal is the answer, in this process too: falling back would pay for a whole
-        # build only to be refused again, which is exactly what it costs the most to repeat.
-        print(str(exc), file=sys.stderr)
-        sys.exit(1)
+        result = client.call(cmd, args)
+        if not isinstance(result, dict):
+            print(failure_message(CommandFailed("daemon returned an invalid payload")), file=sys.stderr)
+            raise SystemExit(1)
+        return result
     except DaemonError as exc:
-        print(f"daemon unavailable ({exc}); running in-process", file=sys.stderr)
-        return None
+        print(failure_message(exc), file=sys.stderr)
+        raise SystemExit(1)
 
 
 def _load_index(
@@ -390,6 +398,11 @@ def _load_index(
     :param exclude: Gitignore-style patterns a first build must skip.
     :return: The index to answer with, and the source key it must be cached under.
     """
+    from zemble.daemon import client
+
+    if not client.in_process():
+        print("Local indexing requires explicit --no-daemon; the daemon owns indexes.", file=sys.stderr)
+        sys.exit(1)
     try:
         return _build_index(path, content, embedder, exclude)
     except EmbeddingBudgetExceeded as e:
@@ -418,8 +431,7 @@ def _run_search(
     exclude: Sequence[str] = (),
 ) -> None:
     """Handle the `search` subcommand."""
-    # An explicit --reranker cannot ride the daemon protocol, so it runs the search here
-    # rather than being silently dropped; ZEMBLE_RERANKER still reaches a daemon's own env.
+    # An explicit --reranker cannot ride the protocol; require a deliberate local opt-out.
     remote = _via_daemon(
         "search",
         {
@@ -431,8 +443,9 @@ def _run_search(
             "paths": list(paths),
             "exclude": list(exclude),
         },
-        no_daemon or reranker is not None,
+        no_daemon,
         embedder,
+        local_option="--reranker" if reranker is not None else None,
     )
     if remote is not None:
         print(json.dumps(remote))
@@ -735,6 +748,10 @@ def _cli_main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
+    if getattr(args, "no_daemon", False):
+        from zemble.daemon import client
+
+        client.disable_for_this_process("--no-daemon")
     _apply_embedding_confirmation(args)
 
     runner = _SUBCOMMAND_RUNNERS.get(args.command)

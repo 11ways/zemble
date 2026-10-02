@@ -113,15 +113,26 @@ def run_graph(args: argparse.Namespace) -> int:
         from zemble.daemon import client
 
         client.disable_for_this_process("--no-daemon")
-    if args.graph_command == "build":
-        return _run_build(args)
-    if args.graph_command == "facts":
-        return _run_facts_status(args)
-    return _run_query(args)
+    from zemble.daemon.protocol import DaemonError, failure_message
+
+    try:
+        if args.graph_command == "build":
+            return _run_build(args)
+        if args.graph_command == "facts":
+            return _run_facts_status(args)
+        return _run_query(args)
+    except DaemonError as error:
+        print(failure_message(error), file=sys.stderr)
+        return 1
 
 
 def _run_build(args: argparse.Namespace) -> int:
     """Build the graph that answers for a path, an ancestor's for a sub-directory it covers, and report it."""
+    from zemble.daemon import client
+
+    if not client.in_process():
+        print("Local graph building requires explicit --no-daemon.", file=sys.stderr)
+        return 1
     ancestor = graph_ancestor(args.path)
     stats = None
     if ancestor is not None:
@@ -345,16 +356,16 @@ def ensure_graph(path: str, *, refresh: bool = True, allow_daemon: bool = True) 
 
 def _ensure_one(path: str, *, refresh: bool, allow_daemon: bool) -> None:
     """Build one root's graph if it is missing, and refresh it once per process."""
+    if allow_daemon and _ensure_via_daemon(path):
+        return
     if not graph_exists(path):
+        build_graph(path)
         _refreshed.add(path)
-        if not (allow_daemon and _ensure_via_daemon(path)):
-            build_graph(path)
         return
     if refresh and path not in _refreshed:
+        # Skipped when another process is writing the graph: that writer is refreshing it.
+        refresh_graph(path)
         _refreshed.add(path)
-        if not (allow_daemon and _ensure_via_daemon(path)):
-            # Skipped when another process is writing the graph: that writer is refreshing it.
-            refresh_graph(path)
 
 
 def _ensure_via_daemon(path: str) -> bool:
@@ -364,12 +375,10 @@ def _ensure_via_daemon(path: str) -> bool:
     :return: Whether the daemon answered; False means do it in this process.
     """
     from zemble.daemon import client
-    from zemble.daemon.protocol import DaemonError
 
-    try:
-        client.call("graph", {"path": path, "command": "ensure"})
-    except DaemonError:
+    if client.in_process():
         return False
+    client.call("graph", {"path": path, "command": "ensure"})
     return True
 
 

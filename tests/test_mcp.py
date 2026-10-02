@@ -415,11 +415,11 @@ async def test_search_builds_exact_content_indexes(
     ],
     ids=["model_loads", "model_load_fails", "cancel_pending_init"],
 )
-async def test_serve_runs_stdio(
+async def test_serve_runs_stdio_without_preloading(
     load_err: Exception | None,
     stdio_yields: bool,
 ) -> None:
-    """serve() runs stdio and handles all background init outcomes without raising."""
+    """Stdio opens without invoking even a failing model loader."""
 
     async def fake_stdio() -> None:
         if stdio_yields:
@@ -427,12 +427,13 @@ async def test_serve_runs_stdio(
 
     load_kwargs = {"side_effect": load_err} if load_err else {"return_value": FakeEmbedder()}
     with (
-        patch("zemble.index_cache.load_embedder", **load_kwargs),
+        patch("zemble.index_cache.load_embedder", **load_kwargs) as model_load,
         patch("mcp.server.fastmcp.FastMCP.run_stdio_async", side_effect=fake_stdio) as mock_run,
     ):
         await serve()
 
     mock_run.assert_called_once()
+    model_load.assert_not_called()
 
 
 @pytest.mark.anyio
@@ -691,6 +692,7 @@ def test_mcp_server_exits_on_stdin_eof(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_a_daemon_refusal_is_reported_once(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
     """A refusal is the answer: the tool reports it and never rebuilds the index it just refused."""
+    monkeypatch.setattr(daemon_client, "_disabled_reason", None)
 
     def _refuse(cmd: str, args: dict[str, Any], **kwargs: Any) -> Any:
         raise CommandRefused("Refusing to index /some/path: too big. Exclude paths with .zembleignore")
@@ -706,8 +708,9 @@ async def test_a_daemon_refusal_is_reported_once(cache: IndexCache, monkeypatch:
 
 
 @pytest.mark.anyio
-async def test_a_daemon_outage_still_falls_back(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unreachable daemon is an outage, not an answer, so this process still answers."""
+async def test_a_daemon_outage_never_falls_back(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreachable daemon must not populate the client's cache."""
+    monkeypatch.setattr(daemon_client, "_disabled_reason", None)
 
     def _unavailable(cmd: str, args: dict[str, Any], **kwargs: Any) -> Any:
         raise DaemonUnavailable("not running (ENOENT)")
@@ -716,10 +719,11 @@ async def test_a_daemon_outage_still_falls_back(cache: IndexCache, monkeypatch: 
     fake_index = MagicMock()
     fake_index.filtered.return_value = fake_index
     fake_index.search.return_value = []
-    with patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index):
+    with patch("zemble.mcp.ZembleIndex.from_path", side_effect=AssertionError("local index loaded")):
         server = create_server(cache)
         result = await server.call_tool("search", {"query": "anything", "repo": "/some/path"})
-    assert "No results found" in _tool_text(result), "the in-process answer came back"
+    assert "Daemon unavailable, retry" in _tool_text(result)
+    assert not cache._tasks
 
 
 @pytest.mark.anyio
@@ -800,6 +804,7 @@ def test_graph_answer_refuses_an_unknown_method(graph_fixture_root: Path, graph_
 @pytest.mark.anyio
 async def test_search_forwards_paths_and_exclude(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
     """Both filters ride the daemon protocol, and reach the index when this process answers."""
+    monkeypatch.setattr(daemon_client, "_disabled_reason", None)
     sent: dict[str, Any] = {}
 
     def _record(cmd: str, args: dict[str, Any], **kwargs: Any) -> Any:
@@ -811,7 +816,7 @@ async def test_search_forwards_paths_and_exclude(cache: IndexCache, monkeypatch:
     await server.call_tool("search", {"query": "q", "repo": "/some/path", "paths": ["src"], "exclude": ["vendor/"]})
     assert sent["paths"] == ["src"] and sent["exclude"] == ["vendor/"], "the filters went over the wire"
 
-    monkeypatch.setattr(daemon_client, "call", lambda *args, **kwargs: (_ for _ in ()).throw(DaemonUnavailable("off")))
+    monkeypatch.setattr(daemon_client, "_disabled_reason", "--no-daemon")
     fake_index = MagicMock()
     fake_index.filtered.return_value = fake_index
     fake_index.search.return_value = []
