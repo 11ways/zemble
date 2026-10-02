@@ -1,5 +1,7 @@
 import os
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,10 +67,12 @@ _DEFAULT_IGNORED_DIRS: frozenset[str] = frozenset(
 
 #: Compiled ignore specs, keyed by directory and the ignore files' modification times, so the
 #: two walks a single index build performs do not recompile every .gitignore in the tree.
-_SPEC_CACHE: dict[
+_SPEC_CACHE: OrderedDict[
     tuple[str, int | None, int | None],
     tuple[GitIgnoreSpec, tuple[PreparedPattern, ...], re.Pattern[str] | None] | None,
-] = {}
+] = OrderedDict()
+_MAX_SPEC_CACHE = 4096
+_SPEC_LOCK = threading.Lock()
 
 
 def _prepare(spec: GitIgnoreSpec) -> tuple[PreparedPattern, ...]:
@@ -131,8 +135,10 @@ def _load_ignore_for_dir(
     gitignore = f"{directory}/.gitignore"
     zembleignore = f"{directory}/.zembleignore"
     key = (directory, _mtime_or_none(gitignore), _mtime_or_none(zembleignore))
-    if key in _SPEC_CACHE:
-        return _SPEC_CACHE[key]
+    with _SPEC_LOCK:
+        if key in _SPEC_CACHE:
+            _SPEC_CACHE.move_to_end(key)
+            return _SPEC_CACHE[key]
 
     lines = []
     if key[1] is not None:
@@ -144,7 +150,10 @@ def _load_ignore_for_dir(
         spec = GitIgnoreSpec.from_lines(lines)
         patterns = _prepare(spec)
         loaded = (spec, patterns, _prefilter(patterns))
-    _SPEC_CACHE[key] = loaded
+    with _SPEC_LOCK:
+        _SPEC_CACHE[key] = loaded
+        if len(_SPEC_CACHE) > _MAX_SPEC_CACHE:
+            _SPEC_CACHE.popitem(last=False)
     return loaded
 
 

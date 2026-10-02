@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from vicinity.backends.basic import BasicArgs
 
 from zemble.index.dense import SelectableBasicBackend
@@ -86,3 +87,31 @@ def test_subtree_scoring_bounds_embedding_row_copies_and_preserves_rankings() ->
     np.testing.assert_array_equal(backend._selector_dist(queries, negative), expected)
     with np.testing.assert_raises(IndexError):
         backend._selector_dist(queries, np.array([len(vectors) - 1, len(vectors)]))
+
+
+@pytest.mark.parametrize("unit", [False, True])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_mapped_normalization_is_bit_identical_with_bounded_scratch(tmp_path, monkeypatch, unit, dtype):
+    """Unit, nonunit, zero and near-zero rows match Vicinity across block boundaries."""
+    from vicinity.utils import normalize
+
+    from zemble.index import dense
+
+    vectors = np.random.default_rng(42).standard_normal((50, 32)).astype(dtype)
+    if unit:
+        vectors = normalize(vectors)
+    vectors[1] = 0
+    if not unit:
+        vectors[2] = 1e-12
+    expected = SelectableBasicBackend(vectors, BasicArgs()).vectors.copy()
+    monkeypatch.setattr(dense, "_SELECTOR_COPY_BYTES", vectors[0].nbytes * 3)
+    original = np.linalg.norm
+
+    def bounded_norm(block, *args, **kwargs):
+        assert block.nbytes <= vectors[0].nbytes * 3
+        return original(block, *args, **kwargs)
+
+    monkeypatch.setattr(np.linalg, "norm", bounded_norm)
+    actual = SelectableBasicBackend.mapped(vectors, tmp_path / "replacement.npy")
+    assert isinstance(actual.vectors, np.memmap)
+    np.testing.assert_array_equal(actual.vectors, expected)

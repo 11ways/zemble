@@ -13,7 +13,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -146,6 +146,34 @@ def test_several_requests_share_one_connection(no_embedder_load: None) -> None:
     assert all(answer["ok"] for answer in answers), "every answer succeeded"
 
 
+def test_daemon_reads_added_limits_despite_a_stale_client_loaded_flag(no_embedder_load, tmp_path, monkeypatch):
+    """A long-running client's loaded flag must not suppress new daemon limits in the file."""
+    env_file = tmp_path / "daemon-env"
+    env_file.write_text("ZEMBLE_DAEMON_MAX_INDEXES=1\nZEMBLE_DAEMON_MAX_RSS_MB=2048\n")
+    monkeypatch.setenv("ZEMBLE_ENV_FILE", str(env_file))
+    monkeypatch.setenv("_ZEMBLE_USER_ENV_LOADED", "1")
+    monkeypatch.delenv("ZEMBLE_DAEMON_MAX_INDEXES", raising=False)
+    monkeypatch.delenv("ZEMBLE_DAEMON_MAX_RSS_MB", raising=False)
+    with patch.dict(os.environ), running_server(watch=False, idle_minutes=0):
+        status = client.call("status", auto_start=False)
+        assert status["max_indexes"] == 1
+        assert status["max_rss_mb"] == 2048
+
+
+def test_daemon_explicit_environment_limits_still_override_the_file(no_embedder_load, tmp_path, monkeypatch):
+    """Rereading config does not override deliberate shell settings."""
+    env_file = tmp_path / "daemon-env"
+    env_file.write_text("ZEMBLE_DAEMON_MAX_INDEXES=1\nZEMBLE_DAEMON_MAX_RSS_MB=2048\n")
+    monkeypatch.setenv("ZEMBLE_ENV_FILE", str(env_file))
+    monkeypatch.setenv("_ZEMBLE_USER_ENV_LOADED", "1")
+    monkeypatch.setenv("ZEMBLE_DAEMON_MAX_INDEXES", "2")
+    monkeypatch.setenv("ZEMBLE_DAEMON_MAX_RSS_MB", "3072")
+    with running_server(watch=False, idle_minutes=0):
+        status = client.call("status", auto_start=False)
+        assert status["max_indexes"] == 2
+        assert status["max_rss_mb"] == 3072
+
+
 @pytest.mark.anyio
 async def test_every_command_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Every entry in the command table answers, and an unknown name is refused."""
@@ -262,6 +290,7 @@ async def test_watcher_rebuild_makes_a_new_file_searchable(tmp_project: Path) ->
 
     (tmp_project / "extra.py").write_text("def brand_new_helper():\n    return 7\n", encoding="utf-8")
     result = await daemon._on_change(cache_key, {tmp_project / "extra.py"})
+    await daemon._watch_tasks[cache_key]
 
     swapped = (await daemon.cache.get(str(tmp_project))).search("brand_new_helper")
     assert swapped, "the rebuilt index is the one being served"
@@ -819,6 +848,7 @@ async def test_a_rebuild_never_blocks_the_root_it_rebuilds(tmp_project: Path, mo
     # 3. Once the rebuild finishes, the swapped-in index carries the edit.
     release.set()
     await asyncio.wait_for(changing, timeout=30)
+    await asyncio.wait_for(daemon._watch_tasks[cache_key], timeout=30)
     swapped = (await daemon.cache.get(str(tmp_project))).search("brand_new_helper")
     assert swapped and swapped[0].chunk.file_path == "extra.py", "3: the new file is the best match"
     assert daemon.last_rebuild[cache_key]["added"] == 2, "3: the rebuild reports both new files"
@@ -831,8 +861,8 @@ async def test_a_rebuild_never_blocks_the_root_it_rebuilds(tmp_project: Path, mo
 
 
 @pytest.mark.anyio
-async def test_a_watched_edit_is_searchable_almost_at_once(tmp_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The whole path from change set to a searchable result stays well under a second."""
+async def test_a_watched_edit_is_searchable_after_quiet(tmp_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The change callback stays prompt and publishes the edit after the quiet window."""
     monkeypatch.setattr("zemble.graph.store.graph_present", lambda root: False)
     daemon = _daemon_with_fake_embedder(watch=False)
     cache_key, _index = await daemon.index_for({"path": str(tmp_project)})
@@ -841,10 +871,12 @@ async def test_a_watched_edit_is_searchable_almost_at_once(tmp_project: Path, mo
     started = time.monotonic()
     await daemon._on_change(cache_key, {tmp_project / "extra.py"})
     elapsed = time.monotonic() - started
+    assert elapsed < 1.0, "the event consumer must keep collecting edits during a rebuild"
+    await daemon._watch_tasks[cache_key]
 
     results = (await daemon.cache.get(str(tmp_project))).search("brand_new_helper")
     assert results and results[0].chunk.file_path == "extra.py", "the edit is searchable"
-    assert elapsed < 1.0, f"visible in under a second, took {elapsed:.2f}s"
+    assert time.monotonic() - started >= server._QUIET_SECONDS
     daemon.shutdown()
 
 

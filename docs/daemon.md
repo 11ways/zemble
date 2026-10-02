@@ -12,6 +12,7 @@ holds, and answers CLI and MCP requests over a unix socket.
 | `zemble/daemon/protocol.py` | Wire format (newline-delimited JSON), socket/pidfile/lock/log locations, error types. Imports nothing heavy: every short-lived process loads it. |
 | `zemble/daemon/client.py` | Connect, auto-start, one request, one response. Raises `DaemonError`; every caller falls back in-process. |
 | `zemble/daemon/server.py` | The `Daemon` object (warm indexes, watchers, per-root locks) plus the `COMMANDS` dispatch table. |
+| `zemble/daemon/memory.py` | RAM-derived memory budget, memory refusal, and kernel allocation backstop. |
 | `zemble/daemon/watch.py` | `IgnoreRules` (the file walker's own gitignore machinery, reused) and `RootWatcher` (watchfiles). |
 | `zemble/daemon/cli.py` | `zemble daemon run\|start\|stop\|restart\|status`. |
 | `zemble/index_cache.py` | The index cache, moved out of `zemble/mcp.py` so the daemon and the in-process MCP path share one implementation. |
@@ -70,6 +71,13 @@ third key element, the digest of those patterns - and only then, so a plain buil
 key, in memory and on disk, is byte-identical to what it always was. The daemon adds an eviction callback (so an evicted
 root stops being watched), a resident-index limit, last-used timestamps, and
 `replace()` for the atomic swap a rebuild ends with.
+
+The daemon's `ResidentCache` reloads saved construction results as mapped columns;
+keeping the original object would retain its mutable postings and anonymous vectors.
+Watchers own freshness while enabled, so queries do not start independent builds of
+a churning tree. `--no-watch` retains query-side staleness checks. Code and code+docs
+requests for one root share one covering resident index, with content selectors for
+narrower answers. On-disk content variants remain separate.
 
 ### Serving a sub-path from an ancestor index
 
@@ -134,7 +142,11 @@ loader, the same default ignored directories, the same extension set (plus `.jav
 so the symbol graph stays fresh). A watcher that disagreed with the indexer about
 what a source file is would either rebuild on noise or miss edits.
 
-Changes are coalesced with a 500 ms debounce and the resulting set of paths is what the
+Events have a 500 ms debounce, but the callback only records paths and returns.
+Rebuilding waits for two seconds of relevant-event quiet, checked again after waiting
+for the daemon-wide construction slot. Each root owns one job and at most 4096
+deduplicated paths; overflow becomes a full-rescan bit. Eviction discards pending
+work and historical root metadata. The resulting set of paths is what the
 rebuild works from: `create_index_from_path(previous=..., changed_paths=...)` re-chunks
 and re-embeds exactly those files and reuses every other file's chunks, vectors and
 postings from the previous index, without walking the tree at all. The same set is
@@ -151,9 +163,9 @@ readability - so a watcher that over-reports cannot get a file into the index th
 build would have skipped. The reverse is a real obligation on the caller: whatever the
 change set does not name is assumed unchanged.
 
-The rebuilt index is swapped into the cache, written back to the on-disk cache (at most
-once every 10 s), and one line per rebuild is logged with the file counts and the
-milliseconds.
+Every successful rebuild is persisted and reloaded as mapped columns before the
+swap. Write throttling previously kept heap generations resident between saves.
+One line per rebuild logs the file counts and milliseconds, including persistence.
 
 The `graph_ms` on that line is the whole symbol-graph refresh. On the javaweb
 workspace it is around 0.6 s for a template edit, 0.9 s for a Java one and 2.4 s when
@@ -165,8 +177,8 @@ they were before, are in [the symbol graph doc](graph.md).
 A rebuild never writes into the index answering queries. It builds a new one next to it
 and the swap is a single dict write on the event loop, so an in-flight search keeps
 reading the object it started with and a search that arrives mid-rebuild is answered by
-the index from before it. Only rebuilds of one root are serialised against each other
-(`Daemon.rebuild_lock_for`); queries take no lock.
+the index from before it. All roots share one construction slot; memory-intensive
+requests also share a scratch slot, but warm search does not take the construction lock.
 
 What that costs is bounded because of how the BM25 index is shaped:
 
@@ -174,8 +186,8 @@ What that costs is bounded because of how the BM25 index is shaped:
 | --- | --- |
 | BM25 columnar postings (`_Frozen`) | **Shared**, memory-mapped, never written to. |
 | BM25 delta (added documents' postings, removed base rows, document order) | Copied - it holds only what moved since the base was built. |
-| Vector matrix | Copied: the rebuild writes the changed files' rows into it. |
-| Chunk list, manifest | Rebuilt, cheap. |
+| Vector matrix | Streamed into a temporary mapping; normalization scratch is bounded in blocks. |
+| Chunk list, manifest | Spliced/rebuilt for construction, then reloaded as mapped columns and a fresh manifest. |
 
 `BM25.for_update()` is that derivation. Scoring adds the base and the delta together:
 corpus size, average document length and every term's document frequency count the live
@@ -219,7 +231,8 @@ output can end up in a backup.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ZEMBLE_DAEMON=0` | unset | Never use or start a daemon in this process. |
-| `ZEMBLE_DAEMON_MAX_INDEXES` | 4 | Resident index variants before the least recently used is evicted. |
+| `ZEMBLE_DAEMON_MAX_INDEXES` | 4 | Resident roots before LRU eviction; content variants of one root share a resident index. |
+| `ZEMBLE_DAEMON_MAX_RSS_MB` | min(15% of MemTotal, 4096) MiB | Process memory budget, including admitted construction scratch; conservative address-space backstop. |
 | `ZEMBLE_DAEMON_IDLE_MINUTES` | 30 | Idle shutdown delay; `0` never exits. |
 | `ZEMBLE_DAEMON_DIR` / `ZEMBLE_DAEMON_SOCKET` | unset | Move the runtime directory or the socket itself (tests use this). |
 
@@ -229,7 +242,8 @@ so a daemon that is still starting is never pulled out from under itself.
 
 ## Fallback rules
 
-The daemon is an accelerator, never a requirement.
+The daemon is an accelerator, never a requirement, but a memory refusal does not
+fall back to an unbounded client build.
 
 - `zemble search`, `find-related`, `stats`, `graph *`, `explain`, `outline` and `signatures`
   go through the client by default, as do their MCP tools.
@@ -239,12 +253,12 @@ The daemon is an accelerator, never a requirement.
   and the caller answers in-process after one stderr line:
   `daemon unavailable (<reason>); running in-process`.
 - **A refusal is not an outage.** A deliberate, deterministic "no" - any `Refused`, which
-  today means a root too broad or holding more source than one build may chunk
+  includes daemon memory admission, a root too broad or holding more source than one build may chunk
   (`ScopeRefused`) and a bill over the budget (`EmbeddingBudgetExceeded`) - is
   answered as `{"ok": false, "kind": "refused", "error": ...}` and raises `CommandRefused`
-  (a `CommandFailed`) in the client. Callers surface it instead of falling back: the same
-  request refuses identically in this process, so a fallback would pay for a full,
-  minutes-long build only to be told the same thing. `ErrorKind` in `protocol.py` is the
+  (a `CommandFailed`) in the client. Callers surface it instead of falling back: refused
+  work is not an outage. A fallback could allocate unbounded client memory or repeat a
+  full paid build only to reproduce a work/bill refusal. `ErrorKind` in `protocol.py` is the
   one home for that vocabulary, and an unknown kind from a newer daemon is read as
   `failed`, i.e. it falls back - unknown members fail closed toward the safe behaviour.
   The daemon logs the refusal's own text, and each refusal carries the environment variable
@@ -261,6 +275,9 @@ The daemon is an accelerator, never a requirement.
   be a cold build. `zemble daemon status` shows a build in progress.
 
 ## Measured
+
+Current memory measurements and effective defaults are documented in
+[the memory report](daemon-memory.md). The latency measurements below are historical.
 
 Workspace `/home/skerit/projects/javaweb`, 6,430 files, 73,957 chunks, `potion-code-16M-v2`,
 query `EventDelegationPlanner`, `-k 3 --max-snippet-lines 0`. Wall time is process start

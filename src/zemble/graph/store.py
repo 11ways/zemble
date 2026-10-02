@@ -59,6 +59,7 @@ from zemble.parallel import pool_context, pooled
 from zemble.types import ContentType
 
 logger = logging.getLogger(__name__)
+DEFAULT_WORKERS = min(10, os.cpu_count() or 2)
 
 GRAPH_FORMAT_VERSION = 6
 #: The file naming the current graph version (first line) and the one it replaced (second).
@@ -1109,7 +1110,7 @@ def _build_locked(
 ) -> GraphStats:
     """Run one build for the writer-lock holder, rebuilding from source when the store is unreadable."""
     started = time.perf_counter()
-    workers = workers if workers is not None else min(10, (os.cpu_count() or 2))
+    workers = workers if workers is not None else DEFAULT_WORKERS
     try:
         # A forced build rebuilds from source, so a legacy store is not worth copying first.
         pointer = _read_pointer(folder) if force else _locked_pointer(folder)

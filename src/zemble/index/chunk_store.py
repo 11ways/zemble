@@ -155,11 +155,14 @@ class SplicedChunks(Sequence[Chunk]):
             yield source, start, count
             return
         end = start + count
-        for position, (inner_source, inner_start) in enumerate(zip(source._sources, source._starts)):
+        position = max(0, bisect_right(source._offsets, start) - 1)
+        while position < len(source._sources) and source._offsets[position] < end:
+            inner_source, inner_start = source._sources[position], source._starts[position]
             run_start, run_end = source._offsets[position], source._offsets[position + 1]
             overlap_start, overlap_end = max(start, run_start), min(end, run_end)
             if overlap_start < overlap_end:
                 yield inner_source, inner_start + (overlap_start - run_start), overlap_end - overlap_start
+            position += 1
 
     def _append(self, source: Sequence[Chunk], start: int, count: int) -> None:
         """Add one run, extending the last one instead when it continues the same source."""

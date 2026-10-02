@@ -22,6 +22,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -268,7 +269,11 @@ def _load_config_globs(root: Path) -> tuple[str, ...] | None:
 
 #: Discovery globs per (root, graph.toml modification time), so the daemon's per-event
 #: `matches_facts_glob` does not re-parse the configuration on every changed path.
-_GLOB_CACHE: dict[tuple[str, int | None], tuple[str, ...]] = {}
+@lru_cache(maxsize=128)
+def _cached_source_globs(root: str, stamp: int | None) -> tuple[str, ...]:
+    """Cache config generations without retaining every root or edit forever."""
+    configured = _load_config_globs(Path(root))
+    return configured if configured is not None else DEFAULT_SOURCE_GLOBS
 
 
 def facts_source_globs(root: Path) -> tuple[str, ...]:
@@ -278,14 +283,7 @@ def facts_source_globs(root: Path) -> tuple[str, ...]:
         stamp: int | None = config.stat().st_mtime_ns
     except OSError:
         stamp = None
-    key = (str(root), stamp)
-    cached = _GLOB_CACHE.get(key)
-    if cached is not None:
-        return cached
-    configured = _load_config_globs(root)
-    globs = configured if configured is not None else DEFAULT_SOURCE_GLOBS
-    _GLOB_CACHE[key] = globs
-    return globs
+    return _cached_source_globs(str(root), stamp)
 
 
 def _segments(pattern: str) -> list[str]:
@@ -364,12 +362,17 @@ def discover_facts_files(root: Path) -> list[Path]:
 
 def matches_facts_glob(root: Path, path: Path) -> bool:
     """Return whether a path is one of a workspace's facts files by name alone."""
+    globs = facts_source_globs(root)
+    # Build output churn must not realpath every ignored .class file before rejecting it.
+    if not any(fnmatch.fnmatch(path.name, pattern.rstrip("/").rsplit("/", 1)[-1]) for pattern in globs):
+        if not path.is_symlink():
+            return False
     try:
         relative = path.resolve().relative_to(root.resolve())
     except ValueError:
         return False
     segments = relative.as_posix().split("/")
-    for pattern in (_segments(pattern) for pattern in facts_source_globs(root)):
+    for pattern in (_segments(pattern) for pattern in globs):
         if not pattern:
             continue
         state = _closure({0}, pattern)
@@ -418,21 +421,19 @@ def file_sha256(path: Path) -> str | None:
 #: Resolved (facts root, written path) -> workspace-relative path, or None when it is outside.
 #: Every fact line of one source file writes the same path, and `Path.resolve` is a realpath
 #: syscall per call, so without this a facts file's own body costs a million of them.
-_RELATIVE_CACHE: dict[tuple[str, str, str], str | None] = {}
+@lru_cache(maxsize=8192)
+def _cached_relative(root: str, facts_root: str, declared: str) -> str | None:
+    """Resolve a bounded working set of declared source paths."""
+    candidate = (Path(facts_root) / declared).resolve()
+    try:
+        return candidate.relative_to(Path(root)).as_posix()
+    except ValueError:
+        return None
 
 
 def _relative_to_workspace(root: Path, facts_root: Path, declared: str) -> str | None:
     """Turn a path written in a facts file into a workspace-relative path."""
-    key = (str(root), str(facts_root), declared)
-    if key in _RELATIVE_CACHE:
-        return _RELATIVE_CACHE[key]
-    candidate = (facts_root / declared).resolve()
-    try:
-        resolved: str | None = candidate.relative_to(root).as_posix()
-    except ValueError:
-        resolved = None
-    _RELATIVE_CACHE[key] = resolved
-    return resolved
+    return _cached_relative(str(root), str(facts_root), declared)
 
 
 def load_facts_file(path: Path, root: Path) -> FactsFile:

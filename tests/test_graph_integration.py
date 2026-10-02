@@ -4,6 +4,7 @@ Skipped unless the javaweb checkout is present. Every fact asserted here was rea
 out of the source first; they are not guesses about what the graph might find.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ import pytest
 from zemble.graph.provider import SqliteGraphProvider
 from zemble.graph.store import build_graph
 
-ZENIT = Path("/home/skerit/projects/javaweb/zenit")
+ZENIT = Path(os.environ.get("ZEMBLE_TEST_ZENIT_ROOT", "/home/skerit/projects/javaweb/zenit"))
 
 pytestmark = [
     pytest.mark.slow,
@@ -63,7 +64,9 @@ def test_real_workspace_journey(zenit_graph: SqliteGraphProvider) -> None:
 
     # 3. Object storage: LocalDiskStorageAdapter is the only shipped StorageAdapter in zenit.
     adapter = [symbol for symbol in zenit_graph.definition("StorageAdapter") if symbol.kind.value == "interface"]
-    implementations = _files(zenit_graph.implementations(adapter[0].id))
+    implementations = _files(
+        hit for hit in zenit_graph.implementations(adapter[0].id) if "/src/test/" not in f"/{hit.symbol.file_path}"
+    )
     assert implementations == {"LocalDiskStorageAdapter.java"}, "step 3: exactly one adapter ships in zenit"
 
     # 4. UI preference cookies: the three shipped preferences all go through PreferenceCookie.named.

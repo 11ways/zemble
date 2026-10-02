@@ -44,6 +44,8 @@ def no_real_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.Tem
     # Never read the developer's real ~/.config/zemble/env (keys, hosted providers) in a test.
     monkeypatch.setenv("ZEMBLE_ENV_FILE", str(tmp_path_factory.mktemp("userenv") / "absent"))
     monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(tmp_path_factory.mktemp("zemble-cache")))
+    # In-thread socket tests must not change the test runner's process allocation limit.
+    monkeypatch.setattr("zemble.daemon.server.allocation_backstop", lambda budget: budget)
     yield
     # Checked before monkeypatch restores anything: a `monkeypatch.undo()` inside a test drops this
     # floor too, and the rest of that test then wrote the developer's real cache.

@@ -147,6 +147,7 @@ def spawn(timeout: float = START_TIMEOUT_SECONDS) -> None:
             stderr=handle,
             start_new_session=True,
             cwd="/",
+            env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MALLOC_ARENA_MAX": "2"},
         )
     except OSError as exc:
         raise DaemonUnavailable(f"cannot start daemon: {exc}") from exc

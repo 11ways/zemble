@@ -1,0 +1,318 @@
+{
+  "revision": "working-tree",
+  "files": 16000,
+  "rounds": 6,
+  "dimensions": 1024,
+  "budget_mib": 4096,
+  "loads": [
+    {
+      "content": [
+        "code"
+      ],
+      "chunks": 128000,
+      "rss_mib": 98.8,
+      "memory_breakdown_mib": {
+        "Rss": 98.8,
+        "Anonymous": 71.9,
+        "Pss_File": 5.2
+      },
+      "status": {
+        "pid": 2786352,
+        "uptime_seconds": 51.6,
+        "rss_mb": 98.8,
+        "requests": 3,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "max_rss_mb": 4096,
+        "virtual_mb": 1666.8,
+        "quiet_seconds": 2.0,
+        "socket": "/tmp/opencode/zemble-churn-uyx9vimh/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/home/skerit/projects/zemble/src/zemble",
+          "editable": true,
+          "source_revision": "4d96f86",
+          "process_started_at": "2026-10-02T02:16:45+00:00",
+          "pid": 2786352,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-churn-uyx9vimh/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 128000,
+            "files": 16000,
+            "last_used": 1790907405.7572756,
+            "watching": true,
+            "rebuilding": false,
+            "last_rebuild": null,
+            "last_error": null,
+            "vectors_mib": 500.0,
+            "vector_storage": "memmap",
+            "chunk_storage": "ChunkList",
+            "bm25_delta_documents": 0,
+            "cached_views": 0
+          }
+        ],
+        "building": [],
+        "pending_reindex": []
+      }
+    },
+    {
+      "content": [
+        "code",
+        "docs"
+      ],
+      "chunks": 136000,
+      "rss_mib": 113.5,
+      "memory_breakdown_mib": {
+        "Rss": 113.5,
+        "Anonymous": 86.1,
+        "Pss_File": 4.7
+      },
+      "status": {
+        "pid": 2786352,
+        "uptime_seconds": 107.4,
+        "rss_mb": 113.5,
+        "requests": 5,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "max_rss_mb": 4096,
+        "virtual_mb": 1781.2,
+        "quiet_seconds": 2.0,
+        "socket": "/tmp/opencode/zemble-churn-uyx9vimh/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/home/skerit/projects/zemble/src/zemble",
+          "editable": true,
+          "source_revision": "4d96f86",
+          "process_started_at": "2026-10-02T02:16:45+00:00",
+          "pid": 2786352,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-churn-uyx9vimh/workspace",
+            "content": [
+              "code",
+              "docs"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 136000,
+            "files": 20000,
+            "last_used": 1790907457.343794,
+            "watching": true,
+            "rebuilding": false,
+            "last_rebuild": null,
+            "last_error": null,
+            "vectors_mib": 531.2,
+            "vector_storage": "memmap",
+            "chunk_storage": "ChunkList",
+            "bm25_delta_documents": 0,
+            "cached_views": 0
+          }
+        ],
+        "building": [],
+        "pending_reindex": []
+      }
+    },
+    {
+      "content": [
+        "code",
+        "docs"
+      ],
+      "chunks": 68000,
+      "rss_mib": 122.5,
+      "memory_breakdown_mib": {
+        "Rss": 122.5,
+        "Anonymous": 94.5,
+        "Pss_File": 5.2
+      },
+      "status": {
+        "pid": 2786352,
+        "uptime_seconds": 142.0,
+        "rss_mb": 122.5,
+        "requests": 7,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "max_rss_mb": 4096,
+        "virtual_mb": 2263.4,
+        "quiet_seconds": 2.0,
+        "socket": "/tmp/opencode/zemble-churn-uyx9vimh/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/home/skerit/projects/zemble/src/zemble",
+          "editable": true,
+          "source_revision": "4d96f86",
+          "process_started_at": "2026-10-02T02:16:45+00:00",
+          "pid": 2786352,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-churn-uyx9vimh/workspace",
+            "content": [
+              "code",
+              "docs"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 136000,
+            "files": 20000,
+            "last_used": 1790907457.343794,
+            "watching": true,
+            "rebuilding": false,
+            "last_rebuild": null,
+            "last_error": null,
+            "vectors_mib": 531.2,
+            "vector_storage": "memmap",
+            "chunk_storage": "ChunkList",
+            "bm25_delta_documents": 0,
+            "cached_views": 0
+          },
+          {
+            "root": "/tmp/opencode/zemble-churn-uyx9vimh/second",
+            "content": [
+              "code",
+              "docs"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 68000,
+            "files": 10000,
+            "last_used": 1790907513.2241046,
+            "watching": true,
+            "rebuilding": false,
+            "last_rebuild": null,
+            "last_error": null,
+            "vectors_mib": 265.6,
+            "vector_storage": "memmap",
+            "chunk_storage": "ChunkList",
+            "bm25_delta_documents": 0,
+            "cached_views": 0
+          }
+        ],
+        "building": [],
+        "pending_reindex": []
+      }
+    }
+  ],
+  "peaks": {
+    "churn": {
+      "daemon_mib": 1984.8,
+      "daemon_and_children_mib": 1984.8
+    },
+    "load_1": {
+      "daemon_mib": 2025.5,
+      "daemon_and_children_mib": 2025.5
+    },
+    "load_2": {
+      "daemon_mib": 2143.4,
+      "daemon_and_children_mib": 2143.4
+    },
+    "load_3": {
+      "daemon_mib": 1115.9,
+      "daemon_and_children_mib": 1115.9
+    },
+    "settle": {
+      "daemon_mib": 1533.1,
+      "daemon_and_children_mib": 1533.1
+    },
+    "startup": {
+      "daemon_mib": 51.1,
+      "daemon_and_children_mib": 51.1
+    }
+  },
+  "final": {
+    "pid": 2786352,
+    "uptime_seconds": 194.0,
+    "rss_mb": 138.0,
+    "requests": 69,
+    "idle_seconds": 0.0,
+    "idle_minutes_limit": 0,
+    "max_indexes": 4,
+    "max_rss_mb": 4096,
+    "virtual_mb": 2397.1,
+    "quiet_seconds": 2.0,
+    "socket": "/tmp/opencode/zemble-churn-uyx9vimh/run/daemon.sock",
+    "runtime": {
+      "zemble_version": "0.5.5",
+      "source_root": "/home/skerit/projects/zemble/src/zemble",
+      "editable": true,
+      "source_revision": "4d96f86",
+      "process_started_at": "2026-10-02T02:16:45+00:00",
+      "pid": 2786352,
+      "stale": false,
+      "note": null
+    },
+    "indexes": [
+      {
+        "root": "/tmp/opencode/zemble-churn-uyx9vimh/workspace",
+        "content": [
+          "code",
+          "docs"
+        ],
+        "embedder": "fake:test@1024",
+        "chunks": 136000,
+        "files": 20000,
+        "last_used": 1790907573.6826365,
+        "watching": true,
+        "rebuilding": false,
+        "last_rebuild": {
+          "added": 0,
+          "removed": 0,
+          "changed": 5,
+          "ms": 14419,
+          "chunks": 136000
+        },
+        "last_error": null,
+        "vectors_mib": 531.2,
+        "vector_storage": "memmap",
+        "chunk_storage": "ChunkList",
+        "bm25_delta_documents": 0,
+        "cached_views": 0
+      },
+      {
+        "root": "/tmp/opencode/zemble-churn-uyx9vimh/second",
+        "content": [
+          "code",
+          "docs"
+        ],
+        "embedder": "fake:test@1024",
+        "chunks": 68000,
+        "files": 10000,
+        "last_used": 1790907573.8341105,
+        "watching": true,
+        "rebuilding": false,
+        "last_rebuild": {
+          "added": 0,
+          "removed": 0,
+          "changed": 5,
+          "ms": 7334,
+          "chunks": 68000
+        },
+        "last_error": null,
+        "vectors_mib": 265.6,
+        "vector_storage": "memmap",
+        "chunk_storage": "ChunkList",
+        "bm25_delta_documents": 0,
+        "cached_views": 0
+      }
+    ],
+    "building": [],
+    "pending_reindex": []
+  },
+  "final_memory_breakdown_mib": {
+    "Rss": 138.0,
+    "Anonymous": 108.9,
+    "Pss_File": 5.5
+  },
+  "log": ""
+}

@@ -1,0 +1,755 @@
+{
+  "revision": "4d96f86",
+  "artifacts": 500000,
+  "peak_rss_mib": 1286.5,
+  "stats": {
+    "path": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+    "embedder": "fake:test@1024",
+    "dimensions": 1024,
+    "indexed_files": 1757,
+    "total_chunks": 25383,
+    "content": [
+      "code"
+    ],
+    "languages": {
+      "java": 1,
+      "python": 25382
+    }
+  },
+  "startup": {
+    "pid": 2760064,
+    "uptime_seconds": 13.3,
+    "rss_mb": 297.7,
+    "requests": 3,
+    "idle_seconds": 0.0,
+    "idle_minutes_limit": 0,
+    "max_indexes": 4,
+    "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+    "runtime": {
+      "zemble_version": "0.5.5",
+      "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+      "editable": true,
+      "source_revision": null,
+      "process_started_at": "2026-10-02T02:03:34+00:00",
+      "pid": 2760064,
+      "stale": false,
+      "note": null
+    },
+    "indexes": [
+      {
+        "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+        "content": [
+          "code"
+        ],
+        "embedder": "fake:test@1024",
+        "chunks": 25383,
+        "files": 1757,
+        "last_used": 1790906615.1024086,
+        "watching": true,
+        "rebuilding": false,
+        "last_rebuild": null,
+        "last_error": null
+      }
+    ],
+    "building": [],
+    "pending_reindex": [],
+    "profile": {
+      "raw_batches": 0,
+      "raw_events": 0,
+      "accepted_events": 0,
+      "graph_entered": false,
+      "graph_held": false,
+      "python_current_mib": 0.0,
+      "python_peak_mib": 0.0,
+      "tracer_mib": 0.0
+    }
+  },
+  "held_before_noise": {
+    "pid": 2760064,
+    "uptime_seconds": 18.1,
+    "rss_mb": 239.1,
+    "requests": 35,
+    "idle_seconds": 0.0,
+    "idle_minutes_limit": 0,
+    "max_indexes": 4,
+    "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+    "runtime": {
+      "zemble_version": "0.5.5",
+      "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+      "editable": true,
+      "source_revision": null,
+      "process_started_at": "2026-10-02T02:03:34+00:00",
+      "pid": 2760064,
+      "stale": false,
+      "note": null
+    },
+    "indexes": [
+      {
+        "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+        "content": [
+          "code"
+        ],
+        "embedder": "fake:test@1024",
+        "chunks": 25383,
+        "files": 1757,
+        "last_used": 1790906615.1024086,
+        "watching": true,
+        "rebuilding": true,
+        "last_rebuild": null,
+        "last_error": null
+      }
+    ],
+    "building": [],
+    "pending_reindex": [
+      "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+    ],
+    "profile": {
+      "raw_batches": 1,
+      "raw_events": 1,
+      "accepted_events": 1,
+      "graph_entered": true,
+      "graph_held": true,
+      "python_current_mib": 0.0,
+      "python_peak_mib": 0.1,
+      "tracer_mib": 0.0
+    }
+  },
+  "checkpoints": [
+    {
+      "artifacts": 50000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 20.4,
+        "rss_mb": 272.2,
+        "requests": 36,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    },
+    {
+      "artifacts": 100000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 22.4,
+        "rss_mb": 305.1,
+        "requests": 37,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    },
+    {
+      "artifacts": 150000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 24.6,
+        "rss_mb": 342.6,
+        "requests": 38,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    },
+    {
+      "artifacts": 200000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 26.6,
+        "rss_mb": 371.6,
+        "requests": 39,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    },
+    {
+      "artifacts": 250000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 28.8,
+        "rss_mb": 421.6,
+        "requests": 40,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    },
+    {
+      "artifacts": 300000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 31.3,
+        "rss_mb": 440.1,
+        "requests": 41,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    },
+    {
+      "artifacts": 350000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 33.3,
+        "rss_mb": 469.1,
+        "requests": 42,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    },
+    {
+      "artifacts": 400000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 35.9,
+        "rss_mb": 498.1,
+        "requests": 43,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    },
+    {
+      "artifacts": 450000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 37.9,
+        "rss_mb": 527.1,
+        "requests": 44,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    },
+    {
+      "artifacts": 500000,
+      "status": {
+        "pid": 2760064,
+        "uptime_seconds": 40.1,
+        "rss_mb": 583.8,
+        "requests": 45,
+        "idle_seconds": 0.0,
+        "idle_minutes_limit": 0,
+        "max_indexes": 4,
+        "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+        "runtime": {
+          "zemble_version": "0.5.5",
+          "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+          "editable": true,
+          "source_revision": null,
+          "process_started_at": "2026-10-02T02:03:34+00:00",
+          "pid": 2760064,
+          "stale": false,
+          "note": null
+        },
+        "indexes": [
+          {
+            "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+            "content": [
+              "code"
+            ],
+            "embedder": "fake:test@1024",
+            "chunks": 25383,
+            "files": 1757,
+            "last_used": 1790906615.1024086,
+            "watching": true,
+            "rebuilding": true,
+            "last_rebuild": null,
+            "last_error": null
+          }
+        ],
+        "building": [],
+        "pending_reindex": [
+          "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+        ],
+        "profile": {
+          "raw_batches": 1,
+          "raw_events": 1,
+          "accepted_events": 1,
+          "graph_entered": true,
+          "graph_held": true,
+          "python_current_mib": 0.0,
+          "python_peak_mib": 0.3,
+          "tracer_mib": 0.0
+        }
+      }
+    }
+  ],
+  "held_after_noise": {
+    "pid": 2760064,
+    "uptime_seconds": 40.1,
+    "rss_mb": 583.8,
+    "requests": 46,
+    "idle_seconds": 0.0,
+    "idle_minutes_limit": 0,
+    "max_indexes": 4,
+    "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+    "runtime": {
+      "zemble_version": "0.5.5",
+      "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+      "editable": true,
+      "source_revision": null,
+      "process_started_at": "2026-10-02T02:03:34+00:00",
+      "pid": 2760064,
+      "stale": false,
+      "note": null
+    },
+    "indexes": [
+      {
+        "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+        "content": [
+          "code"
+        ],
+        "embedder": "fake:test@1024",
+        "chunks": 25383,
+        "files": 1757,
+        "last_used": 1790906615.1024086,
+        "watching": true,
+        "rebuilding": true,
+        "last_rebuild": null,
+        "last_error": null
+      }
+    ],
+    "building": [],
+    "pending_reindex": [
+      "/tmp/opencode/zemble-singleton-8mfhnxso/workspace"
+    ],
+    "profile": {
+      "raw_batches": 1,
+      "raw_events": 1,
+      "accepted_events": 1,
+      "graph_entered": true,
+      "graph_held": true,
+      "python_current_mib": 0.0,
+      "python_peak_mib": 0.3,
+      "tracer_mib": 0.0
+    }
+  },
+  "final": {
+    "pid": 2760064,
+    "uptime_seconds": 155.8,
+    "rss_mb": 1110.2,
+    "requests": 48,
+    "idle_seconds": 0.0,
+    "idle_minutes_limit": 0,
+    "max_indexes": 4,
+    "socket": "/tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock",
+    "runtime": {
+      "zemble_version": "0.5.5",
+      "source_root": "/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble",
+      "editable": true,
+      "source_revision": null,
+      "process_started_at": "2026-10-02T02:03:34+00:00",
+      "pid": 2760064,
+      "stale": false,
+      "note": null
+    },
+    "indexes": [
+      {
+        "root": "/tmp/opencode/zemble-singleton-8mfhnxso/workspace",
+        "content": [
+          "code"
+        ],
+        "embedder": "fake:test@1024",
+        "chunks": 25383,
+        "files": 1757,
+        "last_used": 1790906615.1024086,
+        "watching": true,
+        "rebuilding": false,
+        "last_rebuild": {
+          "added": 0,
+          "removed": 0,
+          "changed": 1,
+          "ms": 1395,
+          "chunks": 25383,
+          "graph_ms": 0
+        },
+        "last_error": null
+      }
+    ],
+    "building": [],
+    "pending_reindex": [],
+    "profile": {
+      "raw_batches": 2,
+      "raw_events": 961035,
+      "accepted_events": 1,
+      "graph_entered": true,
+      "graph_held": false,
+      "python_current_mib": 0.0,
+      "python_peak_mib": 0.0,
+      "tracer_mib": 0.0
+    }
+  },
+  "log": "2026-10-02 04:03:35,003 INFO zemble.daemon.server: zemble daemon 2760064 listening on /tmp/opencode/zemble-singleton-8mfhnxso/run/daemon.sock (max_indexes=4, idle_minutes=0)\n2026-10-02 04:03:40,046 INFO zemble.embedding.pricing: embedding 25383 uncached chunk(s), ~5459123 tokens, ~unknown price with fake:test@1024\n2026-10-02 04:03:48,271 INFO zemble.daemon.server: watching /tmp/opencode/zemble-singleton-8mfhnxso/workspace (282 extensions)\n2026-10-02 04:03:48,918 INFO watchfiles.main: 1 change detected\n2026-10-02 04:03:50,139 INFO zemble.embedding.pricing: embedding 1 uncached chunk(s), ~22 tokens, ~unknown price with fake:test@1024\n2026-10-02 04:03:50,313 INFO zemble.daemon.server: rebuilt /tmp/opencode/zemble-singleton-8mfhnxso/workspace: 0 added, 1 changed, 0 removed, 25383 chunks in 1395 ms\nTimeout (0:01:00)!\nThread 0x00007f70417d56c0 (most recent call first):\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py\", line 90 in _worker\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 995 in run\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1044 in _bootstrap_inner\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1015 in _bootstrap\n\nThread 0x00007f7042cd66c0 (most recent call first):\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 359 in wait\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/queue.py\", line 199 in get\n  File \"/home/skerit/projects/zemble/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py\", line 1089 in run\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1044 in _bootstrap_inner\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1015 in _bootstrap\n\nThread 0x00007f705a2ff6c0 (most recent call first):\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py\", line 90 in _worker\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 995 in run\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1044 in _bootstrap_inner\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1015 in _bootstrap\n\nThread 0x00007f706a17f780 (most recent call first):\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/pathlib/_local.py\", line 181 in _str_normcase\n  File \"<frozen _collections_abc>\", line 1042 in __contains__\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/pathlib/_local.py\", line 377 in relative_to\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/graph/facts.py\", line 372 in matches_facts_glob\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/daemon/server.py\", line 244 in <lambda>\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/daemon/watch.py\", line 89 in matches\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/daemon/watch.py\", line 138 in _filter\n  File \"/home/skerit/projects/zemble/.venv/lib/python3.13/site-packages/watchfiles/main.py\", line 298 in _prep_changes\n  File \"/home/skerit/projects/zemble/tests/measure_daemon_singleton.py\", line 43 in counted\n  File \"/home/skerit/projects/zemble/.venv/lib/python3.13/site-packages/watchfiles/main.py\", line 284 in awatch\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/daemon/watch.py\", line 145 in _run\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/events.py\", line 89 in _run\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/base_events.py\", line 2061 in _run_once\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/base_events.py\", line 684 in run_forever\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/base_events.py\", line 713 in run_until_complete\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/runners.py\", line 119 in run\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/runners.py\", line 196 in run\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/daemon/cli.py\", line 116 in _run_foreground\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/daemon/cli.py\", line 78 in run_daemon\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/daemon/cli.py\", line 221 in main\n  File \"/home/skerit/projects/zemble/tests/measure_daemon_singleton.py\", line 81 in child\n  File \"/home/skerit/projects/zemble/tests/measure_daemon_singleton.py\", line 207 in main\n  File \"/home/skerit/projects/zemble/tests/measure_daemon_singleton.py\", line 217 in <module>\n  File \"<frozen runpy>\", line 88 in _run_code\n  File \"<frozen runpy>\", line 203 in _run_module_as_main\nTimeout (0:01:00)!\nThread 0x00007f70417d56c0 (most recent call first):\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py\", line 90 in _worker\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 995 in run\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1044 in _bootstrap_inner\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1015 in _bootstrap\n\nThread 0x00007f7042cd66c0 (most recent call first):\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 359 in wait\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/queue.py\", line 199 in get\n  File \"/home/skerit/projects/zemble/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py\", line 1089 in run\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1044 in _bootstrap_inner\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1015 in _bootstrap\n\nThread 0x00007f705a2ff6c0 (most recent call first):\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py\", line 90 in _worker\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 995 in run\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1044 in _bootstrap_inner\n  File \"/home/skerit/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py\", line 1015 in _bootstrap\n\nThread 0x00007f706a17f780 (most recent call first):\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/graph/facts.py\", line 299 in _closure\n  File \"/tmp/opencode/zemble-singleton-8mfhnxso/baseline/src/zemble/graph/facts.py\", line ??? in matches_facts_glob\n  <invalid frame>\n"
+}

@@ -38,6 +38,26 @@ _SELECTOR_COPY_BYTES = 4 * 1024 * 1024
 
 
 class SelectableBasicBackend(CosineBasicBackend):
+    @classmethod
+    def mapped(cls, vectors: npt.NDArray, path: Path) -> "SelectableBasicBackend":
+        """Match Vicinity's normalize-or-copy arithmetic with bounded scratch in a mapped replacement."""
+        rows = max(1, _SELECTOR_COPY_BYTES // (vectors.shape[1] * vectors.dtype.itemsize))
+        norms = np.empty(len(vectors), dtype=vectors.dtype)
+        for start in range(0, len(vectors), rows):
+            norms[start : start + rows] = np.linalg.norm(vectors[start : start + rows], axis=1)
+        unit = np.allclose(norms[norms != 0], 1)
+        if isinstance(vectors, np.memmap) and Path(vectors.filename) == path:
+            mapped = vectors
+        else:
+            mapped = np.lib.format.open_memmap(path, mode="w+", dtype=vectors.dtype, shape=vectors.shape)
+        for start in range(0, len(vectors), rows):
+            block = vectors[start : start + rows]
+            mapped[start : start + rows] = block if unit else normalize(block, norms[start : start + rows])
+        mapped.flush()
+        backend = cls.__new__(cls)
+        BasicBackend.__init__(backend, mapped, BasicArgs())
+        return backend
+
     def _selector_dist(self, x: npt.NDArray, selector: npt.NDArray[np.int_]) -> npt.NDArray:
         """Score contiguous subtrees through a view, gathering scattered rows in bounded blocks."""
         x_norm = normalize(x)

@@ -106,6 +106,7 @@ def _run_foreground(args: argparse.Namespace) -> int:
     """Run the daemon in this process until it stops."""
     import asyncio
 
+    from zemble.daemon.memory import MemoryRefused
     from zemble.daemon.server import SocketInUse, run
 
     if getattr(args, "log_file", False):
@@ -114,7 +115,7 @@ def _run_foreground(args: argparse.Namespace) -> int:
         logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, stream=sys.stderr)
     try:
         asyncio.run(run(max_indexes=args.max_indexes, idle_minutes=args.idle_minutes, watch=not args.no_watch))
-    except SocketInUse as exc:
+    except (SocketInUse, MemoryRefused) as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_ERROR
     except KeyboardInterrupt:  # pragma: no cover - interactive
@@ -191,7 +192,10 @@ def _status(as_json: bool) -> int:
         f"{status['requests']} request(s)  idle {status['idle_seconds']:.0f}s"
     )
     _print_runtime(status.get("runtime", {}))
-    print(f"socket {status['socket']}  max_indexes {status['max_indexes']}  idle_limit {status['idle_minutes_limit']}m")
+    print(
+        f"socket {status['socket']}  max_indexes {status['max_indexes']}  "
+        f"memory_limit {status.get('max_rss_mb', 'not reported')} MiB  idle_limit {status['idle_minutes_limit']}m"
+    )
     for entry in status["indexes"]:
         flags = []
         if entry["watching"]:

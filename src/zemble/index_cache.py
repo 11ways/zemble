@@ -58,6 +58,8 @@ def compute_cache_key(
 class IndexCache:
     """Cache of indexed repos and local paths for the lifetime of a process."""
 
+    require_persistence = False
+
     def __init__(self, max_size: int = CACHE_MAX_SIZE, on_evict: Callable[[CacheKey], None] | None = None) -> None:
         """Initialise an empty cache.
 
@@ -67,6 +69,7 @@ class IndexCache:
         self._embedder: Embedder | None = None
         self._model_error: BaseException | None = None
         self._model_ready = asyncio.Event()
+        self._model_lock = asyncio.Lock()
         self._tasks: OrderedDict[CacheKey, asyncio.Future[ZembleIndex]] = OrderedDict()  # ordered for LRU eviction
         self._revalidate_after: dict[CacheKey, float] = {}
         #: The exclude patterns each built key was told to prune with; the key only carries their digest.
@@ -82,18 +85,19 @@ class IndexCache:
 
     async def load_embedder_once(self) -> None:
         """Load the default embedder into the cache, recording a load failure instead of raising."""
-        if self._model_ready.is_set():
-            return
-        try:
-            embedder = await asyncio.to_thread(load_embedder)
-            # Touch dimensions so the model is really loaded, not merely constructed.
-            await asyncio.to_thread(lambda: embedder.dimensions)
-            self._embedder = embedder
-        except Exception as exc:
-            logger.exception("Failed to load embedding model")
-            self._model_error = exc
-        finally:
-            self._model_ready.set()
+        async with self._model_lock:
+            if self._model_ready.is_set():
+                return
+            try:
+                embedder = await asyncio.to_thread(load_embedder)
+                # Touch dimensions so the model is really loaded, not merely constructed.
+                await asyncio.to_thread(lambda: embedder.dimensions)
+                self._embedder = embedder
+            except Exception as exc:
+                logger.exception("Failed to load embedding model")
+                self._model_error = exc.with_traceback(None)
+            finally:
+                self._model_ready.set()
 
     async def _await_model(self) -> Embedder:
         """Block until the embedder is installed; re-raise the load error if it failed."""
@@ -138,6 +142,8 @@ class IndexCache:
             save_index_to_cache(index, source_key)
         except Exception:
             logger.warning("Failed to save index cache for %r", source_key, exc_info=True)
+            if self.require_persistence:
+                raise
         return index
 
     async def _build_tracked(
@@ -161,6 +167,7 @@ class IndexCache:
         existed = self._tasks.pop(cache_key, None) is not None
         self._revalidate_after.pop(cache_key, None)
         self.last_used.pop(cache_key, None)
+        self._exclude_by_key.pop(cache_key, None)
         if existed and self._on_evict is not None:
             self._on_evict(cache_key)
         if existed:
@@ -307,11 +314,7 @@ class IndexCache:
             # Re-check after the await: another caller may have populated the entry.
             if cache_key not in self._tasks:
                 if len(self._tasks) >= self._max_size:
-                    evicted_key, _ = self._tasks.popitem(last=False)
-                    self._revalidate_after.pop(evicted_key, None)
-                    self.last_used.pop(evicted_key, None)
-                    if self._on_evict is not None:
-                        self._on_evict(evicted_key)
+                    self.evict(next(iter(self._tasks)))
                 self._tasks[cache_key] = asyncio.create_task(
                     self._build_tracked(source, ref, embedder, cache_key, exclude)
                 )

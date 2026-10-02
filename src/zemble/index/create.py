@@ -227,6 +227,7 @@ def _assemble_vectors(
     fresh: EmbeddingMatrix | None,
     previous: PreviousIndex | None,
     manifest: dict[str, FileManifestEntry],
+    vector_path: Path | None = None,
 ) -> EmbeddingMatrix:
     """Build the vector matrix for a build, copying every reused row out of the previous index.
 
@@ -234,7 +235,7 @@ def _assemble_vectors(
     never by the caller. A watched workspace rebuilds on every file event, and the previous
     matrix is a read-only mapping of vectors.npy: copying it up front turned hundreds of MB
     of evictable page cache into anonymous heap on the first rebuild, per resident index.
-    A rebuild that embeds nothing now shares the mapping with the index it replaces.
+    A rebuild that embeds nothing shares the input here; the daemon streams its replacement to disk.
 
     :param total: The number of chunks in the new index.
     :param placements: Each planned file with the row its chunks start at.
@@ -242,17 +243,26 @@ def _assemble_vectors(
     :param fresh: The freshly embedded vectors, in ``fresh_rows`` order, or None when none were.
     :param previous: The previous index, or None for a full build.
     :param manifest: The new manifest, used to decide whether the layout is unchanged.
+    :param vector_path: Optional temporary mapped matrix for a budgeted daemon rebuild.
     :return: The full vector matrix.
     """
     if previous is None:
         # A full build embeds every row, so the fresh matrix is already the whole thing.
         return fresh if fresh is not None else np.empty((0, 0), dtype=np.float32)
-    if _has_same_vector_layout(manifest, previous.manifest):
-        if fresh is None:
-            return previous.vectors
+    same_layout = _has_same_vector_layout(manifest, previous.manifest)
+    if same_layout and fresh is None:
+        return previous.vectors
+    if vector_path is not None:
+        embeddings = np.lib.format.open_memmap(
+            vector_path, mode="w+", dtype=np.float32, shape=(total, previous.vectors.shape[1])
+        )
+        if same_layout:
+            embeddings[:] = previous.vectors
+    elif same_layout:
         embeddings = np.array(previous.vectors, dtype=np.float32)
     else:
         embeddings = np.empty((total, previous.vectors.shape[1]), dtype=np.float32)
+    if not same_layout:
         for start, planned in placements:
             if planned.reused and planned.previous_entry is not None:
                 entry = planned.previous_entry
@@ -271,6 +281,7 @@ def create_index_from_path(
     capsules: CapsuleOptions | None = None,
     changed_paths: Iterable[Path] | None = None,
     exclude: Sequence[str] = (),
+    vector_path: Path | None = None,
 ) -> tuple[BM25, SelectableBasicBackend, Sequence[Chunk], dict[str, FileManifestEntry]]:
     """Create an index from a resolved directory, optionally reusing a previous index's unchanged files.
 
@@ -283,6 +294,7 @@ def create_index_from_path(
     :param changed_paths: The exact paths that moved, from a watcher; None walks the whole tree.
         Only honoured together with `previous`, which is what the unnamed files are reused from.
     :param exclude: Extra gitignore-style patterns, relative to `path`, this build skips at walk time.
+    :param vector_path: Optional temporary mapped matrix, normalized with bounded scratch.
     :raises ValueError: if no items were found, no index can be created.
     :return: A BM25 index, semantic index, list of chunks, and file manifest.
     """
@@ -363,7 +375,7 @@ def create_index_from_path(
     # rather than per batch, and it costs a paid provider one batched pass instead of one
     # request per changed file.
     fresh = embed_chunks(embedder, fresh_chunks) if fresh_rows else None
-    embeddings = _assemble_vectors(len(chunks), placements, fresh_rows, fresh, previous, manifest)
+    embeddings = _assemble_vectors(len(chunks), placements, fresh_rows, fresh, previous, manifest, vector_path)
 
     # BM25 is mutated only once the vectors exist: a refused or failed embed must not leave a
     # warm daemon's live index half-updated, and the BM25 index here IS that live object.
@@ -374,6 +386,10 @@ def create_index_from_path(
         _reindex_file(bm25_index, indexed_path, [], previous_manifest[indexed_path], resolved_capsules)
 
     bm25_index.set_doc_order(chunk_ids)
-    semantic_index = SelectableBasicBackend(embeddings, BasicArgs())
+    semantic_index = (
+        SelectableBasicBackend.mapped(embeddings, vector_path)
+        if vector_path is not None
+        else SelectableBasicBackend(embeddings, BasicArgs())
+    )
 
     return bm25_index, semantic_index, chunks, manifest

@@ -119,3 +119,18 @@ def test_spliced_chunks_read_like_the_sequence_they_stand_in_for(tmp_path: Path)
     assert list(generation_two) == expected
     assert all(source is not spliced for source in generation_two._sources), "no spliced source survives"
     assert len(generation_two._sources) == len(spliced._sources)
+
+
+def test_splice_range_visits_only_overlapping_runs():
+    """Reusing each file must not scan every run of the previous generation."""
+    from tests.conftest import make_chunk
+    from zemble.index.chunk_store import SplicedChunks
+
+    class NoFullScan(list):
+        def __iter__(self):
+            raise AssertionError("a range splice scanned the whole previous generation")
+
+    original = SplicedChunks([([make_chunk(f"row {i}")], 0, 1) for i in range(1000)])
+    original._sources = NoFullScan(original._sources)
+    selected = SplicedChunks([(original, 500, 1)])
+    assert len(selected) == 1 and selected[0].content == "row 500"

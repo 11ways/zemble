@@ -238,7 +238,7 @@ def test_nested_home_uses_one_workspace_on_all_surfaces(
     """A call from the app finds its sibling mechanism through the CLI, MCP and daemon."""
     from unittest.mock import AsyncMock
 
-    from zemble.daemon.server import _cmd_home
+    from zemble.daemon.server import _cmd_home, _with_graph
 
     nested = workspace / "src/main/java/com/example/app"
     nested.mkdir(parents=True, exist_ok=True)
@@ -272,6 +272,7 @@ def test_nested_home_uses_one_workspace_on_all_surfaces(
     # 3. Direct daemon requests resolve too, rather than depending on a new client.
     daemon = MagicMock()
     daemon.index_for = AsyncMock(return_value=("fixture", _fake_index(workspace)))
+    daemon.with_graph = AsyncMock(side_effect=lambda root, work: _with_graph(root, work))
     payload = asyncio.run(_cmd_home(daemon, {"path": str(nested), "description": query}))
     assert daemon.index_for.call_args.args[0]["path"] == str(workspace)
     assert payload["home"]["mechanisms"] == baseline["mechanisms"]

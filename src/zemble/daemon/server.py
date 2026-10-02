@@ -12,6 +12,7 @@ import fcntl
 import gc
 import logging
 import os
+import tempfile
 import time
 import traceback
 from collections.abc import Awaitable, Callable, Sequence
@@ -19,8 +20,10 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from zemble.cache import find_index_from_cache_folder, save_index_to_cache
+from zemble.cache import find_index_from_cache_folder, resolve_cache_folder
+from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
 from zemble.daemon import client
+from zemble.daemon.memory import MEMORY_ENV, MIB, MemoryRefused, allocation_backstop, default_budget_mb, virtual_mb
 from zemble.daemon.protocol import (
     DEFAULT_IDLE_MINUTES,
     DEFAULT_MAX_INDEXES,
@@ -34,17 +37,19 @@ from zemble.daemon.protocol import (
     socket_path,
 )
 from zemble.daemon.watch import IgnoreRules, RootWatcher
+from zemble.embedding.base import Embedder
 from zemble.graph.facts import matches_facts_glob
 from zemble.index import ZembleIndex
 from zemble.index.create import create_index_from_path
 from zemble.index.files import get_extensions
-from zemble.index.symbols import SymbolDefinitions
-from zemble.index.types import PersistencePath, PreviousIndex
+from zemble.index.scope import TreeEstimate, estimate_tree, measure_work, require_declared_scope
+from zemble.index.types import PreviousIndex
 from zemble.index_cache import CacheKey, IndexCache, compute_cache_key
 from zemble.refusal import Refused
 from zemble.runtime.identity import identity, status_payload
 from zemble.runtime.memory import release_free_heap
 from zemble.types import ContentType
+from zemble.userenv import load_user_env, user_env_path
 from zemble.utils import describe_unresolved_location, format_results, is_git_url
 
 logger = logging.getLogger(__name__)
@@ -62,10 +67,71 @@ REFUSAL_TYPES: tuple[type[Refused], ...] = (Refused,)
 
 #: Java is watched on top of the index's own extensions so the symbol graph stays fresh.
 _GRAPH_EXTENSIONS = frozenset({".java"})
-#: A rebuilt index is written back to the on-disk cache at most this often.
-_PERSIST_INTERVAL_SECONDS = 10.0
 #: How often the idle check runs.
 _IDLE_CHECK_SECONDS = 30.0
+_QUIET_SECONDS = 2.0
+_MAX_CHANGED_PATHS = 4096
+
+
+def _work_reserve(estimate: TreeEstimate, dimensions: int) -> float:
+    """Reserve parsing/postings plus three transient copies of estimated fresh embedding rows."""
+    rows = estimate.bytes / _DESIRED_CHUNK_LENGTH_CHARS + estimate.files
+    return (estimate.bytes * 12 + rows * dimensions * 12) / MIB
+
+
+def _merge_changes(
+    pending: dict[CacheKey, set[Path] | None], key: CacheKey, paths: Sequence[Path] | set[Path] | None
+) -> None:
+    """Coalesce paths into a capped set, with None representing one full rescan."""
+    changes = pending.setdefault(key, set())
+    if changes is None or paths is None:
+        pending[key] = None
+        return
+    changes.update(paths)
+    if len(changes) > _MAX_CHANGED_PATHS:
+        pending[key] = None
+
+
+class ResidentCache(IndexCache):
+    """The daemon owns freshness and keeps only one mapped generation per root."""
+
+    require_persistence = True
+
+    def __init__(
+        self,
+        max_size: int,
+        on_evict: Callable[[CacheKey], None],
+        on_build: Callable[[CacheKey], None],
+        watch_owned: bool,
+    ) -> None:
+        """Watch admitted roots before chunking so edits during a cold build are not lost."""
+        super().__init__(max_size=max_size, on_evict=on_evict)
+        self._on_build = on_build
+        self.watch_owned = watch_owned
+
+    async def _build_tracked(
+        self, source: str, ref: str | None, embedder: Embedder, cache_key: CacheKey, exclude: Sequence[str] = ()
+    ) -> ZembleIndex:
+        """Start collecting changes before entering the construction thread."""
+        self._on_build(cache_key)
+        return await super()._build_tracked(source, ref, embedder, cache_key, exclude)
+
+    async def _evict_if_stale(self, cache_key: CacheKey) -> None:
+        """Leave freshness to the watcher instead of rebuilding a churning tree from a query."""
+        if not self.watch_owned:
+            await super()._evict_if_stale(cache_key)
+
+    def _build_index(
+        self, source: str, ref: str | None, embedder: Embedder, cache_key: CacheKey, exclude: Sequence[str] = ()
+    ) -> ZembleIndex:
+        """Discard construction dictionaries and vectors before returning the mapped stores."""
+        index = super()._build_index(source, ref, embedder, cache_key, exclude)
+        path = find_index_from_cache_folder(cache_key[0], index.content, index.exclude)
+        embedder = index.embedder
+        del index
+        gc.collect()
+        release_free_heap()
+        return ZembleIndex.load_from_disk(path, embedder=embedder)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -111,13 +177,9 @@ def rebuild_index(
     """
     root = Path(cache_key[0])
     content = cache_key[1]
-    # AIDEV-NOTE: nothing here may write into the index that is being served. The vector matrix
-    # is handed over UNCOPIED: `_assemble_vectors` copies it itself, at the one point a row is
-    # written, so a rebuild that embeds nothing keeps sharing the previous index's mapping
-    # instead of allocating a private matrix per file event. The BM25 index is derived
-    # (`for_update`), which shares the previous index's immutable postings and puts the changes
-    # in a delta beside them. That is what lets a query keep hitting the old index while this
-    # runs, with the lock held only for the swap.
+    # AIDEV-NOTE: the serving generation stays immutable. Reused vectors are streamed into a
+    # temporary mapping, not copied to anonymous heap; BM25 shares its immutable postings.
+    # Admission reserves the replacement inside the process budget before any allocation.
     previous = PreviousIndex(
         chunks=previous_index.chunks,
         vectors=previous_index._semantic_index.vectors,
@@ -125,16 +187,18 @@ def rebuild_index(
         bm25_index=previous_index._bm25_index,
     )
     before = dict(previous_index._manifest)
-    bm25_index, semantic_index, chunks, manifest = create_index_from_path(
-        root,
-        embedder=previous_index.embedder,
-        content=content,
-        display_root=root,
-        previous=previous,
-        capsules=previous_index._capsules,
-        changed_paths=changed_paths,
-        exclude=previous_index.exclude,
-    )
+    with tempfile.TemporaryDirectory(prefix="rebuild-", dir=resolve_cache_folder()) as temporary:
+        bm25_index, semantic_index, chunks, manifest = create_index_from_path(
+            root,
+            embedder=previous_index.embedder,
+            content=content,
+            display_root=root,
+            previous=previous,
+            capsules=previous_index._capsules,
+            changed_paths=changed_paths,
+            exclude=previous_index.exclude,
+            vector_path=Path(temporary) / "vectors.npy",
+        )
     counts = {
         "added": len(manifest.keys() - before.keys()),
         "removed": len(before.keys() - manifest.keys()),
@@ -151,8 +215,22 @@ def rebuild_index(
         content=content,
         manifest=manifest,
         capsules=previous_index._capsules,
+        exclude=previous_index.exclude,
     )
     return index, counts
+
+
+def _mapped_rebuild(
+    current: ZembleIndex, cache_key: CacheKey, changed_paths: Sequence[Path] | None
+) -> tuple[ZembleIndex, dict[str, int]]:
+    """Release construction storage before publishing a mapped replacement."""
+    index, counts = rebuild_index(current, cache_key, changed_paths)
+    path = find_index_from_cache_folder(cache_key[0], cache_key[1], index.exclude)
+    index.save(path)
+    del index
+    gc.collect()
+    release_free_heap()
+    return ZembleIndex.load_from_disk(path, embedder=current.embedder), counts
 
 
 class Daemon:
@@ -163,12 +241,15 @@ class Daemon:
         max_indexes: int | None = None,
         idle_minutes: int | None = None,
         watch: bool = True,
+        max_rss_mb: int | None = None,
     ) -> None:
         """Create a daemon.
 
         :param max_indexes: Resident index limit; None reads ZEMBLE_DAEMON_MAX_INDEXES.
         :param idle_minutes: Idle shutdown delay in minutes, 0 to never exit; None reads the environment.
         :param watch: Whether loaded local roots are watched for changes.
+        :param max_rss_mb: Process memory ceiling in MiB; None reads the env or RAM-derived default.
+        :raises ValueError: If the memory ceiling is not positive.
         """
         self.max_indexes = (
             max_indexes if max_indexes is not None else _env_int("ZEMBLE_DAEMON_MAX_INDEXES", DEFAULT_MAX_INDEXES)
@@ -177,18 +258,32 @@ class Daemon:
             idle_minutes if idle_minutes is not None else _env_int("ZEMBLE_DAEMON_IDLE_MINUTES", DEFAULT_IDLE_MINUTES)
         )
         self.watch_enabled = watch
-        self.cache = IndexCache(max_size=max(1, self.max_indexes), on_evict=self._on_evict)
+        self.max_rss_mb = max_rss_mb if max_rss_mb is not None else _env_int(MEMORY_ENV, default_budget_mb())
+        if self.max_rss_mb <= 0:
+            raise ValueError(f"{MEMORY_ENV} must be positive")
+        self.cache = ResidentCache(
+            max_size=max(1, self.max_indexes),
+            on_evict=self._on_evict,
+            on_build=self._ensure_watcher,
+            watch_owned=watch,
+        )
+        self._operation_lock = asyncio.Lock()
+        self._load_lock = asyncio.Lock()
+        self._request_tasks: set[asyncio.Task[Any]] = set()
+        self._query_keys: dict[asyncio.Task[Any], CacheKey] = {}
+        self._watch_tasks: dict[CacheKey, asyncio.Task[None]] = {}
+        self._watch_changes: dict[CacheKey, set[Path] | None] = {}
+        self._changed_at: dict[CacheKey, float] = {}
         self.watchers: dict[CacheKey, RootWatcher] = {}
         self.locks: dict[CacheKey, asyncio.Lock] = {}
         self.pending: set[CacheKey] = set()
         self.rebuilding: set[CacheKey] = set()
         self._rebuild_tasks: dict[CacheKey, asyncio.Task[dict[str, Any]]] = {}
-        self._rebuild_changes: dict[CacheKey, set[Path]] = {}
+        self._rebuild_changes: dict[CacheKey, set[Path] | None] = {}
         self._rebuild_graph: set[CacheKey] = set()
         self.last_rebuild: dict[CacheKey, dict[str, Any]] = {}
         #: Why a root's last rebuild did not happen, e.g. a refused paid embed. Kept until one succeeds.
         self.last_error: dict[CacheKey, dict[str, Any]] = {}
-        self._persisted_at: dict[CacheKey, float] = {}
         self.started_at = time.time()
         self.last_request_at = time.monotonic()
         self.requests = 0
@@ -226,21 +321,103 @@ class Daemon:
         paths = _patterns(args.get("paths"))
         exclude = _patterns(args.get("exclude"))
         await self.cache.load_embedder_once()
-        cache_key, index = await self.cache.get_with_key(path, ref=ref, content=content, exclude=exclude)
-        self._ensure_watcher(cache_key, index)
-        filtered = index.filtered(paths, exclude)
+        warm = self._warm_for(path, ref, content)
+        if warm is not None and not self.watch_enabled:
+            await self.cache._evict_if_stale(warm[0])
+            if warm[0] not in self.cache._tasks:
+                warm = None
+        if warm is None:
+            async with self._load_lock:
+                cache_key, index = await self._resident_for(path, ref, content, exclude)
+        else:
+            cache_key, index = warm
+        request_task = asyncio.current_task()
+        if request_task in self._request_tasks:
+            self._query_keys[request_task] = cache_key
+        self._ensure_watcher(cache_key)
+        drop = set(get_extensions(index.content)) - set(get_extensions(content))
+        content_filter = [f"*{extension}" for extension in sorted(drop)]
+        filtered = index.filtered(paths, (*exclude, *content_filter))
         if filtered is None:
             raise ValueError(f"No indexed file under {path} survives paths={list(paths)} exclude={list(exclude)}")
+        if set(content) != set(filtered.content):
+            filtered._content = content
         return cache_key, filtered
 
-    def _ensure_watcher(self, cache_key: CacheKey, index: ZembleIndex) -> None:
+    def _warm_for(
+        self, path: str, ref: str | None, content: tuple[ContentType, ...]
+    ) -> tuple[CacheKey, ZembleIndex] | None:
+        """Serve a covering immutable generation without waiting for a background build."""
+        requested = compute_cache_key(path, ref, content)[0]
+        for key, index in sorted(self.cache.loaded(), key=lambda entry: len(entry[0][0]), reverse=True):
+            if not set(content) <= set(key[1]):
+                continue
+            if key[0] == requested:
+                view = index
+            elif not is_git_url(path) and Path(requested).is_relative_to(Path(key[0])):
+                view = index.subtree(Path(requested).relative_to(Path(key[0])).as_posix())
+            else:
+                continue
+            if view is not None:
+                self.cache._tasks.move_to_end(key)
+                self.cache.last_used[key] = time.time()
+                return key, view
+        return None
+
+    def _admit(self, reserve_mb: float, keep: CacheKey | None = None) -> bool:
+        """Evict idle LRU stores until both resident and address-space headroom cover the work."""
+        while max(_rss_mb() or 0, virtual_mb()) + reserve_mb > self.max_rss_mb:
+            victim = next(
+                (
+                    key
+                    for key, _ in self.cache.loaded()
+                    if key != keep and key not in self.rebuilding and key not in self._query_keys.values()
+                ),
+                None,
+            )
+            if victim is None:
+                return False
+            self.cache.evict(victim)
+            gc.collect()
+            release_free_heap()
+        return True
+
+    async def _resident_for(
+        self, path: str, ref: str | None, content: tuple[ContentType, ...], exclude: tuple[str, ...]
+    ) -> tuple[CacheKey, ZembleIndex]:
+        """Share a covering root, or replace its narrower selection before admitting another load."""
+        requested = compute_cache_key(path, ref, content)
+        for key in [key for key, _ in self.cache.loaded()]:
+            if key[0] == requested[0] or (not is_git_url(path) and Path(requested[0]).is_relative_to(Path(key[0]))):
+                if set(content) <= set(key[1]):
+                    # The cache handles path rebasing; its lookup needs the covering selection.
+                    return await self.cache.get_with_key(path, ref=ref, content=key[1], exclude=exclude)
+                if key[0] == requested[0]:
+                    content = tuple(kind for kind in ContentType if kind in set(content) | set(key[1]))
+                    exclude = self.cache._exclude_by_key.get(key, ())
+                    self.cache.evict(key)
+                    break
+        gc.collect()
+        release_free_heap()
+        reserve = 128.0
+        if not is_git_url(path):
+            require_declared_scope(Path(path))
+            estimate = await asyncio.to_thread(estimate_tree, Path(path), content, exclude)
+            reserve += _work_reserve(estimate, self.cache.embedder.dimensions)
+        if not self._admit(reserve):
+            raise MemoryRefused(
+                f"Loading {path} needs ~{reserve:.0f} MiB headroom within {self.max_rss_mb} MiB ({MEMORY_ENV})."
+            )
+        return await self.cache.get_with_key(path, ref=ref, content=content, exclude=exclude)
+
+    def _ensure_watcher(self, cache_key: CacheKey) -> None:
         """Start watching a local root the first time it is served."""
         if not self.watch_enabled or cache_key in self.watchers or is_git_url(cache_key[0]):
             return
         root = Path(cache_key[0])
         if not root.is_dir():
             return
-        extensions = set(get_extensions(index.content)) | _GRAPH_EXTENSIONS
+        extensions = set(get_extensions(cache_key[1])) | _GRAPH_EXTENSIONS
         rules = IgnoreRules(root, extensions, always=lambda path: matches_facts_glob(root, path))
         watcher = RootWatcher(root, rules, lambda paths: self._on_change(cache_key, paths))
         self.watchers[cache_key] = watcher
@@ -254,8 +431,20 @@ class Daemon:
             watcher.stop()
             logger.info("stopped watching %s", cache_key[0])
         self.locks.pop(cache_key, None)
-        self._persisted_at.pop(cache_key, None)
         self.last_error.pop(cache_key, None)
+        self.last_rebuild.pop(cache_key, None)
+        self.pending.discard(cache_key)
+        self._watch_changes.pop(cache_key, None)
+        self._changed_at.pop(cache_key, None)
+        if cache_key not in self.rebuilding:
+            self._rebuild_changes.pop(cache_key, None)
+            self._rebuild_graph.discard(cache_key)
+            rebuild = self._rebuild_tasks.pop(cache_key, None)
+            if rebuild is not None:
+                rebuild.cancel()
+        task = self._watch_tasks.pop(cache_key, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
 
     # -- rebuilding ---------------------------------------------------------
 
@@ -264,13 +453,40 @@ class Daemon:
         if cache_key not in self.cache._tasks:
             return
         self.pending.add(cache_key)
-        root = Path(cache_key[0])
-        # A changed facts file moves graph edges without moving a single .java byte.
-        java_changed = any(path.suffix == ".java" or matches_facts_glob(root, path) for path in paths)
+        self._changed_at[cache_key] = time.monotonic()
+        _merge_changes(self._watch_changes, cache_key, paths)
+        if cache_key not in self._watch_tasks:
+            self._watch_tasks[cache_key] = asyncio.create_task(self._watch_rebuild(cache_key))
+
+    async def _watch_rebuild(self, cache_key: CacheKey) -> None:
+        """Wait for actual quiet, retaining one bounded change set per resident root."""
         try:
-            await self.rebuild(cache_key, java_changed=java_changed, changed_paths=sorted(paths))
+            while cache_key in self.cache._tasks:
+                delay = self._changed_at[cache_key] + _QUIET_SECONDS - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                    continue
+                paths = self._watch_changes.pop(cache_key, set())
+                root = Path(cache_key[0])
+                graph = paths is None or any(path.suffix == ".java" or matches_facts_glob(root, path) for path in paths)
+                try:
+                    result = await self.rebuild(
+                        cache_key, java_changed=graph, changed_paths=None if paths is None else sorted(paths)
+                    )
+                except Exception:
+                    logger.exception("Watcher rebuild failed for %s", cache_key[0])
+                    result = {"deferred": "rebuild failed"}
+                if "deferred" in result:
+                    self._watch_changes[cache_key] = None
+                    self._changed_at[cache_key] = time.monotonic() + 28
+                elif cache_key not in self._watch_changes:
+                    return
         finally:
-            self.pending.discard(cache_key)
+            if self._watch_tasks.get(cache_key) is asyncio.current_task():
+                self.pending.discard(cache_key)
+                self._watch_tasks.pop(cache_key, None)
+                self._watch_changes.pop(cache_key, None)
+                self._changed_at.pop(cache_key, None)
 
     async def rebuild(
         self, cache_key: CacheKey, *, java_changed: bool = True, changed_paths: Sequence[Path] | None = None
@@ -280,19 +496,25 @@ class Daemon:
         A cancelled waiter cannot cancel the shared job. Watcher changes arriving during a
         job are coalesced into a follow-up pass, so joining never loses a named edit.
         """
+        if cache_key not in self.cache._tasks:
+            return {"skipped": "not loaded"}
         if java_changed:
             self._rebuild_graph.add(cache_key)
         task = self._rebuild_tasks.get(cache_key)
         if task is None:
-            self.rebuilding.add(cache_key)
             # Queries serve the LRU generation; staleness must not start a second build mid-job.
             self.cache._revalidate_after[cache_key] = float("inf")
             task = asyncio.create_task(self._run_rebuild(cache_key, java_changed, changed_paths))
             self._rebuild_tasks[cache_key] = task
             task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
         elif changed_paths:
-            self._rebuild_changes.setdefault(cache_key, set()).update(changed_paths)
-        return await asyncio.shield(task)
+            _merge_changes(self._rebuild_changes, cache_key, changed_paths)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                return {"skipped": "evicted before rebuild"}
+            raise
 
     async def _run_rebuild(
         self, cache_key: CacheKey, java_changed: bool, changed_paths: Sequence[Path] | None
@@ -301,21 +523,43 @@ class Daemon:
         result: dict[str, Any] = {}
         try:
             while True:
-                result = await self._rebuild_once(cache_key, java_changed=java_changed, changed_paths=changed_paths)
-                changes = self._rebuild_changes.pop(cache_key, None)
-                if not changes:
+                async with self._load_lock:
+                    if (
+                        cache_key in self._watch_tasks
+                        and time.monotonic() < self._changed_at.get(cache_key, 0) + _QUIET_SECONDS
+                    ):
+                        _merge_changes(self._watch_changes, cache_key, changed_paths)
+                        return {"skipped": "tree still changing"}
+                    self.rebuilding.add(cache_key)
+                    try:
+                        result = await self._rebuild_once(
+                            cache_key, java_changed=java_changed, changed_paths=changed_paths
+                        )
+                    finally:
+                        self.rebuilding.discard(cache_key)
+                if cache_key not in self._rebuild_changes:
                     return result
-                changed_paths = sorted(changes)
+                changes = self._rebuild_changes.pop(cache_key)
+                changed_paths = None if changes is None else sorted(changes)
                 java_changed = True
+        except MemoryError as exc:
+            traceback.clear_frames(exc.__traceback__)
+            result = {"deferred": "allocation backstop", "knob": MEMORY_ENV}
+            self.last_error[cache_key] = {"refused": f"Rebuild deferred by {MEMORY_ENV}", **result}
+            return result
         except Exception as exc:
             # Keep traceback locations for logging, not failed builds' matrices and buffers.
             traceback.clear_frames(exc.__traceback__)
             raise
         finally:
-            self._rebuild_tasks.pop(cache_key, None)
-            self._rebuild_changes.pop(cache_key, None)
-            self.rebuilding.discard(cache_key)
-            self._rebuild_graph.discard(cache_key)
+            if self._rebuild_tasks.get(cache_key) is asyncio.current_task():
+                self._rebuild_tasks.pop(cache_key, None)
+                self._rebuild_changes.pop(cache_key, None)
+                self.rebuilding.discard(cache_key)
+                self._rebuild_graph.discard(cache_key)
+            if cache_key not in self.cache._tasks:
+                self.last_rebuild.pop(cache_key, None)
+                self.last_error.pop(cache_key, None)
             # AIDEV-NOTE: the phase helper has returned, so its old index, persistence buffers
             # and graph working set are gone. Trimming before those phases kept their peak RSS.
             gc.collect()
@@ -339,8 +583,28 @@ class Daemon:
                 current = next((index for key, index in self.cache.loaded() if key == cache_key), None)
                 if current is None:
                     return {"skipped": "not loaded"}
+                # AIDEV-NOTE: admission reserves copying/normalization and persistence scratch;
+                # RLIMIT_AS is the allocation backstop if this estimate misses a shape.
+                vectors = current._semantic_index.vectors.nbytes
+                frozen = current._bm25_index._frozen
+                postings = 0 if frozen is None else frozen.posting_docs.nbytes + frozen.posting_tf.nbytes
+                reserve = 128 + (vectors + postings * 12 + len(current.chunks) * 512) / MIB
+                work = await asyncio.to_thread(
+                    measure_work,
+                    Path(cache_key[0]),
+                    cache_key[1],
+                    current.exclude,
+                    current._manifest,
+                    changed_paths,
+                    Path(cache_key[0]),
+                )
+                reserve += _work_reserve(work, current.embedder.dimensions)
+                if not self._admit(reserve, keep=cache_key):
+                    result = {"deferred": "memory budget", "reserve_mb": round(reserve), "knob": MEMORY_ENV}
+                    self.last_error[cache_key] = {"refused": f"Rebuild deferred by {MEMORY_ENV}", **result}
+                    return result
                 try:
-                    index, counts = await asyncio.to_thread(rebuild_index, current, cache_key, changed_paths)
+                    index, counts = await asyncio.to_thread(_mapped_rebuild, current, cache_key, changed_paths)
                 except REFUSAL_TYPES as exc:
                     # Nothing was chunked, embedded or swapped, so the index that was serving
                     # this root before is still the one serving it now.
@@ -352,6 +616,8 @@ class Daemon:
                 # The swap is the only step a query could observe, and it is one dict write
                 # on this event loop: an in-flight search keeps answering from the old index.
                 self.cache.replace(cache_key, index, cooldown_seconds=float("inf"))
+                if cache_key not in self.cache._tasks:
+                    return {"skipped": "evicted during rebuild"}
         finally:
             # Only in-flight searches may still own the replaced generation, never a graph wait.
             current = None
@@ -365,8 +631,6 @@ class Daemon:
             len(index.chunks),
             result["ms"],
         )
-        if await self._persist(cache_key, index):
-            await self._reload_definitions(cache_key, index)
         index = None
         if java_changed or cache_key in self._rebuild_graph:
             self._rebuild_graph.discard(cache_key)
@@ -374,36 +638,6 @@ class Daemon:
         self.last_rebuild[cache_key] = result
         self.last_error.pop(cache_key, None)
         return result
-
-    async def _persist(self, cache_key: CacheKey, index: ZembleIndex) -> bool:
-        """Write a rebuilt index back to the on-disk cache, at most once per interval.
-
-        :param cache_key: The root and content types that were rebuilt.
-        :param index: The index to write.
-        :return: Whether it was written this time.
-        """
-        now = time.monotonic()
-        if now - self._persisted_at.get(cache_key, 0.0) < _PERSIST_INTERVAL_SECONDS:
-            return False
-        self._persisted_at[cache_key] = now
-        try:
-            await asyncio.to_thread(save_index_to_cache, index, cache_key[0])
-        except Exception:
-            logger.warning("Failed to persist rebuilt index for %s", cache_key[0], exc_info=True)
-            return False
-        return True
-
-    async def _reload_definitions(self, cache_key: CacheKey, index: ZembleIndex) -> None:
-        """Re-attach the symbol-definition lookup a rebuild invalidated.
-
-        The lookup is only ever built at save time, so a rebuilt index carries none until its
-        chunks have been written; until then symbol reranking falls back to its own scan.
-        """
-        symbols = PersistencePath.from_path(find_index_from_cache_folder(cache_key[0], cache_key[1])).symbols
-        try:
-            index._definitions = await asyncio.to_thread(SymbolDefinitions.load, symbols)
-        except Exception:
-            logger.debug("No symbol definitions to re-attach for %s", cache_key[0], exc_info=True)
 
     async def _refresh_graph(self, root: str, changed_paths: Sequence[Path] | None = None) -> int | None:
         """Incrementally refresh the symbol graph for a root that already has one.
@@ -426,6 +660,11 @@ class Daemon:
             return None
         return round((time.monotonic() - started) * 1000)
 
+    async def with_graph(self, root: str, work: Callable[[Any], Any]) -> Any:
+        """Serialize graph construction with index construction instead of multiplying scratch across roots."""
+        async with self._load_lock:
+            return await asyncio.to_thread(_with_graph, root, work)
+
     # -- serving ------------------------------------------------------------
 
     async def handle(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -442,8 +681,25 @@ class Daemon:
             args = {}
         if not isinstance(args, dict):
             return {"id": request_id, "ok": False, "error": "'args' must be an object"}
+        request_task = asyncio.current_task()
+        self._request_tasks.add(request_task)
         try:
-            result = await handler(self, args)
+            if command in {"ping", "status", "shutdown", "refresh"}:
+                result = await handler(self, args)
+            else:
+                async with self._operation_lock:
+                    if not self._admit(32):
+                        raise MemoryRefused(f"No query headroom within {self.max_rss_mb} MiB ({MEMORY_ENV}).")
+                    result = await handler(self, args)
+        except MemoryError:
+            gc.collect()
+            release_free_heap()
+            return {
+                "id": request_id,
+                "ok": False,
+                "error": f"Daemon allocation refused by {MEMORY_ENV}",
+                "kind": ErrorKind.REFUSED.value,
+            }
         except Exception as exc:
             refused = isinstance(exc, REFUSAL_TYPES)
             kind = ErrorKind.REFUSED if refused else ErrorKind.FAILED
@@ -454,6 +710,8 @@ class Daemon:
             return {"id": request_id, "ok": False, "error": message, "kind": kind.value}
         finally:
             self.last_request_at = time.monotonic()
+            self._query_keys.pop(request_task, None)
+            self._request_tasks.discard(request_task)
             # Concurrent queries can finish after the rebuild's trim; release their freed buffers too.
             release_free_heap()
         return {"id": request_id, "ok": True, "result": result}
@@ -501,6 +759,8 @@ class Daemon:
         for watcher in list(self.watchers.values()):
             watcher.stop()
         self.watchers.clear()
+        for task in self._watch_tasks.values():
+            task.cancel()
         self.stop_event.set()
 
 
@@ -550,11 +810,16 @@ async def _cmd_status(daemon: Daemon, args: dict[str, Any]) -> Any:
         "idle_seconds": round(time.monotonic() - daemon.last_request_at, 1),
         "idle_minutes_limit": daemon.idle_minutes,
         "max_indexes": daemon.max_indexes,
+        "max_rss_mb": daemon.max_rss_mb,
+        "virtual_mb": round(virtual_mb(), 1),
+        "quiet_seconds": _QUIET_SECONDS,
         "socket": str(socket_path()),
         "runtime": _runtime_status(),
         "indexes": indexes,
         "building": building,
-        "pending_reindex": [key[0] for key in daemon.pending],
+        "pending_reindex": sorted(
+            {key[0] for key in daemon.pending | (set(daemon._rebuild_tasks) - daemon.rebuilding)}
+        ),
     }
 
 
@@ -629,7 +894,8 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
         raise ValueError("missing 'path'")
     command = str(args.get("command", "ensure"))
     if command == "ensure":
-        await asyncio.to_thread(ensure_graph, path)
+        async with daemon._load_lock:
+            await asyncio.to_thread(ensure_graph, path)
         return {"ensured": True}
     kinds = args.get("kinds")
     extra: dict[str, Any] = {}
@@ -639,7 +905,8 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
         from zemble.graph.model import EdgeKind
 
         extra.update({"hops": int(args.get("hops", 1)), "kinds": [EdgeKind(kind) for kind in kinds] if kinds else None})
-    return await asyncio.to_thread(answer, path, str(args.get("symbol", "")), command, **extra)
+    async with daemon._load_lock:
+        return await asyncio.to_thread(answer, path, str(args.get("symbol", "")), command, **extra)
 
 
 def _with_graph(root: str, work: Callable[[Any], Any]) -> Any:
@@ -685,8 +952,7 @@ async def _cmd_explain(daemon: Daemon, args: dict[str, Any]) -> Any:
     query = str(args.get("query", ""))
     budget = int(args.get("budget", DEFAULT_BUDGET))
     top_k = int(args.get("top_k", DEFAULT_TOP_K))
-    return await asyncio.to_thread(
-        _with_graph,
+    return await daemon.with_graph(
         root,
         lambda graph: explain_payload(index, graph, query, budget, top_k),
     )
@@ -699,7 +965,7 @@ async def _cmd_outline(daemon: Daemon, args: dict[str, Any]) -> Any:
     root = _root_of(args)
     target = str(args.get("target", ""))
     members = args.get("members")
-    return await asyncio.to_thread(_with_graph, root, lambda graph: outline_payload(graph, target, members))
+    return await daemon.with_graph(root, lambda graph: outline_payload(graph, target, members))
 
 
 async def _cmd_signatures(daemon: Daemon, args: dict[str, Any]) -> Any:
@@ -708,7 +974,7 @@ async def _cmd_signatures(daemon: Daemon, args: dict[str, Any]) -> Any:
 
     root = _root_of(args)
     symbol = str(args.get("symbol", ""))
-    return await asyncio.to_thread(_with_graph, root, lambda graph: signatures_payload(graph, symbol))
+    return await daemon.with_graph(root, lambda graph: signatures_payload(graph, symbol))
 
 
 async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
@@ -723,8 +989,7 @@ async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
     top_k = int(args.get("top_k", DEFAULT_TOP_K))
     config = await asyncio.to_thread(HomeConfig.load, root)
     _cache_key, index = await daemon.index_for({**args, "path": root})
-    return await asyncio.to_thread(
-        _with_graph,
+    return await daemon.with_graph(
         root,
         lambda graph: home_payload(index, graph, config, description, top_k, requested_root=requested),
     )
@@ -732,7 +997,8 @@ async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
 
 async def _cmd_refresh(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Force a rebuild check for a root, loading it first if it is not resident."""
-    cache_key, _index = await daemon.index_for(args)
+    async with daemon._operation_lock:
+        cache_key, _index = await daemon.index_for(args)
     del _index
     return await daemon.rebuild(cache_key)
 
@@ -743,8 +1009,10 @@ async def _cmd_evict(daemon: Daemon, args: dict[str, Any]) -> Any:
     if not path:
         raise ValueError("missing 'path'")
     cache_key = compute_cache_key(str(path), args.get("ref"), _content_types(args.get("content")))
-    was_loaded = cache_key in daemon.cache._tasks
-    daemon.cache.evict(cache_key)
+    keys = [key for key in daemon.cache._tasks if key[0] == cache_key[0]]
+    was_loaded = bool(keys)
+    for key in keys:
+        daemon.cache.evict(key)
     return {"evicted": was_loaded, "root": cache_key[0]}
 
 
@@ -809,15 +1077,23 @@ async def run(max_indexes: int | None = None, idle_minutes: int | None = None, w
     :param watch: Whether to watch loaded roots.
     :raises SocketInUse: If another daemon is already listening on this socket.
     """
+    # AIDEV-NOTE: an old MCP client inherits the loaded flag but not settings added since it
+    # started. An explicit path bypasses that flag; genuine shell environment overrides still win.
+    load_user_env(user_env_path())
     # A daemon must never route its own work through a daemon client: that is a deadlock
     # on its own socket, and every shared code path (graph ensure, search) can reach one.
     client.disable_for_this_process("running inside the daemon")
+    daemon = Daemon(max_indexes=max_indexes, idle_minutes=idle_minutes, watch=watch)
+    daemon.max_rss_mb = allocation_backstop(daemon.max_rss_mb)
     lock = _acquire_lock()
     path = socket_path(create_dir=True)
     if path.exists():
         # We hold the lock, so any socket file here belongs to a daemon that is gone.
         path.unlink()
-    daemon = Daemon(max_indexes=max_indexes, idle_minutes=idle_minutes, watch=watch)
+    from zemble.graph import store
+
+    previous_workers = store.DEFAULT_WORKERS
+    store.DEFAULT_WORKERS = 1
     server = await asyncio.start_unix_server(daemon.serve_connection, path=str(path))
     os.chmod(path, 0o600)
     pid_path().write_text(f"{os.getpid()}\n", encoding="utf-8")
@@ -837,6 +1113,7 @@ async def run(max_indexes: int | None = None, idle_minutes: int | None = None, w
         idle_task.cancel()
         prewarm.cancel()
         daemon.shutdown()
+        store.DEFAULT_WORKERS = previous_workers
         with contextlib.suppress(OSError):
             path.unlink()
         with contextlib.suppress(OSError):
