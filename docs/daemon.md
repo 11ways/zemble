@@ -13,6 +13,8 @@ holds, and answers CLI and MCP requests over a unix socket.
 | `zemble/daemon/client.py` | Connect, auto-start, one request, one response. Reports errors without authorizing local indexing. |
 | `zemble/daemon/server.py` | The `Daemon` object (warm indexes, watchers, per-root locks) plus the `COMMANDS` dispatch table. |
 | `zemble/daemon/memory.py` | RAM-derived memory budget, memory refusal, and kernel allocation backstop. |
+| `zemble/daemon/admission.py` | Bounded concurrent reads, FIFO waiting room and request deadlines; leases survive client timeout until actual work finishes. |
+| `zemble/daemon/graph_jobs.py`, `graph_worker.py` | Joined graph jobs, one bounded construction process, progress/status and complete worker teardown. |
 | `zemble/daemon/watch.py` | `IgnoreRules` (the file walker's own gitignore machinery, reused) and `RootWatcher` (watchfiles). |
 | `zemble/daemon/cli.py` | `zemble daemon run\|start\|stop\|restart\|status`. |
 | `zemble/index_cache.py` | The index cache, moved out of `zemble/mcp.py` so the daemon and the in-process MCP path share one implementation. |
@@ -21,6 +23,29 @@ Requests are `{"id", "cmd", "args"}` and answers are `{"id", "ok", "result"|"err
 one JSON object per line. A response can be a whole result set, so the client reads
 with a buffered file object and never assumes a line length. A connection may carry
 several requests in a row.
+
+### Admission and graph construction
+
+Immutable reads have four execution slots and a 32-request waiting room. A request
+carries one optional `deadline_ms` covering preparation, queueing and execution
+(default 25000, maximum 900000). A full queue or expired deadline returns retry
+information (`retry_after_ms`) instead of starting a client-side index. Status
+reports actual active reads, including work whose caller has stopped waiting.
+
+Cold graph preparation owns no read slot. Callers join one construction job per
+canonical root; their deadlines cannot cancel it or block unrelated warm searches.
+The worker has its own bounded lifetime and address-space reservation, writes through
+the existing graph publication protocol, and is reaped before the job completes.
+Watcher changes arriving during construction coalesce into a bounded follow-up pass.
+`graph_construction.jobs` reports queued/building/ready/failed/cancelled states,
+worker PID, budget, elapsed/build time and peak worker RSS. Stop closes graph jobs
+and drains running reads before exiting.
+
+The aggregate default is 8192 MiB. Construction is capped at 6144 MiB and narrowed
+by the serving process's current virtual mappings plus concurrent-read scratch.
+During construction the parent and worker address-space reservations sum to at most
+the aggregate budget. Serving RSS and virtual limits are separately configurable
+and reported in `memory_configuration`; RSS is not interpreted as virtual memory.
 
 ### Commands
 
@@ -178,7 +203,7 @@ A rebuild never writes into the index answering queries. It builds a new one nex
 and the swap is a single dict write on the event loop, so an in-flight search keeps
 reading the object it started with and a search that arrives mid-rebuild is answered by
 the index from before it. All roots share one construction slot; memory-intensive
-requests also share a scratch slot, but warm search does not take the construction lock.
+requests use bounded concurrent read slots, and warm search does not take the construction lock.
 
 What that costs is bounded because of how the BM25 index is shaped:
 
@@ -232,7 +257,12 @@ output can end up in a backup.
 | --- | --- | --- |
 | `ZEMBLE_DAEMON=0` | unset | Never use or start a daemon in this process. |
 | `ZEMBLE_DAEMON_MAX_INDEXES` | 4 | Resident roots before LRU eviction; content variants of one root share a resident index. |
-| `ZEMBLE_DAEMON_MAX_RSS_MB` | min(15% of MemTotal, 4096) MiB | Process memory budget, including admitted construction scratch; conservative address-space backstop. |
+| `ZEMBLE_DAEMON_MAX_RSS_MB` | min(15% of MemTotal, 4096) MiB | Serving-process resident memory admission budget. |
+| `ZEMBLE_DAEMON_MAX_VIRTUAL_MB` | serving RSS budget | Serving-process virtual memory limit and kernel allocation backstop. |
+| `ZEMBLE_DAEMON_TOTAL_MEMORY_MB` | 8192 MiB | Aggregate parent/graph-worker reservation ceiling. |
+| `ZEMBLE_GRAPH_BUILD_MEMORY_MB` | 6144 MiB | Construction cap, narrowed by aggregate headroom. |
+| `ZEMBLE_DAEMON_READ_SLOTS` | 4 | Concurrent immutable read tasks. |
+| `ZEMBLE_DAEMON_QUEUE_LIMIT` | 32 | Waiting-room capacity; excess requests receive retry information. |
 | `ZEMBLE_DAEMON_IDLE_MINUTES` | 30 | Idle shutdown delay; `0` never exits. |
 | `ZEMBLE_DAEMON_DIR` / `ZEMBLE_DAEMON_SOCKET` | unset | Move the runtime directory or the socket itself (tests use this). |
 
@@ -251,9 +281,10 @@ code, but that is backend execution, not a client fallback.
 - If the socket is absent or dead, the client spawns `python -m zemble.daemon run`
   detached (new session, stdio to the log) and waits up to 10 s for it to answer.
 - Startup failures, disconnects and response timeouts report `Daemon unavailable,
-  retry`. Busy execution/construction slots report `Daemon busy, retry`. Requests
-  have a default 30-second response deadline; a cold build may continue in the
-  daemon after the caller's deadline, so a later retry can use its result.
+  retry`. A full waiting room or expired request deadline reports `Daemon busy,
+  retry` with retry information. Clients keep a default 30-second response timeout;
+  the server's default 25-second deadline leaves time to deliver its answer. Shared
+  cold construction may continue so a later retry can use its result.
 - **A refusal is not an outage.** A deliberate, deterministic "no" - any `Refused`, which
   includes daemon memory admission, a root too broad or holding more source than one build may chunk
   (`ScopeRefused`) and a bill over the budget (`EmbeddingBudgetExceeded`) - is

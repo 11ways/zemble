@@ -56,9 +56,10 @@ def _hit_json(hit: Hit) -> dict[str, Any]:
     }
 
 
-def _open(repo: str) -> AnyProvider:
+def _open(repo: str, *, fresh: bool = False) -> AnyProvider:
     """Build the graph if needed and open a provider on it."""
-    ensure_graph(repo)
+    if not fresh:
+        ensure_graph(repo)
     return open_provider(repo)
 
 
@@ -70,7 +71,9 @@ def _capped(items: list[Any], limit: int, render: Any) -> dict[str, Any]:
     return payload
 
 
-def answer(repo: str, symbol: str, method: str, *, limit: int = DEFAULT_LIMIT, **kwargs: Any) -> dict[str, Any]:
+def answer(
+    repo: str, symbol: str, method: str, *, limit: int = DEFAULT_LIMIT, fresh: bool = False, **kwargs: Any
+) -> dict[str, Any]:
     """Resolve a written name and run one provider query, as a payload object.
 
     Returned as an object rather than a JSON string: both callers (this module's tools and
@@ -82,7 +85,7 @@ def answer(repo: str, symbol: str, method: str, *, limit: int = DEFAULT_LIMIT, *
         raise ValueError("limit must be positive")
     if method not in PROVIDER_METHODS:
         return {"error": f"Unknown graph command {method!r}."}
-    provider = _open(repo)
+    provider = _open(repo, fresh=True) if fresh else _open(repo)
     try:
         candidates = provider.definition(symbol)
         if method == "definition":

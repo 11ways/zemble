@@ -16,14 +16,24 @@ import tempfile
 import time
 import traceback
 from collections.abc import Awaitable, Callable, Sequence
-from functools import partial
+from copy import copy
 from pathlib import Path
 from typing import Any
 
 from zemble.cache import find_index_from_cache_folder, resolve_cache_folder
 from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
 from zemble.daemon import client
-from zemble.daemon.memory import MEMORY_ENV, MIB, MemoryRefused, allocation_backstop, default_budget_mb, virtual_mb
+from zemble.daemon.admission import AdmissionBusy, ReadAdmission, request_deadline
+from zemble.daemon.graph_jobs import GraphJobs
+from zemble.daemon.memory import (
+    MEMORY_ENV,
+    MIB,
+    VIRTUAL_ENV,
+    MemoryRefused,
+    allocation_backstop,
+    default_budget_mb,
+    virtual_mb,
+)
 from zemble.daemon.protocol import (
     ACCEPTS_BUSY_FIELD,
     DEFAULT_IDLE_MINUTES,
@@ -263,6 +273,9 @@ class Daemon:
         self.max_rss_mb = max_rss_mb if max_rss_mb is not None else _env_int(MEMORY_ENV, default_budget_mb())
         if self.max_rss_mb <= 0:
             raise ValueError(f"{MEMORY_ENV} must be positive")
+        self.max_virtual_mb = _env_int(VIRTUAL_ENV, self.max_rss_mb)
+        if self.max_virtual_mb <= 0:
+            raise ValueError(f"{VIRTUAL_ENV} must be positive")
         self.cache = ResidentCache(
             max_size=max(1, self.max_indexes),
             on_evict=self._on_evict,
@@ -271,6 +284,8 @@ class Daemon:
         )
         self._operation_lock = asyncio.Lock()
         self._load_lock = asyncio.Lock()
+        self.reads = ReadAdmission(_env_int("ZEMBLE_DAEMON_READ_SLOTS", 4), _env_int("ZEMBLE_DAEMON_QUEUE_LIMIT", 32))
+        self.graphs = GraphJobs(self._load_lock, self.max_rss_mb)
         self._request_tasks: set[asyncio.Task[Any]] = set()
         self._query_keys: dict[asyncio.Task[Any], CacheKey] = {}
         self._watch_tasks: dict[CacheKey, asyncio.Task[None]] = {}
@@ -329,8 +344,6 @@ class Daemon:
             if warm[0] not in self.cache._tasks:
                 warm = None
         if warm is None:
-            if self._load_lock.locked():
-                raise CommandBusy("index construction is occupied")
             async with self._load_lock:
                 cache_key, index = await self._resident_for(path, ref, content, exclude)
         else:
@@ -345,6 +358,7 @@ class Daemon:
         if filtered is None:
             raise ValueError(f"No indexed file under {path} survives paths={list(paths)} exclude={list(exclude)}")
         if set(content) != set(filtered.content):
+            filtered = copy(filtered)
             filtered._content = content
         return cache_key, filtered
 
@@ -370,7 +384,7 @@ class Daemon:
 
     def _admit(self, reserve_mb: float, keep: CacheKey | None = None) -> bool:
         """Evict idle LRU stores until both resident and address-space headroom cover the work."""
-        while max(_rss_mb() or 0, virtual_mb()) + reserve_mb > self.max_rss_mb:
+        while (_rss_mb() or 0) + reserve_mb > self.max_rss_mb or virtual_mb() + reserve_mb > self.max_virtual_mb:
             victim = next(
                 (
                     key
@@ -527,20 +541,23 @@ class Daemon:
         result: dict[str, Any] = {}
         try:
             while True:
-                async with self._load_lock:
-                    if (
-                        cache_key in self._watch_tasks
-                        and time.monotonic() < self._changed_at.get(cache_key, 0) + _QUIET_SECONDS
-                    ):
-                        _merge_changes(self._watch_changes, cache_key, changed_paths)
-                        return {"skipped": "tree still changing"}
-                    self.rebuilding.add(cache_key)
-                    try:
+                if (
+                    cache_key in self._watch_tasks
+                    and time.monotonic() < self._changed_at.get(cache_key, 0) + _QUIET_SECONDS
+                ):
+                    _merge_changes(self._watch_changes, cache_key, changed_paths)
+                    return {"skipped": "tree still changing"}
+                self.rebuilding.add(cache_key)
+                try:
+                    async with self._load_lock:
                         result = await self._rebuild_once(
                             cache_key, java_changed=java_changed, changed_paths=changed_paths
                         )
-                    finally:
-                        self.rebuilding.discard(cache_key)
+                    if java_changed or cache_key in self._rebuild_graph:
+                        self._rebuild_graph.discard(cache_key)
+                        result["graph_ms"] = await self._refresh_graph(cache_key[0], changed_paths)
+                finally:
+                    self.rebuilding.discard(cache_key)
                 if cache_key not in self._rebuild_changes:
                     return result
                 changes = self._rebuild_changes.pop(cache_key)
@@ -636,9 +653,6 @@ class Daemon:
             result["ms"],
         )
         index = None
-        if java_changed or cache_key in self._rebuild_graph:
-            self._rebuild_graph.discard(cache_key)
-            result["graph_ms"] = await self._refresh_graph(cache_key[0], changed_paths)
         self.last_rebuild[cache_key] = result
         self.last_error.pop(cache_key, None)
         return result
@@ -650,7 +664,7 @@ class Daemon:
         named files instead of walking the workspace for them. The build waits for any other
         process writing the graph rather than skipping, so the change set always lands.
         """
-        from zemble.graph.store import build_graph, graph_present
+        from zemble.graph.store import graph_present
 
         # The predicate is the FILE, not a readable graph: a malformed store is exactly the one
         # the watcher must keep driving, and `build_graph` rebuilds it from source.
@@ -658,18 +672,48 @@ class Daemon:
             return None
         started = time.monotonic()
         try:
-            await asyncio.to_thread(partial(build_graph, root, changed_paths=changed_paths))
+            await self.graphs.ensure(root, time.monotonic() + 900, refresh=True, changed_paths=changed_paths)
         except Exception:
             logger.error("The symbol graph for %s is now STALE: its refresh failed", root, exc_info=True)
             return None
         return round((time.monotonic() - started) * 1000)
 
     async def with_graph(self, root: str, work: Callable[[Any], Any]) -> Any:
-        """Serialize graph construction with index construction instead of multiplying scratch across roots."""
-        if self._load_lock.locked():
-            raise CommandBusy("graph/index construction is occupied")
-        async with self._load_lock:
-            return await asyncio.to_thread(_with_graph, root, work)
+        """Read a prepared immutable graph without borrowing the construction slot."""
+        await self.graphs.ensure(root, time.monotonic() + 25)
+        return await asyncio.to_thread(_with_graph, root, work, fresh=True)
+
+    async def _execute_read(self, handler: Handler, args: dict[str, Any]) -> Any:
+        """Pin a request's serving generation until its actual work finishes."""
+        task = asyncio.current_task()
+        self._request_tasks.add(task)
+        try:
+            return await handler(self, args)
+        finally:
+            self._query_keys.pop(task, None)
+            self._request_tasks.discard(task)
+
+    async def _bounded_prepare(self, command: str, args: dict[str, Any], deadline: float) -> None:
+        """Bound cold waiters independently of immutable read execution slots."""
+        preparing = getattr(self, "_preparing", 0)
+        if preparing >= self.reads.slots + self.reads.queue_limit:
+            raise AdmissionBusy("construction waiting room is full")
+        self._preparing = preparing + 1
+        try:
+            await self._prepare_read(command, args, deadline)
+        finally:
+            self._preparing -= 1
+
+    async def _prepare_read(self, command: str, args: dict[str, Any], deadline: float) -> None:
+        """Await shared cold jobs outside the finite read execution pool."""
+        from zemble.workspace import resolve_home_root
+
+        prepared = {**args, "path": str(resolve_home_root(_root_of(args)))} if command == "home" else args
+        if command in {"search", "find_related", "home", "explain", "stats"}:
+            async with asyncio.timeout_at(deadline):
+                await self.index_for(prepared)
+        if command in {"graph", "home", "explain", "outline", "signatures"}:
+            await self.graphs.ensure(_root_of(prepared), deadline)
 
     # -- serving ------------------------------------------------------------
 
@@ -690,21 +734,38 @@ class Daemon:
         request_task = asyncio.current_task()
         self._request_tasks.add(request_task)
         try:
-            if command not in {"ping", "status", "shutdown"} and self._operation_lock.locked():
-                raise CommandBusy("request execution is occupied")
+            deadline = request_deadline(request)
             if command in {"ping", "status", "shutdown", "refresh"}:
                 result = await handler(self, args)
             else:
-                async with self._operation_lock:
-                    if not self._admit(32):
-                        raise MemoryRefused(f"No query headroom within {self.max_rss_mb} MiB ({MEMORY_ENV}).")
-                    result = await handler(self, args)
+                # AIDEV-NOTE: cold construction waiters own no read permit. A disconnected home
+                # request joins a durable graph job without blocking unrelated warm searches.
+                self.reads.check_room()
+                await self._bounded_prepare(str(command), args, deadline)
+                if not self._admit(32):
+                    raise MemoryRefused(f"No query headroom within {self.max_rss_mb} MiB ({MEMORY_ENV}).")
+                result = await self.reads.run(lambda: self._execute_read(handler, args), deadline)
+        except TimeoutError:
+            return {
+                "id": request_id,
+                "ok": False,
+                "error": "construction deadline expired; retry",
+                "kind": ErrorKind.BUSY.value if request.get(ACCEPTS_BUSY_FIELD) else ErrorKind.REFUSED.value,
+                "retry_after_ms": 250,
+            }
         except CommandBusy as exc:
             # AIDEV-NOTE: pre-fix clients fall back on unknown error kinds. REFUSED is their
             # known no-fallback lane; advertise BUSY only to a caller that declares support.
             kind = ErrorKind.BUSY if request.get(ACCEPTS_BUSY_FIELD) is True else ErrorKind.REFUSED
             message = str(exc) if kind is ErrorKind.BUSY else f"Daemon busy, retry: {exc}"
-            return {"id": request_id, "ok": False, "error": message, "kind": kind.value}
+            return {
+                "id": request_id,
+                "ok": False,
+                "error": message,
+                "kind": kind.value,
+                "retry_after_ms": getattr(exc, "retry_after_ms", 250),
+                "admission": self.reads.status(),
+            }
         except MemoryError:
             gc.collect()
             release_free_heap()
@@ -826,6 +887,15 @@ async def _cmd_status(daemon: Daemon, args: dict[str, Any]) -> Any:
         "max_indexes": daemon.max_indexes,
         "max_rss_mb": daemon.max_rss_mb,
         "virtual_mb": round(virtual_mb(), 1),
+        "read_admission": daemon.reads.status(),
+        "graph_construction": daemon.graphs.status(),
+        "serving_virtual_limit_mb": daemon.max_virtual_mb,
+        "memory_configuration": {
+            "rss_mb": daemon.max_rss_mb,
+            "virtual_mb": daemon.max_virtual_mb,
+            "total_mb": daemon.graphs.total_mb,
+            "construction_mb": daemon.graphs.build_mb,
+        },
         "quiet_seconds": _QUIET_SECONDS,
         "socket": str(socket_path()),
         "runtime": _runtime_status(),
@@ -900,7 +970,6 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
     The daemon's win here is freshness: it builds the graph once and its watcher keeps
     it current, so a client never pays the workspace scan `ensure_graph` would do.
     """
-    from zemble.graph.cli import ensure_graph
     from zemble.graph.mcp import answer
 
     path = str(args.get("path", ""))
@@ -908,10 +977,7 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
         raise ValueError("missing 'path'")
     command = str(args.get("command", "ensure"))
     if command == "ensure":
-        if daemon._load_lock.locked():
-            raise CommandBusy("graph/index construction is occupied")
-        async with daemon._load_lock:
-            await asyncio.to_thread(ensure_graph, path)
+        await daemon.graphs.ensure(path, time.monotonic() + 25)
         return {"ensured": True}
     kinds = args.get("kinds")
     extra: dict[str, Any] = {}
@@ -921,13 +987,11 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
         from zemble.graph.model import EdgeKind
 
         extra.update({"hops": int(args.get("hops", 1)), "kinds": [EdgeKind(kind) for kind in kinds] if kinds else None})
-    if daemon._load_lock.locked():
-        raise CommandBusy("graph/index construction is occupied")
-    async with daemon._load_lock:
-        return await asyncio.to_thread(answer, path, str(args.get("symbol", "")), command, **extra)
+    await daemon.graphs.ensure(path, time.monotonic() + 25)
+    return await asyncio.to_thread(answer, path, str(args.get("symbol", "")), command, fresh=True, **extra)
 
 
-def _with_graph(root: str, work: Callable[[Any], Any]) -> Any:
+def _with_graph(root: str, work: Callable[[Any], Any], *, fresh: bool = False) -> Any:
     """Run one graph question against a fresh provider, building the graph if needed.
 
     Called inside a worker thread: `ensure_graph` and the sqlite provider are both blocking,
@@ -936,7 +1000,8 @@ def _with_graph(root: str, work: Callable[[Any], Any]) -> Any:
     from zemble.graph.cli import ensure_graph
     from zemble.graph.provider import open_provider
 
-    ensure_graph(root, allow_daemon=False)
+    if not fresh:
+        ensure_graph(root, allow_daemon=False)
     provider = open_provider(root)
     try:
         return work(provider)
@@ -1102,7 +1167,7 @@ async def run(max_indexes: int | None = None, idle_minutes: int | None = None, w
     # on its own socket, and every shared code path (graph ensure, search) can reach one.
     client.disable_for_this_process("running inside the daemon")
     daemon = Daemon(max_indexes=max_indexes, idle_minutes=idle_minutes, watch=watch)
-    daemon.max_rss_mb = allocation_backstop(daemon.max_rss_mb)
+    daemon.max_virtual_mb = allocation_backstop(daemon.max_virtual_mb)
     lock = _acquire_lock()
     path = socket_path(create_dir=True)
     if path.exists():
@@ -1131,6 +1196,8 @@ async def run(max_indexes: int | None = None, idle_minutes: int | None = None, w
         idle_task.cancel()
         prewarm.cancel()
         daemon.shutdown()
+        await daemon.graphs.close()
+        await daemon.reads.drain()
         store.DEFAULT_WORKERS = previous_workers
         with contextlib.suppress(OSError):
             path.unlink()

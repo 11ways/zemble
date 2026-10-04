@@ -10,6 +10,7 @@ from zemble.refusal import Refused
 
 MIB = 1024 * 1024
 MEMORY_ENV = "ZEMBLE_DAEMON_MAX_RSS_MB"
+VIRTUAL_ENV = "ZEMBLE_DAEMON_MAX_VIRTUAL_MB"
 
 
 class MemoryRefused(Refused):
@@ -46,7 +47,8 @@ def allocation_backstop(budget_mb: int) -> int:
         limit = min(limit, soft)
     if virtual_mb() * MIB >= limit:
         raise MemoryRefused(
-            f"Daemon startup address space exceeds the {limit / MIB:.0f} MiB allocation ceiling ({MEMORY_ENV}); "
+            f"Daemon startup address space exceeds the {limit / MIB:.0f} MiB allocation ceiling "
+            f"({VIRTUAL_ENV}; legacy {MEMORY_ENV}); "
             "use single-threaded BLAS or raise the budget/inherited address-space limit."
         )
     resource.setrlimit(resource.RLIMIT_AS, (limit, hard))

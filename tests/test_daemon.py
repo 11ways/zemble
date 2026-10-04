@@ -202,7 +202,12 @@ async def test_every_command_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     monkeypatch.setattr("zemble.graph.cli.ensure_graph", lambda path, **kwargs: None)
     monkeypatch.setattr("zemble.graph.mcp.answer", lambda *args, **kwargs: '{"results": []}')
     # The evidence handlers are exercised for real over a socket below; here only dispatch is.
-    monkeypatch.setattr(server, "_with_graph", lambda root, work: {"stubbed": True})
+    monkeypatch.setattr(server, "_with_graph", lambda root, work, **kwargs: {"stubbed": True})
+
+    async def prepared(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server.GraphJobs, "ensure", prepared)
 
     args_by_command = {
         "search": {"path": str(tmp_path), "query": "anything"},
@@ -814,7 +819,11 @@ async def test_a_rebuild_never_blocks_the_root_it_rebuilds(tmp_project: Path, mo
     cache_key, index = await daemon.index_for({"path": str(tmp_project)})
     graph_calls: list[Any] = []
     monkeypatch.setattr("zemble.graph.store.graph_present", lambda root: True)
-    monkeypatch.setattr("zemble.graph.store.build_graph", lambda root, **kwargs: graph_calls.append((root, kwargs)))
+
+    async def refresh(root, deadline, **kwargs):
+        graph_calls.append((root, kwargs))
+
+    monkeypatch.setattr(daemon.graphs, "ensure", refresh)
 
     entered = threading.Event()
     release = threading.Event()

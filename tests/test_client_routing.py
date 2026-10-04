@@ -161,7 +161,12 @@ async def test_explicit_local_mode_can_load_an_index(tmp_project, monkeypatch):
 async def test_busy_daemon_does_not_queue_another_request(daemon_mode, monkeypatch, tmp_path):
     """Capacity errors are cheap replies and status remains available."""
     instance = server.Daemon(watch=False)
-    await instance._operation_lock.acquire()
+    from zemble.daemon.admission import ReadAdmission
+
+    instance.reads = ReadAdmission(1, 0)
+    hold = asyncio.get_running_loop().create_future()
+    running = asyncio.create_task(instance.reads.run(lambda: hold, asyncio.get_running_loop().time() + 5))
+    await asyncio.sleep(0)
     try:
         response = await instance.handle(
             {"id": 1, "cmd": "search", "args": {"path": str(tmp_path), "query": "q"}, ACCEPTS_BUSY_FIELD: True}
@@ -169,7 +174,8 @@ async def test_busy_daemon_does_not_queue_another_request(daemon_mode, monkeypat
         assert response["kind"] == ErrorKind.BUSY.value
         assert (await instance.handle({"id": 2, "cmd": "status"}))["ok"]
     finally:
-        instance._operation_lock.release()
+        hold.set_result(None)
+        await running
     assert not instance.cache._tasks
 
 
@@ -177,13 +183,19 @@ async def test_busy_daemon_does_not_queue_another_request(daemon_mode, monkeypat
 async def test_busy_legacy_requests_use_the_known_refusal_lane(daemon_mode, tmp_path):
     """Old index clients must not fall back merely because they do not recognize a new busy vocabulary."""
     instance = server.Daemon(watch=False)
-    await instance._operation_lock.acquire()
+    from zemble.daemon.admission import ReadAdmission
+
+    instance.reads = ReadAdmission(1, 0)
+    hold = asyncio.get_running_loop().create_future()
+    running = asyncio.create_task(instance.reads.run(lambda: hold, asyncio.get_running_loop().time() + 5))
+    await asyncio.sleep(0)
     try:
         reply = await instance.handle({"id": 1, "cmd": "search", "args": {"path": str(tmp_path), "query": "q"}})
         assert reply["kind"] == ErrorKind.REFUSED.value
         assert "busy, retry" in reply["error"]
     finally:
-        instance._operation_lock.release()
+        hold.set_result(None)
+        await running
 
 
 def connect_reply(monkeypatch, payload):

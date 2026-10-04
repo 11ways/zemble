@@ -313,7 +313,7 @@ async def test_all_roots_share_one_rebuild_slot(tmp_project, tmp_path_factory, m
 
     async def build(key, **kwargs):
         calls.append(key)
-        assert len(instance.rebuilding) == 1
+        assert instance._load_lock.locked(), "index scratch owns the shared construction slot"
         entered.set()
         await finish.wait()
         return {"changed": 1}
