@@ -21,6 +21,34 @@ workspace.
 - `annotations/javaweb.json` - 90 queries with expected file locations.
 - `repos.json` - the repo descriptor for the local workspace.
 
+## Historical architectural recall
+
+`historical_recall_pairs.json` pins 42 removed declarations, their behavior queries,
+original source revisions, canonical source targets and phase-1 ranks. The source
+ledger refs are recorded. A fixed hash-seeded split assigns whole replacement-type
+groups to 30 development and 12 holdout pairs; no group crosses that boundary.
+Tune only on development. Run holdout once after implementation choices are frozen,
+and report its aggregate separately without using failures for another tuning pass.
+
+The replay uses `module-fit-final-*` tag worktrees under `/tmp` and restores exact
+pre-removal blobs. It checks blob identities and declaration lines. The owning
+checkouts are never switched or edited. Keep evidence outside repositories.
+
+```bash
+ZEMBLE_CACHE_LOCATION=/tmp/zemble-recall-cache .venv/bin/python -m benchmarks.historical_recall \
+  --workspace /path/to/workspace-checkouts \
+  --replay /tmp/zemble-recall-workspace --out /tmp/zemble-recall-before \
+  --split development
+```
+
+Repeat on the changed revision with a different output directory. `--split holdout`
+selects the frozen final evaluation; `--prepare-only` builds/verifies fixtures
+without starting a daemon. Full duplicate scans run after closing the daemon.
+`--dupes-report` may reuse a complete report of the identical replay corpus;
+`--dupes-kind none` skips that stage when only query channels changed. Availability
+errors abort rather than being counted as recall misses. Startup requires 8 GiB
+available RAM, 15 GiB root-disk headroom and no other daemon socket.
+
 ## Schema
 
 Copied verbatim from `benchmarks/data.py`. An annotation file is a JSON

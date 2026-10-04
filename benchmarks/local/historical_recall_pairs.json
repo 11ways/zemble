@@ -1,0 +1,1350 @@
+{
+  "schema_version": 1,
+  "split_seed": "zemble-recall-phase2-2026-10-04",
+  "split_policy": "whole replacement-type groups; no group spans development and holdout",
+  "workspace_tag": "module-fit-final-zenit-workspace",
+  "ledger_sources": {
+    "master": "f6d7b9ac4298c235fb1c27538e7e47677259ae66",
+    "module-fit-followup": "21c0ca48505a022df9ca9fd7d7b5030b6fce5441"
+  },
+  "pairs": [
+    {
+      "id": "5be0f7f55cd1",
+      "split": "holdout",
+      "group": "HtmlEscape",
+      "ledger_id": 7,
+      "old": "be.elevenways.domino.server.ServerDominoTextNode#escapeHtml(String)",
+      "replacement": "be.elevenways.protoblast.common.text.HtmlEscape#text(String), the shared element-content escaper",
+      "query": "Escape text for safe HTML element content",
+      "source": {
+        "repo": "protoblast",
+        "file": "protoblast/src/main/java/be/elevenways/domino/server/ServerDominoTextNode.java",
+        "revision": "0d35a23c60df030ffe02d55bb9d730c3ec32349d",
+        "member": "escapeHtml",
+        "line": 23
+      },
+      "targets": [
+        {
+          "file_path": "protoblast/src/main/java/be/elevenways/protoblast/common/text/HtmlEscape.java",
+          "line": 62,
+          "end_line": 69,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "HtmlEscape",
+      "target_member": "text",
+      "baseline": {
+        "home_rank": 1,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "92c5f9cdf909",
+      "split": "development",
+      "group": "SyntheticActivation",
+      "ledger_id": 171,
+      "old": "be.elevenways.hawkeye.common.Hawkeye#followLink(DominoElement)",
+      "replacement": "duplicate of SyntheticActivation.activate",
+      "query": "Activate a link through normal browser navigation and cancellation behavior",
+      "source": {
+        "repo": "hawkeye",
+        "file": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/Hawkeye.java",
+        "revision": "3f95bbc4571f38da1951c942905094b24d1ca95a",
+        "member": "followLink",
+        "line": 217
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/SyntheticActivation.java",
+          "line": 32,
+          "end_line": 34,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "SyntheticActivation",
+      "target_member": "activate",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "f6afdd011348",
+      "split": "development",
+      "group": "SyntheticActivation",
+      "ledger_id": 172,
+      "old": "be.elevenways.hawkeye.browser.BrowserSpecificHawkeye#followLink(DominoElement)",
+      "replacement": "duplicate of SyntheticActivation.activate",
+      "query": "Follow a link using a synthetic activation while respecting event cancellation",
+      "source": {
+        "repo": "hawkeye",
+        "file": "hawkeye/hawkeye-core/src/browser/java/be/elevenways/hawkeye/browser/BrowserSpecificHawkeye.java",
+        "revision": "3f95bbc4571f38da1951c942905094b24d1ca95a",
+        "member": "followLink",
+        "line": 846
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/SyntheticActivation.java",
+          "line": 32,
+          "end_line": 34,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "SyntheticActivation",
+      "target_member": "activate",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "3156e8b4f0dc",
+      "split": "development",
+      "group": "AttributeToken",
+      "ledger_id": 175,
+      "old": "be.elevenways.hawkeye.common.PopupSide#parse|tokens",
+      "replacement": "AttributeToken.find(PopupSide.values(), token)|values()",
+      "query": "Parse a popup side from an attribute token and reject unknown names",
+      "source": {
+        "repo": "hawkeye",
+        "file": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/PopupSide.java",
+        "revision": "69d3d30700c4744cd311ea187ce287f73ccd5b5a",
+        "member": "parse",
+        "line": 103
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/customelement/AttributeToken.java",
+          "line": 26,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AttributeToken",
+      "target_member": "find",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "30363f61d274",
+      "split": "development",
+      "group": "AttributeToken",
+      "ledger_id": 176,
+      "old": "be.elevenways.hawkeye.common.PopupAlign#parse|tokens",
+      "replacement": "AttributeToken.find(PopupAlign.values(), token)|values()",
+      "query": "Parse a popup alignment from an attribute token",
+      "source": {
+        "repo": "hawkeye",
+        "file": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/PopupAlign.java",
+        "revision": "69d3d30700c4744cd311ea187ce287f73ccd5b5a",
+        "member": "parse",
+        "line": 75
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/customelement/AttributeToken.java",
+          "line": 26,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AttributeToken",
+      "target_member": "find",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "83a2e40d0b39",
+      "split": "development",
+      "group": "AttributeToken",
+      "ledger_id": 179,
+      "old": "be.elevenways.zenit.common.ui.BadgeTone#fromToken",
+      "replacement": "AttributeToken.find(BadgeVariant.values(), token)",
+      "query": "Find a badge appearance enum value by its textual token",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/ui/BadgeTone.java",
+        "revision": "7eb418911c3ae78cd565fda15a4f0b2e4db82e47",
+        "member": "fromToken",
+        "line": 83
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/customelement/AttributeToken.java",
+          "line": 26,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AttributeToken",
+      "target_member": "find",
+      "baseline": {
+        "home_rank": 4,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "8f59e051db5a",
+      "split": "development",
+      "group": "AttributeToken",
+      "ledger_id": 192,
+      "old": "be.elevenways.plumage.chart.ChartType#find",
+      "replacement": "AttributeToken.find(ChartType.values(), token)",
+      "query": "Look up a chart type enum using an attribute token",
+      "source": {
+        "repo": "plumage",
+        "file": "plumage/src/common/java/be/elevenways/plumage/chart/ChartType.java",
+        "revision": "9fa6f45209491c5997e89ab512c59fd7210f30d5",
+        "member": "find",
+        "line": 83
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/customelement/AttributeToken.java",
+          "line": 26,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AttributeToken",
+      "target_member": "find",
+      "baseline": {
+        "home_rank": 4,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "1fe4658f60ce",
+      "split": "development",
+      "group": "AttributeToken",
+      "ledger_id": 193,
+      "old": "be.elevenways.plumage.chart.ChartScale#find",
+      "replacement": "AttributeToken.find(ChartScale.values(), token)",
+      "query": "Look up a chart scale enum using an attribute token",
+      "source": {
+        "repo": "plumage",
+        "file": "plumage/src/common/java/be/elevenways/plumage/chart/ChartScale.java",
+        "revision": "9fa6f45209491c5997e89ab512c59fd7210f30d5",
+        "member": "find",
+        "line": 59
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/customelement/AttributeToken.java",
+          "line": 26,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AttributeToken",
+      "target_member": "find",
+      "baseline": {
+        "home_rank": 3,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "eb5bb72a8570",
+      "split": "development",
+      "group": "AccessContext",
+      "ledger_id": 207,
+      "old": "be.elevenways.zenit.common.security.WebSocketAuthenticator#hasPermission(Principal, Permission)",
+      "replacement": "AccessContext.detached(principal).hasPermission(permission)",
+      "query": "Check whether a websocket principal has a declared permission",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/security/WebSocketAuthenticator.java",
+        "revision": "c8f56c17884d89d24f12ce13a105e60d238676de",
+        "member": "hasPermission",
+        "line": 44
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/AccessContext.java",
+          "line": 255,
+          "end_line": 279,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AccessContext",
+      "target_member": "hasPermission",
+      "baseline": {
+        "home_rank": 4,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "6a16289a163e",
+      "split": "development",
+      "group": "AccessContext",
+      "ledger_id": 208,
+      "old": "be.elevenways.zenit.common.security.WebSocketAuthenticator#capabilityScope(Principal, Identifier, String)",
+      "replacement": "AccessContext.detached(principal).capabilityScope(model, capability)",
+      "query": "Compute the record capability scope for a websocket principal",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/security/WebSocketAuthenticator.java",
+        "revision": "c8f56c17884d89d24f12ce13a105e60d238676de",
+        "member": "capabilityScope",
+        "line": 74
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/AccessContext.java",
+          "line": 365,
+          "end_line": 381,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AccessContext",
+      "target_member": "capabilityScope",
+      "baseline": {
+        "home_rank": 4,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "cc822db6dd98",
+      "split": "holdout",
+      "group": "RecordCapabilityRules",
+      "ledger_id": 218,
+      "old": "be.elevenways.zenit.common.security.RecordCapabilityChecker#rulesFor(Identifier) / #ownerOf(Identifier, Object) / #recordIdsOwnedBy(Identifier, long)",
+      "replacement": "be.elevenways.zenit.common.security.RecordCapabilityRules#of(Identifier) / RecordOwnership#ownerOf(Identifier, Object) / RecordOwnership#recordIdsOwnedBy(Identifier, PrincipalRef)",
+      "query": "Read the declared capability rules for a model",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityChecker.java",
+        "revision": "670ed05edcd3e575971e54b3263837ffa9a3e168",
+        "member": "rulesFor",
+        "line": 34
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityRules.java",
+          "line": 158,
+          "end_line": 160,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "RecordCapabilityRules",
+      "target_member": "of",
+      "baseline": {
+        "home_rank": 2,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "5e0c7a4b0a63",
+      "split": "development",
+      "group": "RecordOwnership",
+      "ledger_id": 218,
+      "old": "be.elevenways.zenit.common.security.RecordCapabilityChecker#rulesFor(Identifier) / #ownerOf(Identifier, Object) / #recordIdsOwnedBy(Identifier, long)",
+      "replacement": "be.elevenways.zenit.common.security.RecordCapabilityRules#of(Identifier) / RecordOwnership#ownerOf(Identifier, Object) / RecordOwnership#recordIdsOwnedBy(Identifier, PrincipalRef)",
+      "query": "Find the owner principal of a model record",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityChecker.java",
+        "revision": "670ed05edcd3e575971e54b3263837ffa9a3e168",
+        "member": "ownerOf",
+        "line": 47
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordOwnership.java",
+          "line": 35,
+          "end_line": 49,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "RecordOwnership",
+      "target_member": "ownerOf",
+      "baseline": {
+        "home_rank": 1,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "f4b5a9014b21",
+      "split": "development",
+      "group": "RecordOwnership",
+      "ledger_id": 218,
+      "old": "be.elevenways.zenit.common.security.RecordCapabilityChecker#rulesFor(Identifier) / #ownerOf(Identifier, Object) / #recordIdsOwnedBy(Identifier, long)",
+      "replacement": "be.elevenways.zenit.common.security.RecordCapabilityRules#of(Identifier) / RecordOwnership#ownerOf(Identifier, Object) / RecordOwnership#recordIdsOwnedBy(Identifier, PrincipalRef)",
+      "query": "List record ids belonging to a principal",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityChecker.java",
+        "revision": "670ed05edcd3e575971e54b3263837ffa9a3e168",
+        "member": "recordIdsOwnedBy",
+        "line": 118
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordOwnership.java",
+          "line": 54,
+          "end_line": 84,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "RecordOwnership",
+      "target_member": "recordIdsOwnedBy",
+      "baseline": {
+        "home_rank": 2,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "2b34363a435b",
+      "split": "holdout",
+      "group": "RecordCapabilityRules",
+      "ledger_id": 220,
+      "old": "be.elevenways.zenit.auth.server.RecordGrantCapabilityChecker#declareRules / #replaceRules / #clearRules",
+      "replacement": "be.elevenways.zenit.common.security.RecordCapabilityRules#declare /",
+      "query": "Register capability rules for a model",
+      "source": {
+        "repo": "zenit-auth",
+        "file": "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/RecordGrantCapabilityChecker.java",
+        "revision": "7722c9f482b5234ea88d650fac30b6ca9455caaa",
+        "member": "declareRules",
+        "line": 41
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityRules.java",
+          "line": 101,
+          "end_line": 127,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "RecordCapabilityRules",
+      "target_member": "declare",
+      "baseline": {
+        "home_rank": 1,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "08f025ad7a7a",
+      "split": "holdout",
+      "group": "RecordCapabilityRules",
+      "ledger_id": 220,
+      "old": "be.elevenways.zenit.auth.server.RecordGrantCapabilityChecker#declareRules / #replaceRules / #clearRules",
+      "replacement": "be.elevenways.zenit.common.security.RecordCapabilityRules#declare /",
+      "query": "Replace a model capability rules declaration",
+      "source": {
+        "repo": "zenit-auth",
+        "file": "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/RecordGrantCapabilityChecker.java",
+        "revision": "7722c9f482b5234ea88d650fac30b6ca9455caaa",
+        "member": "replaceRules",
+        "line": 49
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityRules.java",
+          "line": 135,
+          "end_line": 138,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "RecordCapabilityRules",
+      "target_member": "override",
+      "baseline": {
+        "home_rank": 2,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "e0c42ddd3021",
+      "split": "holdout",
+      "group": "RecordCapabilityRules",
+      "ledger_id": 220,
+      "old": "be.elevenways.zenit.auth.server.RecordGrantCapabilityChecker#declareRules / #replaceRules / #clearRules",
+      "replacement": "be.elevenways.zenit.common.security.RecordCapabilityRules#declare /",
+      "query": "Clear registered model capability rules",
+      "source": {
+        "repo": "zenit-auth",
+        "file": "zenit-auth/src/server/java/be/elevenways/zenit/auth/server/RecordGrantCapabilityChecker.java",
+        "revision": "7722c9f482b5234ea88d650fac30b6ca9455caaa",
+        "member": "clearRules",
+        "line": 59
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityRules.java",
+          "line": 167,
+          "end_line": 169,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "RecordCapabilityRules",
+      "target_member": "table",
+      "baseline": {
+        "home_rank": 3,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "0479291d545c",
+      "split": "development",
+      "group": "AccessContext",
+      "ledger_id": 230,
+      "old": "be.elevenways.zenit.work.common.WorkAccess#issueCriteria(AccessContext)",
+      "replacement": "AccessContext#capabilityCriteria(IssueModel.MODEL_ID, READ, IssueModel.ID)",
+      "query": "Build criteria for issues visible to the current principal",
+      "source": {
+        "repo": "zenit-work",
+        "file": "zenit-work/src/common/java/be/elevenways/zenit/work/common/WorkAccess.java",
+        "revision": "4571a6b12d1aa3ed80c3605cdfa176398c6bdfca",
+        "member": "issueCriteria",
+        "line": 119
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/AccessContext.java",
+          "line": 388,
+          "end_line": 391,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AccessContext",
+      "target_member": "capabilityCriteria",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "e367e44dc075",
+      "split": "development",
+      "group": "AccessContext",
+      "ledger_id": 231,
+      "old": "be.elevenways.zenit.work.common.WorkAccess#issueWriteCriteria(AccessContext)",
+      "replacement": "Criteria.and(read, AccessContext#capabilityCriteria(IssueModel.MODEL_ID, WRITE, IssueModel.ID))",
+      "query": "Build criteria for issues the current principal may modify",
+      "source": {
+        "repo": "zenit-work",
+        "file": "zenit-work/src/common/java/be/elevenways/zenit/work/common/WorkAccess.java",
+        "revision": "4571a6b12d1aa3ed80c3605cdfa176398c6bdfca",
+        "member": "issueWriteCriteria",
+        "line": 131
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/AccessContext.java",
+          "line": 388,
+          "end_line": 391,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AccessContext",
+      "target_member": "capabilityCriteria",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "3f0b0d9bbc76",
+      "split": "development",
+      "group": "AccessContext",
+      "ledger_id": 232,
+      "old": "be.elevenways.zenit.work.common.WorkAccess#projectCriteria / #projectWriteCriteria / #projectsHolding",
+      "replacement": "AccessContext#capabilityCriteria(ProjectModel.MODEL_ID, capability, column)",
+      "query": "Build project visibility criteria using the current principal",
+      "source": {
+        "repo": "zenit-work",
+        "file": "zenit-work/src/common/java/be/elevenways/zenit/work/common/WorkAccess.java",
+        "revision": "4571a6b12d1aa3ed80c3605cdfa176398c6bdfca",
+        "member": "projectCriteria",
+        "line": 59
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/AccessContext.java",
+          "line": 388,
+          "end_line": 391,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AccessContext",
+      "target_member": "capabilityCriteria",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "e4c20ff2bef4",
+      "split": "development",
+      "group": "AccessContext",
+      "ledger_id": 232,
+      "old": "be.elevenways.zenit.work.common.WorkAccess#projectCriteria / #projectWriteCriteria / #projectsHolding",
+      "replacement": "AccessContext#capabilityCriteria(ProjectModel.MODEL_ID, capability, column)",
+      "query": "Build criteria for projects the current principal may modify",
+      "source": {
+        "repo": "zenit-work",
+        "file": "zenit-work/src/common/java/be/elevenways/zenit/work/common/WorkAccess.java",
+        "revision": "4571a6b12d1aa3ed80c3605cdfa176398c6bdfca",
+        "member": "projectWriteCriteria",
+        "line": 81
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/AccessContext.java",
+          "line": 388,
+          "end_line": 391,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AccessContext",
+      "target_member": "capabilityCriteria",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "b85bad175cc6",
+      "split": "holdout",
+      "group": "RecordCapabilityScope",
+      "ledger_id": 234,
+      "old": "be.elevenways.zenit.work.common.WorkAccess#scope(UuidField, RecordCapabilityScope)",
+      "replacement": "RecordCapabilityScope#criteria(Field) (duplicate; deleted at zero references, 2026-10-03)",
+      "query": "Apply a capability scope to a UUID field as query criteria",
+      "source": {
+        "repo": "zenit-work",
+        "file": "zenit-work/src/common/java/be/elevenways/zenit/work/common/WorkAccess.java",
+        "revision": "4571a6b12d1aa3ed80c3605cdfa176398c6bdfca",
+        "member": "scope",
+        "line": 169
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityScope.java",
+          "line": 131,
+          "end_line": 133,
+          "node_kind": "method_declaration"
+        },
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityScope.java",
+          "line": 141,
+          "end_line": 143,
+          "node_kind": "method_declaration"
+        },
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/security/RecordCapabilityScope.java",
+          "line": 145,
+          "end_line": 156,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "RecordCapabilityScope",
+      "target_member": "criteria",
+      "baseline": {
+        "home_rank": 1,
+        "related_rank": 4,
+        "dupes": false
+      }
+    },
+    {
+      "id": "01733fcf31b9",
+      "split": "holdout",
+      "group": "DomainEvents",
+      "ledger_id": 252,
+      "old": "be.elevenways.zenit.common.orm.comment.RecordComments#addAfterCreateListener(Consumer)",
+      "replacement": "be.elevenways.zenit.common.orm.event.DomainEvents#afterCommit(CommentCreated.class, listener)",
+      "query": "Register a callback after a record comment is created and committed",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/orm/comment/RecordComments.java",
+        "revision": "d92b0a366ddfb3422ab7da9919305de5c22b09d3",
+        "member": "addAfterCreateListener",
+        "line": 138
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/orm/event/DomainEvents.java",
+          "line": 59,
+          "end_line": 62,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "DomainEvents",
+      "target_member": "afterCommit",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "ea1c5015944d",
+      "split": "holdout",
+      "group": "DomainEvents",
+      "ledger_id": 253,
+      "old": "be.elevenways.zenit.common.orm.comment.RecordComments#removeAfterCreateListener(Consumer)",
+      "replacement": "be.elevenways.zenit.common.orm.event.DomainEvents.Subscription#cancel()",
+      "query": "Unsubscribe a record comment creation callback",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/orm/comment/RecordComments.java",
+        "revision": "d92b0a366ddfb3422ab7da9919305de5c22b09d3",
+        "member": "removeAfterCreateListener",
+        "line": 148
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/orm/event/DomainEvents.java",
+          "line": 35,
+          "end_line": 35,
+          "node_kind": "method_declaration"
+        },
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/orm/event/DomainEvents.java",
+          "line": 139,
+          "end_line": 142,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "DomainEvents",
+      "target_member": "cancel",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "8aa20c8c83c5",
+      "split": "holdout",
+      "group": "DomainEvents",
+      "ledger_id": 256,
+      "old": "be.elevenways.zenit.work.common.CommandListener",
+      "replacement": "be.elevenways.zenit.common.orm.event.DomainEvents#on with IssueChanged, AcceptedChange, DeadlineReminder, TimeChange, PartyChange",
+      "query": "Listen for work issue and time changes using domain events",
+      "source": {
+        "repo": "zenit-work",
+        "file": "zenit-work/src/common/java/be/elevenways/zenit/work/common/CommandListener.java",
+        "revision": "5929ed5a0828d1bbcd0411a9191e72c9cdafa525",
+        "member": null,
+        "line": 21
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/orm/event/DomainEvents.java",
+          "line": 53,
+          "end_line": 56,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "DomainEvents",
+      "target_member": "on",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "32a310b6e839",
+      "split": "holdout",
+      "group": "DomainEvents",
+      "ledger_id": 257,
+      "old": "be.elevenways.zenit.work.common.CommandListeners",
+      "replacement": "be.elevenways.zenit.common.orm.event.DomainEvents",
+      "query": "Register and dispatch work domain event listeners",
+      "source": {
+        "repo": "zenit-work",
+        "file": "zenit-work/src/common/java/be/elevenways/zenit/work/common/CommandListeners.java",
+        "revision": "5929ed5a0828d1bbcd0411a9191e72c9cdafa525",
+        "member": null,
+        "line": 27
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/orm/event/DomainEvents.java",
+          "line": 53,
+          "end_line": 56,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "DomainEvents",
+      "target_member": "on",
+      "baseline": {
+        "home_rank": 7,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "4a045cea9322",
+      "split": "holdout",
+      "group": "DomainEvents",
+      "ledger_id": 258,
+      "old": "be.elevenways.zenit.billing.server.BillingListener",
+      "replacement": "be.elevenways.zenit.common.orm.event.DomainEvents#on with BillingViews.AcceptedOffer, BillingViews.DocumentTransitioned; DomainEvents#leases",
+      "query": "Listen for accepted billing offers and document transitions",
+      "source": {
+        "repo": "zenit-billing",
+        "file": "zenit-billing/src/server/java/be/elevenways/zenit/billing/server/BillingListener.java",
+        "revision": "cc75214ca7b5033ed6b2ebd6f979826e4e0abbd1",
+        "member": null,
+        "line": 25
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/orm/event/DomainEvents.java",
+          "line": 53,
+          "end_line": 56,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "DomainEvents",
+      "target_member": "on",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "793854a5bbcf",
+      "split": "holdout",
+      "group": "DomainEvents",
+      "ledger_id": 259,
+      "old": "be.elevenways.zenit.billing.server.BillingListeners",
+      "replacement": "be.elevenways.zenit.common.orm.event.DomainEvents",
+      "query": "Register and dispatch billing domain event listeners",
+      "source": {
+        "repo": "zenit-billing",
+        "file": "zenit-billing/src/server/java/be/elevenways/zenit/billing/server/BillingListeners.java",
+        "revision": "cc75214ca7b5033ed6b2ebd6f979826e4e0abbd1",
+        "member": null,
+        "line": 32
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/orm/event/DomainEvents.java",
+          "line": 53,
+          "end_line": 56,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "DomainEvents",
+      "target_member": "on",
+      "baseline": {
+        "home_rank": 8,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "b383f076a842",
+      "split": "development",
+      "group": "ShippedCatalogs",
+      "ledger_id": 260,
+      "old": "be.elevenways.zenit.microcopy.server.DefaultCatalogLoader",
+      "replacement": "be.elevenways.zenit.server.microcopy.ShippedCatalogs (ShippedCatalogs#shared() for the process instance)",
+      "query": "Load the shipped translation catalogs from the classpath",
+      "source": {
+        "repo": "zenit-microcopy",
+        "file": "zenit-microcopy/src/server/java/be/elevenways/zenit/microcopy/server/DefaultCatalogLoader.java",
+        "revision": "241fe05e420b6c0c3752bf2c5af2e275be4c903c",
+        "member": null,
+        "line": 28
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/server/java/be/elevenways/zenit/server/microcopy/ShippedCatalogs.java",
+          "line": 78,
+          "end_line": 90,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "ShippedCatalogs",
+      "target_member": "shared",
+      "baseline": {
+        "home_rank": 1,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "5d36f1c6fbbc",
+      "split": "development",
+      "group": "ShippedCatalogs",
+      "ledger_id": 261,
+      "old": "be.elevenways.zenit.microcopy.server.DefaultCatalogLoader#findCandidates(String, LocaleChain)",
+      "replacement": "be.elevenways.zenit.server.microcopy.ShippedCatalogs#variants(String, LocaleChain), as Translation through be.elevenways.zenit.microcopy.Translation#of(CopyVariant)",
+      "query": "Find translations in classpath catalogs along a locale fallback chain",
+      "source": {
+        "repo": "zenit-microcopy",
+        "file": "zenit-microcopy/src/server/java/be/elevenways/zenit/microcopy/server/DefaultCatalogLoader.java",
+        "revision": "241fe05e420b6c0c3752bf2c5af2e275be4c903c",
+        "member": "findCandidates",
+        "line": 55
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/server/java/be/elevenways/zenit/server/microcopy/ShippedCatalogs.java",
+          "line": 131,
+          "end_line": 141,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "ShippedCatalogs",
+      "target_member": "variants",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": 4,
+        "dupes": false
+      }
+    },
+    {
+      "id": "53d3ce863f51",
+      "split": "development",
+      "group": "ShippedCatalogs",
+      "ledger_id": 262,
+      "old": "be.elevenways.zenit.microcopy.server.DefaultCatalogLoader#parseCatalog(String, String, String)",
+      "replacement": "be.elevenways.zenit.server.microcopy.ShippedCatalogs#parse(String, String, String)",
+      "query": "Parse translation catalog text into locale variants",
+      "source": {
+        "repo": "zenit-microcopy",
+        "file": "zenit-microcopy/src/server/java/be/elevenways/zenit/microcopy/server/DefaultCatalogLoader.java",
+        "revision": "241fe05e420b6c0c3752bf2c5af2e275be4c903c",
+        "member": "parseCatalog",
+        "line": 74
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/server/java/be/elevenways/zenit/server/microcopy/ShippedCatalogs.java",
+          "line": 179,
+          "end_line": 190,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "ShippedCatalogs",
+      "target_member": "parse",
+      "baseline": {
+        "home_rank": 1,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "e16e7387af18",
+      "split": "development",
+      "group": "Slugs",
+      "ledger_id": 404,
+      "old": "be.elevenways.protoblast.common.util.BlastString#slug(String)",
+      "replacement": "be.elevenways.zenit.common.text.Slugs#slugify(String) (the fold every stored slug was made with)",
+      "query": "Fold arbitrary text into a stable URL slug",
+      "source": {
+        "repo": "protoblast",
+        "file": "protoblast/src/main/java/be/elevenways/protoblast/common/util/BlastString.java",
+        "revision": "91739c2dabea384e2a7b58dbbbc5ebdc42f656b2",
+        "member": "slug",
+        "line": 117
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/text/Slugs.java",
+          "line": 44,
+          "end_line": 46,
+          "node_kind": "method_declaration"
+        },
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/text/Slugs.java",
+          "line": 53,
+          "end_line": 79,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "Slugs",
+      "target_member": "slugify",
+      "baseline": {
+        "home_rank": 2,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "4b90f2113124",
+      "split": "development",
+      "group": "AttributeToken",
+      "ledger_id": 411,
+      "old": "be.elevenways.zenit.widget.common.builtin.ActionButtonVariant#forToken(String)",
+      "replacement": "AttributeToken.find(ActionButtonVariant.values(), token)",
+      "query": "Parse an action button appearance by its token",
+      "source": {
+        "repo": "zenit-widget",
+        "file": "zenit-widget/src/common/java/be/elevenways/zenit/widget/common/builtin/ActionButtonVariant.java",
+        "revision": "b28d74bad048565302b958fddff91c8c71daafa6",
+        "member": "forToken",
+        "line": 55
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/customelement/AttributeToken.java",
+          "line": 26,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AttributeToken",
+      "target_member": "find",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "b069fadf16e8",
+      "split": "development",
+      "group": "AttributeToken",
+      "ledger_id": 412,
+      "old": "be.elevenways.zenit.a2ui.common.A2uiButtonVariant#forToken(String)",
+      "replacement": "AttributeToken.find(A2uiButtonVariant.values(), token)",
+      "query": "Parse a generated UI button appearance by its token",
+      "source": {
+        "repo": "zenit-a2ui",
+        "file": "zenit-a2ui/src/common/java/be/elevenways/zenit/a2ui/common/A2uiButtonVariant.java",
+        "revision": "d5305b2eb1395f80258792e043fb8200e52518fd",
+        "member": "forToken",
+        "line": 72
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/customelement/AttributeToken.java",
+          "line": 26,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AttributeToken",
+      "target_member": "find",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "a11f3f909dd6",
+      "split": "development",
+      "group": "AttributeToken",
+      "ledger_id": 413,
+      "old": "be.elevenways.zenit.widget.common.surface.MessageLevel#forToken(String)",
+      "replacement": "AttributeToken.find(MessageLevel.values(), token)",
+      "query": "Parse a surface message severity by its token",
+      "source": {
+        "repo": "zenit-widget",
+        "file": "zenit-widget/src/common/java/be/elevenways/zenit/widget/common/surface/MessageLevel.java",
+        "revision": "b28d74bad048565302b958fddff91c8c71daafa6",
+        "member": "forToken",
+        "line": 62
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/customelement/AttributeToken.java",
+          "line": 26,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AttributeToken",
+      "target_member": "find",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "0eac2d0f01bd",
+      "split": "development",
+      "group": "AttributeToken",
+      "ledger_id": 414,
+      "old": "be.elevenways.zenit.widget.common.surface.SurfaceActionKind#forToken(String)",
+      "replacement": "AttributeToken.find(SurfaceActionKind.values(), token)",
+      "query": "Parse a surface action kind from its token",
+      "source": {
+        "repo": "zenit-widget",
+        "file": "zenit-widget/src/common/java/be/elevenways/zenit/widget/common/surface/SurfaceActionKind.java",
+        "revision": "b28d74bad048565302b958fddff91c8c71daafa6",
+        "member": "forToken",
+        "line": 58
+      },
+      "targets": [
+        {
+          "file_path": "hawkeye/hawkeye-core/src/common/java/be/elevenways/hawkeye/common/customelement/AttributeToken.java",
+          "line": 26,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "AttributeToken",
+      "target_member": "find",
+      "baseline": {
+        "home_rank": null,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "3e30cdf675a2",
+      "split": "development",
+      "group": "ReturnPath",
+      "ledger_id": 426,
+      "old": "be.elevenways.zenit.server.http.ReturnTarget#sanitize(String)",
+      "replacement": "be.elevenways.zenit.common.routing.ReturnPath#of(String)",
+      "query": "Validate a redirect return path and refuse unsafe destinations",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/server/java/be/elevenways/zenit/server/http/ReturnTarget.java",
+        "revision": "90f0d769fa42ce61fb9754083ec2241e4b2f8c83",
+        "member": "sanitize",
+        "line": 89
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/routing/ReturnPath.java",
+          "line": 34,
+          "end_line": 36,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "ReturnPath",
+      "target_member": "of",
+      "baseline": {
+        "home_rank": 4,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "6eb204508ff0",
+      "split": "development",
+      "group": "ReturnPath",
+      "ledger_id": 427,
+      "old": "be.elevenways.zenit.server.http.ReturnTarget#or(String, String)",
+      "replacement": "be.elevenways.zenit.common.routing.ReturnPath#or(String, String)",
+      "query": "Choose a safe return path or a fallback",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/server/java/be/elevenways/zenit/server/http/ReturnTarget.java",
+        "revision": "90f0d769fa42ce61fb9754083ec2241e4b2f8c83",
+        "member": "or",
+        "line": 159
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/routing/ReturnPath.java",
+          "line": 41,
+          "end_line": 44,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "ReturnPath",
+      "target_member": "or",
+      "baseline": {
+        "home_rank": 1,
+        "related_rank": 1,
+        "dupes": false
+      }
+    },
+    {
+      "id": "2565c223741e",
+      "split": "development",
+      "group": "FormCondition",
+      "ledger_id": 516,
+      "old": "be.elevenways.zenit.common.edit.Records#matches(Map, Map), Records#conditionsFor(String), Records#activeSpec(Map)",
+      "replacement": "FormCondition.matches(records.subSpec().conditionFactsFor(entry), row), records.subSpec().activeSpec(values)",
+      "query": "Evaluate whether a form entry condition matches submitted field values",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/edit/Records.java",
+        "revision": "08b546f889cc365d3fab05eb9438c591dbad28e1",
+        "member": "matches",
+        "line": 102
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/edit/FormCondition.java",
+          "line": 31,
+          "end_line": 43,
+          "node_kind": "method_declaration"
+        },
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/edit/FormCondition.java",
+          "line": 45,
+          "end_line": 48,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "FormCondition",
+      "target_member": "matches",
+      "baseline": {
+        "home_rank": 2,
+        "related_rank": 5,
+        "dupes": false
+      }
+    },
+    {
+      "id": "099940b43586",
+      "split": "development",
+      "group": "FormSpec",
+      "ledger_id": 516,
+      "old": "be.elevenways.zenit.common.edit.Records#matches(Map, Map), Records#conditionsFor(String), Records#activeSpec(Map)",
+      "replacement": "FormCondition.matches(records.subSpec().conditionFactsFor(entry), row), records.subSpec().activeSpec(values)",
+      "query": "Choose the active form fields from submitted selector values",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/common/java/be/elevenways/zenit/common/edit/Records.java",
+        "revision": "08b546f889cc365d3fab05eb9438c591dbad28e1",
+        "member": "activeSpec",
+        "line": 112
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/common/java/be/elevenways/zenit/common/edit/FormSpec.java",
+          "line": 100,
+          "end_line": 106,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "FormSpec",
+      "target_member": "activeSpec",
+      "baseline": {
+        "home_rank": 1,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "c02a94387881",
+      "split": "development",
+      "group": "RegistryIndex",
+      "ledger_id": 519,
+      "old": "be.elevenways.zenit.server.task.record.SchedulePlacements#registry()",
+      "replacement": "RegistryIndex.registries().get(ZenitIds.id(\"schedule_placement\")) returns the identical registry; place/find remain the typed placement API",
+      "query": "Retrieve the registered schedule placement registry",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/server/java/be/elevenways/zenit/server/task/record/SchedulePlacements.java",
+        "revision": "b2b840e2cd645a2550c63cf3c75c73b9cab0eb00",
+        "member": "registry",
+        "line": 57
+      },
+      "targets": [
+        {
+          "file_path": "protoblast/src/main/java/be/elevenways/protoblast/common/registry/RegistryIndex.java",
+          "line": 35,
+          "end_line": 37,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "RegistryIndex",
+      "target_member": "registries",
+      "baseline": {
+        "home_rank": 7,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "f68fdc30abb7",
+      "split": "development",
+      "group": "ResourceParent",
+      "ledger_id": 520,
+      "old": "be.elevenways.zenit.cms.common.resource.ResourceParent.Hop#via(Field, Identifier)",
+      "replacement": "new ResourceParent.Hop(field, targetModelId)",
+      "query": "Construct a parent relationship hop from a field and target model",
+      "source": {
+        "repo": "zenit-cms",
+        "file": "zenit-cms/src/common/java/be/elevenways/zenit/cms/common/resource/ResourceParent.java",
+        "revision": "729f0c7f9ba2304883a6b29e4476b9a2b8e6d46d",
+        "member": "via",
+        "line": 257
+      },
+      "targets": [
+        {
+          "file_path": "zenit-cms/src/common/java/be/elevenways/zenit/cms/common/resource/ResourceParent.java",
+          "line": 250,
+          "end_line": 260,
+          "node_kind": "record_declaration"
+        },
+        {
+          "file_path": "zenit-cms/src/common/java/be/elevenways/zenit/cms/common/resource/ResourceParent.java",
+          "line": 252,
+          "end_line": 255,
+          "node_kind": "compact_constructor_declaration"
+        }
+      ],
+      "target_type": "ResourceParent",
+      "target_member": "Hop",
+      "baseline": {
+        "home_rank": 1,
+        "related_rank": null,
+        "dupes": false
+      }
+    },
+    {
+      "id": "3dcbfe282f63",
+      "split": "development",
+      "group": "OperationRequest",
+      "ledger_id": 531,
+      "old": "be.elevenways.zenit.server.operation.OperationRequest#source(RecordSource)",
+      "replacement": "OperationRequest#readPath(SubjectReadPath.records(source)) -- source(...) was a duplicate of it",
+      "query": "Declare a record source read path on an operation request",
+      "source": {
+        "repo": "zenit",
+        "file": "zenit/src/server/java/be/elevenways/zenit/server/operation/OperationRequest.java",
+        "revision": "93ac3afaf6cd3be481b707ab0d825e4e191d4d8b",
+        "member": "source",
+        "line": 148
+      },
+      "targets": [
+        {
+          "file_path": "zenit/src/server/java/be/elevenways/zenit/server/operation/OperationRequest.java",
+          "line": 161,
+          "end_line": 169,
+          "node_kind": "method_declaration"
+        }
+      ],
+      "target_type": "OperationRequest",
+      "target_member": "readPath",
+      "baseline": {
+        "home_rank": 2,
+        "related_rank": 1,
+        "dupes": false
+      }
+    }
+  ]
+}
