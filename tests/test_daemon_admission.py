@@ -174,3 +174,32 @@ async def test_worker_budget_and_parent_limit_are_separate_and_restored(tmp_path
     await jobs._build(str(tmp_path))
     assert limits[-1] == (4096 * 1024 * 1024, -1)
     assert jobs.process is None and jobs.states[str(tmp_path)]["state"] == "ready"
+
+
+@pytest.mark.anyio
+async def test_published_graph_reads_do_not_wait_for_or_cancel_a_refresh(tmp_path, monkeypatch):
+    """A held refresh must leave the previous published generation available to warm readers."""
+    from zemble.graph import store
+
+    monkeypatch.setattr(store, "graph_ancestor", lambda root: None)
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+    root = str(tmp_path)
+    jobs.ready.add(root)
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def build_once(path):
+        jobs.states[path]["state"] = "building"
+        entered.set()
+        await finish.wait()
+        jobs.states[path]["state"] = "ready"
+
+    monkeypatch.setattr(jobs, "_build_once", build_once)
+    refreshing = asyncio.create_task(jobs.ensure(root, time.monotonic() + 5, refresh=True))
+    await entered.wait()
+    await asyncio.wait_for(jobs.ensure(root, time.monotonic() + 0.01), 0.1)
+    assert not refreshing.done(), "reading a published graph must not cancel its refresh"
+    assert jobs.status()["jobs"][0]["state"] == "building"
+    finish.set()
+    await refreshing
+    assert root in jobs.ready

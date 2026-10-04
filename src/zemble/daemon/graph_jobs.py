@@ -53,7 +53,8 @@ class GraphJobs:
             if sum(not task.done() for task in self.jobs.values()) >= 8:
                 raise AdmissionBusy("graph construction queue is full")
             self.states[root] = {"root": root, "state": "queued", "queued_at": time.time()}
-            self.ready.discard(root)
+            # AIDEV-NOTE: refresh replaces a published graph beside its readers, just like
+            # an index rebuild. Keeping the old ready generation avoids turning edits into outages.
             self.paths[root] = [str(path) for path in changed_paths] if changed_paths is not None else None
             task = asyncio.create_task(self._build(root))
             self.jobs[root] = task
@@ -82,7 +83,6 @@ class GraphJobs:
                         return
                     paths = self.pending.pop(root)
                     self.paths[root] = sorted(paths) if paths is not None else None
-                    self.ready.discard(root)
         except TimeoutError:
             self.states[root].update(state="failed", error="graph construction deadline expired")
             raise
