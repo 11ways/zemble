@@ -41,6 +41,12 @@ Watcher changes arriving during construction coalesce into a bounded follow-up p
 worker PID, budget, elapsed/build time and peak worker RSS. Stop closes graph jobs
 and drains running reads before exiting.
 
+Repeated identical `home` and graph questions join one read computation and reuse
+successful answers in a 64-entry LRU. Keys contain weak serving-index identities
+and successful graph publication generations; edits therefore invalidate answers
+without retaining old indexes. Errors are never cached. During a refresh, readers
+continue using the last published generation instead of waiting for construction.
+
 The aggregate default is 8192 MiB. Construction is capped at 6144 MiB and narrowed
 by the serving process's current virtual mappings plus concurrent-read scratch.
 During construction the parent and worker address-space reservations sum to at most

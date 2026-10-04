@@ -10,11 +10,13 @@ import asyncio
 import contextlib
 import fcntl
 import gc
+import json
 import logging
 import os
 import tempfile
 import time
 import traceback
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from copy import copy
 from pathlib import Path
@@ -285,6 +287,9 @@ class Daemon:
         self._operation_lock = asyncio.Lock()
         self._load_lock = asyncio.Lock()
         self.reads = ReadAdmission(_env_int("ZEMBLE_DAEMON_READ_SLOTS", 4), _env_int("ZEMBLE_DAEMON_QUEUE_LIMIT", 32))
+        from zemble.daemon.read_cache import ReadCache
+
+        self.read_cache = ReadCache()
         self.graphs = GraphJobs(self._load_lock, self.max_rss_mb)
         self._request_tasks: set[asyncio.Task[Any]] = set()
         self._query_keys: dict[asyncio.Task[Any], CacheKey] = {}
@@ -683,11 +688,18 @@ class Daemon:
         await self.graphs.ensure(root, time.monotonic() + 25)
         return await asyncio.to_thread(_with_graph, root, work, fresh=True)
 
-    async def _execute_read(self, handler: Handler, args: dict[str, Any]) -> Any:
+    async def _execute_read(self, handler: Handler, args: dict[str, Any], *, memo: bool = True) -> Any:
         """Pin a request's serving generation until its actual work finishes."""
         task = asyncio.current_task()
         self._request_tasks.add(task)
         try:
+            if memo and handler in {_cmd_home, _cmd_graph}:
+                indexes = tuple(
+                    (key[0], weakref.ref(index)) for key, index in sorted(self.cache.loaded(), key=lambda x: x[0][0])
+                )
+                generations = tuple(sorted(self.graphs.generations.items()))
+                key = (handler.__name__, json.dumps(args, sort_keys=True), indexes, generations)
+                return await self.read_cache.get(key, lambda: self._execute_read(handler, args, memo=False))
             return await handler(self, args)
         finally:
             self._query_keys.pop(task, None)

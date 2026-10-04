@@ -31,6 +31,7 @@ class GraphJobs:
         self.jobs: dict[str, asyncio.Task[Any]] = {}
         self.states: dict[str, dict[str, Any]] = {}
         self.ready: set[str] = set()
+        self.generations: dict[str, int] = {}
         self.process: asyncio.subprocess.Process | None = None
         self.paths: dict[str, list[str] | None] = {}
         self.pending: dict[str, set[str] | None] = {}
@@ -138,6 +139,8 @@ class GraphJobs:
                         error = stderr.decode()[-2000:]
                         raise MemoryRefused(f"graph worker failed ({self.process.returncode}): {error}")
                     state.update(json.loads(stdout))
+                    self.generations[root] = self.generations.get(root, 0) + 1
+                    state["generation"] = self.generations[root]
                     self.ready.add(root)
                     state["state"] = "ready"
                 finally:
