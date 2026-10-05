@@ -420,7 +420,8 @@ the store and their unresolved edges into a scratch database beside it
 stored edges of every other file to re-resolve move there too. The supertype edges
 of all targets are then resolved and indexed at once - a call chain can climb
 through any of them - and everything else is resolved, derived and staged a batch at
-a time, the lookup forgetting its caches between batches. The staged result is
+a time, the lookup letting its caches go between batches once they hold more than
+`HELD_SYMBOLS` (50k decoded symbols, ~62 MiB). The staged result is
 copied into `edges` last. A full build of the zenit workspace (12,458 files, 2.06M
 edges) peaks at ~190 MiB of private memory, where holding every extraction and the
 whole symbol table took 2.2 GiB; it is ~10% slower. `tests/test_graph_incremental.py`
@@ -521,14 +522,15 @@ every file it covers is re-extracted and re-resolved.
 
 Mapping facts is bounded the same way the build is. Facts files are parsed, mapped and
 released one at a time (a moved one twice: once for its `symbol` facts, which every
-other file's refs may need, once to map it), refs map through a `SqliteLookup` that
-forgets after every facts file, the fact edges wait in the scratch database
+other file's refs may need, once to map it), refs map through a `SqliteLookup` under
+the same budget, the fact edges wait in the scratch database
 (`overlay_edges`) and are read back per batch, and skipped facts are counted by what
 they are reported under rather than kept one record each. With every facts file of
 the zenit workspace moved on archdev (163 files, 795 MB of JSONL, 903k fact edges,
-8,274 files re-resolved) the refresh peaked at 3,388 MiB of private memory before and
-338 MiB after, in about the same time (348 s before, 384 s after on a busy host); the
-scratch database grew to ~2.2 GB on disk meanwhile.
+8,274 files re-resolved) the refresh peaked at 3,412 MiB of RSS before and 334 MiB
+after. Run side by side on the same host, both graphs came out identical row for row
+and the new build spent 15% more CPU (438 s against 380 s): indexed lookups cost more
+than a symbol table held whole. The scratch database grows to ~2.2 GB on disk meanwhile.
 
 Two constants were worth more than any of the structure. `_relative_to_workspace`
 called `Path.resolve` - a realpath syscall - once per fact line, 1.4 M times per

@@ -8,8 +8,16 @@ from pathlib import Path
 import pytest
 
 from zemble.cli import _cli_main
-from zemble.graph.facts import FactsFormatError, discover_facts_files, load_facts_file, matches_facts_glob
-from zemble.graph.store import build_graph, connect
+from zemble.graph.facts import (
+    FactsFormatError,
+    FactsOverlay,
+    OverlayEdges,
+    discover_facts_files,
+    load_facts_file,
+    matches_facts_glob,
+)
+from zemble.graph.model import Edge, EdgeKind, Resolution
+from zemble.graph.store import _apply_overlay, _hierarchy_after_overlay, build_graph, connect
 
 CONSUMER = "src/main/java/com/example/app/Consumer.java"
 CIRCLE = "src/main/java/com/example/core/Circle.java"
@@ -398,3 +406,32 @@ def test_javac_spellings_land_on_zemble_symbols(graph_fixture_root: Path, graph_
 
     accessor = next(edge for edge in _edges(workspace, POINT) if edge["kind"] == "calls")
     assert accessor["dst_id"].endswith("Point.x"), "the record accessor landed on the component"
+
+
+def test_overlay_edges_keep_one_copy_and_read_back_by_kind(tmp_path: Path) -> None:
+    """Fact edges wait in sqlite: one copy per file, in collection order, and filtered by kind when asked."""
+    edges = OverlayEdges()
+    call = Edge("A.java#A.run()", "go", EdgeKind.CALLS, 3, dst_id="B.java#B.go()", resolution=Resolution.EXACT)
+    external = Edge("A.java#A.run()", "valueOf", EdgeKind.CALLS, 4, arity=1, source="javac")
+    parent = Edge("A.java#A", "Base", EdgeKind.EXTENDS, 1, dst_id="Base.java#Base", resolution=Resolution.EXACT)
+
+    # 1. A second facts file writing the same edge for the same file adds nothing.
+    assert [edges.add("A.java", edge) for edge in (call, external, parent)] == [True, True, True], "step 1: new"
+    assert not edges.add("A.java", call), "step 1: a duplicate is refused"
+    assert edges.add("Other.java", call), "step 1: the same edge for another file is its own"
+    assert edges.count() == 4 and edges.covered == {"A.java", "Other.java"}, "step 1: counted once per file"
+
+    # 2. A file's edges come back whole and in order; a missing destination stays missing.
+    assert edges.of("A.java") == [call, external, parent], "step 2: read back as collected"
+    assert edges.of("A.java")[1].dst_id is None, "step 2: no destination is None, not ''"
+    assert edges.of("Nowhere.java") == [], "step 2: an uncovered file has none"
+
+    # 3. Asking for kinds reads only those, which is how the hierarchy is assembled.
+    assert edges.of("A.java", (EdgeKind.EXTENDS, EdgeKind.IMPLEMENTS)) == [parent], "step 3: the kind filter"
+    overlay = FactsOverlay(root=tmp_path, edges=edges)
+    assert _hierarchy_after_overlay([], overlay, {"A.java"}) == [parent], "step 3: the facts' hierarchy is kept"
+    extracted = Edge("A.java#A", "Other", EdgeKind.EXTENDS, 1)
+    unowned = Edge("C.java#C", "Base", EdgeKind.EXTENDS, 1)
+    assert _apply_overlay([extracted, unowned], overlay, {"A.java"}) == [unowned, call, external, parent], (
+        "step 3: a covered file's extracted edges give way to its facts, an uncovered file keeps its own"
+    )

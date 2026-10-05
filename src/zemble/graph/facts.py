@@ -976,7 +976,7 @@ class OverlayEdges:
         columns = ", ".join(self._EDGE_COLUMNS)
         placeholders = ",".join("?" * (len(self._EDGE_COLUMNS) + 1))
         self._insert = f"INSERT OR IGNORE INTO {self._table} (file_path, {columns}) VALUES ({placeholders})"
-        self._select = f"SELECT {columns} FROM {self._table} WHERE file_path = ? ORDER BY rowid"
+        self._select = f"SELECT {columns} FROM {self._table} WHERE file_path = ?"
 
     def _database(self) -> sqlite3.Connection:
         """Create the table on first use."""
@@ -1025,8 +1025,11 @@ class OverlayEdges:
         """Return a covered file's edges, optionally of some kinds only, in the order they were collected."""
         if file_path not in self.covered:
             return []
-        edges = [_overlay_edge(row) for row in self._database().execute(self._select, (file_path,))]
-        return edges if kinds is None else [edge for edge in edges if edge.kind in kinds]
+        query, parameters = self._select, [file_path]
+        if kinds is not None:
+            query += f" AND kind IN ({','.join('?' * len(kinds))})"
+            parameters += [kind.value for kind in kinds]
+        return [_overlay_edge(row) for row in self._database().execute(query + " ORDER BY rowid", parameters)]
 
     def count(self) -> int:
         """Return how many edges were collected."""
