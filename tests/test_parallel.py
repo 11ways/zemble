@@ -57,10 +57,12 @@ if __name__ == "__main__":
     assert context is not None, "this script has a real __main__"
     pool = process_pool(4, context)
     pids = sorted(set(pool.map(_slow_pid, range(40))))
-    with open(sys.argv[1], "w") as handle:
+    staged = sys.argv[1] + ".staged"
+    with open(staged, "w") as handle:
         handle.write(json.dumps(pids))
         handle.flush()
         os.fsync(handle.fileno())
+    os.replace(staged, sys.argv[1])
     time.sleep(300)
 """
 
