@@ -21,6 +21,8 @@ PASSAGE_ENV = "ZEMBLE_RERANK_PASSAGE"
 NONE_SPEC = "none"
 
 SCHEMES = ("cross", "voyage")
+#: Schemes scored by a paid provider rather than a local model; only these are worth serving.
+HOSTED_SCHEMES = frozenset({"voyage"})
 
 DEFAULT_TOP_K = 50
 DEFAULT_ALPHA = 1.0
@@ -130,8 +132,38 @@ def parse_reranker_spec(spec: str) -> Reranker | None:
         cross:<hf-model>
         voyage:<model>
 
+    A ``voyage:`` reranker is served by the embedding server when ``ZEMBLE_EMBED_SERVER`` names one,
+    and a malformed spec is refused by :func:`split_reranker_spec`.
+
     :param spec: The spec string.
     :return: A reranker, or None for ``none``.
+    """
+    parts = split_reranker_spec(spec)
+    if parts is None:
+        return None
+    scheme, model = parts
+    if scheme == "cross":
+        from zemble.rerank.cross_encoder import CrossEncoderReranker
+
+        return CrossEncoderReranker(model)
+
+    # A hosted reranker goes through the embedding server when one is configured: the server
+    # holds the provider key, so this process needs none.
+    from zemble.embedding.wire import server_settings
+
+    settings = server_settings()
+    if settings is not None:
+        from zemble.embedding.served import ServerReranker
+
+        return ServerReranker(f"{scheme}:{model}", settings)
+    return build_hosted_reranker(scheme, model)
+
+
+def split_reranker_spec(spec: str) -> tuple[str, str] | None:
+    """Take a reranker spec apart into its scheme and model.
+
+    :param spec: The spec string.
+    :return: The scheme and model, or None for ``none``.
     :raises RerankerSpecError: If the spec is empty, has an unknown scheme, or names no model.
     """
     spec = spec.strip()
@@ -145,15 +177,25 @@ def parse_reranker_spec(spec: str) -> Reranker | None:
         raise RerankerSpecError(f"Unknown reranker spec {spec!r}; expected one of {expected}")
     if not rest.strip():
         raise RerankerSpecError(f"Reranker spec {spec!r} names no model")
+    return scheme, rest.strip()
 
-    if scheme == "cross":
-        from zemble.rerank.cross_encoder import CrossEncoderReranker
 
-        return CrossEncoderReranker(rest.strip())
+def build_hosted_reranker(scheme: str, model: str) -> Reranker:
+    """Build the bare hosted reranker for a scheme, bypassing any embedding server.
 
+    The embedding server scores through this, so its own provider calls never route back through
+    a client of itself.
+
+    :param scheme: The reranker scheme.
+    :param model: The provider's model name.
+    :return: The reranker.
+    :raises RerankerSpecError: If the scheme is not a hosted one.
+    """
+    if scheme not in HOSTED_SCHEMES:
+        raise RerankerSpecError(f"{scheme}:{model} is not a hosted reranker; hosted schemes: {sorted(HOSTED_SCHEMES)}")
     from zemble.rerank.voyage import VoyageReranker
 
-    return VoyageReranker(rest.strip())
+    return VoyageReranker(model)
 
 
 def resolve_reranker_spec(spec: str | None = None) -> str:

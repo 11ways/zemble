@@ -87,6 +87,27 @@ def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def uncovered_texts(texts: list[str], digests: list[str], covered: set[str]) -> list[str]:
+    """Return the texts a caching buyer would really send: uncovered ones, each distinct text once.
+
+    THE one answer to what a cached buy costs, shared by the local cache and the embedding
+    server's client, because the buyer gives every copy of one text a single provider slot.
+
+    :param texts: The texts a build is about to embed.
+    :param digests: Their hashes, in the same order.
+    :param covered: The hashes a stored vector already serves.
+    :return: Those still to be bought, first occurrence first.
+    """
+    pending: list[str] = []
+    seen: set[str] = set()
+    for text, digest in zip(texts, digests, strict=True):
+        if digest in covered or digest in seen:
+            continue
+        seen.add(digest)
+        pending.append(text)
+    return pending
+
+
 @contextmanager
 def _transaction(connection: sqlite3.Connection, *, immediate: bool = True) -> Iterator[None]:
     """Acquire the writer before reading, commit one short batch, and roll back any failed batch."""
@@ -121,6 +142,34 @@ def connect_cache(path: Path) -> sqlite3.Connection:
     except BaseException:
         connection.close()
         raise
+
+
+def read_rows(path: Path, batch_size: int = 4096) -> Iterator[list[tuple[str, int, bytes]]]:
+    """Yield every vector of a cache file as ``(text hash, dims, raw float32 bytes)``, a batch at a time.
+
+    The file is opened read-only, so a cache from anywhere (another machine's, a backup) can be
+    read without being converted, and each batch is its own short read keyed on the rowid, so a
+    long upload never pins a WAL snapshot a concurrent buyer's write would have to wait behind.
+
+    :param path: The sqlite file.
+    :param batch_size: Rows per batch.
+    :yield: One batch of rows.
+    :ytype: list[tuple[str, int, bytes]]
+    """
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_SECONDS)
+    try:
+        last = 0
+        while True:
+            found = connection.execute(
+                "SELECT rowid, text_sha256, dims, vec FROM embeddings WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (last, batch_size),
+            ).fetchall()
+            if not found:
+                break
+            last = int(found[-1][0])
+            yield [(str(row[1]), int(row[2]), bytes(row[3])) for row in found]
+    finally:
+        connection.close()
 
 
 def stamps_since(connection: sqlite3.Connection) -> int | None:
@@ -243,9 +292,8 @@ class EmbeddingCache:
     def pending(self, texts: list[str], dims: int | None) -> list[str]:
         """Return the texts a buyer reading this file would really have to send.
 
-        THE one answer to what a cached buy costs, so a report and a build cannot disagree about
-        it: duplicates collapse, because :meth:`CachingEmbedder.embed_documents` gives every copy
-        of one text a single provider slot, and a stored vector was bought already.
+        Read through :func:`uncovered_texts`, so a report and a build cannot disagree about it:
+        duplicates collapse, and a stored vector was bought already.
 
         :param texts: The texts a build is about to embed.
         :param dims: The width a stored vector has to serve; None names no usable width, so
@@ -254,14 +302,29 @@ class EmbeddingCache:
         """
         digests = [text_hash(text) for text in texts]
         covered = self.covered(digests, dims) if dims is not None else set()
-        pending: list[str] = []
-        seen: set[str] = set()
-        for text, digest in zip(texts, digests, strict=True):
-            if digest in covered or digest in seen:
-                continue
-            seen.add(digest)
-            pending.append(text)
-        return pending
+        return uncovered_texts(texts, digests, covered)
+
+    def count(self) -> int:
+        """Return how many vectors this file stores, at every width."""
+        with self._lock:
+            return int(self._connection.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
+
+    def put_missing(self, rows: list[tuple[str, int, bytes]]) -> int:
+        """Store vectors another cache already bought, keeping any this file holds, and stamp them.
+
+        :param rows: ``(text hash, dims, raw float32 bytes)`` triples.
+        :return: How many rows were new to this file.
+        """
+        if not rows:
+            return 0
+        with self._lock, _transaction(self._connection):
+            before = self._connection.total_changes
+            self._connection.executemany(
+                "INSERT OR IGNORE INTO embeddings (text_sha256, dims, vec) VALUES (?, ?, ?)", rows
+            )
+            added = self._connection.total_changes - before
+            self._stamp({digest for digest, _dims, _vector in rows})
+        return added
 
     def put_many(self, rows: list[tuple[str, int, np.ndarray]]) -> None:
         """Store vectors, ignoring any key another process wrote first, and stamp them as used today.
@@ -315,6 +378,25 @@ class CachingEmbedder:
         """
         self.inner = inner
         self.cache = EmbeddingCache(family, directory)
+
+    @property
+    def family(self) -> str:
+        """The cache family key (scheme plus model, no dimensions) the price table is keyed by."""
+        return self.cache.family
+
+    @property
+    def store_location(self) -> str:
+        """Where the vectors this embedder reuses are kept, for a report."""
+        return str(self.cache.path)
+
+    def stored_digests(self, digests: list[str]) -> set[str]:
+        """Return which text hashes already have a usable vector, asking no provider anything.
+
+        :param digests: The text hashes to look up.
+        :return: The covered subset; empty when no width can be read without a provider probe.
+        """
+        width = self.known_dimensions
+        return self.cache.covered(digests, width) if width is not None else set()
 
     @property
     def model_id(self) -> str:

@@ -25,6 +25,7 @@ from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser,
 from zemble.embedding.gc import DEFAULT_GRACE_DAYS, collect_embeddings, day_text
 from zemble.embedding.pricing import CONFIRM_ENV, EmbeddingBudgetExceeded, confirmed
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
+from zemble.embedding.server_cli import EMBED_SERVER_COMMANDS, add_embed_server_parser, run_embed_server
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
@@ -59,6 +60,7 @@ _CLI_DISPATCH_ARGS = frozenset(
         *EVIDENCE_COMMANDS,
         *HOME_COMMANDS,
         *EMBED_STATUS_COMMANDS,
+        *EMBED_SERVER_COMMANDS,
         *STATUS_COMMANDS,
         "daemon",
     }
@@ -73,6 +75,7 @@ _SUBCOMMAND_RUNNERS = {
     **dict.fromkeys(EVIDENCE_COMMANDS, run_evidence),
     **dict.fromkeys(HOME_COMMANDS, run_home),
     **dict.fromkeys(EMBED_STATUS_COMMANDS, run_embed_status),
+    **dict.fromkeys(EMBED_SERVER_COMMANDS, run_embed_server),
     **dict.fromkeys(STATUS_COMMANDS, run_status),
 }
 
@@ -712,6 +715,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_evidence_parser(sub)
     add_home_parser(sub)
     add_embed_status_parser(sub)
+    add_embed_server_parser(sub)
     add_daemon_parser(sub)
     add_status_parser(sub)
 

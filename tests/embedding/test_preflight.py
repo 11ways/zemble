@@ -9,7 +9,7 @@ import pytest
 
 from tests.embedding.test_pricing import PricedEmbedder
 from zemble.chunking.capsule import embedding_text
-from zemble.embedding.cache import EmbeddingCache, text_hash
+from zemble.embedding.cache import CachingEmbedder, EmbeddingCache, text_hash
 from zemble.embedding.preflight import embed_status
 from zemble.embedding.registry import ResolvedEmbedder
 from zemble.index import ScopeRefused, ZembleIndex
@@ -20,14 +20,21 @@ from zemble.types import ContentType
 FAMILY = "voyage:voyage-4-lite"
 
 
+def resolve_to(monkeypatch: pytest.MonkeyPatch, provider: PricedEmbedder, scheme: str) -> None:
+    """Resolve every spec to this provider behind the cache, the way the registry wraps a paid one."""
+    monkeypatch.setattr(
+        "zemble.embedding.preflight.build_embedder",
+        lambda spec: ResolvedEmbedder(
+            spec=spec, embedder=CachingEmbedder(provider, FAMILY), scheme=scheme, family=FAMILY
+        ),
+    )
+
+
 @pytest.fixture
 def paid_embedder(monkeypatch: pytest.MonkeyPatch) -> PricedEmbedder:
     """Resolve every spec to one remote-looking embedder, so no provider is ever contacted."""
     embedder = PricedEmbedder(dimensions=8)
-    monkeypatch.setattr(
-        "zemble.embedding.preflight.build_embedder",
-        lambda spec: ResolvedEmbedder(spec=spec, embedder=embedder, scheme="voyage", family=FAMILY),
-    )
+    resolve_to(monkeypatch, embedder, "voyage")
     return embedder
 
 
@@ -165,10 +172,7 @@ def test_embed_status_reads_the_cache_of_a_model_whose_width_needs_a_probe(
         declared_dimensions = None
 
     embedder = UndeclaredWidth(dimensions=8)
-    monkeypatch.setattr(
-        "zemble.embedding.preflight.build_embedder",
-        lambda spec: ResolvedEmbedder(spec=spec, embedder=embedder, scheme="openai", family=FAMILY),
-    )
+    resolve_to(monkeypatch, embedder, "openai")
 
     # 1. Nothing is declared, and cold it is honestly the whole tree.
     cold = embed_status(tmp_project)

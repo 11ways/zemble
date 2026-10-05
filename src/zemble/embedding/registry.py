@@ -154,20 +154,44 @@ def caching_enabled() -> bool:
     return os.environ.get(CACHE_ENV, "1").strip().lower() not in {"0", "false", "no"}
 
 
+def build_provider(spec: str) -> tuple[Embedder, str, str]:
+    """Build the bare provider for a spec, bypassing both the local cache and an embedding server.
+
+    The embedding server buys through this, so its own provider calls can never be routed back
+    through a client of itself.
+
+    :param spec: The spec string.
+    :return: The embedder, its scheme, and its cache family key.
+    """
+    return _build(spec)
+
+
 def build_embedder(spec: str) -> ResolvedEmbedder:
     """Build an embedder from a spec and keep its scheme and cache family alongside it.
 
     The family (scheme plus model, no dimensions) is what the sqlite cache file and the
-    price table are keyed by, and neither can be recovered from an :class:`Embedder`.
+    price table are keyed by, and neither can be recovered from an :class:`Embedder`. A paid
+    family goes through the embedding server when ``ZEMBLE_EMBED_SERVER`` names one, whatever
+    ``ZEMBLE_EMBED_CACHE`` says, because the server always caches; otherwise through the local
+    sqlite cache.
 
     :param spec: The spec string.
     :return: The embedder and its keys.
     """
     embedder, scheme, family = _build(spec)
-    if scheme in _CACHED_SCHEMES and caching_enabled():
-        from zemble.embedding.cache import CachingEmbedder
+    if scheme in _CACHED_SCHEMES:
+        from zemble.embedding.wire import server_settings
 
-        embedder = CachingEmbedder(embedder, family)
+        settings = server_settings()
+        if settings is not None:
+            from zemble.embedding.served import ServerEmbedder
+
+            served = ServerEmbedder(spec, family, settings, embedder)
+            return ResolvedEmbedder(spec=spec, embedder=served, scheme=scheme, family=family)
+        if caching_enabled():
+            from zemble.embedding.cache import CachingEmbedder
+
+            embedder = CachingEmbedder(embedder, family)
     return ResolvedEmbedder(spec=spec, embedder=embedder, scheme=scheme, family=family)
 
 

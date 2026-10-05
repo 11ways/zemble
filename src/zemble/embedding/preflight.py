@@ -17,7 +17,7 @@ from pathlib import Path
 
 from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.embedding.base import declared_dimensions, is_remote
-from zemble.embedding.cache import EmbeddingCache, text_hash
+from zemble.embedding.cache import text_hash
 from zemble.embedding.pricing import (
     applicable_budget_usd,
     bill_refusal,
@@ -29,7 +29,7 @@ from zemble.embedding.pricing import (
     pending_purchase,
     price_per_million,
 )
-from zemble.embedding.registry import build_embedder, caching_enabled, resolve_embedder_spec
+from zemble.embedding.registry import build_embedder, resolve_embedder_spec
 from zemble.types import ContentType
 
 
@@ -158,16 +158,12 @@ def embed_status(
     covered: set[str] = set()
     lookup_seconds = 0.0
     digests = [text_hash(text) for text in texts]
-    if remote and caching_enabled():
+    # The buyer answers where its vectors live: a local sqlite file, or the embedding server.
+    stored_digests = getattr(resolved.embedder, "stored_digests", None)
+    if remote and stored_digests is not None:
         started = time.monotonic()
-        cache = EmbeddingCache(resolved.family)
-        cache_path = str(cache.path)
-        try:
-            width = cache.usable_width(dimensions)
-            if width is not None:
-                covered = cache.covered(digests, width)
-        finally:
-            cache.close()
+        cache_path = str(resolved.embedder.store_location)
+        covered = stored_digests(digests)
         lookup_seconds = time.monotonic() - started
 
     # AIDEV-NOTE: WHO buys is a question for the buyer, never for this report: the caching

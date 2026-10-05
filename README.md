@@ -293,6 +293,16 @@ zemble daemon start
 zemble daemon stop
 ```
 
+The shared embedding server ([docs/embed-server.md](docs/embed-server.md)):
+
+```bash
+zemble embed-server add-key --label aeor       # on the server host, once per client
+zemble embed-server run --host 0.0.0.0         # on the server host
+zemble embed-server check                      # on a client: what the server holds
+zemble embed-server push --remove-local        # on a client: upload its vectors, drop the local file
+zemble embed-server gc --dry-run               # on the server host
+```
+
 `path` defaults to the current directory. The graph and evidence commands exit `0` when
 they answered, `1` when nothing matched and `2` when the name was ambiguous, with the
 candidates on stderr; `zemble home` exits `1` when nothing matched at all.
@@ -490,6 +500,10 @@ zemble search "auth flow" ./my-project --embedder openai:http://localhost:11434/
 Mixing embedders in one index is refused loudly, never silently blended. See
 [docs/embedders.md](docs/embedders.md) for the grammar, the environment variables, the
 cache and the cost notes.
+
+Several machines can share one vector cache and one provider key through
+`zemble embed-server`, so a chunk is paid for once across all of them; see
+[docs/embed-server.md](docs/embed-server.md).
 
 ### Java compiler facts
 

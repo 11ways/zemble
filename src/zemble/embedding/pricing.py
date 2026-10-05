@@ -297,7 +297,7 @@ def embedder_family(embedder: object) -> str:
     Reading that spec can cost a provider round trip on a model with no documented width, so a
     failure to name the family is reported as an unknown price rather than raised.
     """
-    family = getattr(getattr(embedder, "cache", None), "family", None)
+    family = getattr(embedder, "family", None)
     if isinstance(family, str):
         return family
     try:

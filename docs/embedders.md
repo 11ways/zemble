@@ -148,6 +148,9 @@ changed is never paid for twice.
 Model2Vec is deliberately *not* wrapped: embedding locally is faster than a
 sqlite round trip.
 
+With `ZEMBLE_EMBED_SERVER` set, a paid family skips this local file and asks the shared
+embedding server instead; see [the embedding server doc](embed-server.md).
+
 ## The capsule path is repo-relative
 
 The cache is keyed by the text a chunk is embedded as, and that text starts with the

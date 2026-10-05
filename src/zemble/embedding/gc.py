@@ -162,6 +162,33 @@ def collect_embeddings(cache_folder: Path, *, grace_days: int, dry_run: bool) ->
     return reports
 
 
+def collect_unused(directory: Path, *, grace_days: int, dry_run: bool) -> list[EmbeddingSweep]:
+    """Sweep the vectors nobody used within the grace period, for a cache no saved index references.
+
+    The embedding server's files are such a cache: its clients' indexes live on other machines,
+    so the use stamps it writes on every serve are the only evidence of what is still wanted.
+
+    :param directory: The folder holding the per-family sqlite files.
+    :param grace_days: Keep a vector stored or served within this many days; 0 keeps none.
+    :param dry_run: Report what would go, writing nothing.
+    :return: One report per cache file, in name order.
+    """
+    reports: list[EmbeddingSweep] = []
+    for path in sorted(directory.glob("*.sqlite")) if directory.is_dir() else []:
+        report = EmbeddingSweep(path=path, size_before=file_size(path), cutoff_day=today() - grace_days)
+        reports.append(report)
+        found = holders(path, exclude_self=True)
+        if found is None:
+            report.refused = "cannot tell which processes have it open (no /proc)"
+            continue
+        report.holders = found
+        if found and not dry_run:
+            report.refused = f"held open by pid {', '.join(map(str, found))}; stop the embedding server first"
+            continue
+        _sweep_file(report, set(), dry_run=dry_run)
+    return reports
+
+
 def _sweep_file(report: EmbeddingSweep, marked: set[str], *, dry_run: bool) -> None:
     """Count, and unless dry, delete and VACUUM, the rows of one file that are neither marked nor recent."""
     if dry_run:
