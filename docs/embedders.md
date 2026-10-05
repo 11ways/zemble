@@ -122,6 +122,12 @@ changed is never paid for twice.
 - Location: `~/.cache/zemble/embeddings/<family>.sqlite` (or
   `$ZEMBLE_CACHE_LOCATION/embeddings/`, or the platform cache dir).
 - One file per embedder **family** (scheme plus model, without dimensions).
+- WAL readers leave no open transaction between preflight and provider work.
+  Vector batches and their use stamps commit atomically under `BEGIN IMMEDIATE`;
+  contending writers use SQLite's bounded 30-second busy timeout, without retrying
+  provider calls. A per-family `.sqlite.init.lock` serializes first-open journal
+  transitions and schema setup. Garbage collection selects and deletes under one
+  writer transaction.
 - Table: `(text_sha256, dims, vec)`, primary key `(text_sha256, dims)`.
 - Matryoshka fallback: a request at 256 dimensions is served by slicing a stored
   1024-dimension vector of the same text and renormalizing. The slice is not

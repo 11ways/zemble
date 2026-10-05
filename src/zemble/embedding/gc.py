@@ -169,6 +169,9 @@ def _sweep_file(report: EmbeddingSweep, marked: set[str], *, dry_run: bool) -> N
     else:
         connection = connect_cache(report.path)
     try:
+        if not dry_run:
+            # Select doomed rows under the same writer lease that deletes them.
+            connection.execute("BEGIN IMMEDIATE")
         has_stamps = _has_table(connection, "used")
         # A vector stored before stamps existed counts as used the day they began, never as
         # unused forever: an age nobody recorded fails closed.

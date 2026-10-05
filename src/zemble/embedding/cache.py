@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import re
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +34,9 @@ FLUSH_EVERY = 512
 #: The WAL is truncated back to this size whenever a checkpoint empties it. Without a limit
 #: it keeps the high-water mark of the largest write burst forever (720 MB measured).
 JOURNAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
+
+#: Native SQLite lock waiting is bounded; provider work never holds a database transaction.
+BUSY_TIMEOUT_SECONDS = 30.0
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -82,21 +87,40 @@ def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+@contextmanager
+def _transaction(connection: sqlite3.Connection, *, immediate: bool = True) -> Iterator[None]:
+    """Acquire the writer before reading, commit one short batch, and roll back any failed batch."""
+    connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+    try:
+        yield
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+
 def connect_cache(path: Path) -> sqlite3.Connection:
     """Open (creating if needed) one family's cache file: WAL mode, a bounded WAL, the stamp tables."""
-    connection = sqlite3.connect(path, check_same_thread=False)
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA synchronous=NORMAL")
-    connection.execute(f"PRAGMA journal_size_limit={JOURNAL_SIZE_LIMIT_BYTES}")
-    connection.executescript(_SCHEMA)
-    # Read first: a no-op INSERT OR IGNORE still takes the write lock, and would make every open
-    # wait on whichever process is in the middle of a write burst.
-    if stamps_since(connection) is None:
-        connection.execute(
-            "INSERT OR IGNORE INTO cache_meta (key, value) VALUES (?, ?)", (STAMPS_SINCE_KEY, str(today()))
-        )
-        connection.commit()
-    return connection
+    connection = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=BUSY_TIMEOUT_SECONDS)
+    try:
+        # A journal-mode transition on a brand-new family must not race another opener.
+        # This lock covers initialization only, never embedding or normal cache reads.
+        with path.with_suffix(path.suffix + ".init.lock").open("a+b") as initialization:
+            fcntl.flock(initialization.fileno(), fcntl.LOCK_EX)
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            connection.execute(f"PRAGMA journal_size_limit={JOURNAL_SIZE_LIMIT_BYTES}")
+            connection.executescript(_SCHEMA)
+            if stamps_since(connection) is None:
+                with _transaction(connection):
+                    connection.execute(
+                        "INSERT OR IGNORE INTO cache_meta (key, value) VALUES (?, ?)",
+                        (STAMPS_SINCE_KEY, str(today())),
+                    )
+        return connection
+    except BaseException:
+        connection.close()
+        raise
 
 
 def stamps_since(connection: sqlite3.Connection) -> int | None:
@@ -171,11 +195,14 @@ class EmbeddingCache:
         if not digests:
             return set()
         with self._lock:
-            self._connection.execute("CREATE TEMP TABLE IF NOT EXISTS wanted (digest TEXT PRIMARY KEY)")
-            self._connection.execute("DELETE FROM wanted")
-            self._connection.executemany(
-                "INSERT OR IGNORE INTO wanted (digest) VALUES (?)", [(digest,) for digest in digests]
-            )
+            # Group temporary writes, then release their transaction BEFORE reading the main DB.
+            # Otherwise this lookup pins a WAL snapshot until a later paid embedding tries to write.
+            with _transaction(self._connection, immediate=False):
+                self._connection.execute("CREATE TEMP TABLE IF NOT EXISTS wanted (digest TEXT PRIMARY KEY)")
+                self._connection.execute("DELETE FROM wanted")
+                self._connection.executemany(
+                    "INSERT OR IGNORE INTO wanted (digest) VALUES (?)", [(digest,) for digest in digests]
+                )
             rows = self._connection.execute(
                 "SELECT w.digest FROM wanted w JOIN embeddings e ON e.text_sha256 = w.digest WHERE e.dims >= ?",
                 (dims,),
@@ -244,12 +271,11 @@ class EmbeddingCache:
         if not rows:
             return
         payload = [(digest, dims, np.asarray(vector, dtype=np.float32).tobytes()) for digest, dims, vector in rows]
-        with self._lock:
+        with self._lock, _transaction(self._connection):
             self._connection.executemany(
                 "INSERT OR REPLACE INTO embeddings (text_sha256, dims, vec) VALUES (?, ?, ?)", payload
             )
             self._stamp({digest for digest, _dims, _vector in rows})
-            self._connection.commit()
 
     def touch(self, digests: Iterable[str]) -> None:
         """Stamp served vectors as used today, so a garbage collection keeps them through its grace period.
@@ -259,9 +285,8 @@ class EmbeddingCache:
         distinct = set(digests)
         if not distinct:
             return
-        with self._lock:
+        with self._lock, _transaction(self._connection):
             self._stamp(distinct)
-            self._connection.commit()
 
     def _stamp(self, digests: set[str]) -> None:
         """Write today's stamp for these hashes; a stamp already at today is left unwritten."""
