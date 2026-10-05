@@ -185,8 +185,8 @@ handed to `build_graph(changed_paths=...)`, where it replaces two walks: the sou
 walk and the `**/build/zemble/*.jsonl` discovery of the graph's facts files. The
 watcher can stand in for the second because its ignore rules always admit a facts
 file by name, whatever `.gitignore` says about the `build/` directory it lives in.
-The full walk is still what a cold build, `zemble daemon refresh` and the CLI's cache
-validation use: a walk discovers changes, a watcher reports them, and only a reported
+The full walk is still what a cold build, a restarted daemon's first load and the CLI's
+cache validation use: a walk discovers changes, a watcher reports them, and only a reported
 set may skip the discovery.
 
 A named path is still judged the way the walk judges one - extension, `.gitignore`,
@@ -405,8 +405,9 @@ edge read back out of sqlite for one changed file - and it is what to attack nex
   there ([storage](graph.md#durability)).
 - **A change set is trusted, not verified.** Only the paths the watcher reports are
   looked at, so an event the watcher never delivered leaves the index and the graph
-  stale until something else touches that file. `zemble daemon refresh` and every cold
-  build still walk the tree, which is the way back to a known-good state.
+  stale until something else touches that file. `zemble daemon restart` is the way back
+  to a known-good state: the next request loads the index through a full walk, which
+  rebuilds it when any file is newer than it or the set of files moved.
 - **The symbol graph is still the slow half.** A one-file edit costs ~40 s of graph
   refresh against a workspace this size, essentially all of it the resolve pass; the
   index is ready in a quarter of a second. The graph refresh does not block queries
