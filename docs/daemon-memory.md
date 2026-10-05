@@ -209,6 +209,7 @@ private memory of the graph worker on the same workspace:
 | 1 file changed | 41 MiB | 41 MiB |
 | 1,000 files changed | 552 MiB | 162 MiB |
 | From nothing (12,458 files, 2.06M edges) | 2,184 MiB | 189 MiB |
+| Every facts file moved (163 files, 903k fact edges) | 3,388 MiB | 338 MiB |
 
 The worker's ceilings dropped accordingly: 2048 MiB construction, 4096 MiB aggregate.
 

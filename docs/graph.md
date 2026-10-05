@@ -409,9 +409,9 @@ of them does any more.
 (`zemble/graph/lookup.py`). `SqliteLookup` answers each question with an indexed
 query and caches what it touched: by id, by qualified name, by simple name, by
 container, by file, by Hawkeye registration key, and the resolved supertypes of one
-type. `MemoryLookup` builds every dictionary in one pass over the symbol list, and is
-used only when mapping a facts file has already read the whole table; on the zenit
-workspace it cost ~340 MiB and bought no speed over the indexed lookup.
+type. `MemoryLookup` builds every dictionary in one pass over the symbol list; builds
+never use it, because on the zenit workspace it cost ~340 MiB and bought no speed over
+the indexed lookup.
 
 **The build itself is batched**, so its memory follows a batch, not the workspace.
 Changed files are extracted `_BATCH_FILES` (100) at a time; their symbols go into
@@ -516,8 +516,19 @@ debounce plus that number after it is saved.
 The walk lane costs the source walk (0.6 s) plus the facts discovery walk (1.4 s),
 the latter because `**/build/zemble/*.jsonl` can prune nothing - `**` keeps every
 directory alive - so it descends the whole tree. A facts file rewrite is the
-expensive lane by design: mapping it needs the whole symbol table and a ref mapper
-built over it, and there is no smaller unit than the facts file it rewrote.
+expensive lane by design: there is no smaller unit than the facts file it rewrote, and
+every file it covers is re-extracted and re-resolved.
+
+Mapping facts is bounded the same way the build is. Facts files are parsed, mapped and
+released one at a time (a moved one twice: once for its `symbol` facts, which every
+other file's refs may need, once to map it), refs map through a `SqliteLookup` that
+forgets after every facts file, the fact edges wait in the scratch database
+(`overlay_edges`) and are read back per batch, and skipped facts are counted by what
+they are reported under rather than kept one record each. With every facts file of
+the zenit workspace moved on archdev (163 files, 795 MB of JSONL, 903k fact edges,
+8,274 files re-resolved) the refresh peaked at 3,388 MiB of private memory before and
+338 MiB after, in about the same time (348 s before, 384 s after on a busy host); the
+scratch database grew to ~2.2 GB on disk meanwhile.
 
 Two constants were worth more than any of the structure. `_relative_to_workspace`
 called `Path.resolve` - a realpath syscall - once per fact line, 1.4 M times per
