@@ -5,6 +5,7 @@ from __future__ import annotations
 import mmap
 import os
 import threading
+from array import array
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -44,6 +45,54 @@ def map_blob(path: Path) -> bytes | mmap.mmap:
         if path.stat().st_size == 0:
             return b""
         return mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
+
+
+#: How much of a mapped blob one copy step reads; a reused run is copied, never materialized.
+_COPY_BYTES = 8 * 1024 * 1024
+
+
+class BlobWriter:
+    """Append entries to a `<name>.bin` blob on disk, keeping only their end offsets in memory.
+
+    The layout is the one :class:`StringTable` reads: the blob plus `<name>_offsets.npy`.
+    """
+
+    def __init__(self, directory: Path, name: str) -> None:
+        """Start the blob *name* in *directory*, replacing one that is there."""
+        blob_name, offsets_name = StringTable.file_names(name)
+        self._offsets_path = directory / offsets_name
+        self._handle = open(directory / blob_name, "wb")  # noqa: SIM115 - closed by finish()
+        self._ends = array("q")
+        self._size = 0
+
+    def __len__(self) -> int:
+        """The number of entries written so far."""
+        return len(self._ends)
+
+    def append(self, data: bytes) -> None:
+        """Write one entry."""
+        self._handle.write(data)
+        self._size += len(data)
+        self._ends.append(self._size)
+
+    def append_range(self, blob: bytes | mmap.mmap, offsets: npt.NDArray[np.int64], start: int, end: int) -> None:
+        """Copy entries *start* to *end* (exclusive) of another blob verbatim, in bounded steps."""
+        if end <= start:
+            return
+        first, last = int(offsets[start]), int(offsets[end])
+        for position in range(first, last, _COPY_BYTES):
+            self._handle.write(blob[position : min(last, position + _COPY_BYTES)])
+        shifted = np.asarray(offsets[start + 1 : end + 1], dtype=np.int64) + (self._size - first)
+        self._ends.frombytes(shifted.tobytes())
+        self._size += last - first
+
+    def finish(self) -> None:
+        """Close the blob and write its offsets, with the leading zero."""
+        self._handle.close()
+        offsets = np.zeros(len(self._ends) + 1, dtype=np.int64)
+        if self._ends:
+            offsets[1:] = np.frombuffer(self._ends, dtype=np.int64)
+        np.save(self._offsets_path, offsets)
 
 
 def offsets_of(items: Sequence[bytes]) -> npt.NDArray[np.int64]:

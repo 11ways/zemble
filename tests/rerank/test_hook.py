@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 import pytest
 from vicinity.backends.basic import BasicArgs
 
-from tests.conftest import make_chunk
-from zemble.index.bm25 import BM25
+from tests.conftest import make_chunk, write_bm25
 from zemble.index.dense import SelectableBasicBackend
 from zemble.rerank.apply import apply_reranker, passage_text
 from zemble.rerank.registry import PassageMode, RerankSettings
@@ -127,14 +127,10 @@ def hybrid_embeddings(hybrid_chunks: list[Chunk]) -> npt.NDArray[np.float32]:
 
 
 def test_search_hook_pulls_a_deep_candidate_into_the_top(
-    hybrid_chunks: list[Chunk], hybrid_embeddings: npt.NDArray[np.float32], mock_embedder: object
+    hybrid_chunks: list[Chunk], hybrid_embeddings: npt.NDArray[np.float32], mock_embedder: object, tmp_path: Path
 ) -> None:
     """A reranker window wider than top_k can promote a candidate the fusion ranked below it."""
-    bm25 = BM25()
-    doc_ids = [f"c{i}" for i in range(len(hybrid_chunks))]
-    for doc_id, chunk in zip(doc_ids, hybrid_chunks):
-        bm25.add_document(doc_id, tokenize(chunk.content))
-    bm25.set_doc_order(doc_ids)
+    bm25 = write_bm25(tmp_path, {f"c{i}": tokenize(chunk.content) for i, chunk in enumerate(hybrid_chunks)})
     semantic = SelectableBasicBackend(hybrid_embeddings, BasicArgs())
 
     baseline = search("token handler", mock_embedder, semantic, bm25, hybrid_chunks, top_k=2)

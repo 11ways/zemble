@@ -16,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 import orjson
 
-from zemble.index.columnar import StringTable, atomic_bytes, atomic_save
+from zemble.index.columnar import StringTable
 from zemble.ranking.boosting import NAMESPACE_CHAIN_RE, defined_symbol_names
 from zemble.types import Chunk
 
@@ -64,9 +64,8 @@ class _NameTable:
             count=int(counts.sum()),
         )
         StringTable.save(path, prefix, names)
-        # Replaced, never truncated: a warm process has these columns mapped (see save_chunks).
-        atomic_save(path / f"{prefix}{_OFFSETS_SUFFIX}", offsets)
-        atomic_save(path / f"{prefix}{_CHUNKS_SUFFIX}", chunk_ids)
+        np.save(path / f"{prefix}{_OFFSETS_SUFFIX}", offsets)
+        np.save(path / f"{prefix}{_CHUNKS_SUFFIX}", chunk_ids)
 
     @classmethod
     def load(cls, path: Path, prefix: str) -> "_NameTable":
@@ -81,10 +80,11 @@ class _NameTable:
 class SymbolDefinitions:
     """Name -> chunk-index lookup replacing the per-query definition scan."""
 
-    def __init__(self, general: _NameTable, sql: _NameTable) -> None:
-        """Hold the general (case-sensitive) and SQL (lowercased) tables."""
+    def __init__(self, general: _NameTable, sql: _NameTable, n_chunks: int) -> None:
+        """Hold the general (case-sensitive) and SQL (lowercased) tables over *n_chunks* chunks."""
         self._general = general
         self._sql = sql
+        self.n_chunks = n_chunks
 
     def chunks_defining(self, names: Iterable[str]) -> npt.NDArray[np.int32] | None:
         """Return the ascending chunk indices defining any of *names*.
@@ -116,24 +116,65 @@ class SymbolDefinitions:
         meta = orjson.loads((path / _META_NAME).read_bytes())
         if meta.get("format") != _SYMBOLS_FORMAT:
             raise ValueError(f"Unsupported symbol format {meta.get('format')!r}; expected {_SYMBOLS_FORMAT}")
-        return cls(_NameTable.load(path, _GENERAL), _NameTable.load(path, _SQL))
+        return cls(_NameTable.load(path, _GENERAL), _NameTable.load(path, _SQL), int(meta["n_chunks"]))
+
+
+class SymbolWriter:
+    """Collect definitions in chunk order: a new chunk is scanned once, a carried-over one keeps its names."""
+
+    def __init__(self, directory: Path, previous: SymbolDefinitions | None = None) -> None:
+        """Start writing into *directory*, reusing definitions from *previous* when it is given."""
+        self._directory = directory
+        self._previous = previous
+        self._remap = np.full(previous.n_chunks, -1, dtype=np.int64) if previous is not None else None
+        self._general: dict[str, list[int]] = {}
+        self._sql: dict[str, list[int]] = {}
+        self._count = 0
+
+    def add(self, content: str) -> None:
+        """Scan one new chunk as the next one."""
+        general_names, sql_names = defined_symbol_names(content)
+        for name in general_names:
+            self._general.setdefault(name, []).append(self._count)
+        for name in sql_names:
+            self._sql.setdefault(name, []).append(self._count)
+        self._count += 1
+
+    def reuse(self, start: int, count: int) -> None:
+        """Carry the previous chunks *start* to *start* + *count* over as the next ones."""
+        if self._remap is None:
+            raise ValueError("this writer has no previous definitions to reuse")
+        self._remap[start : start + count] = np.arange(self._count, self._count + count)
+        self._count += count
+
+    def finish(self) -> None:
+        """Write the lookup tables."""
+        self._directory.mkdir(parents=True, exist_ok=True)
+        tables = ((_GENERAL, self._general), (_SQL, self._sql))
+        for prefix, postings in tables:
+            if self._previous is not None and self._remap is not None:
+                _carry(self._previous._general if prefix == _GENERAL else self._previous._sql, self._remap, postings)
+            _NameTable.save(self._directory, prefix, postings)
+        (self._directory / _META_NAME).write_bytes(orjson.dumps({"format": _SYMBOLS_FORMAT, "n_chunks": self._count}))
+
+
+def _carry(table: _NameTable, remap: npt.NDArray[np.int64], postings: dict[str, list[int]]) -> None:
+    """Add the carried-over chunks of a previous table to *postings*, at their new rows."""
+    offsets = np.asarray(table.offsets)
+    moved = remap[np.asarray(table.chunks, dtype=np.int64)] if len(table.chunks) else np.empty(0, dtype=np.int64)
+    for row, name in enumerate(table.names.to_list()):
+        rows = moved[offsets[row] : offsets[row + 1]]
+        rows = rows[rows >= 0]
+        if len(rows):
+            postings.setdefault(name, []).extend(rows.tolist())
 
 
 def save_symbol_definitions(path: Path, chunks: Sequence[Chunk]) -> None:
     """Scan every chunk for definitions and write the lookup tables into *path*."""
-    path.mkdir(parents=True, exist_ok=True)
-    general: dict[str, list[int]] = {}
-    sql: dict[str, list[int]] = {}
-    for index, chunk in enumerate(chunks):
-        general_names, sql_names = defined_symbol_names(chunk.content)
-        for name in general_names:
-            general.setdefault(name, []).append(index)
-        for name in sql_names:
-            sql.setdefault(name, []).append(index)
-
-    _NameTable.save(path, _GENERAL, general)
-    _NameTable.save(path, _SQL, sql)
-    atomic_bytes(path / _META_NAME, orjson.dumps({"format": _SYMBOLS_FORMAT, "n_chunks": len(chunks)}))
+    writer = SymbolWriter(path)
+    for chunk in chunks:
+        writer.add(chunk.content)
+    writer.finish()
 
 
 def symbol_files(path: Path) -> list[Path]:

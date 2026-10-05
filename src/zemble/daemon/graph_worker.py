@@ -8,11 +8,11 @@ import time
 
 
 def main() -> None:
-    """Set the worker's explicit virtual limit before importing graph machinery."""
+    """Set the worker's private-memory limit before importing graph machinery."""
     root, budget = sys.argv[1:]
     limit = int(budget) * 1024 * 1024
-    _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
+    _soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+    resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
 
     def stop(_signal: int, _frame: object) -> None:
         raise KeyboardInterrupt("graph worker shutdown")

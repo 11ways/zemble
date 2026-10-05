@@ -319,7 +319,7 @@ The byte estimate is a *lower* bound on what is embedded - a context capsule add
 header to every chunk, measured at +21% on this repository and +52% on the small test
 fixture tree. That is honest for work, and void for money.
 
-Both scope guards sit at `create_index_from_path`, the one construction seam every index
+Both scope guards sit at `write_index`, the one construction seam every index
 build passes, so the daemon's watcher rebuild is judged by exactly the same rule as the
 CLI. Before that they sat above `ZembleIndex.from_path` only, and the daemon re-chunked
 and re-embedded, unguarded, the very tree the CLI had just been refused.
@@ -406,7 +406,7 @@ Both refusals name the same three remedies, in the same order, from one helper: 
 paths, narrow the root, or raise/confirm the ceiling that refused. The first two work from
 inside a tool call; the third needs the environment of whichever process builds.
 
-- The check sits at the seams that BUY document vectors - `index/dense.py::embed_chunks` for
+- The check sits at the seams that BUY document vectors - `index/create.py::write_index` for
   an index build, `dedup/detect.py` for logic-mode duplication - and asks the embedder what
   it would actually have to buy, so a caching embedder answers with its uncached set and a
   bare one with everything. It is per build, never per 512-text slice, and it deliberately

@@ -9,13 +9,14 @@ leaves its old generation available, reports the deferral in status, and retains
 one full-rescan bit for a retry after 30 seconds. Initial loads without room return
 a memory refusal, not an in-process fallback.
 
-The Linux allocation backstop is `RLIMIT_AS` at that ceiling, or a stricter inherited
-limit; status reports the effective lower ceiling. This is deliberately
-more conservative than RSS: mappings, allocator reservations and thread stacks count
-even when their pages are not resident. Admission checks both RSS and address space;
-a missed estimate still cannot allocate beyond the process ceiling. An allocation
-refusal during rebuilding preserves the old generation. A ceiling below startup
-address space refuses startup with a diagnostic. Detached daemons use one BLAS/OMP
+The budget counts private memory (`VmData`: heap and private writable mappings), and
+the Linux allocation backstop is `RLIMIT_DATA` at that ceiling, or a stricter inherited
+limit; status reports the effective lower ceiling. Index stores are mapped files, page
+cache the kernel can drop, so they count against neither; counting them (as address
+space, as this used to) made one large mapped index look like gigabytes of allocation and
+refused a second root. A missed estimate still cannot allocate beyond the ceiling. An
+allocation refusal during rebuilding preserves the old generation. A ceiling below
+startup private memory refuses startup with a diagnostic. Detached daemons use one BLAS/OMP
 thread and at most two glibc arenas; graph extraction uses one worker, not a fleet
 of child interpreters.
 
@@ -40,7 +41,7 @@ The daemon rereads its env file at startup using an explicit path. An inherited
 added settings. Explicit shell environment values still override the file, and an
 explicit `--max-indexes` overrides both. A file edit does not reconfigure an already
 running daemon: restart that daemon, not every MCP client. Status prints the effective
-index count and memory budget; JSON also includes `virtual_mb` and `quiet_seconds`.
+index count and memory budget; JSON also includes `private_mb` and `quiet_seconds`.
 
 ## Causes
 
@@ -177,3 +178,24 @@ shared content stores and filter composition, quiet-period coalescing, capped qu
 global single-flight work, eviction cleanup, mapped generations, model single-flight
 loading, real allocation refusal, bounded caches, ignored-artifact rejection, and
 stale inherited env flags with explicit-environment precedence.
+
+## Streaming builds (2026-10-05)
+
+A build materialized the whole index before saving it: the vector matrix copied to the
+heap and normalized into a second copy, every BM25 posting as a Python dict, every chunk
+blob joined in memory, and a save that folded the whole BM25 corpus again. One edited
+file cost a copy of the index. Builds now stream their generation to disk (see
+[the daemon doc](daemon.md#rebuilding-beside-the-index-that-is-being-served)). Peak
+private memory on the 177,780-chunk zenit workspace, measured phase by phase:
+
+| Build | Before | After |
+| --- | --- | --- |
+| Cold load, index current | 38 MiB | 32 MiB |
+| Cold load, 1 file changed | 1,509 MiB | 180 MiB |
+| Cold load, 3,000 files changed | 1,996 MiB | 222 MiB |
+| Daemon rebuild, 1 file changed | 688 MiB | 169 MiB |
+| Build from nothing | not measured (> 2 GiB) | 283 MiB |
+
+Admission reserves 192 MiB plus three bytes per byte of new source, measured against the
+stored manifest of the root that will answer, not the whole tree.
+

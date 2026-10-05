@@ -84,10 +84,7 @@ def test_embed_status_journey(tmp_project: Path, paid_embedder: PricedEmbedder) 
     assert status.cached == 2, "step 3: a matryoshka-wider vector counts as cached"
 
     # 4. With an index on disk, unchanged files are reusable and are never even looked up.
-    from zemble.cache import save_index_to_cache
-
-    index = ZembleIndex.from_path(tmp_project, embedder=paid_embedder)
-    save_index_to_cache(index, str(tmp_project))
+    ZembleIndex.from_path(tmp_project, embedder=paid_embedder)
     status = embed_status(tmp_project)
     assert status.reusable == len(texts), "step 4: every unchanged file is reused from the previous index"
     assert (status.cached, status.uncached, status.estimated_tokens) == (0, 0, 0), "step 4: a warm build is free"

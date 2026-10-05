@@ -177,8 +177,7 @@ async def test_budget_evicts_idle_lru_but_not_an_active_query(tmp_project, tmp_p
     second, index = await instance.index_for({"path": str(other)})
     del index
     instance.max_rss_mb = 150
-    monkeypatch.setattr(server, "virtual_mb", lambda: 0)
-    monkeypatch.setattr(server, "_rss_mb", lambda: 100 * len(instance.cache.loaded()))
+    monkeypatch.setattr(server, "private_mb", lambda: 100 * len(instance.cache.loaded()))
     instance._query_keys[asyncio.current_task()] = second
     assert instance._admit(30)
     assert first not in instance.cache._tasks and second in instance.cache._tasks
@@ -384,7 +383,6 @@ async def test_repeated_rebuilds_return_to_mapped_stores_without_heap_deltas(tmp
         index = instance.cache.loaded()[0][1]
         assert isinstance(index.chunks, ChunkList)
         assert isinstance(index._semantic_index.vectors, np.memmap)
-        assert index._bm25_index.delta_documents == 0
         assert not index._views
         del index
 
@@ -394,13 +392,13 @@ def test_allocation_backstop_refuses_a_real_oversized_allocation():
     code = """
 import json
 import sys
-from zemble.daemon.memory import allocation_backstop, virtual_mb
-budget = int(virtual_mb()) + 32
+from zemble.daemon.memory import allocation_backstop, private_mb
+budget = int(private_mb()) + 32
 allocation_backstop(budget)
 try:
     scratch = bytearray(128 * 1024 * 1024)
 except MemoryError:
-    sys.stdout.write(json.dumps({'refused': True, 'budget_mb': budget, 'virtual_mb': virtual_mb()}))
+    sys.stdout.write(json.dumps({'refused': True, 'budget_mb': budget, 'private_mb': private_mb()}))
 else:
     raise AssertionError('allocation backstop did not bind')
 """
@@ -412,14 +410,14 @@ else:
         env={**os.environ, "OPENBLAS_NUM_THREADS": "1"},
     )
     payload = json.loads(result.stdout)
-    assert payload["refused"] and payload["virtual_mb"] <= payload["budget_mb"]
+    assert payload["refused"] and payload["private_mb"] <= payload["budget_mb"]
 
 
 def test_backstop_reports_a_stricter_inherited_limit(monkeypatch):
     """Status must describe the effective ceiling even when the parent supplied a stricter ulimit."""
     from zemble.daemon import memory
 
-    monkeypatch.setattr(memory, "virtual_mb", lambda: 10)
+    monkeypatch.setattr(memory, "private_mb", lambda: 10)
     monkeypatch.setattr(memory.resource, "getrlimit", lambda kind: (512 * memory.MIB, 1024 * memory.MIB))
     applied = []
     monkeypatch.setattr(memory.resource, "setrlimit", lambda kind, value: applied.append(value))

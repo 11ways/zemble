@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from zemble.index.bm25 import BM25
-from zemble.types import Chunk, EmbeddingMatrix
+from zemble.index.chunk_store import ChunkList
+from zemble.index.symbols import SymbolDefinitions
+from zemble.types import EmbeddingMatrix
 
 CACHE_FORMAT_VERSION = 13  # Bump when the persisted index schema changes.
 
@@ -61,9 +62,10 @@ class FileManifestEntry:
 
 @dataclass
 class PreviousIndex:
-    """A previously built index, loaded for reuse during incremental reindexing."""
+    """The persisted generation a build carries unchanged files over from, every store mapped."""
 
-    chunks: Sequence[Chunk]
+    chunks: ChunkList
     vectors: EmbeddingMatrix
     manifest: dict[str, FileManifestEntry]
     bm25_index: BM25
+    definitions: SymbolDefinitions | None = None

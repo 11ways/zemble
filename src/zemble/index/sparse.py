@@ -19,7 +19,7 @@ def selector_to_mask(selector: npt.NDArray[np.int_] | None, size: int) -> npt.ND
 def enrich_for_bm25(chunk: Chunk, include_context: bool = False) -> str:
     """Append file path components to BM25 content to boost path-based queries.
 
-    Assumes ``chunk.file_path`` is already repo-relative (set by ``create_index_from_path``)
+    Assumes ``chunk.file_path`` is already repo-relative (set by ``write_index``)
     so machine-specific directory components are never indexed.
 
     :param chunk: The chunk to build a BM25 document for.

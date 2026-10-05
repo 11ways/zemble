@@ -8,8 +8,8 @@ materializing anything.
 
 from __future__ import annotations
 
-from bisect import bisect_right
-from collections.abc import Callable, Iterator, Sequence
+from array import array
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, overload
 
@@ -17,17 +17,17 @@ import numpy as np
 import numpy.typing as npt
 import orjson
 
-from zemble.index.columnar import StringTable, atomic_bytes, atomic_save, map_blob, offsets_of
+from zemble.index.columnar import BlobWriter, StringTable, map_blob
 from zemble.types import Chunk
 
 #: Bumped when the columnar chunk layout changes shape.
 _CHUNKS_FORMAT = 2
 
 _META_NAME = "chunks.json"
-_CONTENT_NAME = "content.bin"
-_CONTENT_OFFSETS_NAME = "content_offsets.npy"
-_CONTEXT_NAME = "context.bin"
-_CONTEXT_OFFSETS_NAME = "context_offsets.npy"
+_CONTENT = "content"
+_CONTEXT = "context"
+_CONTENT_NAME, _CONTENT_OFFSETS_NAME = StringTable.file_names(_CONTENT)
+_CONTEXT_NAME, _CONTEXT_OFFSETS_NAME = StringTable.file_names(_CONTEXT)
 _PATHS_TABLE = "paths"
 _PATH_IDS_NAME = "path_ids.npy"
 _LANGUAGES_TABLE = "languages"
@@ -127,121 +127,6 @@ class ChunkList(Sequence[Chunk]):
         return self._languages
 
 
-class SplicedChunks(Sequence[Chunk]):
-    """A chunk sequence stitched from runs of existing sequences, materializing nothing.
-
-    AIDEV-NOTE: this is what keeps a rebuilt index's chunks in the mapped columns. An
-    incremental build reuses almost every file verbatim, and copying those chunks into a list
-    turned the whole :class:`ChunkList` into ~150 MB of Python objects on the first file event,
-    per resident index. Adjacent runs of one source are merged and a spliced source is flattened
-    into its own runs, so a long-lived daemon keeps a handful of runs rather than one per file.
-    """
-
-    def __init__(self, runs: Sequence[tuple[Sequence[Chunk], int, int]]) -> None:
-        """Hold the runs; each is a source sequence, the row it starts at, and how many rows it covers."""
-        self._sources: list[Sequence[Chunk]] = []
-        self._starts: list[int] = []
-        self._offsets: list[int] = [0]
-        for source, start, count in runs:
-            for flat_source, flat_start, flat_count in self._flatten(source, start, count):
-                self._append(flat_source, flat_start, flat_count)
-        self._file_paths: list[str] | None = None
-        self._languages: list[str | None] | None = None
-
-    @staticmethod
-    def _flatten(source: Sequence[Chunk], start: int, count: int) -> Iterator[tuple[Sequence[Chunk], int, int]]:
-        """Expand a run over a spliced source into runs over that source's own sources."""
-        if not isinstance(source, SplicedChunks):
-            yield source, start, count
-            return
-        end = start + count
-        position = max(0, bisect_right(source._offsets, start) - 1)
-        while position < len(source._sources) and source._offsets[position] < end:
-            inner_source, inner_start = source._sources[position], source._starts[position]
-            run_start, run_end = source._offsets[position], source._offsets[position + 1]
-            overlap_start, overlap_end = max(start, run_start), min(end, run_end)
-            if overlap_start < overlap_end:
-                yield inner_source, inner_start + (overlap_start - run_start), overlap_end - overlap_start
-            position += 1
-
-    def _append(self, source: Sequence[Chunk], start: int, count: int) -> None:
-        """Add one run, extending the last one instead when it continues the same source."""
-        if count <= 0:
-            return
-        if self._sources and self._sources[-1] is source and self._starts[-1] + self._run_length(-1) == start:
-            self._offsets[-1] += count
-            return
-        self._sources.append(source)
-        self._starts.append(start)
-        self._offsets.append(self._offsets[-1] + count)
-
-    def _run_length(self, position: int) -> int:
-        """The number of rows the run at *position* covers."""
-        return self._offsets[position] - self._offsets[position - 1]
-
-    def __len__(self) -> int:
-        """The number of chunks."""
-        return self._offsets[-1]
-
-    @overload
-    def __getitem__(self, item: int) -> Chunk: ...
-
-    @overload
-    def __getitem__(self, item: slice) -> list[Chunk]: ...
-
-    def __getitem__(self, item: int | slice) -> Chunk | list[Chunk]:
-        """Materialize one chunk, or a list of chunks for a slice."""
-        if isinstance(item, slice):
-            return [self._chunk(row) for row in range(*item.indices(len(self)))]
-        if item < 0:
-            item += len(self)
-        if not 0 <= item < len(self):
-            raise IndexError(item)
-        return self._chunk(item)
-
-    def _chunk(self, row: int) -> Chunk:
-        """Read one row out of the run that holds it."""
-        position = bisect_right(self._offsets, row) - 1
-        return self._sources[position][self._starts[position] + (row - self._offsets[position])]
-
-    def __iter__(self) -> Iterator[Chunk]:
-        """Iterate over every chunk, run by run."""
-        for position, source in enumerate(self._sources):
-            start = self._starts[position]
-            for offset in range(self._offsets[position + 1] - self._offsets[position]):
-                yield source[start + offset]
-
-    def __eq__(self, other: object) -> bool:
-        """Compare element-wise against any other sequence of chunks."""
-        if isinstance(other, Sequence):
-            return len(self) == len(other) and all(mine == theirs for mine, theirs in zip(self, other))
-        return NotImplemented
-
-    __hash__ = None  # type: ignore[assignment]
-
-    def _column(self, of_source: Callable[[Sequence[Chunk]], list[Any]]) -> list[Any]:
-        """Concatenate one whole-index column, reading each run out of its source's own column."""
-        values: list[Any] = []
-        for position, source in enumerate(self._sources):
-            start = self._starts[position]
-            values.extend(of_source(source)[start : start + (self._offsets[position + 1] - self._offsets[position])])
-        return values
-
-    @property
-    def file_paths(self) -> list[str]:
-        """Every chunk's file path, in chunk order, without materializing chunks."""
-        if self._file_paths is None:
-            self._file_paths = self._column(file_paths_of)
-        return self._file_paths
-
-    @property
-    def languages(self) -> list[str | None]:
-        """Every chunk's language, in chunk order, without materializing chunks."""
-        if self._languages is None:
-            self._languages = self._column(languages_of)
-        return self._languages
-
-
 def file_paths_of(chunks: Sequence[Chunk]) -> list[str]:
     """Return every chunk's file path, using the columns when the sequence has them."""
     columns = getattr(chunks, "file_paths", None)
@@ -275,40 +160,89 @@ def languages_of(chunks: Sequence[Chunk]) -> list[str | None]:
     return columns if columns is not None else [chunk.language for chunk in chunks]
 
 
-def save_chunks(path: Path, chunks: Sequence[Chunk]) -> None:
-    """Write the chunk columns into *path*."""
-    path.mkdir(parents=True, exist_ok=True)
+class ChunkStoreWriter:
+    """Write the chunk columns one chunk at a time, keeping only the fixed-width columns in memory.
 
-    contents: list[bytes] = []
-    contexts: list[bytes] = []
-    path_ids: list[int] = []
-    language_ids: list[int] = []
-    lines = np.zeros((len(chunks), 2), dtype=np.int32)
-    path_index: dict[str, int] = {}
-    language_index: dict[str, int] = {}
+    Content and context go straight to their blobs on disk; a run of a previous store is copied
+    byte for byte from its mapping, never decoded into Chunk objects.
+    """
 
-    for row, chunk in enumerate(chunks):
-        contents.append(chunk.content.encode("utf-8"))
-        contexts.append(chunk.context.encode("utf-8"))
-        path_ids.append(path_index.setdefault(chunk.file_path, len(path_index)))
+    def __init__(self, directory: Path) -> None:
+        """Start writing the columns into *directory*."""
+        directory.mkdir(parents=True, exist_ok=True)
+        self._directory = directory
+        self._content = BlobWriter(directory, _CONTENT)
+        self._context = BlobWriter(directory, _CONTEXT)
+        self._paths: dict[str, int] = {}
+        self._languages: dict[str, int] = {}
+        self._path_ids = array("i")
+        self._language_ids = array("i")
+        self._lines = array("i")
+
+    def __len__(self) -> int:
+        """The number of chunks written so far."""
+        return len(self._path_ids)
+
+    def append(self, chunk: Chunk) -> None:
+        """Write one chunk as the next row."""
+        self._content.append(chunk.content.encode("utf-8"))
+        self._context.append(chunk.context.encode("utf-8"))
+        self._path_ids.append(self._paths.setdefault(chunk.file_path, len(self._paths)))
         language = chunk.language
-        language_ids.append(-1 if language is None else language_index.setdefault(language, len(language_index)))
-        lines[row] = (chunk.start_line, chunk.end_line)
+        self._language_ids.append(
+            -1 if language is None else self._languages.setdefault(language, len(self._languages))
+        )
+        self._lines.extend((chunk.start_line, chunk.end_line))
 
-    # AIDEV-NOTE: every column is replaced, never truncated in place. A warm daemon keeps these
-    # very files mapped while it persists a rebuild over them, and a plain write_bytes/np.save
-    # rewrites the inode under that mapping: the reader then sees a torn column (or SIGBUS).
-    # That is what `atomic_bytes`/`atomic_save` are for; bm25.py already writes this way.
-    atomic_bytes(path / _CONTENT_NAME, b"".join(contents))
-    atomic_save(path / _CONTENT_OFFSETS_NAME, offsets_of(contents))
-    atomic_bytes(path / _CONTEXT_NAME, b"".join(contexts))
-    atomic_save(path / _CONTEXT_OFFSETS_NAME, offsets_of(contexts))
-    StringTable.save(path, _PATHS_TABLE, list(path_index))
-    StringTable.save(path, _LANGUAGES_TABLE, list(language_index))
-    atomic_save(path / _PATH_IDS_NAME, np.array(path_ids, dtype=np.int32))
-    atomic_save(path / _LANGUAGE_IDS_NAME, np.array(language_ids, dtype=np.int32))
-    atomic_save(path / _LINES_NAME, lines)
-    atomic_bytes(path / _META_NAME, orjson.dumps({"format": _CHUNKS_FORMAT, "n_chunks": len(chunks)}))
+    def reuse(self, source: ChunkList, start: int, count: int) -> None:
+        """Copy rows *start* to *start* + *count* of a persisted store as the next rows."""
+        end = start + count
+        self._content.append_range(source._content, source._content_offsets, start, end)
+        self._context.append_range(source._context, source._context_offsets, start, end)
+        self._path_ids.frombytes(_translated(source._path_ids[start:end], source._path_table, self._paths).tobytes())
+        self._language_ids.frombytes(
+            _translated(source._language_ids[start:end], source._language_table, self._languages).tobytes()
+        )
+        self._lines.frombytes(np.asarray(source._lines[start:end], dtype=np.int32).tobytes())
+
+    def finish(self) -> None:
+        """Write the remaining columns and the format marker."""
+        directory = self._directory
+        self._content.finish()
+        self._context.finish()
+        StringTable.save(directory, _PATHS_TABLE, list(self._paths))
+        StringTable.save(directory, _LANGUAGES_TABLE, list(self._languages))
+        np.save(directory / _PATH_IDS_NAME, _column(self._path_ids))
+        np.save(directory / _LANGUAGE_IDS_NAME, _column(self._language_ids))
+        np.save(directory / _LINES_NAME, _column(self._lines).reshape(-1, 2))
+        (directory / _META_NAME).write_bytes(orjson.dumps({"format": _CHUNKS_FORMAT, "n_chunks": len(self)}))
+
+
+def _column(values: array) -> npt.NDArray[np.int32]:
+    """Return an int32 column of an `array("i")`, empty when it is."""
+    return np.frombuffer(values, dtype=np.int32) if values else np.empty(0, dtype=np.int32)
+
+
+def _translated(ids: npt.NDArray[np.int32], table: list[str], into: dict[str, int]) -> npt.NDArray[np.int32]:
+    """Map one store's table ids to another table's, registering names the other does not hold yet."""
+    ids = np.asarray(ids, dtype=np.int32)
+    if not len(ids):
+        return ids
+    unique, inverse = np.unique(ids, return_inverse=True)
+    mapped = np.fromiter(
+        (-1 if value < 0 else into.setdefault(table[value], len(into)) for value in unique.tolist()),
+        dtype=np.int32,
+        count=len(unique),
+    )
+    return mapped[inverse]
+
+
+def save_chunks(path: Path, chunks: Iterable[Chunk]) -> None:
+    """Write a whole chunk list into *path*."""
+    writer = ChunkStoreWriter(path)
+    for chunk in chunks:
+        writer.append(chunk)
+    writer.finish()
 
 
 def load_chunks(path: Path) -> ChunkList:

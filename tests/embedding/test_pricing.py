@@ -76,7 +76,7 @@ class PricedEmbedder:
 def buy(embedder: Embedder, texts: list[str]) -> None:
     """Buy vectors the way a build seam does: the bill guard first, then the embedder.
 
-    This is exactly what `zemble.index.dense.embed_chunks` and the dupes logic lane do, spelled
+    This is exactly what `zemble.index.create.write_index` and the dupes logic lane do, spelled
     out here so a journey can name its own token counts instead of a capsule's.
     """
     require_affordable_bill(embedder, texts)

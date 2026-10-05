@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -38,6 +39,13 @@ def _age(path: Path, days: float) -> None:
     os.utime(path, (stamp, stamp))
 
 
+def _exited_pid() -> int:
+    """Return the pid of a process that has already exited."""
+    process = subprocess.Popen(["true"])
+    process.wait()
+    return process.pid
+
+
 def _write(root: Path, relative: str, text: str) -> None:
     """Write one source file under a root."""
     target = root / relative
@@ -55,7 +63,7 @@ def _clear(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], 
 def test_clear_orphans_finds_every_kind_and_removes_only_those(
     graph_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Six kinds of orphan are listed with sizes by a dry run and removed by a real one; live entries stay."""
+    """Every kind of orphan is listed with sizes by a dry run and removed by a real one; live entries stay."""
     cache = graph_cache
     live_root = tmp_path / "live"
     live_root.mkdir()
@@ -90,6 +98,19 @@ def test_clear_orphans_finds_every_kind_and_removes_only_those(
     _age(leftover, 1)
     fresh_temp = live_index / "semantic_index" / "vectors.npy.123.789.tmp.npy"
     fresh_temp.write_bytes(b"x")
+    # The staging folder of a build whose process is gone, and a file named after a dead builder;
+    # a staging folder of a build still running is kept however old it is.
+    dead_pid = _exited_pid()
+    dead_staging = live_index.parent / f".staging-index-{dead_pid}-abc123"
+    (dead_staging / "chunks").mkdir(parents=True)
+    (dead_staging / "chunks" / "content.bin").write_bytes(b"x" * 64)
+    _age(dead_staging, 1)
+    live_staging = live_index.parent / f".staging-index-{os.getpid()}-def456"
+    live_staging.mkdir()
+    _age(live_staging, 1)
+    dead_builder = live_index / f"graph.sqlite.building-{dead_pid}"
+    dead_builder.write_bytes(b"x" * 32)
+    _age(dead_builder, 1)
     # A graph whose root was deleted, and a live graph with a version no reader holds any more.
     dead_ws = tmp_path / "dead-ws"
     _write(dead_ws, "p/A.java", "package p;\npublic class A {}\n")
@@ -110,20 +131,24 @@ def test_clear_orphans_finds_every_kind_and_removes_only_those(
         (OrphanKind.GIT_URL_STALE, stale_url.parent),
         (OrphanKind.EMBEDDER_UNUSED, unused.path),
         (OrphanKind.TEMP_LEFTOVER, leftover),
+        (OrphanKind.TEMP_LEFTOVER, dead_builder),
+        (OrphanKind.STAGING_LEFTOVER, dead_staging),
         (OrphanKind.GRAPH_ROOT_GONE, dead_graph),
         (OrphanKind.RETIRED_GRAPH, graph_folder(str(live_ws))),
-    }, "step 3: exactly the six orphans"
+    }, "step 3: exactly the eight orphans"
 
     # 4. A dry run prints each with its size and a total, and deletes nothing.
     out = _clear(monkeypatch, capsys, "--dry-run")
-    assert out.count("Would clear") == 6 and "MB)" in out and "Would free" in out, f"step 4: sized listing: {out}"
+    assert out.count("Would clear") == 8 and "MB)" in out and "Would free" in out, f"step 4: sized listing: {out}"
     assert gone_index.exists() and unused.path.exists() and leftover.exists(), "step 4: nothing deleted"
 
-    # 5. The real run removes the six and keeps every live entry.
+    # 5. The real run removes the eight and keeps every live entry.
     out = _clear(monkeypatch, capsys)
     assert f"Cleared orphaned index for `{gone_root}`" in out, f"step 5: the familiar line for a gone root: {out}"
     assert not gone_index.exists() and not stale_url.exists() and not dead_graph.exists(), "step 5: folders gone"
     assert not unused.path.exists() and not leftover.exists(), "step 5: files gone"
+    assert not dead_staging.exists() and not dead_builder.exists(), "step 5: a dead build's leftovers gone"
+    assert live_staging.exists(), "step 5: a running build's staging folder stays"
     assert [name for name in os.listdir(graph_folder(str(live_ws))) if name.endswith(".sqlite")] == [
         "graph-2.sqlite"
     ], "step 5: only the current graph version is left"

@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call, patch
 
@@ -7,23 +8,18 @@ import pytest
 from model2vec import StaticModel
 from vicinity.backends.basic import BasicArgs
 
-from tests.conftest import FakeEmbedder, make_chunk
+from tests.conftest import FakeEmbedder, make_chunk, write_bm25
 from zemble.embedding.model2vec import Model2VecEmbedder, load_static_model
 from zemble.index.bm25 import BM25
-from zemble.index.dense import SelectableBasicBackend, embed_chunks
+from zemble.index.dense import SelectableBasicBackend
 from zemble.search import _search_bm25, _search_semantic, _sort_top_k, search
 from zemble.tokens import tokenize
 from zemble.types import Chunk
 
 
-def _build_bm25(chunks: list[Chunk]) -> BM25:
-    """Build a BM25 index over chunks, keyed by their position."""
-    index = BM25()
-    doc_ids = [f"c{i}" for i in range(len(chunks))]
-    for doc_id, chunk in zip(doc_ids, chunks):
-        index.add_document(doc_id, tokenize(chunk.content))
-    index.set_doc_order(doc_ids)
-    return index
+def _build_bm25(chunks: list[Chunk], directory: Path) -> BM25:
+    """Write a BM25 index over chunks into *directory*, keyed by their position."""
+    return write_bm25(directory, {f"c{i}": tokenize(chunk.content) for i, chunk in enumerate(chunks)})
 
 
 @pytest.fixture
@@ -48,9 +44,9 @@ def embeddings(chunks: list[Chunk]) -> npt.NDArray[np.float32]:
 
 
 @pytest.fixture
-def bm25(chunks: list[Chunk]) -> BM25:
+def bm25(chunks: list[Chunk], tmp_path: Path) -> BM25:
     """Pre-built BM25 index over the chunks fixture."""
-    return _build_bm25(chunks)
+    return _build_bm25(chunks, tmp_path / "bm25")
 
 
 @pytest.fixture
@@ -83,7 +79,9 @@ def test_semantic_search(semantic: SelectableBasicBackend, chunks: list[Chunk], 
     assert all(-1.0 <= r.score <= 1.0 for r in results)
 
 
-def test_search_hybrid(chunks: list[Chunk], semantic: SelectableBasicBackend, bm25: BM25, mock_embedder: Any) -> None:
+def test_search_hybrid(
+    chunks: list[Chunk], semantic: SelectableBasicBackend, bm25: BM25, mock_embedder: Any, tmp_path: Path
+) -> None:
     """search_hybrid: returns combined results; identical content in different files produces separate results."""
     results = search("authenticate token", mock_embedder, semantic, bm25, chunks, top_k=3)
     assert len(results) > 0
@@ -98,7 +96,7 @@ def test_search_hybrid(chunks: list[Chunk], semantic: SelectableBasicBackend, bm
     embs /= np.linalg.norm(embs, axis=1, keepdims=True) + 1e-8
 
     sem_index = SelectableBasicBackend(embs, BasicArgs())
-    bm25_index = _build_bm25(all_chunks)
+    bm25_index = _build_bm25(all_chunks, tmp_path / "shared")
 
     deduped = search("helper", mock_embedder, sem_index, bm25_index, all_chunks, top_k=5)
     result_locations = {r.chunk.file_path for r in deduped}
@@ -160,13 +158,6 @@ def test_model2vec_embedder_loads_lazily(model_name: str, incomplete_cache: bool
     load_static_model.cache_clear()
 
 
-def test_embed_chunks_empty_returns_empty_array(mock_embedder: Any) -> None:
-    """embed_chunks with an empty list returns an empty float32 array of the embedder's width."""
-    result = embed_chunks(mock_embedder, [])
-    assert result.shape == (0, 256)
-    assert result.dtype == np.float32
-
-
 def test_selectable_basic_backend_rejects_k_below_one(
     semantic: SelectableBasicBackend, embeddings: npt.NDArray[np.float32]
 ) -> None:
@@ -181,7 +172,7 @@ class _BonusEmbedder(FakeEmbedder):
     semantic_weight_bonus = 0.5
 
 
-def test_search_honours_the_embedders_fusion_bonus(mock_embedder: FakeEmbedder) -> None:
+def test_search_honours_the_embedders_fusion_bonus(mock_embedder: FakeEmbedder, tmp_path: Path) -> None:
     """An embedder's declared bonus reaches fusion: the dense lane's pick overtakes BM25's."""
     lexical = make_chunk("def refresh_session_cookie(request):\n    pass", "cookies.py")
     semantic_only = make_chunk("class Renewal:\n    pass", "renewal.py")
@@ -191,7 +182,7 @@ def test_search_honours_the_embedders_fusion_bonus(mock_embedder: FakeEmbedder) 
     # 1. Make the dense lane rank the chunk BM25 cannot see at all: its vector IS the query's.
     embeddings = np.vstack([mock_embedder.embed_documents([lexical.content]), mock_embedder.embed_queries([query])])
     semantic_index = SelectableBasicBackend(embeddings.astype(np.float32), BasicArgs())
-    bm25_index = _build_bm25(corpus)
+    bm25_index = _build_bm25(corpus, tmp_path)
 
     # 2. At the shipped weights BM25's lexical hit wins the fusion.
     plain = search(query, mock_embedder, semantic_index, bm25_index, corpus, top_k=2, rerank=False)

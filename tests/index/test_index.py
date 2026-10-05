@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -7,8 +8,8 @@ import pytest
 
 from tests.conftest import make_chunk
 from zemble import ZembleIndex
+from zemble.cache import find_index_from_cache_folder
 from zemble.index.chunk_store import save_chunks
-from zemble.index.create import create_index_from_path
 from zemble.index.files import MAX_FILE_BYTES, FileStatus, get_file_status
 from zemble.index.index import LazyFileSizes
 from zemble.types import ContentType
@@ -19,6 +20,11 @@ def indexed_index(mock_embedder: Any, tmp_project: Path) -> ZembleIndex:
     """ZembleIndex built from tmp_project."""
     with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
         return ZembleIndex.from_path(tmp_project)
+
+
+def _stored(index: ZembleIndex) -> Path:
+    """Return the folder a built index was published into."""
+    return find_index_from_cache_folder(str(index._root), index.storage_content, index.exclude)
 
 
 @pytest.mark.parametrize(
@@ -33,7 +39,7 @@ def test_index_markdown_inclusion(
     mock_embedder: Any, tmp_project: Path, content: list[ContentType], md_in_results: bool
 ) -> None:
     """Markdown files are excluded for code-only and included when docs is requested."""
-    _, _, chunks, _ = create_index_from_path(tmp_project, mock_embedder, content=content)
+    chunks = ZembleIndex.from_path(tmp_project, content=content, embedder=mock_embedder).chunks
     has_md = ".md" in {Path(c.file_path).suffix for c in chunks}
     assert has_md is md_in_results
 
@@ -58,8 +64,7 @@ def test_from_git_include_text_files_deprecated(mock_embedder: Any, tmp_project:
     fake_result.returncode = 0
     with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
         with patch("subprocess.run", return_value=fake_result):
-            with patch("zemble.index.index.create_index_from_path") as mock_create:
-                mock_create.return_value = (MagicMock(), MagicMock(), [make_chunk("x = 1", "f.py")], {})
+            with patch.object(ZembleIndex, "build", return_value=(MagicMock(), MagicMock())):
                 with pytest.warns(DeprecationWarning, match="include_text_files is deprecated"):
                     ZembleIndex.from_git("https://example.com/repo", include_text_files=True)
 
@@ -67,14 +72,14 @@ def test_from_git_include_text_files_deprecated(mock_embedder: Any, tmp_project:
 def test_index_empty_returns_zero_chunks(mock_embedder: Any, tmp_path: Path) -> None:
     """Indexing an empty directory yields zero files and chunks."""
     with pytest.raises(ValueError):
-        create_index_from_path(tmp_path, mock_embedder)
+        ZembleIndex.from_path(tmp_path, embedder=mock_embedder)
 
 
 def test_oversized_file_is_skipped(mock_embedder: Any, tmp_path: Path) -> None:
     """Files exceeding MAX_FILE_BYTES are silently skipped during indexing."""
     (tmp_path / "big.py").write_bytes(b"x" * (MAX_FILE_BYTES + 1))
     with pytest.raises(ValueError):  # no indexable content remains
-        create_index_from_path(tmp_path, mock_embedder)
+        ZembleIndex.from_path(tmp_path, embedder=mock_embedder)
 
 
 def test_tiny_invalid_utf8_file_status_does_not_crash(tmp_path: Path) -> None:
@@ -187,28 +192,13 @@ def test_find_related(indexed_index: ZembleIndex) -> None:
     ]
 
 
-def test_roundtrip(tmp_path: Path, indexed_index: ZembleIndex) -> None:
-    """Test that saving and loading a folder leads to the same data."""
+def test_roundtrip(indexed_index: ZembleIndex) -> None:
+    """A built index is published, and loading its folder gives back the same data."""
     assert indexed_index.chunks[0].to_dict()["location"] == indexed_index.chunks[0].location
-    indexed_index.save(tmp_path)
-    index_2 = ZembleIndex.load_from_disk(tmp_path, embedder=indexed_index.embedder)
+    index_2 = ZembleIndex.load_from_disk(_stored(indexed_index), embedder=indexed_index.embedder)
     assert index_2.chunks == indexed_index.chunks
     assert index_2._root == indexed_index._root
-
-
-def test_load_save_roundtrip_preserves_manifest(tmp_path: Path, indexed_index: ZembleIndex) -> None:
-    """load_from_disk followed by save must preserve the incremental manifest."""
-    save_a = tmp_path / "a"
-    save_b = tmp_path / "b"
-    indexed_index.save(save_a)
-    loaded = ZembleIndex.load_from_disk(save_a, embedder=indexed_index.embedder)
-    loaded.save(save_b)
-    import json
-
-    manifest_a = json.loads((save_a / "metadata.json").read_text())["files"]
-    manifest_b = json.loads((save_b / "metadata.json").read_text())["files"]
-    assert manifest_b == manifest_a
-    assert len(manifest_b) > 0
+    assert index_2._manifest == indexed_index._manifest and index_2._manifest
 
 
 def test_load_non_existent(tmp_path: Path, indexed_index: ZembleIndex) -> None:
@@ -245,7 +235,7 @@ def test_load_from_disk_rejects_incompatible_state(
     corruption: str, message: str, tmp_path: Path, indexed_index: ZembleIndex
 ) -> None:
     """Incompatible persistence metadata and component counts are rejected."""
-    indexed_index.save(tmp_path)
+    shutil.copytree(_stored(indexed_index), tmp_path, dirs_exist_ok=True)
     if corruption == "version":
         path = tmp_path / "metadata.json"
         data = orjson.loads(path.read_bytes())

@@ -75,7 +75,7 @@ def _in_process(args: argparse.Namespace) -> dict[str, Any]:
     """
     root = str(resolve_home_root(args.path))
     config = HomeConfig.load(root)
-    index, _source_key = _load_index(root, args.embedder)
+    index = _load_index(root, args.embedder)
     ensure_graph(root)
     provider = open_provider(root)
     try:
@@ -84,20 +84,17 @@ def _in_process(args: argparse.Namespace) -> dict[str, Any]:
         provider.close()
 
 
-def _load_index(path: str, embedder: str | None = None) -> tuple[ZembleIndex, str]:
-    """Build or load the code-and-docs index answering for a workspace, saving it back to the cache.
+def _load_index(path: str, embedder: str | None = None) -> ZembleIndex:
+    """Build or load the code-and-docs index answering for a workspace.
 
     Imported lazily: `zemble.cli` imports this module, so the reverse import can
     only happen once the parser is already built.
 
-    :return: The index, and the root it was built from, which a sub-path request answers from.
+    :return: The index answering for *path*.
     """
     from zemble.cli import _load_index as load
-    from zemble.cli import _maybe_save_index
 
-    index, source_key = load(path, list(HOME_CONTENT), embedder)
-    _maybe_save_index(index, source_key)
-    return index, source_key
+    return load(path, list(HOME_CONTENT), embedder)
 
 
 __all__ = ["HOME_COMMANDS", "HOME_CONTENT", "add_home_parser", "run_home"]

@@ -19,6 +19,17 @@ def write_index_components(path: Path) -> None:
         (path / component).write_text("")
 
 
+def write_bm25(directory: Path, documents: dict[str, list[str]]) -> Any:
+    """Write a BM25 index over *documents*, in order, and load it."""
+    from zemble.index.bm25 import BM25, BM25Writer
+
+    writer = BM25Writer(directory)
+    for chunk_id, tokens in documents.items():
+        writer.add(chunk_id, tokens)
+    writer.finish()
+    return BM25.load(directory)
+
+
 def make_chunk(content: str, file_path: str = "src/module.py") -> Chunk:
     """Create a minimal Chunk for use in tests."""
     return Chunk(

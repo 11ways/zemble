@@ -14,7 +14,6 @@ from zemble.cache import (
     find_ancestor_index_root,
     indexed_ancestor_hint,
     resolve_index_root,
-    save_index_to_cache,
 )
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
@@ -199,8 +198,7 @@ def test_resolve_index_root_finds_a_validated_on_disk_ancestor(
 
     # 2. Index the workspace and persist it the way every surface does.
     with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
-        index = ZembleIndex.from_path(workspace)
-    save_index_to_cache(index, str(workspace))
+        ZembleIndex.from_path(workspace)
 
     # 3. Now the sub-directory is routed to the workspace index.
     assert find_ancestor_index_root(str(workspace / "alpha"), mock_embedder.model_id, [ContentType.CODE]) == str(
@@ -219,8 +217,7 @@ def test_resolve_index_root_finds_a_validated_on_disk_ancestor(
 
     # 5. An index of exactly the requested path keeps serving it.
     with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
-        own = ZembleIndex.from_path(workspace / "alpha")
-    save_index_to_cache(own, str(workspace / "alpha"))
+        ZembleIndex.from_path(workspace / "alpha")
     assert resolve_index_root(str(workspace / "alpha"), mock_embedder.model_id, [ContentType.CODE]) == (
         str(workspace / "alpha"),
         None,

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from zemble.daemon.admission import AdmissionBusy
-from zemble.daemon.memory import MIB, MemoryRefused, virtual_mb
+from zemble.daemon.memory import MIB, MemoryRefused, private_mb
 
 TOTAL_MEMORY_ENV = "ZEMBLE_DAEMON_TOTAL_MEMORY_MB"
 GRAPH_MEMORY_ENV = "ZEMBLE_GRAPH_BUILD_MEMORY_MB"
@@ -93,22 +93,22 @@ class GraphJobs:
             self.pending.pop(root, None)
 
     async def _build_once(self, root: str) -> None:
-        """Reserve aggregate address space, reap the worker and restore serving limits on every path."""
+        """Reserve aggregate private memory, reap the worker and restore serving limits on every path."""
         state = self.states[root]
         started = time.monotonic()
         try:
             async with self.lock:
-                old_soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+                old_soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
                 # AIDEV-NOTE: reserve bounded concurrent read scratch while the worker owns the rest;
                 # summing per-process limits, not RSS alone, bounds the complete construction lifetime.
-                serving_limit = max(virtual_mb() + 192, 512)
+                serving_limit = max(private_mb() + 192, 512)
                 worker_limit = int(min(self.build_mb, self.total_mb - serving_limit))
                 if worker_limit < 512:
                     raise MemoryRefused("insufficient aggregate graph construction headroom")
                 parent_limit = int(serving_limit * MIB)
                 if old_soft != resource.RLIM_INFINITY:
                     parent_limit = min(parent_limit, old_soft)
-                resource.setrlimit(resource.RLIMIT_AS, (parent_limit, hard))
+                resource.setrlimit(resource.RLIMIT_DATA, (parent_limit, hard))
                 try:
                     self.process = await asyncio.create_subprocess_exec(
                         sys.executable,
@@ -131,7 +131,7 @@ class GraphJobs:
                         pid=self.process.pid,
                         budget_mb=worker_limit,
                         started_at=time.time(),
-                        serving_virtual_limit_mb=parent_limit / MIB,
+                        serving_limit_mb=parent_limit / MIB,
                     )
                     message = json.dumps({"changed_paths": self.paths.get(root)}).encode()
                     stdout, stderr = await self.process.communicate(message)
@@ -148,7 +148,7 @@ class GraphJobs:
                         self.process.terminate()
                         await self.process.wait()
                     self.process = None
-                    resource.setrlimit(resource.RLIMIT_AS, (old_soft, hard))
+                    resource.setrlimit(resource.RLIMIT_DATA, (old_soft, hard))
         except BaseException as exc:
             state.update(state="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", error=str(exc))
             raise

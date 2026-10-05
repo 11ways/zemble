@@ -8,7 +8,7 @@ import pytest
 
 from tests.conftest import FakeEmbedder
 from zemble import ZembleIndex
-from zemble.cache import get_validated_cache
+from zemble.cache import find_index_from_cache_folder, get_validated_cache
 from zemble.types import ContentType
 
 
@@ -33,9 +33,8 @@ def test_index_and_search_at_a_non_standard_dimension(tmp_project: Path, odd_emb
     assert results, "step 2: a real query must return results"
     assert len(odd_embedder.query_calls) == before + 1, "step 2: the query must use embed_queries"
 
-    # 3. Persist: the metadata records the embedder id and width instead of a model path.
-    save_path = tmp_project / ".index"
-    index.save(save_path)
+    # 3. Persist: the build published its generation; the metadata records the embedder and width.
+    save_path = find_index_from_cache_folder(str(tmp_project), index.storage_content)
     metadata = json.loads((save_path / "metadata.json").read_text())
     assert metadata["embedder"] == "fake:odd@313"
     assert metadata["dimensions"] == 313

@@ -6,7 +6,6 @@ import shutil
 import sys
 from collections.abc import Collection, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import orjson
 
@@ -17,6 +16,7 @@ from zemble.index.chunk_store import file_paths_of, load_chunks
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.file_walker import walk_entries
 from zemble.index.files import FileStatus, get_extensions, get_file_status
+from zemble.index.symbols import SymbolDefinitions
 from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath, PreviousIndex, make_chunk_id
 from zemble.types import ContentType
 from zemble.utils import is_git_url
@@ -25,9 +25,6 @@ logger = logging.getLogger(__name__)
 
 #: (stored, requested) embedder pairs already reported, so one rebuild logs one line.
 _REPORTED_EMBEDDER_MISMATCHES: set[tuple[str, str]] = set()
-
-if TYPE_CHECKING:
-    from zemble.index import ZembleIndex
 
 
 def exclude_digest(exclude: Sequence[str]) -> str:
@@ -118,17 +115,6 @@ def resolve_cache_folder() -> Path:
 def clear_cache(path: str) -> None:
     """Clear all exact content indexes for the given path."""
     shutil.rmtree(find_index_from_cache_folder(path).parent, ignore_errors=True)
-
-
-def save_index_to_cache(index: "ZembleIndex", path: str) -> None:
-    """Save an index to the cache folder if it was freshly built.
-
-    The exclude patterns the index was built with come off the index itself, so a pruned
-    build can never be written over the plain index of the same root.
-    """
-    if not index.loaded_from_disk:
-        index.save(find_index_from_cache_folder(path, index.storage_content, index.exclude))
-        retire_covered_indexes(path, index.storage_content, index.exclude)
 
 
 def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[ContentType], capsule_key: str) -> bool:
@@ -599,8 +585,9 @@ def load_previous_for_incremental(
         # Mapped read-only: the build copies this matrix itself if it has a row to write.
         vectors = SelectableBasicBackend.load(persistence_path.semantic_index).vectors
         bm25_index = BM25.load(persistence_path.bm25_index)
+        definitions = SymbolDefinitions.load(persistence_path.symbols)
         chunk_count = len(chunks)
-        if not (chunk_count == vectors.shape[0] == len(bm25_index.doc_order)):
+        if not (chunk_count == vectors.shape[0] == bm25_index.document_count == definitions.n_chunks):
             return None
         stored_paths = file_paths_of(chunks)
         expected_ids: list[str] = []
@@ -615,7 +602,9 @@ def load_previous_for_incremental(
         if next_start != chunk_count or bm25_index.doc_order != expected_ids:
             return None
 
-        return PreviousIndex(chunks=chunks, vectors=vectors, manifest=manifest, bm25_index=bm25_index)
+        return PreviousIndex(
+            chunks=chunks, vectors=vectors, manifest=manifest, bm25_index=bm25_index, definitions=definitions
+        )
     except (OSError, orjson.JSONDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         logger.debug("Unable to reuse incremental cache for %s", path, exc_info=True)
         return None

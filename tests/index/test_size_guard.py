@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from zemble.cache import save_index_to_cache
 from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.embedding.pricing import CONFIRM_ENV
 from zemble.index import OversizedRootRefused, ScopeRefused, ZembleIndex
@@ -134,7 +133,6 @@ def test_a_reusable_index_is_not_refused(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(tmp_path / "cache"))
     monkeypatch.setenv(CONFIRM_ENV, "1")
     first = ZembleIndex.from_path(root, embedder=mock_embedder)
-    save_index_to_cache(first, str(root.resolve()))
     monkeypatch.delenv(CONFIRM_ENV)
 
     # The whole tree is over the ceiling, but only the one file that moved is work.

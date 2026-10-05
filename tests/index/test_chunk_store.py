@@ -5,7 +5,7 @@ import pytest
 
 from zemble.index.chunk_store import (
     ChunkList,
-    SplicedChunks,
+    ChunkStoreWriter,
     file_paths_of,
     languages_of,
     load_chunks,
@@ -85,52 +85,33 @@ def test_empty_chunk_list_roundtrips(tmp_path: Path) -> None:
     assert list(loaded) == []
 
 
-def test_spliced_chunks_read_like_the_sequence_they_stand_in_for(tmp_path: Path) -> None:
-    """A rebuild's spliced chunks answer exactly as the list they replace, run by run."""
+def test_a_written_store_copies_reused_rows_from_the_previous_one(tmp_path: Path) -> None:
+    """A rebuild's store carries unchanged rows over byte for byte and equals the list it stands for."""
     stored = _chunks()
-    save_chunks(tmp_path, stored)
-    mapped = load_chunks(tmp_path)
+    save_chunks(tmp_path / "previous", stored)
+    previous = load_chunks(tmp_path / "previous")
     replacement = [
         Chunk(content="def b():\n    return 22\n", file_path="src/a.py", start_line=4, end_line=6, language="python"),
-        Chunk(content="def c():\n    return 3\n", file_path="src/a.py", start_line=8, end_line=9, language="python"),
+        Chunk(content="def c():\n    return 3\n", file_path="src/new.py", start_line=8, end_line=9, language="rust"),
     ]
-    # src/a.py's second chunk was re-chunked into two; everything around it is reused.
-    spliced = SplicedChunks([(mapped, 0, 1), (replacement, 0, 2), (mapped, 2, 2)])
+
+    # 1. src/a.py's second chunk was re-chunked into two; everything around it is carried over.
+    writer = ChunkStoreWriter(tmp_path / "next")
+    writer.reuse(previous, 0, 1)
+    for chunk in replacement:
+        writer.append(chunk)
+    writer.reuse(previous, 2, 2)
+    writer.finish()
+    written = load_chunks(tmp_path / "next")
     expected = [stored[0], *replacement, stored[2], stored[3]]
 
-    # 1. Every way of reading the sequence agrees with the list it stands in for.
-    assert len(spliced) == len(expected)
-    assert list(spliced) == expected, "iteration walks the runs in order"
-    assert [spliced[row] for row in range(len(spliced))] == expected, "indexing resolves the right run"
-    assert spliced[-1] == expected[-1] and spliced[1:4] == expected[1:4]
-    assert spliced == expected, "it compares equal to the plain list"
-    assert file_paths_of(spliced) == [chunk.file_path for chunk in expected]
-    assert languages_of(spliced) == [chunk.language for chunk in expected]
-    with pytest.raises(IndexError):
-        spliced[len(expected)]
+    # 2. Every way of reading it agrees with the plain list, columns included.
+    assert written == expected and list(written) == expected
+    assert file_paths_of(written) == [chunk.file_path for chunk in expected]
+    assert languages_of(written) == [chunk.language for chunk in expected]
 
-    # 2. Runs of one source that continue each other are merged, so a no-op rebuild keeps one run.
-    unchanged = SplicedChunks([(mapped, 0, 2), (mapped, 2, 2)])
-    assert list(unchanged) == stored
-    assert len(unchanged._sources) == 1, "adjacent runs of the same source collapse"
-
-    # 3. A second generation flattens onto the original sources instead of nesting.
-    generation_two = SplicedChunks([(spliced, 0, 3), (spliced, 3, 2)])
-    assert list(generation_two) == expected
-    assert all(source is not spliced for source in generation_two._sources), "no spliced source survives"
-    assert len(generation_two._sources) == len(spliced._sources)
-
-
-def test_splice_range_visits_only_overlapping_runs():
-    """Reusing each file must not scan every run of the previous generation."""
-    from tests.conftest import make_chunk
-    from zemble.index.chunk_store import SplicedChunks
-
-    class NoFullScan(list):
-        def __iter__(self):
-            raise AssertionError("a range splice scanned the whole previous generation")
-
-    original = SplicedChunks([([make_chunk(f"row {i}")], 0, 1) for i in range(1000)])
-    original._sources = NoFullScan(original._sources)
-    selected = SplicedChunks([(original, 500, 1)])
-    assert len(selected) == 1 and selected[0].content == "row 500"
+    # 3. The previous store is untouched, and a store written from the plain list is byte-identical.
+    assert load_chunks(tmp_path / "previous") == stored
+    save_chunks(tmp_path / "plain", expected)
+    for name in ("content.bin", "content_offsets.npy", "context.bin", "context_offsets.npy", "lines.npy"):
+        assert (tmp_path / "next" / name).read_bytes() == (tmp_path / "plain" / name).read_bytes(), name

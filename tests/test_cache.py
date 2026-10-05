@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -18,7 +18,6 @@ from zemble.cache import (
     find_index_from_cache_folder,
     get_validated_cache,
     resolve_cache_folder,
-    save_index_to_cache,
 )
 from zemble.chunking.capsule import CapsuleOptions
 from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
@@ -76,15 +75,6 @@ def test_cache_dir_no_env(fn: object, expected_rel: Path) -> None:
     with patch.dict("os.environ", {}, clear=True):
         with patch("pathlib.Path.home", return_value=home):
             assert fn("zemble") == home / expected_rel  # type: ignore[operator]
-
-
-def test_save_index_to_cache(tmp_path: Path) -> None:
-    """A freshly built index is saved under its cache key."""
-    index = MagicMock(loaded_from_disk=False, content=(ContentType.DOCS,), storage_content=(ContentType.DOCS,))
-    with patch("zemble.cache.find_index_from_cache_folder", return_value=tmp_path / "index") as mock_find:
-        save_index_to_cache(index, "repo")
-    mock_find.assert_any_call("repo", (ContentType.DOCS,), index.exclude)
-    index.save.assert_called_once_with(tmp_path / "index")
 
 
 @pytest.mark.parametrize(

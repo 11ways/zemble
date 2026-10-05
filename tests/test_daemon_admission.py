@@ -149,11 +149,11 @@ async def test_graph_waiters_join_and_a_deadline_leaves_construction_observable(
 
 @pytest.mark.anyio
 async def test_worker_budget_and_parent_limit_are_separate_and_restored(tmp_path, monkeypatch):
-    """Aggregate reservation includes parent mappings, and teardown restores its old ceiling."""
+    """Aggregate reservation includes the parent's private memory, and teardown restores its old ceiling."""
     from zemble.daemon import graph_jobs
 
     limits = []
-    monkeypatch.setattr(graph_jobs, "virtual_mb", lambda: 2600)
+    monkeypatch.setattr(graph_jobs, "private_mb", lambda: 2600)
     monkeypatch.setattr(graph_jobs.resource, "getrlimit", lambda _: (4096 * 1024 * 1024, -1))
     monkeypatch.setattr(graph_jobs.resource, "setrlimit", lambda _, limit: limits.append(limit))
     jobs = GraphJobs(asyncio.Lock(), 4096)

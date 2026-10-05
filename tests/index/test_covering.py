@@ -15,7 +15,6 @@ from zemble.cache import (
     find_index_from_cache_folder,
     has_cached_index,
     resolve_index_root,
-    save_index_to_cache,
 )
 from zemble.cache_orphans import OrphanKind, find_orphans, remove_orphan
 from zemble.graph.store import build_graph, graph_present, resolve_graph_root
@@ -41,14 +40,13 @@ def test_one_root_keeps_one_index(tmp_project: Path, mock_embedder: FakeEmbedder
     code_folder = find_index_from_cache_folder(root, CODE)
 
     # 1. A code request on a fresh root stores a code index, next to which the graph lives.
-    save_index_to_cache(ZembleIndex.from_path(tmp_project, content=CODE, embedder=mock_embedder), root)
+    ZembleIndex.from_path(tmp_project, content=CODE, embedder=mock_embedder)
     assert not PersistencePath.from_path(code_folder).non_existing(), "step 1: the code index is stored"
     graph_file = code_folder / "graph-1.sqlite"
     graph_file.write_bytes(b"graph")
 
     # 2. Storing code+docs for the same root removes the code index it covers, but not the graph.
-    wide = ZembleIndex.from_path(tmp_project, content=CODE_DOCS, embedder=mock_embedder)
-    save_index_to_cache(wide, root)
+    ZembleIndex.from_path(tmp_project, content=CODE_DOCS, embedder=mock_embedder)
     assert PersistencePath.from_path(code_folder).non_existing(), "step 2: the covered code index is gone"
     assert graph_file.read_bytes() == b"graph", "step 2: the graph sharing its folder stays"
 
@@ -59,7 +57,6 @@ def test_one_root_keeps_one_index(tmp_project: Path, mock_embedder: FakeEmbedder
     assert narrowed.content == CODE and narrowed.storage_content == CODE_DOCS, "step 3: stored wide, answers code"
     assert _files(narrowed) == {"auth.py", "utils.py"}, "step 3: the docs file never answers a code request"
     assert narrowed.stats.indexed_files == 2, "step 3: and stats describe the code it answers for"
-    save_index_to_cache(narrowed, root)
     assert PersistencePath.from_path(code_folder).non_existing(), "step 3: answering never writes a code index back"
 
     # 4. A caller's own filter on the narrowed view keeps it narrowed.
@@ -89,10 +86,10 @@ def test_a_covered_index_left_from_before_is_an_orphan(tmp_project: Path, mock_e
     root = str(tmp_project)
     cache_folder = find_index_from_cache_folder(root, CODE).parent.parent
     code_folder = find_index_from_cache_folder(root, CODE)
-    save_index_to_cache(ZembleIndex.from_path(tmp_project, content=CODE, embedder=mock_embedder), root)
+    ZembleIndex.from_path(tmp_project, content=CODE, embedder=mock_embedder)
     kept = code_folder.parent / "kept-code-index"
     shutil.copytree(code_folder, kept)
-    save_index_to_cache(ZembleIndex.from_path(tmp_project, content=CODE_DOCS, embedder=mock_embedder), root)
+    ZembleIndex.from_path(tmp_project, content=CODE_DOCS, embedder=mock_embedder)
     # The state an older zemble left: both variants stored side by side, plus the graph.
     shutil.rmtree(code_folder)
     kept.rename(code_folder)
@@ -117,7 +114,7 @@ def test_a_sub_root_an_ancestor_answers_for_is_an_orphan(
     workspace = tmp_path / "work"
     shutil.copytree(graph_fixture_root, workspace)
     sub = workspace / "src" / "main" / "java" / "com" / "example" / "core"
-    save_index_to_cache(ZembleIndex.from_path(sub, content=CODE, embedder=mock_embedder), str(sub))
+    ZembleIndex.from_path(sub, content=CODE, embedder=mock_embedder)
     build_graph(str(sub))
 
     # 1. Before the workspace has an index or graph of its own, the sub-root's are not orphans.
@@ -125,7 +122,7 @@ def test_a_sub_root_an_ancestor_answers_for_is_an_orphan(
     assert not [orphan for orphan in find_orphans(graph_cache) if orphan.kind in kinds], "step 1: still needed"
 
     # 2. Once the workspace has both, the sub-root's are reported, naming who answers instead.
-    save_index_to_cache(ZembleIndex.from_path(workspace, content=CODE, embedder=mock_embedder), str(workspace))
+    ZembleIndex.from_path(workspace, content=CODE, embedder=mock_embedder)
     build_graph(str(workspace))
     found = {orphan.kind: orphan for orphan in find_orphans(graph_cache) if orphan.kind in kinds}
     assert set(found) == kinds, "step 2: the sub-root's index and graph are both orphans"
@@ -151,10 +148,10 @@ def test_an_older_wider_index_never_replaces_a_current_narrower_one(
     cache_folder = find_index_from_cache_folder(root, CODE).parent.parent
     code_folder = find_index_from_cache_folder(root, CODE)
     wide_folder = find_index_from_cache_folder(root, CODE_DOCS)
-    save_index_to_cache(ZembleIndex.from_path(tmp_project, content=CODE, embedder=mock_embedder), root)
+    ZembleIndex.from_path(tmp_project, content=CODE, embedder=mock_embedder)
     kept = code_folder.parent / "kept-code-index"
     shutil.copytree(code_folder, kept)
-    save_index_to_cache(ZembleIndex.from_path(tmp_project, content=CODE_DOCS, embedder=mock_embedder), root)
+    ZembleIndex.from_path(tmp_project, content=CODE_DOCS, embedder=mock_embedder)
     # The state a long-unused code+docs index leaves: the code index was kept current after it.
     shutil.rmtree(code_folder)
     kept.rename(code_folder)
@@ -175,6 +172,5 @@ def test_an_older_wider_index_never_replaces_a_current_narrower_one(
     (tmp_project / "README.md").touch()
     wide = ZembleIndex.from_path(tmp_project, content=CODE_DOCS, embedder=mock_embedder)
     assert not wide.loaded_from_disk, "step 3: the wider index was stale and is synced"
-    save_index_to_cache(wide, root)
     assert PersistencePath.from_path(code_folder).non_existing(), "step 3: the covered code index is gone"
     assert covering_content(root, mock_embedder.model_id, CODE) == CODE_DOCS, "step 3: code+docs answers now"

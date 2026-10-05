@@ -16,7 +16,6 @@ from zemble.cache import (
     indexed_ancestor_hint,
     resolve_cache_folder,
     resolve_index_root,
-    save_index_to_cache,
 )
 from zemble.cache_orphans import DEFAULT_MAX_AGE_DAYS, KEY_DIR_NAME, OrphanKind, find_orphans, remove_orphan
 from zemble.daemon.cli import add_daemon_parser, run_daemon
@@ -82,7 +81,7 @@ _SUBCOMMAND_RUNNERS = {
 
 def _build_index(
     path: str, content: list[ContentType], embedder: str | None = None, exclude: Sequence[str] = ()
-) -> tuple[ZembleIndex, str]:
+) -> ZembleIndex:
     """Build, or route to, the index that answers a request for a path.
 
     A sub-directory of an already indexed tree is answered from that tree's index, filtered
@@ -94,28 +93,20 @@ def _build_index(
     :param content: Content types to index.
     :param embedder: Embedder spec, or None for the environment default.
     :param exclude: Gitignore-style patterns a first build must skip.
-    :return: The index to answer with, and the source key it must be cached under.
+    :return: The index to answer with.
     """
     if is_git_url(path):
-        return ZembleIndex.from_git(path, content=content, embedder=embedder), path
+        return ZembleIndex.from_git(path, content=content, embedder=embedder)
     root, prefix = resolve_index_root(path, resolve_embedder(embedder).model_id, content)
     pruned = () if has_cached_index(root, content) else tuple(exclude)
     index = ZembleIndex.from_path(root, content=content, embedder=embedder, exclude=pruned)
     if prefix is None:
-        return index, root
+        return index
     view = index.subtree(prefix)
     if view is not None:
-        return view, root
+        return view
     print(f"the {root} index holds nothing under {path}; indexing it on its own", file=sys.stderr)
-    return ZembleIndex.from_path(path, content=content, embedder=embedder, exclude=tuple(exclude)), path
-
-
-def _maybe_save_index(index: ZembleIndex, path: str) -> None:
-    """Save the index to the cache folder if it was not loaded from disk."""
-    try:
-        save_index_to_cache(index, path)
-    except Exception as e:
-        print(f"Error saving index: {e}", file=sys.stderr)
+    return ZembleIndex.from_path(path, content=content, embedder=embedder, exclude=tuple(exclude))
 
 
 def _add_embedder_arg(p: argparse.ArgumentParser) -> None:
@@ -137,7 +128,7 @@ def _run_stats(path: str, content: list[ContentType], embedder: str | None = Non
     if remote is not None:
         print(json.dumps(remote))
         return
-    index, source_key = _load_index(path, content, embedder)
+    index = _load_index(path, content, embedder)
     stats = index.stats
     print(
         json.dumps(
@@ -152,7 +143,6 @@ def _run_stats(path: str, content: list[ContentType], embedder: str | None = Non
             }
         )
     )
-    _maybe_save_index(index, source_key)
 
 
 def _filtered(index: ZembleIndex, path: str, paths: Sequence[str], exclude: Sequence[str]) -> ZembleIndex:
@@ -392,14 +382,14 @@ def _via_daemon(
 
 def _load_index(
     path: str, content: list[ContentType], embedder: str | None = None, exclude: Sequence[str] = ()
-) -> tuple[ZembleIndex, str]:
+) -> ZembleIndex:
     """Build or route to an index, exiting on FileNotFoundError, a bad embedder spec or a refused build.
 
     :param path: Local path or git URL.
     :param content: Content types to index.
     :param embedder: Embedder spec, or None for the environment default.
     :param exclude: Gitignore-style patterns a first build must skip.
-    :return: The index to answer with, and the source key it must be cached under.
+    :return: The index to answer with.
     """
     from zemble.daemon import client
 
@@ -453,7 +443,7 @@ def _run_search(
     if remote is not None:
         print(json.dumps(remote))
         return
-    index, source_key = _load_index(path, content, embedder, exclude)
+    index = _load_index(path, content, embedder, exclude)
     try:
         pairwise = load_reranker(reranker)
     except RerankerSpecError as e:
@@ -463,7 +453,6 @@ def _run_search(
     results = view.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines, reranker=pairwise)
     out = format_results(query, results, max_snippet_lines) if results else {"error": "No results found."}
     print(json.dumps(out))
-    _maybe_save_index(index, source_key)
 
 
 def _run_find_related(
@@ -500,7 +489,7 @@ def _run_find_related(
             sys.exit(1)
         print(json.dumps(remote))
         return
-    index, source_key = _load_index(path, content, embedder, exclude)
+    index = _load_index(path, content, embedder, exclude)
     chunk = index.chunk_at(file_path, line)
     if chunk is None:
         print(describe_unresolved_location(index, file_path, line), file=sys.stderr)
@@ -514,7 +503,6 @@ def _run_find_related(
         else {"error": f"No related chunks found for {file_path}:{line}."}
     )
     print(json.dumps(out))
-    _maybe_save_index(index, source_key)
 
 
 def _clear_indexes(cache_folder: Path) -> None:

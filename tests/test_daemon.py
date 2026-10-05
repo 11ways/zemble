@@ -356,7 +356,7 @@ async def test_the_watcher_rebuild_passes_the_same_scope_guard_as_the_cli(
     """A dump into a watched tree is refused by the work guard: one seam, both lanes.
 
     Before this, `require_affordable_scope` sat above `ZembleIndex.from_path` only, and the
-    daemon's rebuild reached `create_index_from_path` directly - so the CLI was refused while
+    daemon's rebuild reached the index writer directly - so the CLI was refused while
     the daemon chunked and embedded the very same tree, unguarded, minutes later.
     """
     daemon = _daemon_with_fake_embedder(watch=False)
@@ -694,8 +694,7 @@ def test_cli_embedder_override_requires_explicit_no_daemon(
     fake_index = MagicMock()
     fake_index.filtered.return_value = fake_index
     fake_index.search.return_value = []
-    monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
-    monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: fake_index)
 
     with pytest.raises(SystemExit):
         cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None, embedder="model2vec:other")
@@ -713,8 +712,7 @@ def test_cli_no_daemon_flag_is_silent(
     fake_index = MagicMock()
     fake_index.filtered.return_value = fake_index
     fake_index.search.return_value = []
-    monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: (fake_index, path))
-    monkeypatch.setattr(cli, "_maybe_save_index", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_load_index", lambda path, *args, **kwargs: fake_index)
 
     cli._run_search(str(tmp_project), "q", 5, [ContentType.CODE], None, no_daemon=True)
     assert "daemon unavailable" not in capsys.readouterr().err, "an opt-out is not a failure"

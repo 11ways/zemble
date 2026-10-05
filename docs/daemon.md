@@ -34,7 +34,7 @@ reports actual active reads, including work whose caller has stopped waiting.
 
 Cold graph preparation owns no read slot. Callers join one construction job per
 canonical root; their deadlines cannot cancel it or block unrelated warm searches.
-The worker has its own bounded lifetime and address-space reservation, writes through
+The worker has its own bounded lifetime and private-memory limit, writes through
 the existing graph publication protocol, and is reaped before the job completes.
 Watcher changes arriving during construction coalesce into a bounded follow-up pass.
 `graph_construction.jobs` reports queued/building/ready/failed/cancelled states,
@@ -48,10 +48,9 @@ without retaining old indexes. Errors are never cached. During a refresh, reader
 continue using the last published generation instead of waiting for construction.
 
 The aggregate default is 8192 MiB. Construction is capped at 6144 MiB and narrowed
-by the serving process's current virtual mappings plus concurrent-read scratch.
-During construction the parent and worker address-space reservations sum to at most
-the aggregate budget. Serving RSS and virtual limits are separately configurable
-and reported in `memory_configuration`; RSS is not interpreted as virtual memory.
+by the serving process's current private memory plus concurrent-read scratch.
+During construction the parent and worker private-memory limits (`RLIMIT_DATA`) sum
+to at most the aggregate budget; both are reported in `memory_configuration`.
 
 ### Commands
 
@@ -179,7 +178,7 @@ Rebuilding waits for two seconds of relevant-event quiet, checked again after wa
 for the daemon-wide construction slot. Each root owns one job and at most 4096
 deduplicated paths; overflow becomes a full-rescan bit. Eviction discards pending
 work and historical root metadata. The resulting set of paths is what the
-rebuild works from: `create_index_from_path(previous=..., changed_paths=...)` re-chunks
+rebuild works from: `write_index(previous=..., changed_paths=...)` re-chunks
 and re-embeds exactly those files and reuses every other file's chunks, vectors and
 postings from the previous index, without walking the tree at all. The same set is
 handed to `build_graph(changed_paths=...)`, where it replaces two walks: the source
@@ -195,9 +194,8 @@ readability - so a watcher that over-reports cannot get a file into the index th
 build would have skipped. The reverse is a real obligation on the caller: whatever the
 change set does not name is assumed unchanged.
 
-Every successful rebuild is persisted and reloaded as mapped columns before the
-swap. Write throttling previously kept heap generations resident between saves.
-One line per rebuild logs the file counts and milliseconds, including persistence.
+Every successful rebuild is published and reloaded as mapped columns before the
+swap. One line per rebuild logs the file counts and milliseconds, including persistence.
 
 The `graph_ms` on that line is the whole symbol-graph refresh. On the javaweb
 workspace it is around 0.6 s for a template edit, 0.9 s for a Java one and 2.4 s when
@@ -212,29 +210,27 @@ reading the object it started with and a search that arrives mid-rebuild is answ
 the index from before it. All roots share one construction slot; memory-intensive
 requests use bounded concurrent read slots, and warm search does not take the construction lock.
 
-What that costs is bounded because of how the BM25 index is shaped:
+Every build lane - a cold build, a stale cache brought up to date, a clone, a watcher
+rebuild - is `ZembleIndex.build`: `write_index` streams the next generation into a
+staging folder beside the variant, `generation.publish` renames it into place file by
+file (metadata last, under the variant's `index.lock`), and the result is loaded mapped.
+A process that has the old generation mapped keeps reading its inodes; a load opening
+the variant waits on the lock rather than mixing two generations.
 
-| Piece | Shared or copied |
+Nothing is held whole while writing:
+
+| Store | How the next generation gets it |
 | --- | --- |
-| BM25 columnar postings (`_Frozen`) | **Shared**, memory-mapped, never written to. |
-| BM25 delta (added documents' postings, removed base rows, document order) | Copied - it holds only what moved since the base was built. |
-| Vector matrix | Streamed into a temporary mapping; normalization scratch is bounded in blocks. |
-| Chunk list, manifest | Spliced/rebuilt for construction, then reloaded as mapped columns and a fresh manifest. |
+| Chunks | Each new file's chunks are appended as they are chunked; a reused file's rows are copied byte for byte from the mapped store. |
+| BM25 | New documents' postings are kept as three flat integers each; reused documents are carried by row and merged term by term in blocks of 2^20 postings. |
+| Symbols | New chunks are scanned; reused chunks keep the names their previous generation found. |
+| Vectors | A mapped matrix is preallocated; reused rows are copied in blocks, fresh rows embedded in batches of 2048 after the bill guard has judged all of them at once. |
 
-`BM25.for_update()` is that derivation. Scoring adds the base and the delta together:
-corpus size, average document length and every term's document frequency count the live
-documents (base minus removed, plus added), and a removed base row is masked out of the
-term's posting list, so a query cannot tell where a document came from. Identity with a
-from-scratch index is asserted in `tests/index/test_bm25.py`.
-
-`BM25.fold()` turns base plus delta back into one base with a vectorized pass over the
-postings, and no per-document dictionary anywhere. A save always writes the folded form,
-so a cold load never pays for a warm process's updates, and `for_update()` folds instead
-of deriving once the delta has grown past a tenth of the base. Every column is written to
-a temporary file and moved onto its target: an older index generation may still have that
-very file mapped, and truncating it under a live mapping is a SIGBUS, not a stale read -
-which is exactly how the first measurement run of this work died, before the columns were
-shared at all.
+What stays in memory is what is new plus a few integers per chunk. On the 177k-chunk
+workspace a rebuild for one edited file peaks at ~170 MiB of private memory and a
+build from nothing at ~280 MiB. Carried-over postings come first within a term, which no
+score can see because each document appears once; identity with a from-scratch build is
+asserted in `tests/index/test_bm25.py`.
 
 ### On demand, and only on demand
 
@@ -264,8 +260,7 @@ output can end up in a backup.
 | --- | --- | --- |
 | `ZEMBLE_DAEMON=0` | unset | Never use or start a daemon in this process. |
 | `ZEMBLE_DAEMON_MAX_INDEXES` | 4 | Resident roots before LRU eviction; content variants of one root share a resident index. |
-| `ZEMBLE_DAEMON_MAX_RSS_MB` | min(15% of MemTotal, 4096) MiB | Serving-process resident memory admission budget. |
-| `ZEMBLE_DAEMON_MAX_VIRTUAL_MB` | serving RSS budget | Serving-process virtual memory limit and kernel allocation backstop. |
+| `ZEMBLE_DAEMON_MAX_RSS_MB` | min(15% of MemTotal, 4096) MiB | Serving-process private memory (`VmData`) budget and `RLIMIT_DATA` backstop; mapped index files are not counted. |
 | `ZEMBLE_DAEMON_TOTAL_MEMORY_MB` | 8192 MiB | Aggregate parent/graph-worker reservation ceiling. |
 | `ZEMBLE_GRAPH_BUILD_MEMORY_MB` | 6144 MiB | Construction cap, narrowed by aggregate headroom. |
 | `ZEMBLE_DAEMON_READ_SLOTS` | 4 | Concurrent immutable read tasks. |

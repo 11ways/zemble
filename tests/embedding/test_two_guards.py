@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import ast
 import math
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import make_chunk
 from tests.embedding.test_pricing import PricedEmbedder
-from zemble.cache import save_index_to_cache
 from zemble.daemon.server import REFUSAL_TYPES
 from zemble.dedup.detect import DupeOptions, logic_classes
 from zemble.dedup.model import CloneKind
@@ -42,7 +41,7 @@ from zemble.embedding.pricing import (
 )
 from zemble.embedding.registry import CACHE_ENV, ResolvedEmbedder, build_embedder, caching_enabled
 from zemble.index import ScopeRefused, ZembleIndex
-from zemble.index.dense import embed_chunks
+from zemble.index.create import write_index
 from zemble.index.scope import DEFAULT_WORK_LIMIT_BYTES, WORK_LIMIT_ENV, estimate_tree
 from zemble.refusal import Refused
 from zemble.types import ContentType
@@ -106,7 +105,6 @@ def test_a_tree_whose_chunks_are_already_bought_is_not_refused(tmp_path: Path) -
 
     # 2. The first build is allowed and pays for every chunk once.
     first = ZembleIndex.from_path(root, embedder=embedder)
-    save_index_to_cache(first, str(root.resolve()))
     bought = len(inner.document_batches)
     assert bought > 0, "step 2: a cold build really does buy the tree"
 
@@ -172,6 +170,8 @@ def test_the_two_lanes_agree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     #    ceiling while the report went on saying REFUSED.
     monkeypatch.setenv(CACHE_ENV, "0")
     assert not caching_enabled(), "step 4: the documented knob really is off"
+    # Step 3's build was published; these verdicts are about a cold build, so start from no index.
+    monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(tmp_path / "cold-index-cache"))
     monkeypatch.setenv(WORK_LIMIT_ENV, "1")
     assert _verdicts(cached=False) == (True, True), "step 4: work is refused with the cache off too"
     monkeypatch.delenv(WORK_LIMIT_ENV)
@@ -341,8 +341,12 @@ def test_the_prose_quotes_the_capsule_constants_it_argues_from() -> None:
 
 
 def _buy_chunks(embedder: Embedder) -> None:
-    """Drive `zemble.index.dense.embed_chunks`, the seam every index build buys its vectors at."""
-    embed_chunks(embedder, [make_chunk("x = 1\n" * 600)])
+    """Drive `zemble.index.create.write_index`, the seam every index build buys its vectors at."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory) / "src"
+        root.mkdir()
+        (root / "module.py").write_text("x = 1\n" * 600, encoding="utf-8")
+        write_index(root, embedder, Path(directory) / "index", display_root=root)
 
 
 def _buy_logic_bodies(embedder: Embedder) -> None:
@@ -388,7 +392,7 @@ def _reaches_the_provider(module: Path) -> bool:
 #: cache wrapper, so this is what keeps them in step - and naming a seam here is not enough,
 #: because step 2 RUNS each probe: asserting that the string "require_affordable_bill" appears
 #: in the file passed with both guard call lines deleted.
-PAID_DOCUMENT_SEAMS = {"index/dense.py": _buy_chunks, "dedup/detect.py": _buy_logic_bodies}
+PAID_DOCUMENT_SEAMS = {"index/create.py": _buy_chunks, "dedup/detect.py": _buy_logic_bodies}
 
 
 def test_every_paid_document_seam_passes_the_bill_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

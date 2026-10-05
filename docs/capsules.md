@@ -55,7 +55,7 @@ a doc comment is credited to what the comment documents.
 ## Configuration
 
 `CapsuleOptions(level, in_bm25)`, passed to `ZembleIndex.from_path(...,
-capsules=...)` or `create_index_from_path(..., capsules=...)`. Levels are `full`
+capsules=...)` or `write_index(..., capsules=...)`. Levels are `full`
 (everything above), `lite` (path and type chain only) and `off` (no capsule at all;
 byte-for-byte the pre-capsule behaviour). `in_bm25` additionally appends the capsule,
 minus its path segment, to the BM25 document - BM25 already enriches with path

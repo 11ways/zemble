@@ -150,7 +150,6 @@ async def test_index_cache_builds_and_caches(cache: IndexCache, tmp_path: Path, 
     fake_index = MagicMock()
     with (
         patch(f"zemble.mcp.ZembleIndex.{patch_target}", return_value=fake_index) as mock_build,
-        patch("zemble.index_cache.save_index_to_cache") as mock_save,
         patch("zemble.index_cache.get_validated_cache", return_value=Path("/fake/cache")),
     ):
         first = await cache.get(resolved_source)
@@ -165,7 +164,6 @@ async def test_index_cache_builds_and_caches(cache: IndexCache, tmp_path: Path, 
         (ContentType.CODE,),
         (ContentType.DOCS,),
     ]
-    assert mock_save.call_count == 2
 
 
 @pytest.mark.anyio
@@ -189,7 +187,6 @@ async def test_index_cache_staleness_check_scope(
     resolved_source = str(tmp_path) if source == "local_tmp_path" else source
     with (
         patch(f"zemble.mcp.ZembleIndex.{patch_target}", return_value=MagicMock()) as mock_build,
-        patch("zemble.index_cache.save_index_to_cache"),
         patch("zemble.index_cache.get_validated_cache", return_value=None) as mock_validate,
         # Disable the cooldown: real build duration (here, just thread-dispatch overhead) would
         # otherwise sometimes exceed the gap between the two get() calls below, flaking the test.
@@ -270,17 +267,6 @@ async def test_index_cache_evicts_on_failure(cache: IndexCache, tmp_path: Path) 
         result = await cache.get(str(tmp_path))
     assert result is not None
     assert call_count == 2
-
-
-@pytest.mark.anyio
-async def test_index_cache_ignores_cache_save_failure(cache: IndexCache, tmp_path: Path) -> None:
-    """A cache save failure must not fail the MCP request."""
-    fake_index = MagicMock()
-    with (
-        patch("zemble.mcp.ZembleIndex.from_path", return_value=fake_index),
-        patch("zemble.index_cache.save_index_to_cache", side_effect=RuntimeError("save failed")),
-    ):
-        assert await cache.get(str(tmp_path)) is fake_index
 
 
 @pytest.mark.anyio
@@ -393,7 +379,6 @@ async def test_search_builds_exact_content_indexes(
 
     with (
         patch("zemble.index.index.load_embedder", return_value=mock_embedder),
-        patch("zemble.index_cache.save_index_to_cache"),
     ):
         server = create_server(cache)
         for content, expected_suffixes in expected:
@@ -617,7 +602,6 @@ async def test_no_tool_returns_json_inside_a_json_string(
 
     with (
         patch("zemble.index.index.load_embedder", return_value=mock_embedder),
-        patch("zemble.index_cache.save_index_to_cache"),
     ):
         server = create_server(cache)
         listed = await server.list_tools()
@@ -739,7 +723,6 @@ async def test_search_defaults_repo_to_the_server_start_directory(
     monkeypatch.setattr(mcp_repo, "DEFAULT_REPO", str(tmp_project))
     with (
         patch("zemble.index.index.load_embedder", return_value=mock_embedder),
-        patch("zemble.index_cache.save_index_to_cache"),
     ):
         server = create_server(cache)
         result = await server.call_tool("search", {"query": "authenticate", "top_k": 5})

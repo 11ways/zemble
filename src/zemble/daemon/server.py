@@ -13,7 +13,6 @@ import gc
 import json
 import logging
 import os
-import tempfile
 import time
 import traceback
 import weakref
@@ -21,19 +20,23 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from zemble.cache import find_index_from_cache_folder, resolve_cache_folder, retire_covered_indexes
-from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
+from zemble.cache import (
+    covering_content,
+    find_index_from_cache_folder,
+    load_manifest_for_incremental,
+    resolve_index_root,
+    retire_covered_indexes,
+)
 from zemble.daemon import client
 from zemble.daemon.admission import AdmissionBusy, ReadAdmission, request_deadline
 from zemble.daemon.graph_jobs import GraphJobs
 from zemble.daemon.memory import (
     MEMORY_ENV,
     MIB,
-    VIRTUAL_ENV,
     MemoryRefused,
     allocation_backstop,
     default_budget_mb,
-    virtual_mb,
+    private_mb,
 )
 from zemble.daemon.protocol import (
     ACCEPTS_BUSY_FIELD,
@@ -53,7 +56,7 @@ from zemble.daemon.watch import IgnoreRules, RootWatcher
 from zemble.embedding.base import Embedder
 from zemble.graph.facts import matches_facts_glob
 from zemble.index import ZembleIndex
-from zemble.index.create import create_index_from_path
+from zemble.index.chunk_store import ChunkList
 from zemble.index.files import get_extensions
 from zemble.index.scope import TreeEstimate, estimate_tree, measure_work, require_declared_scope
 from zemble.index.types import PreviousIndex
@@ -86,10 +89,28 @@ _QUIET_SECONDS = 2.0
 _MAX_CHANGED_PATHS = 4096
 
 
-def _work_reserve(estimate: TreeEstimate, dimensions: int) -> float:
-    """Reserve parsing/postings plus three transient copies of estimated fresh embedding rows."""
-    rows = estimate.bytes / _DESIRED_CHUNK_LENGTH_CHARS + estimate.files
-    return (estimate.bytes * 12 + rows * dimensions * 12) / MIB
+#: Private memory a build needs whatever it writes: one embedding batch, one merge block of
+#: postings, the vocabulary, and a few integers per chunk (see `zemble.index.create.write_index`).
+_BUILD_BASE_MB = 192.0
+#: Private bytes a build holds per byte of NEW source: its BM25 postings as flat integers.
+_BUILD_BYTES_PER_SOURCE_BYTE = 3
+
+
+def _work_reserve(estimate: TreeEstimate) -> float:
+    """Reserve what a streaming build of *estimate*'s new source holds in private memory."""
+    return _BUILD_BASE_MB + estimate.bytes * _BUILD_BYTES_PER_SOURCE_BYTE / MIB
+
+
+def _load_work(
+    path: str, content: tuple[ContentType, ...], exclude: tuple[str, ...], embedder_id: str, loaded: set[str]
+) -> TreeEstimate:
+    """Measure what loading *path* will chunk: only what the stored index answering it does not cover unchanged."""
+    root, _prefix = resolve_index_root(path, embedder_id, content, None, loaded)
+    stored = covering_content(root, embedder_id, content, None, ())
+    manifest = load_manifest_for_incremental(root, embedder_id, stored)
+    if manifest is None:
+        return estimate_tree(Path(path), content, exclude)
+    return estimate_tree(Path(root), stored, (), manifest)
 
 
 def _merge_changes(
@@ -107,8 +128,6 @@ def _merge_changes(
 
 class ResidentCache(IndexCache):
     """The daemon owns freshness and keeps only one mapped generation per root."""
-
-    require_persistence = True
 
     def __init__(
         self,
@@ -133,18 +152,6 @@ class ResidentCache(IndexCache):
         """Leave freshness to the watcher instead of rebuilding a churning tree from a query."""
         if not self.watch_owned:
             await super()._evict_if_stale(cache_key)
-
-    def _build_index(
-        self, source: str, ref: str | None, embedder: Embedder, cache_key: CacheKey, exclude: Sequence[str] = ()
-    ) -> ZembleIndex:
-        """Discard construction dictionaries and vectors before returning the mapped stores."""
-        index = super()._build_index(source, ref, embedder, cache_key, exclude)
-        path = find_index_from_cache_folder(cache_key[0], index.storage_content, index.exclude)
-        embedder = index.embedder
-        del index
-        gc.collect()
-        release_free_heap()
-        return ZembleIndex.load_from_disk(path, embedder=embedder)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -179,39 +186,42 @@ def _content_types(raw: Sequence[str] | None) -> tuple[ContentType, ...]:
 
 
 def rebuild_index(
-    previous_index: ZembleIndex, cache_key: CacheKey, changed_paths: Sequence[Path] | None = None
+    current: ZembleIndex, cache_key: CacheKey, changed_paths: Sequence[Path] | None = None
 ) -> tuple[ZembleIndex, dict[str, int]]:
-    """Reindex a root incrementally from an in-memory index, returning the new index and what moved.
+    """Write and publish the next generation of a served root, returning it loaded and what moved.
 
-    :param previous_index: The index currently serving this root.
+    :param current: The index currently serving this root; it is read, never written.
     :param cache_key: The root and content types being rebuilt.
     :param changed_paths: The paths a watcher saw move; None re-walks the whole tree.
     :return: The replacement index, and counts of added, changed and removed files.
     """
+    if not isinstance(current.chunks, ChunkList):
+        raise TypeError("a served index is always loaded from its stores")
     root = Path(cache_key[0])
     content = cache_key[1]
-    # AIDEV-NOTE: the serving generation stays immutable. Reused vectors are streamed into a
-    # temporary mapping, not copied to anonymous heap; BM25 shares its immutable postings.
-    # Admission reserves the replacement inside the process budget before any allocation.
     previous = PreviousIndex(
-        chunks=previous_index.chunks,
-        vectors=previous_index._semantic_index.vectors,
-        manifest=previous_index._manifest,
-        bm25_index=previous_index._bm25_index,
+        chunks=current.chunks,
+        vectors=current._semantic_index.vectors,
+        manifest=current._manifest,
+        bm25_index=current._bm25_index,
+        definitions=current._definitions,
     )
-    before = dict(previous_index._manifest)
-    with tempfile.TemporaryDirectory(prefix="rebuild-", dir=resolve_cache_folder()) as temporary:
-        bm25_index, semantic_index, chunks, manifest = create_index_from_path(
-            root,
-            embedder=previous_index.embedder,
-            content=content,
-            display_root=root,
-            previous=previous,
-            capsules=previous_index._capsules,
-            changed_paths=changed_paths,
-            exclude=previous_index.exclude,
-            vector_path=Path(temporary) / "vectors.npy",
-        )
+    before = dict(current._manifest)
+    index, written = ZembleIndex.build(
+        root,
+        current.embedder,
+        find_index_from_cache_folder(cache_key[0], content, current.exclude),
+        content=content,
+        capsules=current._capsules,
+        exclude=current.exclude,
+        previous=previous,
+        changed_paths=changed_paths,
+    )
+    retire_covered_indexes(cache_key[0], content, current.exclude)
+    # The writer's scratch is garbage now; hand it back before the graph phase can wait for minutes.
+    gc.collect()
+    release_free_heap()
+    manifest = written.manifest
     counts = {
         "added": len(manifest.keys() - before.keys()),
         "removed": len(before.keys() - manifest.keys()),
@@ -219,32 +229,7 @@ def rebuild_index(
             1 for path, entry in manifest.items() if path in before and before[path].mtime_ns != entry.mtime_ns
         ),
     }
-    index = ZembleIndex(
-        previous_index.embedder,
-        bm25_index,
-        semantic_index,
-        chunks,
-        root=root,
-        content=content,
-        manifest=manifest,
-        capsules=previous_index._capsules,
-        exclude=previous_index.exclude,
-    )
     return index, counts
-
-
-def _mapped_rebuild(
-    current: ZembleIndex, cache_key: CacheKey, changed_paths: Sequence[Path] | None
-) -> tuple[ZembleIndex, dict[str, int]]:
-    """Release construction storage before publishing a mapped replacement."""
-    index, counts = rebuild_index(current, cache_key, changed_paths)
-    path = find_index_from_cache_folder(cache_key[0], cache_key[1], index.exclude)
-    index.save(path)
-    retire_covered_indexes(cache_key[0], cache_key[1], index.exclude)
-    del index
-    gc.collect()
-    release_free_heap()
-    return ZembleIndex.load_from_disk(path, embedder=current.embedder), counts
 
 
 class Daemon:
@@ -275,9 +260,6 @@ class Daemon:
         self.max_rss_mb = max_rss_mb if max_rss_mb is not None else _env_int(MEMORY_ENV, default_budget_mb())
         if self.max_rss_mb <= 0:
             raise ValueError(f"{MEMORY_ENV} must be positive")
-        self.max_virtual_mb = _env_int(VIRTUAL_ENV, self.max_rss_mb)
-        if self.max_virtual_mb <= 0:
-            raise ValueError(f"{VIRTUAL_ENV} must be positive")
         self.cache = ResidentCache(
             max_size=max(1, self.max_indexes),
             on_evict=self._on_evict,
@@ -384,8 +366,8 @@ class Daemon:
         return None
 
     def _admit(self, reserve_mb: float, keep: CacheKey | None = None) -> bool:
-        """Evict idle LRU stores until both resident and address-space headroom cover the work."""
-        while (_rss_mb() or 0) + reserve_mb > self.max_rss_mb or virtual_mb() + reserve_mb > self.max_virtual_mb:
+        """Evict idle LRU stores until private-memory headroom covers the work."""
+        while private_mb() + reserve_mb > self.max_rss_mb:
             victim = next(
                 (
                     key
@@ -421,11 +403,13 @@ class Daemon:
             return joined
         gc.collect()
         release_free_heap()
-        reserve = 128.0
+        reserve = _BUILD_BASE_MB
         if not is_git_url(path):
             require_declared_scope(Path(path))
-            estimate = await asyncio.to_thread(estimate_tree, Path(path), content, exclude)
-            reserve += _work_reserve(estimate, self.cache.embedder.dimensions)
+            estimate = await asyncio.to_thread(
+                _load_work, path, content, exclude, self.cache.embedder.model_id, self.cache.loaded_roots(content)
+            )
+            reserve = _work_reserve(estimate)
         if not self._admit(reserve):
             raise MemoryRefused(
                 f"Loading {path} needs ~{reserve:.0f} MiB headroom within {self.max_rss_mb} MiB ({MEMORY_ENV})."
@@ -631,12 +615,8 @@ class Daemon:
                 current = next((index for key, index in self.cache.loaded() if key == cache_key), None)
                 if current is None:
                     return {"skipped": "not loaded"}
-                # AIDEV-NOTE: admission reserves copying/normalization and persistence scratch;
-                # RLIMIT_AS is the allocation backstop if this estimate misses a shape.
-                vectors = current._semantic_index.vectors.nbytes
-                frozen = current._bm25_index._frozen
-                postings = 0 if frozen is None else frozen.posting_docs.nbytes + frozen.posting_tf.nbytes
-                reserve = 128 + (vectors + postings * 12 + len(current.chunks) * 512) / MIB
+                # AIDEV-NOTE: a rebuild streams its generation to disk, so its private memory is
+                # bounded by what is new, not by the index; RLIMIT_DATA is the backstop if this misses.
                 work = await asyncio.to_thread(
                     measure_work,
                     Path(cache_key[0]),
@@ -646,13 +626,13 @@ class Daemon:
                     changed_paths,
                     Path(cache_key[0]),
                 )
-                reserve += _work_reserve(work, current.embedder.dimensions)
+                reserve = _work_reserve(work)
                 if not self._admit(reserve, keep=cache_key):
                     result = {"deferred": "memory budget", "reserve_mb": round(reserve), "knob": MEMORY_ENV}
                     self.last_error[cache_key] = {"refused": f"Rebuild deferred by {MEMORY_ENV}", **result}
                     return result
                 try:
-                    index, counts = await asyncio.to_thread(_mapped_rebuild, current, cache_key, changed_paths)
+                    index, counts = await asyncio.to_thread(rebuild_index, current, cache_key, changed_paths)
                 except REFUSAL_TYPES as exc:
                     # Nothing was chunked, embedded or swapped, so the index that was serving
                     # this root before is still the one serving it now.
@@ -920,13 +900,11 @@ async def _cmd_status(daemon: Daemon, args: dict[str, Any]) -> Any:
         "idle_minutes_limit": daemon.idle_minutes,
         "max_indexes": daemon.max_indexes,
         "max_rss_mb": daemon.max_rss_mb,
-        "virtual_mb": round(virtual_mb(), 1),
+        "private_mb": round(private_mb(), 1),
         "read_admission": daemon.reads.status(),
         "graph_construction": daemon.graphs.status(),
-        "serving_virtual_limit_mb": daemon.max_virtual_mb,
         "memory_configuration": {
-            "rss_mb": daemon.max_rss_mb,
-            "virtual_mb": daemon.max_virtual_mb,
+            "private_mb": daemon.max_rss_mb,
             "total_mb": daemon.graphs.total_mb,
             "construction_mb": daemon.graphs.build_mb,
         },
@@ -1215,7 +1193,7 @@ async def run(max_indexes: int | None = None, idle_minutes: int | None = None, w
     # on its own socket, and every shared code path (graph ensure, search) can reach one.
     client.disable_for_this_process("running inside the daemon")
     daemon = Daemon(max_indexes=max_indexes, idle_minutes=idle_minutes, watch=watch)
-    daemon.max_virtual_mb = allocation_backstop(daemon.max_virtual_mb)
+    daemon.max_rss_mb = allocation_backstop(daemon.max_rss_mb)
     lock = _acquire_lock()
     path = socket_path(create_dir=True)
     if path.exists():

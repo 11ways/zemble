@@ -10,9 +10,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.conftest import FakeEmbedder, make_chunk, write_index_components
-from zemble.cli import _build_parser, _cli_main, _maybe_save_index, _run_clear, _via_daemon, main
+from zemble.cli import _build_parser, _cli_main, _run_clear, _via_daemon, main
 from zemble.embedding.pricing import CONFIRM_ENV
-from zemble.index.create import create_index_from_path
+from zemble.index.create import write_index
 from zemble.types import ContentType, SearchResult
 from zemble.version import __version__
 
@@ -240,14 +240,6 @@ def test_cli_content_argument(
     with patch("zemble.cli.ZembleIndex.from_path", return_value=fake_index) as mock_from_path:
         _cli_main()
     assert list(mock_from_path.call_args.kwargs["content"]) == expected
-
-
-def test_maybe_save_index_logs_error_on_save_failure(capsys: pytest.CaptureFixture[str]) -> None:
-    """_maybe_save_index prints to stderr when cache persistence fails."""
-    fake_index = MagicMock()
-    with patch("zemble.cli.save_index_to_cache", side_effect=OSError("disk full")):
-        _maybe_save_index(fake_index, "/some/path")
-    assert "Error saving index" in capsys.readouterr().err
 
 
 def test_agent_file_tools_are_bash_only() -> None:
@@ -573,7 +565,7 @@ def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
     from zemble.index import ZembleIndex
 
     reached: list[str] = []
-    real_create = create_index_from_path
+    real_create = write_index
     real_bill = pricing.require_affordable_bill
 
     def _trip_wire(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -584,12 +576,12 @@ def test_every_subcommand_that_can_build_accepts_the_yes_its_refusals_advertise(
         reached.append("require_affordable_bill")
         return real_bill(embedder, texts)
 
-    monkeypatch.setattr("zemble.index.create.create_index_from_path", _trip_wire)
-    monkeypatch.setattr("zemble.index.index.create_index_from_path", _trip_wire)
-    # Both spellings of the paid seam: `index/dense.py` bound the name at import, `dedup/detect.py`
+    monkeypatch.setattr("zemble.index.create.write_index", _trip_wire)
+    monkeypatch.setattr("zemble.index.index.write_index", _trip_wire)
+    # Both spellings of the paid seam: `index/create.py` bound the name at import, `dedup/detect.py`
     # looks it up on the module when the logic lane runs.
     monkeypatch.setattr("zemble.embedding.pricing.require_affordable_bill", _paid_wire)
-    monkeypatch.setattr("zemble.index.dense.require_affordable_bill", _paid_wire)
+    monkeypatch.setattr("zemble.index.create.require_affordable_bill", _paid_wire)
     monkeypatch.setattr(
         "zemble.embedding.preflight.build_embedder",
         lambda spec: ResolvedEmbedder(spec=spec, embedder=FakeEmbedder(), scheme="fake", family="fake:test"),

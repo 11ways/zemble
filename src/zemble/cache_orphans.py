@@ -19,6 +19,7 @@ from zemble.cache import (
     remove_index_components,
     stored_variants,
 )
+from zemble.daemon.protocol import process_alive
 from zemble.embedding.gc import indexes_by_family, last_activity
 from zemble.graph.store import (
     graph_covers,
@@ -29,12 +30,18 @@ from zemble.graph.store import (
     retired_graph_files,
     sweep_graph_folder,
 )
+from zemble.index.generation import LOCK_NAME, STAGING_PREFIX
 from zemble.openfiles import held_open
 
 #: A cache entry's folder name: the sha256 of its source.
 KEY_DIR_NAME = re.compile(r"^[a-f0-9]{64}$")
 #: What `zemble.index.columnar` writes beside a column before renaming it: `<name>.<pid>.<thread>.tmp[.npy]`.
 _TEMP_LEFTOVER = re.compile(r".+\.\d+\.\d+\.tmp(\.npy)?$")
+#: A file a build names after its process, `<name>.building-<pid>`, which the build renames when done.
+_PID_LEFTOVER = re.compile(r".+\.building-(\d+)$")
+#: A staging folder a build writes its next index generation into (`zemble.index.generation`),
+#: or the temporary folder an older daemon rebuilt in.
+_STAGING_LEFTOVER = re.compile(rf"^{re.escape(STAGING_PREFIX)}.+-(\d+)-[^-]+$|^rebuild-.+$")
 #: A temporary file younger than this may still be about to be renamed by a live writer.
 _TEMP_MIN_AGE_SECONDS = 3600
 #: Days a git-URL entry or an unused embedder file is kept after it was last written.
@@ -43,40 +50,27 @@ _SECONDS_PER_DAY = 86400
 
 
 class OrphanKind(str, Enum):
-    """Why a cache entry is an orphan; each member says how it is removed."""
+    """Why a cache entry is an orphan; each member names itself in a report and says how it is removed."""
 
-    INDEX_ROOT_GONE = "index-root-gone"
-    GRAPH_ROOT_GONE = "graph-root-gone"
-    GIT_URL_STALE = "git-url-stale"
-    EMBEDDER_UNUSED = "embedder-unused"
-    TEMP_LEFTOVER = "temp-leftover"
-    RETIRED_GRAPH = "retired-graph"
-    INDEX_COVERED = "index-covered"
-    INDEX_UNDER_ANCESTOR = "index-under-ancestor"
-    GRAPH_UNDER_ANCESTOR = "graph-under-ancestor"
+    label: str
 
-    @property
-    def label(self) -> str:
-        """A short phrase naming the kind in a report."""
-        match self:
-            case OrphanKind.INDEX_ROOT_GONE:
-                return "index whose root is gone"
-            case OrphanKind.GRAPH_ROOT_GONE:
-                return "graph whose root is gone"
-            case OrphanKind.GIT_URL_STALE:
-                return "stale git-URL index"
-            case OrphanKind.EMBEDDER_UNUSED:
-                return "embedder cache no index uses"
-            case OrphanKind.TEMP_LEFTOVER:
-                return "temporary leftover"
-            case OrphanKind.RETIRED_GRAPH:
-                return "retired graph version or superseded graph.sqlite"
-            case OrphanKind.INDEX_COVERED:
-                return "index a wider index of the same root covers"
-            case OrphanKind.INDEX_UNDER_ANCESTOR:
-                return "sub-root index an ancestor's index answers for"
-            case OrphanKind.GRAPH_UNDER_ANCESTOR:
-                return "sub-root graph an ancestor's graph answers for"
+    def __new__(cls, value: str, label: str) -> "OrphanKind":
+        """Build a member from its wire value and the phrase a report names it by."""
+        member = str.__new__(cls, value)
+        member._value_ = value
+        member.label = label
+        return member
+
+    INDEX_ROOT_GONE = ("index-root-gone", "index whose root is gone")
+    GRAPH_ROOT_GONE = ("graph-root-gone", "graph whose root is gone")
+    GIT_URL_STALE = ("git-url-stale", "stale git-URL index")
+    EMBEDDER_UNUSED = ("embedder-unused", "embedder cache no index uses")
+    TEMP_LEFTOVER = ("temp-leftover", "temporary leftover")
+    STAGING_LEFTOVER = ("staging-leftover", "index generation a killed build left unpublished")
+    RETIRED_GRAPH = ("retired-graph", "retired graph version or superseded graph.sqlite")
+    INDEX_COVERED = ("index-covered", "index a wider index of the same root covers")
+    INDEX_UNDER_ANCESTOR = ("index-under-ancestor", "sub-root index an ancestor's index answers for")
+    GRAPH_UNDER_ANCESTOR = ("graph-under-ancestor", "sub-root graph an ancestor's graph answers for")
 
 
 @dataclass
@@ -128,7 +122,12 @@ def remove_orphan(orphan: Orphan) -> bool:
     A retired graph is swept as its writer, so a folder another process is writing is skipped.
     """
     match orphan.kind:
-        case OrphanKind.INDEX_ROOT_GONE | OrphanKind.GRAPH_ROOT_GONE | OrphanKind.GIT_URL_STALE:
+        case (
+            OrphanKind.INDEX_ROOT_GONE
+            | OrphanKind.GRAPH_ROOT_GONE
+            | OrphanKind.GIT_URL_STALE
+            | OrphanKind.STAGING_LEFTOVER
+        ):
             shutil.rmtree(orphan.target)
             return True
         case OrphanKind.EMBEDDER_UNUSED | OrphanKind.TEMP_LEFTOVER:
@@ -153,9 +152,11 @@ def remove_orphan(orphan: Orphan) -> bool:
 
 
 def _prune_empty(folder: Path) -> None:
-    """Remove a variant folder and the root folder above it once nothing is left in them."""
+    """Remove a variant folder and the root folder above it once nothing but a publish lock is left."""
     for path in (folder, folder.parent):
         try:
+            if [entry.name for entry in path.iterdir()] == [LOCK_NAME]:
+                (path / LOCK_NAME).unlink()
             path.rmdir()
         except OSError:
             return
@@ -281,24 +282,41 @@ def _unused_embedders(cache_folder: Path, oldest: float) -> list[Orphan]:
 
 
 def _temp_leftovers(cache_folder: Path, doomed: set[Path], now: float) -> list[Orphan]:
-    """List column temp files a killed save left behind, outside key folders already going."""
+    """List temp files and staging folders a killed writer left behind, outside key folders already going."""
     orphans = []
-    for directory, _subdirectories, names in os.walk(cache_folder):
+    for directory, subdirectories, names in os.walk(cache_folder):
         here = Path(directory)
         if any(here == folder or folder in here.parents for folder in doomed):
             continue
+        for name in sorted(subdirectories):
+            match = _STAGING_LEFTOVER.match(name)
+            if match is None:
+                continue
+            subdirectories.remove(name)
+            path = here / name
+            if _left_by_a_live_writer(path, match.group(1), now):
+                continue
+            orphans.append(Orphan(OrphanKind.STAGING_LEFTOVER, path, _tree_size(path), (path,)))
         for name in sorted(names):
-            if not _TEMP_LEFTOVER.match(name):
+            match = _PID_LEFTOVER.match(name)
+            if not _TEMP_LEFTOVER.match(name) and match is None:
                 continue
             path = here / name
-            try:
-                stat = path.stat()
-            except FileNotFoundError:
+            if _left_by_a_live_writer(path, match.group(1) if match else None, now) or held_open(path):
                 continue
-            if now - stat.st_mtime < _TEMP_MIN_AGE_SECONDS or held_open(path):
-                continue
-            orphans.append(Orphan(OrphanKind.TEMP_LEFTOVER, path, stat.st_size, (path,)))
+            orphans.append(Orphan(OrphanKind.TEMP_LEFTOVER, path, _size(path), (path,)))
     return orphans
+
+
+def _left_by_a_live_writer(path: Path, pid: str | None, now: float) -> bool:
+    """Return whether a leftover may still belong to a running writer: its process lives, or it is recent."""
+    try:
+        modified = path.stat().st_mtime
+    except FileNotFoundError:
+        return True
+    if pid is not None and process_alive(int(pid)):
+        return True
+    return now - modified < _TEMP_MIN_AGE_SECONDS
 
 
 def _size(path: Path) -> int:

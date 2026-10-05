@@ -8,56 +8,11 @@ from vicinity.backends.basic import BasicArgs, BasicBackend, CosineBasicBackend
 from vicinity.datatypes import QueryResult
 from vicinity.utils import normalize
 
-from zemble.chunking.capsule import embedding_text
-from zemble.embedding.base import Embedder
-from zemble.embedding.pricing import require_affordable_bill
-from zemble.index.columnar import atomic_save
-from zemble.types import Chunk
-
-
-def embed_chunks(embedder: Embedder, chunks: list[Chunk]) -> npt.NDArray[np.float32]:
-    """Embed chunk contents as documents, each prefixed by its context capsule when it has one.
-
-    Every chunk a build embeds passes here in ONE call, incremental builds included, so this
-    is where the bill for the whole build is judged - never per provider batch. An uncached set
-    that is over budget raises ``EmbeddingBudgetExceeded`` out of the guard, having sent nothing.
-
-    :param embedder: The embedder to use.
-    :param chunks: The chunks to embed.
-    :return: A float32 matrix, one row per chunk.
-    """
-    if not chunks:
-        return np.empty((0, embedder.dimensions), dtype=np.float32)
-    texts = [embedding_text(chunk) for chunk in chunks]
-    require_affordable_bill(embedder, texts)
-    return embedder.embed_documents(texts)
-
-
 #: Maximum temporary embedding-row copy for a scattered selector, per query worker.
 _SELECTOR_COPY_BYTES = 4 * 1024 * 1024
 
 
 class SelectableBasicBackend(CosineBasicBackend):
-    @classmethod
-    def mapped(cls, vectors: npt.NDArray, path: Path) -> "SelectableBasicBackend":
-        """Match Vicinity's normalize-or-copy arithmetic with bounded scratch in a mapped replacement."""
-        rows = max(1, _SELECTOR_COPY_BYTES // (vectors.shape[1] * vectors.dtype.itemsize))
-        norms = np.empty(len(vectors), dtype=vectors.dtype)
-        for start in range(0, len(vectors), rows):
-            norms[start : start + rows] = np.linalg.norm(vectors[start : start + rows], axis=1)
-        unit = np.allclose(norms[norms != 0], 1)
-        if isinstance(vectors, np.memmap) and Path(vectors.filename) == path:
-            mapped = vectors
-        else:
-            mapped = np.lib.format.open_memmap(path, mode="w+", dtype=vectors.dtype, shape=vectors.shape)
-        for start in range(0, len(vectors), rows):
-            block = vectors[start : start + rows]
-            mapped[start : start + rows] = block if unit else normalize(block, norms[start : start + rows])
-        mapped.flush()
-        backend = cls.__new__(cls)
-        BasicBackend.__init__(backend, mapped, BasicArgs())
-        return backend
-
     def _selector_dist(self, x: npt.NDArray, selector: npt.NDArray[np.int_]) -> npt.NDArray:
         """Score contiguous subtrees through a view, gathering scattered rows in bounded blocks."""
         x_norm = normalize(x)
@@ -115,32 +70,19 @@ class SelectableBasicBackend(CosineBasicBackend):
 
         return out
 
-    def save(self, path: Path) -> None:
-        """Save the backend; its vectors are already unit length.
-
-        The matrix is replaced rather than truncated in place: another index generation may
-        still have this very file mapped read-only while this one is written.
-        """
-        path.mkdir(parents=True, exist_ok=True)
-        atomic_save(path / "vectors.npy", self.vectors)
-        self.arguments.dump(path / "arguments.json")
-
     @classmethod
-    def load(cls, path: Path, writable: bool = False) -> "SelectableBasicBackend":
+    def load(cls, path: Path) -> "SelectableBasicBackend":
         """Load a selectable basic backend, mapping the vectors instead of reading them.
 
-        Vicinity's own loader reads the whole matrix and then re-normalizes it; the constructor
-        normalizes before saving, so the stored rows are already unit length and both passes are
-        pure cost. The mapped matrix is read-only, so any caller that writes into ``vectors``
-        must ask for a writable copy; an incremental build does not, because it copies the
-        matrix itself only once it has a row to write.
+        Vicinity's own loader reads the whole matrix and then re-normalizes it; a build writes
+        unit-length rows, so both passes are pure cost. The mapped matrix is read-only; a build
+        writes the next generation's matrix into a file of its own.
 
         :param path: Directory the backend was saved to.
-        :param writable: Read the vectors into memory instead of mapping them read-only.
         :return: The loaded backend.
         """
         arguments = BasicArgs.load(path / "arguments.json")
-        vectors = np.load(path / "vectors.npy", mmap_mode=None if writable else "r")
+        vectors = np.load(path / "vectors.npy", mmap_mode="r")
         backend = cls.__new__(cls)
         # Skips CosineBasicBackend.__init__, whose only extra work is the normalization pass.
         BasicBackend.__init__(backend, vectors, arguments)

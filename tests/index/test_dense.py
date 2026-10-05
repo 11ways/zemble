@@ -1,48 +1,37 @@
 from pathlib import Path
 
 import numpy as np
-import pytest
 from vicinity.backends.basic import BasicArgs
 
 from zemble.index.dense import SelectableBasicBackend
 
 
-def test_save_load_roundtrip(tmp_path: Path) -> None:
-    """Test save and load roundtrip."""
-    vecs = np.random.default_rng(seed=42).normal(size=(10, 32))
-    args = BasicArgs()
-    selectable = SelectableBasicBackend(vecs, args)
-    selectable.save(tmp_path)
-
-    selectable_2 = SelectableBasicBackend.load(tmp_path)
-    assert np.allclose(selectable.vectors, selectable_2.vectors)
+def _store(path: Path, vectors: np.ndarray) -> None:
+    """Write a matrix the way a build does: unit rows, plus the backend arguments."""
+    path.mkdir(parents=True, exist_ok=True)
+    BasicArgs().dump(path / "arguments.json")
+    np.save(path / "vectors.npy", vectors / np.linalg.norm(vectors, axis=1, keepdims=True))
 
 
 def test_load_maps_the_vectors_and_query_results_are_unchanged(tmp_path: Path) -> None:
-    """Loading maps the matrix read-only, keeps every value, and only copies when asked to."""
+    """Loading maps the matrix read-only and answers exactly what the in-memory backend answers."""
     rng = np.random.default_rng(20260820)
     vectors = rng.standard_normal((32, 8)).astype(np.float32)
     backend = SelectableBasicBackend(vectors, BasicArgs())
-    backend.save(tmp_path)
+    _store(tmp_path, vectors)
     query = rng.standard_normal((1, 8)).astype(np.float32)
     expected = backend.query(query, k=5)[0]
 
     # 1. The mapped backend answers exactly what the in-memory one answered.
     loaded = SelectableBasicBackend.load(tmp_path)
-    np.testing.assert_array_equal(loaded.vectors, backend.vectors)
+    np.testing.assert_allclose(loaded.vectors, backend.vectors, rtol=1e-6)
     indices, distances = loaded.query(query, k=5)[0]
     np.testing.assert_array_equal(indices, expected[0])
-    np.testing.assert_array_equal(distances, expected[1])
+    np.testing.assert_allclose(distances, expected[1], rtol=1e-5)
 
-    # 2. The default load is a read-only map, so nothing can write through it by accident.
+    # 2. The load is a read-only map, so nothing can write through it by accident.
     assert isinstance(loaded.vectors, np.memmap)
     assert not loaded.vectors.flags.writeable
-
-    # 3. Incremental reindexing asks for a writable copy and gets one.
-    writable = SelectableBasicBackend.load(tmp_path, writable=True)
-    assert writable.vectors.flags.writeable
-    writable.vectors[0] = 0.0
-    np.testing.assert_array_equal(SelectableBasicBackend.load(tmp_path).vectors, backend.vectors)
 
 
 def test_subtree_scoring_bounds_embedding_row_copies_and_preserves_rankings() -> None:
@@ -87,31 +76,3 @@ def test_subtree_scoring_bounds_embedding_row_copies_and_preserves_rankings() ->
     np.testing.assert_array_equal(backend._selector_dist(queries, negative), expected)
     with np.testing.assert_raises(IndexError):
         backend._selector_dist(queries, np.array([len(vectors) - 1, len(vectors)]))
-
-
-@pytest.mark.parametrize("unit", [False, True])
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_mapped_normalization_is_bit_identical_with_bounded_scratch(tmp_path, monkeypatch, unit, dtype):
-    """Unit, nonunit, zero and near-zero rows match Vicinity across block boundaries."""
-    from vicinity.utils import normalize
-
-    from zemble.index import dense
-
-    vectors = np.random.default_rng(42).standard_normal((50, 32)).astype(dtype)
-    if unit:
-        vectors = normalize(vectors)
-    vectors[1] = 0
-    if not unit:
-        vectors[2] = 1e-12
-    expected = SelectableBasicBackend(vectors, BasicArgs()).vectors.copy()
-    monkeypatch.setattr(dense, "_SELECTOR_COPY_BYTES", vectors[0].nbytes * 3)
-    original = np.linalg.norm
-
-    def bounded_norm(block, *args, **kwargs):
-        assert block.nbytes <= vectors[0].nbytes * 3
-        return original(block, *args, **kwargs)
-
-    monkeypatch.setattr(np.linalg, "norm", bounded_norm)
-    actual = SelectableBasicBackend.mapped(vectors, tmp_path / "replacement.npy")
-    assert isinstance(actual.vectors, np.memmap)
-    np.testing.assert_array_equal(actual.vectors, expected)

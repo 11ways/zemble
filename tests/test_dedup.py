@@ -1757,7 +1757,7 @@ def test_existing_home_never_indexes_or_embeds(tmp_path: Path, monkeypatch: pyte
 
     monkeypatch.setattr(zemble.embedding.registry, "load_embedder", explode)
     monkeypatch.setattr(zemble.embedding.registry, "build_embedder", explode)
-    monkeypatch.setattr(zemble.index.create, "create_index_from_path", explode)
+    monkeypatch.setattr(zemble.index.create, "write_index", explode)
     monkeypatch.setattr(zemble.search, "search", explode)
 
     workspace = _existing_home_workspace(tmp_path, "Weaving a string (`OneShared.weave`)", toml=_DEPENDS_TOML)

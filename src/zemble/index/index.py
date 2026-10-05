@@ -1,30 +1,37 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import warnings
 from collections import OrderedDict, defaultdict
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 import orjson
 
-from zemble.cache import covering_content, get_validated_cache, load_previous_for_incremental
+from zemble.cache import (
+    covering_content,
+    find_index_from_cache_folder,
+    get_validated_cache,
+    load_previous_for_incremental,
+    retire_covered_indexes,
+)
 from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.embedding.base import Embedder
 from zemble.embedding.registry import load_embedder
 from zemble.index.bm25 import BM25
-from zemble.index.chunk_store import file_paths_of, languages_of, load_chunks, resolve_chunk, save_chunks
-from zemble.index.create import create_index_from_path
+from zemble.index.chunk_store import file_paths_of, languages_of, load_chunks, resolve_chunk
+from zemble.index.create import WrittenIndex, write_index
 from zemble.index.dense import SelectableBasicBackend
 from zemble.index.files import get_extensions, read_file_text
-from zemble.index.symbols import SymbolDefinitions, save_symbol_definitions
-from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath
+from zemble.index.generation import publish, reading, staging_for, write_metadata
+from zemble.index.symbols import SymbolDefinitions
+from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath, PreviousIndex
 from zemble.index.view import IndexView
 from zemble.rerank.base import Reranker
 from zemble.rerank.registry import RerankSettings, load_reranker, resolve_reranker_spec
@@ -340,28 +347,74 @@ class ZembleIndex:
 
         path = path.resolve()
         previous = load_previous_for_incremental(str(path), resolved.model_id, stored, resolved_capsules, exclude)
-        bm25_index, semantic_index, chunks, manifest = create_index_from_path(
+        built, _written = cls.build(
             path,
-            embedder=resolved,
-            content=stored,
-            display_root=path,
-            previous=previous,
-            capsules=resolved_capsules,
-            exclude=exclude,
-        )
-
-        built = ZembleIndex(
             resolved,
-            bm25_index,
-            semantic_index,
-            chunks,
-            root=path,
+            find_index_from_cache_folder(str(path), stored, exclude),
             content=stored,
-            manifest=manifest,
             capsules=resolved_capsules,
             exclude=exclude,
+            previous=previous,
         )
+        retire_covered_indexes(str(path), stored, exclude)
         return _answering(built, normalized, stored)
+
+    @classmethod
+    def build(
+        cls,
+        source: Path,
+        embedder: Embedder,
+        final: Path,
+        *,
+        content: Sequence[ContentType],
+        capsules: CapsuleOptions,
+        exclude: Sequence[str] = (),
+        previous: PreviousIndex | None = None,
+        changed_paths: Iterable[Path] | None = None,
+    ) -> tuple[ZembleIndex, WrittenIndex]:
+        """Write the next generation of the index stored at *final*, publish it, and load it mapped.
+
+        Every build lane goes through here - a cold build, a stale cache brought up to date, a
+        clone, the daemon's watcher - so every index that answers a query is read from its files.
+
+        :param source: Resolved directory to index; chunk paths are stored relative to it.
+        :param embedder: The embedder to index with.
+        :param final: The variant folder the generation is published into.
+        :param content: Content types to index.
+        :param capsules: Context-capsule knobs.
+        :param exclude: Gitignore-style patterns this build skips.
+        :param previous: The current generation, whose unchanged files are carried over.
+        :param changed_paths: The exact paths that moved; None walks the tree.
+        :return: The loaded index, and what the build wrote.
+        """
+        staging = staging_for(final)
+        try:
+            written = write_index(
+                source,
+                embedder,
+                staging,
+                content=content,
+                display_root=source,
+                previous=previous,
+                capsules=capsules,
+                changed_paths=changed_paths,
+                exclude=exclude,
+            )
+            write_metadata(
+                staging,
+                root=source,
+                embedder=embedder,
+                content=content,
+                capsules=capsules,
+                exclude=exclude,
+                manifest=written.manifest,
+            )
+            publish(staging, final)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        index = cls.load_from_disk(final, embedder=embedder)
+        index.loaded_from_disk = False
+        return index, written
 
     @classmethod
     def from_git(
@@ -411,25 +464,14 @@ class ZembleIndex:
             if result.returncode != 0:
                 raise RuntimeError(f"git clone failed for {url!r}:\n{result.stderr.strip()}")
 
-            resolved_path = Path(tmp_dir).resolve()
-            bm25_index, semantic_index, chunks, manifest = create_index_from_path(
-                resolved_path,
-                embedder=resolved,
-                content=normalized,
-                display_root=resolved_path,
-                capsules=resolved_capsules,
-            )
-
-            return ZembleIndex(
+            index, _written = cls.build(
+                Path(tmp_dir).resolve(),
                 resolved,
-                bm25_index,
-                semantic_index,
-                chunks,
-                root=resolved_path,
+                find_index_from_cache_folder(cache_key, normalized),
                 content=normalized,
-                manifest=manifest,
                 capsules=resolved_capsules,
             )
+            return index
 
     def find_related(
         self, source: Chunk | SearchResult, *, top_k: int = 5, max_snippet_lines: int | None = None
@@ -675,19 +717,19 @@ class ZembleIndex:
             missing = ", ".join(str(p) for p in non_existent)
             raise FileNotFoundError(f"Index not found at {path}. Missing: {missing}")
 
-        with open(persistence_paths.metadata, "rb") as f:
-            metadata = orjson.loads(f.read())
-        found_version = metadata.get("cache_version")
-        if found_version != CACHE_FORMAT_VERSION:
-            raise ValueError(
-                f"Unsupported index format {found_version!r}; expected {CACHE_FORMAT_VERSION}. "
-                "Rebuild it with ZembleIndex.from_path(<source directory>) before searching again."
-            )
-
-        bm25_index = BM25.load(persistence_paths.bm25_index)
-        semantic_index = SelectableBasicBackend.load(persistence_paths.semantic_index)
-        chunks = load_chunks(persistence_paths.chunks)
-        definitions = SymbolDefinitions.load(persistence_paths.symbols)
+        with reading(path):
+            with open(persistence_paths.metadata, "rb") as f:
+                metadata = orjson.loads(f.read())
+            found_version = metadata.get("cache_version")
+            if found_version != CACHE_FORMAT_VERSION:
+                raise ValueError(
+                    f"Unsupported index format {found_version!r}; expected {CACHE_FORMAT_VERSION}. "
+                    "Rebuild it with ZembleIndex.from_path(<source directory>) before searching again."
+                )
+            bm25_index = BM25.load(persistence_paths.bm25_index)
+            semantic_index = SelectableBasicBackend.load(persistence_paths.semantic_index)
+            chunks = load_chunks(persistence_paths.chunks)
+            definitions = SymbolDefinitions.load(persistence_paths.symbols)
         if not (len(chunks) == bm25_index.document_count == semantic_index.vectors.shape[0]):
             raise ValueError("Persisted index components have inconsistent document counts")
         root_path = metadata["root_path"]
@@ -714,33 +756,3 @@ class ZembleIndex:
             definitions=definitions,
             exclude=tuple(metadata.get("exclude", ())),
         )
-
-    def save(self, path: Path | str) -> None:
-        """Save the index to disk."""
-        path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
-
-        persistence_paths = PersistencePath.from_path(path)
-
-        self._bm25_index.save(persistence_paths.bm25_index)
-        self._semantic_index.save(persistence_paths.semantic_index)
-        save_chunks(persistence_paths.chunks, self.chunks)
-        save_symbol_definitions(persistence_paths.symbols, self.chunks)
-        from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS  # avoid circular import at module level
-
-        root_str = None if self._root is None else str(self._root)
-        metadata = {
-            "root_path": root_str,
-            "time": datetime.now().timestamp(),
-            "embedder": self.embedder.model_id,
-            "dimensions": self.embedder.dimensions,
-            "content_type": list(x.value for x in self._storage_content),
-            "chunk_size": _DESIRED_CHUNK_LENGTH_CHARS,
-            "cache_version": CACHE_FORMAT_VERSION,
-            "capsules": self._capsules.key,
-            "exclude": list(self._exclude),
-            "files": self._manifest,
-        }
-        with open(persistence_paths.metadata, "wb") as f:
-            data = orjson.dumps(metadata)
-            f.write(data)

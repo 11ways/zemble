@@ -20,7 +20,6 @@ from zemble.cache import (
     has_cached_index,
     indexed_ancestor_hint,
     resolve_index_root,
-    save_index_to_cache,
 )
 from zemble.embedding.base import Embedder
 from zemble.embedding.pricing import EmbeddingBudgetExceeded
@@ -71,8 +70,6 @@ def compute_cache_key(
 
 class IndexCache:
     """Cache of indexed repos and local paths for the lifetime of a process."""
-
-    require_persistence = False
 
     def __init__(self, max_size: int = CACHE_MAX_SIZE, on_evict: Callable[[CacheKey], None] | None = None) -> None:
         """Initialise an empty cache.
@@ -152,12 +149,6 @@ class IndexCache:
             # The hint is added to the text; the ceiling that refused is unchanged, so the knob
             # travels with it. Re-deciding it here would name the money knob for a volume refusal.
             raise EmbeddingBudgetExceeded(f"{exc} {hint}" if hint else str(exc), exc.knob) from exc
-        try:
-            save_index_to_cache(index, source_key)
-        except Exception:
-            logger.warning("Failed to save index cache for %r", source_key, exc_info=True)
-            if self.require_persistence:
-                raise
         return index
 
     async def _build_tracked(
