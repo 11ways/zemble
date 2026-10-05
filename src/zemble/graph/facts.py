@@ -30,7 +30,7 @@ from typing import NamedTuple, Protocol, runtime_checkable
 import orjson
 
 from zemble.graph.generated import GeneratedMapping, GeneratedSourceMapper, template_is_newer
-from zemble.graph.lookup import SqliteLookup, SymbolLookup, symbol_from_row
+from zemble.graph.lookup import HELD_SYMBOLS, SqliteLookup, SymbolLookup, symbol_from_row
 from zemble.graph.model import (
     CALLABLE_KINDS,
     TYPE_KINDS,
@@ -714,9 +714,10 @@ class JavaRefMapper:
         self._mapped: dict[str, MappedRef] = {}
 
     def release(self) -> None:
-        """Forget every answer so far, so mapping a workspace holds one facts file's worth of symbols."""
+        """Let go of what earlier refs cached once it passes the lookup's budget."""
         self._flat.clear()
-        self._mapped.clear()
+        if len(self._mapped) > HELD_SYMBOLS:
+            self._mapped.clear()
         self.lookup.release()
 
     # ---- flat (javac) type names ----------------------------------------

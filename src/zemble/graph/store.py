@@ -1841,6 +1841,8 @@ def _map_overlay_for(
     map_facts_files(overlay, symbols, request, declared, plan.present)
     grown = targets | (plan.moved_coverage(overlay) & known_files)
     map_facts_files(overlay, symbols, plan.mapping_request(grown), declared, plan.present)
+    # The mappers' cached symbols would otherwise sit beside the resolver's for the whole pass.
+    overlay.mappers.clear()
     return overlay, grown
 
 

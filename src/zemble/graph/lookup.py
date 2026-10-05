@@ -177,7 +177,7 @@ class SymbolLookup(Protocol):
         ...
 
     def release(self) -> None:
-        """Forget what earlier lookups cached; a batched build calls this between batches."""
+        """Let go of cached answers once they pass a budget; a batched build calls this between batches."""
         ...
 
 
@@ -259,6 +259,12 @@ class MemoryLookup:
         """Keep everything: this lookup IS its dictionaries, built once for the whole table."""
 
 
+#: How many decoded symbols a `SqliteLookup` keeps across `release()` calls, ~1.3 KiB each. The
+#: batches of one build ask for the same popular names (`get`, `of`, `build`) over and over, and
+#: forgetting them after every batch cost the zenit workspace a third more CPU.
+HELD_SYMBOLS = 50_000
+
+
 class SqliteLookup:
     """Answers every lookup with an indexed query, caching what one build touched.
 
@@ -270,6 +276,7 @@ class SqliteLookup:
     def __init__(self, connection: sqlite3.Connection) -> None:
         """Prepare the caches; nothing is read until something is asked."""
         self._connection = connection
+        self._held = 0
         self._by_id: dict[str, Symbol | None] = {}
         self._by_qualified: dict[str, list[Symbol]] = {}
         self._by_name: dict[str, list[Symbol]] = {}
@@ -282,7 +289,9 @@ class SqliteLookup:
     def _select(self, clause: str, *parameters: object) -> list[Symbol]:
         """Run a symbol query and rebuild every row it returned."""
         query = f"SELECT * FROM symbols WHERE {clause}"  # noqa: S608 - clause is a literal
-        return [symbol_from_row(row) for row in self._connection.execute(query, parameters)]
+        found = [symbol_from_row(row) for row in self._connection.execute(query, parameters)]
+        self._held += len(found)
+        return found
 
     def by_id(self, symbol_id: str) -> Symbol | None:
         """Return the symbol with this id, or None."""
@@ -347,6 +356,7 @@ class SqliteLookup:
                 (key.value, value),
             )
             found = [symbol_from_row(row) for row in rows]
+            self._held += len(found)
             self._declarations[(key, value)] = found
         return found
 
@@ -368,11 +378,15 @@ class SqliteLookup:
         if found is None:
             row = self._connection.execute("SELECT * FROM files WHERE path = ?", (file_path,)).fetchone()
             found = context_from_row(row) if row is not None else FileContext(file_path)
+            self._held += 1
             self._contexts[file_path] = found
         return found
 
     def release(self) -> None:
-        """Drop every cache, so a build that resolves the tree in batches holds one batch's worth."""
+        """Drop every cache once they hold more than :data:`HELD_SYMBOLS`, so a batched build stays bounded."""
+        if self._held <= HELD_SYMBOLS:
+            return
+        self._held = 0
         for cache in (
             self._by_id,
             self._by_qualified,

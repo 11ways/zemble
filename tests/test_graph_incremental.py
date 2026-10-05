@@ -48,8 +48,11 @@ FUNCTIONS = "src/common/java/com/example/ui/WidgetFunctions.java"
 
 @pytest.fixture(params=[1, 1_000_000], ids=["file-by-file", "one-batch"])
 def either_batching(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> int:
-    """Run every build of a journey one file per batch, or the whole tree as one batch."""
+    """Run every build of a journey one file per batch forgetting every lookup between them, or as one batch."""
     monkeypatch.setattr("zemble.graph.store._BATCH_FILES", request.param)
+    if request.param == 1:
+        monkeypatch.setattr("zemble.graph.lookup.HELD_SYMBOLS", 0)
+        monkeypatch.setattr("zemble.graph.facts.HELD_SYMBOLS", 0)
     return request.param
 
 

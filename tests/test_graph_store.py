@@ -432,3 +432,30 @@ def test_a_failed_refresh_leaves_the_graph_it_started_from(
     monkeypatch.setattr(store, "_resolve_pass", resolve_pass)
     refreshed = build_graph(path, changed_paths=[circle])
     assert refreshed.extracted_files == 1, "step 3: the edit is still pending and is refreshed now"
+
+
+def test_a_lookup_keeps_its_answers_until_they_pass_the_budget(
+    graph_fixture_root: Path, graph_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between batches a lookup forgets nothing it may still hold, and everything once it holds too much."""
+    from zemble.graph import lookup as lookup_module
+
+    build_graph(str(graph_fixture_root))
+    connection = connect(str(graph_fixture_root))
+    try:
+        lookup = lookup_module.SqliteLookup(connection)
+        circle = lookup.by_qualified("com.example.core.Circle")
+        assert circle, "step 1: the lookup answers from the graph"
+
+        # 2. Under the budget a release keeps the cached answer: the very same objects come back.
+        monkeypatch.setattr(lookup_module, "HELD_SYMBOLS", len(circle))
+        lookup.release()
+        assert lookup.by_qualified("com.example.core.Circle") is circle, "step 2: an answer under budget is kept"
+
+        # 3. Past the budget a release drops every cache, and the next answer is read again.
+        lookup.by_qualified("com.example.core.Shape")
+        lookup.release()
+        again = lookup.by_qualified("com.example.core.Circle")
+        assert again is not circle and again == circle, "step 3: past the budget the answer is read anew"
+    finally:
+        connection.close()
