@@ -1891,7 +1891,7 @@ def _write_facts_symbols_for_read(connection: sqlite3.Connection, root: Path, pl
     present = set(plan.present)
     for relative in sorted((present - stored - set(plan.states)) | (plan.moved & present)):
         try:
-            loaded = load_facts_file(plan.present[relative], root)
+            loaded = load_facts_file(plan.present[relative], root, symbols_only=True)
         except FactsFormatError:
             # Mapping reports it; the rows a previous read wrote stay until the file is readable.
             continue

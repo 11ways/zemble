@@ -20,6 +20,7 @@ from zemble.cache import (
     get_validated_cache,
     load_previous_for_incremental,
     retire_covered_indexes,
+    seed_for_incremental,
 )
 from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.embedding.base import Embedder
@@ -347,6 +348,8 @@ class ZembleIndex:
 
         path = path.resolve()
         previous = load_previous_for_incremental(str(path), resolved.model_id, stored, resolved_capsules, exclude)
+        if previous is None:
+            previous = seed_for_incremental(str(path), resolved.model_id, stored, resolved_capsules, exclude)
         built, _written = cls.build(
             path,
             resolved,

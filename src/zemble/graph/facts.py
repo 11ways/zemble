@@ -460,12 +460,15 @@ def _relative_to_workspace(root: Path, facts_root: Path, declared: str) -> str |
     return _cached_relative(str(root), str(facts_root), declared)
 
 
-def load_facts_file(path: Path, root: Path) -> FactsFile:
+def load_facts_file(path: Path, root: Path, *, symbols_only: bool = False) -> FactsFile:
     """Read one facts file and decide which of its source files are still fresh.
 
     :param path: The facts file to read.
     :param root: The workspace root every source path is reported relative to.
-    :return: The parsed file, with per-source freshness already decided.
+    :param symbols_only: Keep only the `symbol` facts and leave every source's freshness
+        undecided, which is all the graph's `symbol` table needs: no source is hashed, and a
+        line that cannot be a `file` or `symbol` fact is never parsed.
+    :return: The parsed file, with per-source freshness already decided unless `symbols_only`.
     :raises FactsFormatError: If the header is missing, unreadable or of another version.
     """
     try:
@@ -486,7 +489,7 @@ def load_facts_file(path: Path, root: Path) -> FactsFile:
                 mtime_ns=stat.st_mtime_ns,
                 size=stat.st_size,
             )
-            _read_body(handle, loaded, root, facts_root)
+            _read_body(handle, loaded, root, facts_root, symbols_only=symbols_only)
     except OSError as error:
         raise FactsFormatError(f"{path}: cannot be read") from error
     return loaded
@@ -500,12 +503,14 @@ def _display_path(root: Path, path: Path) -> str:
         return str(path)
 
 
-def _read_body(lines: Iterable[bytes], loaded: FactsFile, root: Path, facts_root: Path) -> None:
+def _read_body(
+    lines: Iterable[bytes], loaded: FactsFile, root: Path, facts_root: Path, *, symbols_only: bool = False
+) -> None:
     """Group every fact under the source file it was declared for."""
     current: SourceFacts | None = None
     outside: str | None = None
     for raw in lines:
-        if not raw.strip():
+        if not raw.strip() or (symbols_only and b'"symbol"' not in raw and b'"file"' not in raw):
             continue
         try:
             payload = orjson.loads(raw)
@@ -517,8 +522,10 @@ def _read_body(lines: Iterable[bytes], loaded: FactsFile, root: Path, facts_root
             loaded.unknown_kinds[str(kind)] += 1
             continue
         if kind == "file":
-            current = _declare_file(payload, loaded, root, facts_root)
+            current = _declare_file(payload, loaded, root, facts_root, hashed=not symbols_only)
             outside = str(payload.get("path", "")) if current is None else None
+            continue
+        if symbols_only and kind != "symbol":
             continue
         target = _target_of(payload, loaded, current, root, facts_root)
         if target is None:
@@ -551,16 +558,20 @@ def _record_unattached(
     ] += 1
 
 
-def _declare_file(payload: dict, loaded: FactsFile, root: Path, facts_root: Path) -> SourceFacts | None:
-    """Handle a `file` line: resolve its path and hash the current content."""
+def _declare_file(
+    payload: dict, loaded: FactsFile, root: Path, facts_root: Path, *, hashed: bool = True
+) -> SourceFacts | None:
+    """Handle a `file` line: resolve its path and, unless told not to, hash the current content."""
     declared = str(payload.get("path", ""))
     relative = _relative_to_workspace(root, facts_root, declared) if declared else None
     if relative is None:
         loaded.outside_root += 1
         return None
     expected = str(payload.get("sha256", ""))
-    actual = file_sha256(root / relative)
-    if actual is None:
+    actual = file_sha256(root / relative) if hashed else None
+    if not hashed:
+        source = SourceFacts(path=relative, declared_sha256=expected, fresh=False, reason="freshness not checked")
+    elif actual is None:
         source = SourceFacts(path=relative, declared_sha256=expected, fresh=False, reason="file is gone")
     elif actual != expected:
         source = SourceFacts(path=relative, declared_sha256=expected, fresh=False, reason="content changed")

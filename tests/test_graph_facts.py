@@ -435,3 +435,36 @@ def test_overlay_edges_keep_one_copy_and_read_back_by_kind(tmp_path: Path) -> No
     assert _apply_overlay([extracted, unowned], overlay, {"A.java"}) == [unowned, call, external, parent], (
         "step 3: a covered file's extracted edges give way to its facts, an uncovered file keeps its own"
     )
+
+
+def test_a_symbols_only_read_yields_exactly_the_symbol_facts_of_a_full_read(
+    graph_fixture_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `symbol` table pass reads only what it stores, and stores what a full read would."""
+    from zemble.graph import facts as facts_module
+
+    workspace = _workspace(graph_fixture_root, tmp_path / "ws")
+    square = "src/main/java/com/example/core/Square.java"
+    path = _write_facts(
+        workspace,
+        [
+            _header(),
+            {"t": "file", "path": CIRCLE, "sha256": _sha(workspace, CIRCLE)},
+            {"t": "symbol", "ref": "com.example.core.Circle", "kind": "class", "line": 5},
+            {"t": "call", "from": "com.example.core.Circle#area()", "to": "java.lang.Math#abs(double)", "line": 9},
+            {"t": "file", "path": square, "sha256": "0" * 64},
+            {"t": "symbol", "ref": "com.example.core.Square", "kind": "class", "line": 3},
+            {"t": "symbol", "ref": "com.example.core.Circle#area()", "kind": "method", "path": CIRCLE, "line": 8},
+            {"t": "file", "path": "/elsewhere/Outside.java", "sha256": "0" * 64},
+            {"t": "symbol", "ref": "com.example.Outside", "kind": "class", "line": 1},
+            {"t": "file", "path": CIRCLE, "sha256": _sha(workspace, CIRCLE)},
+            {"t": "symbol", "ref": "com.example.core.Circle", "kind": "class", "line": 6},
+        ],
+    )
+    full = list(facts_module.symbol_facts(load_facts_file(path, workspace)))
+
+    # 1. Neither a source is hashed nor a non-symbol fact parsed, and the answer is the same.
+    monkeypatch.setattr(facts_module, "file_sha256", lambda _path: pytest.fail("a source was hashed"))
+    quick = list(facts_module.symbol_facts(load_facts_file(path, workspace, symbols_only=True)))
+    assert quick == full, "1: the same symbol facts in the same order"
+    assert ("com.example.core.Circle", CIRCLE, 6) in quick and len(quick) == 4, "1: duplicates and paths kept"

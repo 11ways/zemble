@@ -521,8 +521,9 @@ expensive lane by design: there is no smaller unit than the facts file it rewrot
 every file it covers is re-extracted and re-resolved.
 
 Mapping facts is bounded the same way the build is. Facts files are parsed, mapped and
-released one at a time (a moved one twice: once for its `symbol` facts, which every
-other file's refs may need, once to map it), refs map through a `SqliteLookup` under
+released one at a time (a moved one twice: once for its `symbol` facts alone, which every
+other file's refs may need, without hashing a source or parsing another fact; once to
+map it), refs map through a `SqliteLookup` under
 the same budget, the fact edges wait in the scratch database
 (`overlay_edges`) and are read back per batch, and skipped facts are counted by what
 they are reported under rather than kept one record each. With every facts file of

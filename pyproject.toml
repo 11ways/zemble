@@ -102,6 +102,7 @@ target-version = "py310"
 "src/zemble/embedding/server_cli.py" = ["T20"]
 "src/zemble/runtime/cli.py" = ["T20"]
 "src/zemble/installer/*.py" = ["T20", "E501"]
+"javac-facts/test/check_facts.py" = ["T20"]
 
 [tool.ruff.lint]
 select = [

@@ -3,8 +3,10 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Collection, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import orjson
@@ -608,3 +610,53 @@ def load_previous_for_incremental(
     except (OSError, orjson.JSONDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         logger.debug("Unable to reuse incremental cache for %s", path, exc_info=True)
         return None
+
+
+def _checkout_identity(root: Path) -> tuple[str, str] | None:
+    """Return a git checkout's `origin` URL and the root's path inside it, or None outside one."""
+    try:
+        found = [
+            subprocess.run(
+                ["git", "-C", str(root), *arguments], capture_output=True, text=True, timeout=10, check=True
+            ).stdout.strip()
+            for arguments in (["config", "--get", "remote.origin.url"], ["rev-parse", "--show-prefix"])
+        ]
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (found[0], found[1]) if found[0] else None
+
+
+def seed_for_incremental(
+    path: str,
+    embedder_id: str,
+    content: Sequence[ContentType],
+    capsules: CapsuleOptions | None = None,
+    exclude: Sequence[str] = (),
+) -> PreviousIndex | None:
+    """Borrow a sibling checkout's index for a root that has none of its own.
+
+    A clone of a repository indexed elsewhere holds mostly the same files. Its first build reuses
+    the sibling's rows for every file whose bytes match, skipping their chunking and embedding and,
+    on a copy-on-write filesystem, sharing the sibling's vector blocks. A sibling is a checkout of
+    the same `origin` at the same path inside it; the most recently built compatible one lends.
+
+    :param path: The resolved root about to be built.
+    :return: The sibling's index, its `root` set, or None when no sibling qualifies.
+    """
+    identity = _checkout_identity(Path(path))
+    if identity is None:
+        return None
+    candidates: dict[str, float] = {}
+    for folder in resolve_cache_folder().iterdir():
+        for _content, _index_path, metadata in stored_variants(folder):
+            root = metadata.get("root_path")
+            if isinstance(root, str) and root != path:
+                candidates[root] = max(candidates.get(root, 0.0), float(metadata.get("time") or 0.0))
+    for root in sorted(candidates, key=candidates.__getitem__, reverse=True):
+        if not Path(root).is_dir() or _checkout_identity(Path(root)) != identity:
+            continue
+        previous = load_previous_for_incremental(root, embedder_id, content, capsules, exclude)
+        if previous is not None:
+            logger.info("seeding the index of %s from its sibling checkout %s", path, root)
+            return replace(previous, root=Path(root))
+    return None

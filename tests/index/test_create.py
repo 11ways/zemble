@@ -372,3 +372,14 @@ def test_reused_runs_broken_by_a_deletion_keep_every_row_in_place(
             )
         number = path[1]
         assert after._bm25_index.get_scores([f"symbol_number_{number}"])[entry.start] > 0, f"2: {path} postings"
+
+
+def test_a_reused_run_never_merges_into_a_fresh_one() -> None:
+    """Rows reused from row k-1 right after k fresh rows stay reused, so they are not embedded again."""
+    runs: list[tuple[int, int, int]] = []
+    create_module._extend(runs, 0, 1, -1)
+    create_module._extend(runs, 1, 2, 0)
+    create_module._extend(runs, 3, 1, 2)
+    create_module._extend(runs, 4, 1, -1)
+    create_module._extend(runs, 5, 1, -1)
+    assert runs == [(0, 1, -1), (1, 3, 0), (4, 2, -1)], "a fresh run, one reused run, then one fresh run"

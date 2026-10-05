@@ -1,6 +1,7 @@
 """Plan and write one index generation, streaming it to disk in memory bounded by one batch."""
 
 import errno
+import filecmp
 import os
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Sequence
@@ -51,9 +52,40 @@ class PlannedFile:
     count: int
 
 
-def _reused_file(indexed_path: str, previous_entry: FileManifestEntry) -> PlannedFile:
-    """Plan a file whose modification time did not move: its chunks stay in the previous stores."""
-    return PlannedFile(indexed_path, previous_entry.mtime_ns, previous_entry, True, [], previous_entry.count)
+def _reused_file(indexed_path: str, previous_entry: FileManifestEntry, mtime_ns: int | None = None) -> PlannedFile:
+    """Plan a file whose content did not move: its chunks stay in the previous stores.
+
+    :param mtime_ns: The file's own modification time, when the previous stores are a sibling
+        checkout's and recorded another; None keeps the recorded one.
+    """
+    mtime = previous_entry.mtime_ns if mtime_ns is None else mtime_ns
+    return PlannedFile(indexed_path, mtime, previous_entry, True, [], previous_entry.count)
+
+
+def _same_as_sibling(
+    ours: Path,
+    indexed_path: str,
+    sibling_root: Path,
+    entry: FileManifestEntry,
+    our_paths: RepoRelativePaths,
+    their_paths: RepoRelativePaths,
+) -> bool:
+    """Return whether a sibling's indexed copy of a file would chunk exactly like ours.
+
+    Its index must still describe it, its bytes must match, and the capsule must name it the same:
+    a capsule names a file by its repository's folder, so a top-level file of a checkout in another
+    folder chunks differently even when its bytes match.
+    """
+    theirs = sibling_root / indexed_path
+    try:
+        current = theirs.stat().st_mtime_ns == entry.mtime_ns
+    except OSError:
+        return False
+    return (
+        current
+        and our_paths.path_for(ours, indexed_path) == their_paths.path_for(theirs, indexed_path)
+        and filecmp.cmp(ours, theirs, shallow=False)
+    )
 
 
 def _indexed_path(walked: WalkedFile, root: Path, display_root: Path | None) -> str:
@@ -70,6 +102,7 @@ def plan_files(
     previous_manifest: dict[str, FileManifestEntry] | None = None,
     capsules: CapsuleOptions | None = None,
     exclude: Sequence[str] = (),
+    sibling_root: Path | None = None,
 ) -> Iterator[PlannedFile]:
     """Walk a tree and chunk every file a build would index, without embedding anything.
 
@@ -83,11 +116,14 @@ def plan_files(
     :param previous_manifest: A previous build's manifest, or None for a full build.
     :param capsules: Context-capsule knobs; None resolves the environment override.
     :param exclude: Extra gitignore-style patterns, relative to `path`, this build skips.
+    :param sibling_root: The checkout `previous_manifest` describes when it is another one; its
+        files are then reused by content rather than by modification time.
     :return: One :class:`PlannedFile` per indexable file, in walk order.
     """
     resolved_capsules = CapsuleOptions.resolve(capsules)
     normalized = (content,) if isinstance(content, ContentType) else content
     repo_paths = RepoRelativePaths()
+    sibling_paths = RepoRelativePaths()
     for walked in walk_entries(path, get_extensions(normalized), ignore=list(exclude)):
         try:
             if get_file_status(walked.path, None, walked.stat) != FileStatus.VALID:
@@ -96,8 +132,14 @@ def plan_files(
             mtime_ns = walked.stat.st_mtime_ns
             previous_entry = previous_manifest.get(indexed_path) if previous_manifest is not None else None
 
-            if previous_entry is not None and previous_entry.mtime_ns == mtime_ns:
-                planned = _reused_file(indexed_path, previous_entry)
+            if previous_entry is not None and (
+                previous_entry.mtime_ns == mtime_ns
+                if sibling_root is None
+                else _same_as_sibling(
+                    walked.path, indexed_path, sibling_root, previous_entry, repo_paths, sibling_paths
+                )
+            ):
+                planned = _reused_file(indexed_path, previous_entry, mtime_ns)
             else:
                 file_chunks = chunk_source(
                     read_file_text(walked.path),
@@ -374,8 +416,11 @@ def _extend(runs: list[tuple[int, int, int]], start: int, count: int, previous: 
     if runs:
         last_start, last_count, last_previous = runs[-1]
         contiguous = last_start + last_count == start
+        # A reused run only continues a reused one: after a fresh run (-1) of k rows, a reuse of
+        # row k-1 passed `last_previous + last_count == previous` and was re-embedded as fresh.
         if contiguous and (
-            (previous < 0 and last_previous < 0) or (previous >= 0 and last_previous + last_count == previous)
+            (previous < 0 and last_previous < 0)
+            or (previous >= 0 and last_previous >= 0 and last_previous + last_count == previous)
         ):
             runs[-1] = (last_start, last_count + count, last_previous)
             return
@@ -424,7 +469,11 @@ def write_index(
     # reuse from - so the guard can never approve an incremental build the build then does in
     # full because the previous index turned out to be unusable, and against the change set on
     # the lane that has one, so the guard never walks a tree the build itself refuses to walk.
-    changed = list(changed_paths) if previous is not None and changed_paths is not None else None
+    sibling_root = previous.root if previous is not None else None
+    # A sibling's manifest says nothing about which of OUR files moved, so a seeded build walks.
+    changed = (
+        list(changed_paths) if previous is not None and sibling_root is None and changed_paths is not None else None
+    )
     require_declared_scope(path)
     require_affordable_scope(
         path, embedder, normalized, exclude, previous_manifest or None, changed=changed, display_root=display_root
@@ -448,6 +497,7 @@ def write_index(
             previous_manifest=previous_manifest if previous is not None else None,
             capsules=resolved_capsules,
             exclude=exclude,
+            sibling_root=sibling_root,
         )
     )
     stores = PersistencePath.from_path(target)

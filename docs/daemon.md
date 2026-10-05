@@ -194,8 +194,11 @@ readability - so a watcher that over-reports cannot get a file into the index th
 build would have skipped. The reverse is a real obligation on the caller: whatever the
 change set does not name is assumed unchanged.
 
-Every successful rebuild is published and reloaded as mapped columns before the
-swap. One line per rebuild logs the file counts and milliseconds, including persistence.
+A change set that moves nothing the index holds - a facts file, build output, a file
+touched without its modification time moving - keeps the served generation as it is:
+the named paths are judged first and nothing is written. Every other successful rebuild
+is published and reloaded as mapped columns before the swap. One line per rebuild logs
+the file counts and milliseconds, including persistence.
 
 The `graph_ms` on that line is the whole symbol-graph refresh. On the javaweb
 workspace it is around 0.6 s for a template edit, 0.9 s for a Java one and 2.4 s when
@@ -224,13 +227,37 @@ Nothing is held whole while writing:
 | Chunks | Each new file's chunks are appended as they are chunked; a reused file's rows are copied byte for byte from the mapped store. |
 | BM25 | New documents' postings are kept as three flat integers each; reused documents are carried by row and merged term by term in blocks of 2^20 postings. |
 | Symbols | New chunks are scanned; reused chunks keep the names their previous generation found. |
-| Vectors | A mapped matrix is preallocated; reused rows are copied in blocks, fresh rows embedded in batches of 2048 after the bill guard has judged all of them at once. |
+| Vectors | The matrix's header is padded to 4 KiB so every 1024-wide row is a filesystem block; reused rows are copied file to file with `copy_file_range`, which btrfs and xfs answer by sharing the blocks (elsewhere it is an in-kernel copy, and a matrix that is not one whole mapped file is copied through memory). Fresh rows are embedded in batches of 2048 after the bill guard has judged all of them at once. |
+
+Unchanged files arrive in the previous generation's order, so their rows are copied as a
+few long runs rather than one call per file. A one-file rebuild of the zenit workspace
+takes 1.4-1.9 s, against 4.5 s before; on btrfs it writes the changed rows and the text
+stores, not another 730 MB of vectors.
 
 What stays in memory is what is new plus a few integers per chunk. On the 177k-chunk
 workspace a rebuild for one edited file peaks at ~170 MiB of private memory and a
 build from nothing at ~280 MiB. Carried-over postings come first within a term, which no
 score can see because each document appears once; identity with a from-scratch build is
 asserted in `tests/index/test_bm25.py`.
+
+### A clone's first build
+
+A root with no index of its own borrows from a sibling checkout: another cached root
+whose git `origin` is the same and which sits at the same path inside its repository,
+the most recently built compatible one (`cache.seed_for_incremental`). A file is reused
+when the sibling's index still describes it and its bytes match ours, and its capsule
+names it the same way - a capsule names a file `<repository folder>/<path>`, so files of
+nested repositories (`zenit/`, `hawkeye/`) match across checkouts while top-level files of
+a checkout in another folder are chunked anew. Reused rows record the clone's own
+modification times, so its next build is an ordinary incremental one.
+
+Seeding `zenit-workspace-gptb` from the main workspace reused 116,744 of 170,210 chunks
+(the rest: 2,097 files the clone changed, 519 top-level files, 68 new ones) and took
+268 s against 685 s alone. Its text is identical to a build alone; borrowed vectors are
+the sibling's copies of the same texts, which can differ from the embedding server's in
+the last float digits (cosine 0.9996 at worst) when the two were bought separately. On
+btrfs the borrowed vector rows share the sibling's blocks once its matrix is in the
+block-aligned layout any rebuild writes.
 
 ### On demand, and only on demand
 

@@ -74,28 +74,25 @@ FORBIDDEN = [
 ]
 
 
-def matches(fact, expected):
+def matches(fact: dict, expected: dict) -> bool:
+    """Return whether a fact holds every key of an expected subset."""
     return all(fact.get(key) == value for key, value in expected.items())
 
 
-def main(path):
-    problems = []
-    facts = []
-
-    with open(path, "r", encoding="utf-8") as handle:
-        lines = handle.read().splitlines()
-
-    if not lines:
-        print("no output produced")
-        return 1
-
+def _parse(lines: list[str], problems: list[str]) -> list[dict | None]:
+    """Parse every line, recording the ones that are not JSON as None."""
+    facts: list[dict | None] = []
     for number, line in enumerate(lines, start=1):
         try:
             facts.append(json.loads(line))
         except json.JSONDecodeError as error:
             problems.append("line %d is not valid JSON: %s" % (number, error))
             facts.append(None)
+    return facts
 
+
+def _check_header(facts: list[dict | None], problems: list[str]) -> None:
+    """Check line 1 is a complete javac facts header and the only one."""
     header = facts[0]
     if not isinstance(header, dict) or header.get("zemble_facts") != 1:
         problems.append("line 1 is not a zemble_facts header")
@@ -107,14 +104,16 @@ def main(path):
             problems.append("header tool is %r" % header.get("tool"))
         if header.get("language") != "java":
             problems.append("header language is %r" % header.get("language"))
+    if any(isinstance(fact, dict) and fact.get("zemble_facts") for fact in facts[1:]):
+        problems.append("a second header line was emitted")
 
-    for fact in facts[1:]:
-        if isinstance(fact, dict) and fact.get("zemble_facts"):
-            problems.append("a second header line was emitted")
-            break
 
-    # Every file line comes before the facts about that file, and appears once.
-    declared = set()
+def _check_files(facts: list[dict | None], problems: list[str]) -> set[str]:
+    """Check every file line comes before the facts about that file and appears once.
+
+    :return: The declared file paths.
+    """
+    declared: set[str] = set()
     for number, fact in enumerate(facts[1:], start=2):
         if not isinstance(fact, dict):
             continue
@@ -126,22 +125,41 @@ def main(path):
             declared.add(fact["path"])
         elif "path" in fact and fact["path"] not in declared:
             problems.append("line %d references undeclared file %s" % (number, fact["path"]))
+    return declared
 
+
+def _check_contents(facts: list[dict | None], problems: list[str]) -> None:
+    """Check the expected facts are there, the forbidden ones are not, and lines are usable."""
     real = [fact for fact in facts if isinstance(fact, dict)]
-
     for expected in EXPECTED:
         if not any(matches(fact, expected) for fact in real):
             problems.append("missing fact: %s" % json.dumps(expected, sort_keys=True))
-
     for forbidden in FORBIDDEN:
         if any(matches(fact, forbidden) for fact in real):
             problems.append("forbidden fact present: %s" % json.dumps(forbidden, sort_keys=True))
-
     # Every symbol/call fact must carry a positive line number.
     for number, fact in enumerate(facts, start=1):
         if isinstance(fact, dict) and fact.get("t") in ("symbol", "call"):
             if not isinstance(fact.get("line"), int) or fact["line"] < 1:
                 problems.append("line %d has no usable line number" % number)
+
+
+def main(path: str) -> int:
+    """Check one emitted facts file and report every problem found.
+
+    :return: The process exit status.
+    """
+    with open(path, encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+    if not lines:
+        print("no output produced")
+        return 1
+
+    problems: list[str] = []
+    facts = _parse(lines, problems)
+    _check_header(facts, problems)
+    declared = _check_files(facts, problems)
+    _check_contents(facts, problems)
 
     if problems:
         for problem in problems:
@@ -149,7 +167,8 @@ def main(path):
         print("%d problem(s) in %d fact line(s)" % (len(problems), len(facts) - 1))
         return 1
 
-    print("OK: %d fact lines, %d files, %d assertions" % (len(facts) - 1, len(declared), len(EXPECTED) + len(FORBIDDEN)))
+    assertions = len(EXPECTED) + len(FORBIDDEN)
+    print("OK: %d fact lines, %d files, %d assertions" % (len(facts) - 1, len(declared), assertions))
     return 0
 
 

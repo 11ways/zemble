@@ -69,3 +69,6 @@ class PreviousIndex:
     manifest: dict[str, FileManifestEntry]
     bm25_index: BM25
     definitions: SymbolDefinitions | None = None
+    #: The checkout the manifest's paths live under when it is not the root being built: a
+    #: sibling clone lending its rows, whose files are reused only where their bytes match.
+    root: Path | None = None
