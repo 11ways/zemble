@@ -97,6 +97,10 @@ class EmbedStatus:
         )
 
 
+#: Texts chunked before the store is asked which of them it already holds.
+_LOOKUP_BATCH = 4096
+
+
 def embed_status(
     path: Path | str,
     content: Sequence[ContentType] = (ContentType.CODE,),
@@ -145,29 +149,42 @@ def embed_status(
         else None
     )
 
+    # The buyer answers where its vectors live: a local sqlite file, or the embedding server.
+    stored_digests = getattr(resolved.embedder, "stored_digests", None)
+    lookup = stored_digests if remote and stored_digests is not None else None
+    cache_path = str(resolved.embedder.store_location) if lookup is not None else None
+    lookup_seconds = 0.0
+    reusable = embedded = 0
+    # Only a text that may still have to be bought is kept: the store is asked about each batch
+    # as it is chunked, so a tree whose vectors are already paid for holds no text at all.
+    uncached_texts: list[str] = []
+    batch: list[str] = []
+
+    def settle() -> None:
+        nonlocal lookup_seconds
+        if lookup is not None and batch:
+            asked = time.monotonic()
+            digests = [text_hash(text) for text in batch]
+            covered = lookup(digests)
+            lookup_seconds += time.monotonic() - asked
+            uncached_texts.extend(text for text, digest in zip(batch, digests, strict=True) if digest not in covered)
+        else:
+            uncached_texts.extend(batch)
+        batch.clear()
+
     started = time.monotonic()
-    reusable = 0
-    texts: list[str] = []
     for planned in plan_files(
         root, content, display_root=root, previous_manifest=manifest, capsules=resolved_capsules, exclude=exclude
     ):
         if planned.reused:
             reusable += planned.count
             continue
-        texts.extend(embedding_text(chunk) for chunk in planned.chunks)
-    chunk_seconds = time.monotonic() - started
-
-    cache_path: str | None = None
-    covered: set[str] = set()
-    lookup_seconds = 0.0
-    digests = [text_hash(text) for text in texts]
-    # The buyer answers where its vectors live: a local sqlite file, or the embedding server.
-    stored_digests = getattr(resolved.embedder, "stored_digests", None)
-    if remote and stored_digests is not None:
-        started = time.monotonic()
-        cache_path = str(resolved.embedder.store_location)
-        covered = stored_digests(digests)
-        lookup_seconds = time.monotonic() - started
+        batch.extend(embedding_text(chunk) for chunk in planned.chunks)
+        embedded += planned.count
+        if len(batch) >= _LOOKUP_BATCH:
+            settle()
+    settle()
+    chunk_seconds = time.monotonic() - started - lookup_seconds
 
     # AIDEV-NOTE: WHO buys is a question for the buyer, never for this report: the caching
     # wrapper gives duplicate texts one provider slot, so it buys each DISTINCT text once, while
@@ -182,9 +199,8 @@ def embed_status(
     # (pessimistic); one width that is not the one the build resolves and it counts everything
     # as stored (optimistic). Both are advisory only - the build's own guard measures the real
     # set, so neither can buy more than it announces.
-    uncached_texts = [text for text, digest in zip(texts, digests, strict=True) if digest not in covered]
     uncached = len(uncached_texts)
-    cached = len(texts) - uncached
+    cached = embedded - uncached
     billed = pending_purchase(resolved.embedder, uncached_texts, may_probe=False)
     tokens = estimate_tokens(billed)
     price = price_per_million(resolved.family)
@@ -205,7 +221,7 @@ def embed_status(
         remote=remote,
         dimensions=dimensions,
         content=[item.value for item in content],
-        chunks_total=reusable + len(texts),
+        chunks_total=reusable + embedded,
         reusable=reusable,
         cached=cached,
         uncached=uncached,
