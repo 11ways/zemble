@@ -220,9 +220,15 @@ class ZembleIndex:
         language_to_id = defaultdict(list)
         file_to_id = defaultdict(list)
         view = self._view
+        # Pattern matching is per file, not per chunk: a workspace has ~13x more chunks than files.
+        kept: dict[str, bool] = {}
         for i, (file_path, language) in enumerate(zip(file_paths_of(self.chunks), languages_of(self.chunks))):
-            if view is not None and not view.keeps(file_path):
-                continue
+            if view is not None:
+                keeps = kept.get(file_path)
+                if keeps is None:
+                    keeps = kept[file_path] = view.keeps(file_path)
+                if not keeps:
+                    continue
             if language:
                 language_to_id[language].append(i)
             file_to_id[file_path].append(i)
