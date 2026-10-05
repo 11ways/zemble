@@ -135,7 +135,11 @@ class Edge:
     line: int
     dst_id: str | None = None
     resolution: Resolution = Resolution.UNRESOLVED
+    # The symbols an ambiguous edge could mean, while it is being resolved. The store keeps
+    # only their number in `candidate_count`: an ambiguous edge has no destination, so no query
+    # ever reached the list, and on javaweb it was 1.6 GB of a 2.6 GB graph.
     candidates: list[str] = field(default_factory=list)
+    candidate_count: int = 0
     # Arity of a call site, used to pick between overloads. -1 when not applicable.
     arity: int = -1
     # Receiver text as written (`this`, `super`, a simple identifier or a dotted name).
@@ -152,6 +156,10 @@ class Edge:
     # about generated Hawkeye code mapped back onto its template keeps the generated member
     # here, so a reader can see the detour the source map made.
     origin_ref: str | None = None
+
+    def ambiguity(self) -> int:
+        """How many symbols this edge could mean: its list while resolving, its stored count once loaded."""
+        return len(self.candidates) or self.candidate_count
 
 
 @dataclass

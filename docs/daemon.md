@@ -108,7 +108,8 @@ keeping the original object would retain its mutable postings and anonymous vect
 Watchers own freshness while enabled, so queries do not start independent builds of
 a churning tree. `--no-watch` retains query-side staleness checks. Code and code+docs
 requests for one root share one covering resident index, with content selectors for
-narrower answers. On-disk content variants remain separate.
+narrower answers. On disk a root keeps only the widest stored index; a narrower request
+is answered from it (`ZembleIndex.for_content`).
 
 ### Serving a sub-path from an ancestor index
 

@@ -91,7 +91,7 @@ Every edge records which rung it landed on:
 | --- | --- |
 | `EXACT` | The declaring type was pinned down through the file's scope, and exactly one member matched. |
 | `UNIQUE_NAME` | Scope did not decide it, but exactly one symbol in the whole workspace carries that name. |
-| `AMBIGUOUS` | Several did. `dst_id` is `None` and `candidates` lists them all. |
+| `AMBIGUOUS` | Several did. `dst_id` is `None` and `candidate_count` says how many. |
 | `UNRESOLVED` | Nothing did. The target is in the JDK or a third-party jar. |
 
 A guess is never upgraded to `EXACT`.
@@ -281,7 +281,9 @@ declares - element tag, template tag, template id, function name and namespaced
 function key), `facts_symbols` (the `symbol` facts of every facts file, so mapping
 one file can reach the others without parsing them), `facts_status` (one row per
 facts file, see [the facts overlay](graph-facts.md)) and `meta` (format version,
-root, covered languages, skipped languages). Format version 6. A column a graph
+root, covered languages, skipped languages). Format version 7: an ambiguous edge stores
+how many symbols it could mean, not their ids, because nothing ever read the list and on
+javaweb it was 1.6 GB of a 2.6 GB store (0.9 GB after the migration). A column a graph
 built by an older zemble lacks is added on the next open and `decl_keys` is filled
 in one pass over the symbol table, so a version-4 graph is migrated rather than
 rebuilt; a graph is derived data either way.
@@ -517,6 +519,7 @@ in the calling process.
 
 ```
 zemble graph build <path> [--stats] [--force] [--json]
+zemble graph compact
 
 zemble graph facts status <path> [--json] [--limit N]
 
@@ -534,7 +537,9 @@ zemble graph neighbors       <path> <symbol> [--hops N] [--kinds KIND ...] [--js
 
 `<symbol>` is a simple name (`PageWindow`), a qualified name
 (`be.elevenways.zenit.common.data.PageWindow`) or `Type.member`
-(`PageWindow.of`). A query builds the graph if none exists yet.
+(`PageWindow.of`). A query builds the graph if none exists yet. `compact` brings every
+graph in the cache to the current format and gives freed pages back, under each graph's
+writer lock; a graph is otherwise only migrated when something next writes it.
 
 Exit codes: `0` answered, `1` no such symbol, `2` the name is ambiguous, in which
 case every candidate is listed on stderr so the next call can be qualified.

@@ -272,6 +272,7 @@ zemble graph implementations ./my-project StorageAdapter
 zemble graph tests-of ./my-project PageWindow
 zemble graph neighbors ./my-project PageWindow --hops 2
 zemble graph build ./my-project --stats
+zemble graph compact
 zemble graph facts status ./my-project
 ```
 

@@ -1,6 +1,5 @@
 """Behaviour journeys over workspace-wide resolution."""
 
-import json
 from pathlib import Path
 
 from zemble.graph.model import EdgeKind, Resolution
@@ -62,7 +61,7 @@ def test_type_resolution_ladder_journey(graph_fixture_root: Path, built_graph) -
     ]
     assert ambiguous[0]["resolution"] == Resolution.AMBIGUOUS.value, "step 4: two same-named types are ambiguous"
     assert ambiguous[0]["dst_id"] is None, "step 4: an ambiguous edge names no single destination"
-    assert len(json.loads(ambiguous[0]["candidates"])) == 2, "step 4: both candidates are listed"
+    assert ambiguous[0]["candidate_count"] == 2, "step 4: both candidates are counted"
 
     # 5. A JDK type nobody declares stays honestly unresolved.
     jdk = [row for row in _edges(root, kind=EdgeKind.REFERENCES_TYPE.value) if row["dst_name"] == "String"]
@@ -97,7 +96,7 @@ def test_call_resolution_journey(graph_fixture_root: Path, built_graph) -> None:
     # 6. An ambiguous receiver narrows to the same-named members, never to one of them.
     unknown = [row for row in calls if row["src_id"].endswith("Consumer.measure(Circle)")]
     assert unknown[0]["resolution"] == Resolution.AMBIGUOUS.value, "step 6: an ambiguous receiver stays ambiguous"
-    assert len(json.loads(unknown[0]["candidates"])) == 2, "step 6: both area() candidates are listed"
+    assert unknown[0]["candidate_count"] == 2, "step 6: both area() candidates are counted"
 
 
 def test_override_journey(graph_fixture_root: Path, built_graph) -> None:

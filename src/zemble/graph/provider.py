@@ -128,7 +128,7 @@ def _reason(symbol: Symbol, edge: Edge, depth: int = 1, *, outgoing: bool = Fals
     verb = table.get(edge.kind, edge.kind.value)
     phrase = _RESOLUTION_PHRASES[edge.resolution]
     if edge.resolution is Resolution.AMBIGUOUS:
-        phrase = f"ambiguous, {len(edge.candidates)} candidates"
+        phrase = f"ambiguous, {edge.ambiguity()} candidates"
     if edge.source != TREE_SITTER_SOURCE:
         phrase = edge.source
     if edge.origin_ref:

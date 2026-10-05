@@ -1,18 +1,26 @@
 """Behaviour journeys over graph storage and incremental rebuilds."""
 
+import json
 import logging
 import shutil
+import sqlite3
 from pathlib import Path
 
+from zemble.graph.model import Edge, EdgeKind, Resolution
 from zemble.graph.store import (
+    _EDGE_COLUMNS_SQL,
+    _EDGE_PLACEHOLDERS,
     GRAPH_FORMAT_VERSION,
     GRAPH_POINTER_NAME,
     _compact_if_drifted,
+    _edge_row,
     _Pointer,
     _publish,
     _read_pointer,
     build_graph,
+    compact_stored_graphs,
     connect,
+    edge_from_row,
     graph_db_path,
     graph_exists,
     graph_folder,
@@ -221,6 +229,84 @@ def test_torn_store_journey(graph_fixture_root: Path, graph_cache: Path, tmp_pat
     # 6. A refresh after the rebuild is an ordinary no-op again.
     again = build_graph(path)
     assert (again.extracted_files, again.rebuilt_from_corruption) == (0, False), "step 6: back to a plain refresh"
+
+
+def test_a_format_6_store_keeps_only_candidate_counts(tmp_path: Path) -> None:
+    """Stored candidate lists become counts: read as counts before migrating, migrated by the next writer."""
+    db = tmp_path / "graph-1.sqlite"
+    legacy = sqlite3.connect(db)
+    legacy.execute(
+        "CREATE TABLE edges (src_id TEXT, dst_id TEXT, dst_name TEXT, kind TEXT, line INTEGER, resolution TEXT, "
+        "candidates TEXT, arity INTEGER, receiver TEXT, receiver_type TEXT, is_new INTEGER, file_path TEXT, "
+        "source TEXT, origin_ref TEXT)"
+    )
+    ids = [f"a/B.java#B.id{n}()" for n in range(300)]
+    legacy.executemany(
+        "INSERT INTO edges (src_id, dst_name, kind, line, resolution, candidates, arity) VALUES (?,?,?,?,?,?,?)",
+        [
+            ("a/A.java#A.run()", "id", "calls", 3, "ambiguous", json.dumps(ids), 0),
+            ("a/A.java#A.run()", "x", "calls", 4, "unresolved", None, 0),
+        ],
+    )
+    legacy.commit()
+    legacy.close()
+
+    # 1. A reader of the unmigrated store already sees counts, never the list.
+    reader = open_db(db, read_only=True)
+    edges = [edge_from_row(row) for row in reader.execute("SELECT * FROM edges ORDER BY line")]
+    reader.close()
+    assert [edge.ambiguity() for edge in edges] == [300, 0], "step 1: a format-6 row is read as its count"
+    assert all(edge.candidates == [] for edge in edges), "step 1: and the list itself is not materialised"
+
+    # 2. The next writer replaces the lists by their counts and drops the column.
+    writer = open_db(db)
+    columns = {row["name"] for row in writer.execute("PRAGMA table_info(edges)")}
+    edges = [edge_from_row(row) for row in writer.execute("SELECT * FROM edges ORDER BY line")]
+    writer.close()
+    assert "candidates" not in columns and "candidate_count" in columns, "step 2: the list column is gone"
+    assert [edge.ambiguity() for edge in edges] == [300, 0], "step 2: the counts survived the migration"
+
+    # 3. An edge resolved now stores its count the same way.
+    fresh = Edge(src_id="a/A.java#A.go()", dst_name="id", kind=EdgeKind.CALLS, line=9, candidates=ids[:7])
+    fresh.resolution = Resolution.AMBIGUOUS
+    writer = open_db(db)
+    writer.execute(f"INSERT INTO edges ({_EDGE_COLUMNS_SQL}) VALUES ({_EDGE_PLACEHOLDERS})", _edge_row(fresh))
+    stored = edge_from_row(writer.execute("SELECT * FROM edges WHERE line = 9").fetchone())
+    writer.close()
+    assert stored.ambiguity() == 7, "step 3: a new ambiguous edge keeps its count"
+
+
+def test_compact_brings_every_stored_graph_to_the_current_format(graph_fixture_root: Path, graph_cache: Path) -> None:
+    """`zemble graph compact` migrates a graph nobody writes to, and gives the freed space back."""
+    path = str(graph_fixture_root)
+    built = build_graph(path)
+    db = graph_db_path(path)
+    assert db is not None
+    # The state a format-6 zemble left: every edge carries a long candidate list.
+    legacy = sqlite3.connect(db)
+    legacy.execute("ALTER TABLE edges ADD COLUMN candidates TEXT")
+    legacy.execute("UPDATE edges SET candidates = ?", (json.dumps([f"x/Y.java#Y.m{n}()" for n in range(10000)]),))
+    legacy.execute("ALTER TABLE edges DROP COLUMN candidate_count")
+    legacy.commit()
+    legacy.close()
+
+    # 1. Every graph is reported with its size before and after.
+    reports = compact_stored_graphs(graph_cache)
+    assert [report.folder for report in reports] == [db.parent], "step 1: the one stored graph is compacted"
+    report = reports[0]
+    assert report.skipped is None and report.size_after < report.size_before // 4, "step 1: and shrank"
+
+    # 2. It is in the current format now, with every edge and its count intact.
+    connection = connect(path)
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(edges)")}
+    count = connection.execute("SELECT COUNT(*), MIN(candidate_count) FROM edges").fetchone()
+    connection.close()
+    assert "candidates" not in columns, "step 2: the list column is gone"
+    assert tuple(count) == (built.edges, 10000), "step 2: every edge kept its count"
+
+    # 3. Running it again finds nothing left to do.
+    again = compact_stored_graphs(graph_cache)[0]
+    assert again.size_after == again.size_before, "step 3: a current, compact graph is left as it is"
 
 
 def test_a_bloated_store_is_compacted(tmp_path: Path) -> None:

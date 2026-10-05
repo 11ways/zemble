@@ -14,7 +14,7 @@ import numpy as np
 import numpy.typing as npt
 import orjson
 
-from zemble.cache import get_validated_cache, load_previous_for_incremental
+from zemble.cache import covering_content, get_validated_cache, load_previous_for_incremental
 from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.embedding.base import Embedder
 from zemble.embedding.registry import load_embedder
@@ -22,7 +22,7 @@ from zemble.index.bm25 import BM25
 from zemble.index.chunk_store import file_paths_of, languages_of, load_chunks, resolve_chunk, save_chunks
 from zemble.index.create import create_index_from_path
 from zemble.index.dense import SelectableBasicBackend
-from zemble.index.files import read_file_text
+from zemble.index.files import get_extensions, read_file_text
 from zemble.index.symbols import SymbolDefinitions, save_symbol_definitions
 from zemble.index.types import CACHE_FORMAT_VERSION, FileManifestEntry, PersistencePath
 from zemble.index.view import IndexView
@@ -71,6 +71,25 @@ def resolve_embedder(embedder: Embedder | str | None, model_path: str | None = N
     if embedder is None and model_path is not None:
         return load_embedder(f"model2vec:{model_path}" if ":" not in model_path else model_path)
     return load_embedder(embedder)
+
+
+def _answering(index: ZembleIndex, content: Sequence[ContentType], stored: Sequence[ContentType]) -> ZembleIndex:
+    """Narrow an index stored for *stored* to the content a caller asked for; it is itself when they agree.
+
+    :raises ValueError: If the stored index holds no file of that content.
+    """
+    if set(content) == set(stored):
+        return index
+    narrowed = index.for_content(content)
+    if narrowed is None:
+        raise ValueError(f"No {'/'.join(c.value for c in content)} files are indexed under {index._root}.")
+    return narrowed
+
+
+def _content_patterns(index: ZembleIndex, content: Sequence[ContentType]) -> tuple[str, ...]:
+    """Return the patterns dropping every file an index stores but *content* does not cover."""
+    dropped = sorted(set(get_extensions(index.storage_content)) - set(get_extensions(content)))
+    return tuple(f"*{extension}" for extension in dropped)
 
 
 class LazyFileSizes(dict):
@@ -131,6 +150,7 @@ class ZembleIndex:
         definitions: SymbolDefinitions | None = None,
         view: IndexView | None = None,
         exclude: Sequence[str] = (),
+        storage_content: Sequence[ContentType] | None = None,
     ) -> None:
         """Initialize a ZembleIndex. Should be created with from_path or from_git.
 
@@ -148,6 +168,8 @@ class ZembleIndex:
             so scores and ranking are the full index's and only the candidate set narrows.
         :param exclude: The gitignore-style patterns this index was BUILT with, which are part
             of its cache identity: a pruned build is never written over a plain one.
+        :param storage_content: The content types the stores hold when this view answers for fewer
+            of them (`content`); None when they are the same.
         """
         self.embedder = embedder
         self.chunks: Sequence[Chunk] = chunks
@@ -155,6 +177,9 @@ class ZembleIndex:
         self._semantic_index: SelectableBasicBackend = semantic_index
         self._root: Path | None = root
         self._content: tuple[ContentType, ...] = (content,) if isinstance(content, ContentType) else tuple(content)
+        self._storage_content: tuple[ContentType, ...] = (
+            tuple(storage_content) if storage_content is not None else self._content
+        )
         self._view: IndexView | None = view
         self._exclude: tuple[str, ...] = tuple(exclude)
         self._file_mapping, self._language_mapping = self._populate_mapping()
@@ -219,8 +244,43 @@ class ZembleIndex:
 
     @property
     def content(self) -> tuple[ContentType, ...]:
-        """Return the content types covered by this index."""
+        """Return the content types this index answers for."""
         return self._content
+
+    @property
+    def storage_content(self) -> tuple[ContentType, ...]:
+        """Return the content types its stores hold, which a narrowed view answers for only part of."""
+        return self._storage_content
+
+    def for_content(self, content: Sequence[ContentType]) -> ZembleIndex | None:
+        """Return a view answering only from files of these content types, or None when none is indexed.
+
+        Scores and ranking stay the whole index's, BM25 corpus statistics included, exactly as a
+        sub-tree view's do; only the candidate set narrows.
+
+        :param content: Content types this index holds, all or some of them.
+        :return: This index when it answers for exactly these already, else the narrowed view.
+        :raises ValueError: If a requested content type is not in this index.
+        """
+        wanted = tuple(content_type for content_type in ContentType if content_type in content)
+        if set(wanted) == set(self._content):
+            return self
+        if not set(wanted) <= set(self._content):
+            raise ValueError(
+                f"an index of {[c.value for c in self._content]} cannot answer for {[c.value for c in wanted]}"
+            )
+        current = self._view or IndexView()
+        narrowed = IndexView.build(current.prefix, current.paths, (*current.exclude, *_content_patterns(self, wanted)))
+        return self._with_view(narrowed, content=wanted)
+
+    def _narrowing(self) -> tuple[str, ...]:
+        """Return the exclude patterns that keep this view to the content types it answers for.
+
+        AIDEV-NOTE: a caller's filter REPLACES a view's own exclude patterns (`IndexView.with_filter`),
+        so every view built here re-applies these; otherwise `filtered()` on a code view of a
+        code+docs index would quietly answer with docs again.
+        """
+        return _content_patterns(self, self._content)
 
     @property
     def exclude(self) -> tuple[str, ...]:
@@ -266,33 +326,36 @@ class ZembleIndex:
         resolved = resolve_embedder(embedder, model_path)
         resolved_capsules = CapsuleOptions.resolve(capsules)
         exclude = tuple(exclude)
-        cache_path = get_validated_cache(str(path), resolved.model_id, normalized, resolved_capsules, exclude)
+        # One root keeps one index: a request a wider stored index covers is answered from it.
+        stored = covering_content(str(path), resolved.model_id, normalized, resolved_capsules, exclude)
+        cache_path = get_validated_cache(str(path), resolved.model_id, stored, resolved_capsules, exclude)
         if cache_path:
-            return cls.load_from_disk(cache_path, embedder=resolved)
+            return _answering(cls.load_from_disk(cache_path, embedder=resolved), normalized, stored)
 
         path = path.resolve()
-        previous = load_previous_for_incremental(str(path), resolved.model_id, normalized, resolved_capsules, exclude)
+        previous = load_previous_for_incremental(str(path), resolved.model_id, stored, resolved_capsules, exclude)
         bm25_index, semantic_index, chunks, manifest = create_index_from_path(
             path,
             embedder=resolved,
-            content=normalized,
+            content=stored,
             display_root=path,
             previous=previous,
             capsules=resolved_capsules,
             exclude=exclude,
         )
 
-        return ZembleIndex(
+        built = ZembleIndex(
             resolved,
             bm25_index,
             semantic_index,
             chunks,
             root=path,
-            content=normalized,
+            content=stored,
             manifest=manifest,
             capsules=resolved_capsules,
             exclude=exclude,
         )
+        return _answering(built, normalized, stored)
 
     @classmethod
     def from_git(
@@ -483,7 +546,7 @@ class ZembleIndex:
         :param prefix: A root-relative directory path.
         :return: The restricted view, or None when no indexed file lives under the prefix.
         """
-        return self._with_view(IndexView.build(prefix=prefix))
+        return self._with_view(IndexView.build(prefix=prefix, exclude=self._narrowing()))
 
     def filtered(self, paths: Sequence[str] = (), exclude: Sequence[str] = ()) -> ZembleIndex | None:
         """Return a view answering only from *paths*, minus anything *exclude* matches.
@@ -500,15 +563,17 @@ class ZembleIndex:
         if not paths and not exclude:
             return self
         current = self._view or IndexView()
-        return self._with_view(current.with_filter(paths, exclude))
+        return self._with_view(current.with_filter(paths, (*exclude, *self._narrowing())))
 
-    def _with_view(self, view: IndexView | None) -> ZembleIndex | None:
-        """Build (or reuse) the view of this index that keeps exactly what *view* keeps."""
+    def _with_view(self, view: IndexView | None, content: tuple[ContentType, ...] | None = None) -> ZembleIndex | None:
+        """Build (or reuse) the view of this index that keeps exactly what *view* keeps, answering for *content*."""
         if view is None:
             return self
-        cached = self._views.get(view.key)
+        answers = content if content is not None else self._content
+        key = f"{view.key}\x00{','.join(c.value for c in answers)}"
+        cached = self._views.get(key)
         if cached is not None:
-            self._views.move_to_end(view.key)
+            self._views.move_to_end(key)
             return cached
         restricted = ZembleIndex(
             self.embedder,
@@ -516,19 +581,20 @@ class ZembleIndex:
             self._semantic_index,
             self.chunks,
             root=self._root,
-            content=self._content,
+            content=answers,
             loaded_from_disk=self.loaded_from_disk,
             manifest=self._manifest,
             capsules=self._capsules,
             definitions=self._definitions,
             view=view,
             exclude=self._exclude,
+            storage_content=self._storage_content,
         )
         if not restricted._file_mapping:
             return None
         if len(self._views) >= _MAX_CACHED_VIEWS:
             self._views.popitem(last=False)
-        self._views[view.key] = restricted
+        self._views[key] = restricted
         return restricted
 
     def search(
@@ -662,7 +728,7 @@ class ZembleIndex:
             "time": datetime.now().timestamp(),
             "embedder": self.embedder.model_id,
             "dimensions": self.embedder.dimensions,
-            "content_type": list(x.value for x in self._content),
+            "content_type": list(x.value for x in self._storage_content),
             "chunk_size": _DESIRED_CHUNK_LENGTH_CHARS,
             "cache_version": CACHE_FORMAT_VERSION,
             "capsules": self._capsules.key,

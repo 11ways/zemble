@@ -18,11 +18,10 @@ import time
 import traceback
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
-from copy import copy
 from pathlib import Path
 from typing import Any
 
-from zemble.cache import find_index_from_cache_folder, resolve_cache_folder
+from zemble.cache import find_index_from_cache_folder, resolve_cache_folder, retire_covered_indexes
 from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
 from zemble.daemon import client
 from zemble.daemon.admission import AdmissionBusy, ReadAdmission, request_deadline
@@ -140,7 +139,7 @@ class ResidentCache(IndexCache):
     ) -> ZembleIndex:
         """Discard construction dictionaries and vectors before returning the mapped stores."""
         index = super()._build_index(source, ref, embedder, cache_key, exclude)
-        path = find_index_from_cache_folder(cache_key[0], index.content, index.exclude)
+        path = find_index_from_cache_folder(cache_key[0], index.storage_content, index.exclude)
         embedder = index.embedder
         del index
         gc.collect()
@@ -241,6 +240,7 @@ def _mapped_rebuild(
     index, counts = rebuild_index(current, cache_key, changed_paths)
     path = find_index_from_cache_folder(cache_key[0], cache_key[1], index.exclude)
     index.save(path)
+    retire_covered_indexes(cache_key[0], cache_key[1], index.exclude)
     del index
     gc.collect()
     release_free_heap()
@@ -357,14 +357,10 @@ class Daemon:
         if request_task in self._request_tasks:
             self._query_keys[request_task] = cache_key
         self._ensure_watcher(cache_key)
-        drop = set(get_extensions(index.content)) - set(get_extensions(content))
-        content_filter = [f"*{extension}" for extension in sorted(drop)]
-        filtered = index.filtered(paths, (*exclude, *content_filter))
+        narrowed = index.for_content(content)
+        filtered = narrowed.filtered(paths, exclude) if narrowed is not None else None
         if filtered is None:
             raise ValueError(f"No indexed file under {path} survives paths={list(paths)} exclude={list(exclude)}")
-        if set(content) != set(filtered.content):
-            filtered = copy(filtered)
-            filtered._content = content
         return cache_key, filtered
 
     def _warm_for(

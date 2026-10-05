@@ -61,7 +61,7 @@ from zemble.types import ContentType
 logger = logging.getLogger(__name__)
 DEFAULT_WORKERS = min(10, os.cpu_count() or 2)
 
-GRAPH_FORMAT_VERSION = 6
+GRAPH_FORMAT_VERSION = 7
 #: The file naming the current graph version (first line) and the one it replaced (second).
 GRAPH_POINTER_NAME = "graph.current"
 #: The file whose OS lock is held by the one process allowed to write a workspace's graph.
@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS symbols (
 );
 CREATE TABLE IF NOT EXISTS edges (
     src_id TEXT, dst_id TEXT, dst_name TEXT, kind TEXT, line INTEGER,
-    resolution TEXT, candidates TEXT, arity INTEGER, receiver TEXT,
+    resolution TEXT, candidate_count INTEGER, arity INTEGER, receiver TEXT,
     receiver_type TEXT, is_new INTEGER, file_path TEXT, source TEXT, origin_ref TEXT
 );
 CREATE TABLE IF NOT EXISTS facts_status (
@@ -689,6 +689,56 @@ def _migrate_legacy(folder: Path) -> _Pointer:
     return pointer
 
 
+@dataclass
+class CompactedGraph:
+    """What `compact_stored_graphs` did to one graph folder."""
+
+    folder: Path
+    size_before: int
+    size_after: int
+    #: Why nothing was done, when nothing was.
+    skipped: str | None = None
+
+
+def _version_size(folder: Path, name: str) -> int:
+    """Return the bytes one version file and its WAL take."""
+    return sum(path.stat().st_size for path in (folder / name, folder / f"{name}-wal") if path.exists())
+
+
+def compact_stored_graphs(cache_folder: Path) -> list[CompactedGraph]:
+    """Bring every stored graph to the current format and give its freed pages back to the filesystem.
+
+    A graph is only migrated when something opens it for writing, which for a checkout nobody
+    edits is never; this does it for all of them, each under its writer lock. A graph another
+    process is writing is skipped, and a replaced version a reader still holds stays on disk
+    until the next writer finds it released.
+
+    :param cache_folder: The zemble cache folder.
+    :return: One report per graph folder, in name order.
+    """
+    reports: list[CompactedGraph] = []
+    for folder in sorted(cache_folder.glob("*/index")):
+        if not ((folder / GRAPH_POINTER_NAME).is_file() or (folder / LEGACY_GRAPH_DB_NAME).is_file()):
+            continue
+        with _writer_lock(folder, wait=False) as taken:
+            if not taken:
+                reports.append(CompactedGraph(folder, 0, 0, "another process is writing it"))
+                continue
+            try:
+                pointer = _locked_pointer(folder)
+            except GraphStoreCorrupt as exc:
+                reports.append(CompactedGraph(folder, 0, 0, str(exc)))
+                continue
+            if pointer is None:
+                continue
+            before = _version_size(folder, pointer.current)
+            open_db(folder / pointer.current).close()
+            _compact_if_drifted(folder, pointer.current)
+            current = _sweep(folder, _read_pointer(folder) or pointer).current
+            reports.append(CompactedGraph(folder, before, _version_size(folder, current)))
+    return reports
+
+
 def _migrate(connection: sqlite3.Connection) -> None:
     """Add the columns a graph built by an older zemble does not have yet."""
     edge_columns = {row["name"] for row in connection.execute("PRAGMA table_info(edges)")}
@@ -696,6 +746,8 @@ def _migrate(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE edges ADD COLUMN source TEXT")
     if "origin_ref" not in edge_columns:
         connection.execute("ALTER TABLE edges ADD COLUMN origin_ref TEXT")
+    if "candidates" in edge_columns:
+        _count_candidates(connection, edge_columns)
     status_columns = {row["name"] for row in connection.execute("PRAGMA table_info(facts_status)")}
     if "template_paths" not in status_columns:
         connection.execute("ALTER TABLE facts_status ADD COLUMN template_paths TEXT")
@@ -706,6 +758,23 @@ def _migrate(connection: sqlite3.Connection) -> None:
     if "annotation_args" not in symbol_columns:
         connection.execute("ALTER TABLE symbols ADD COLUMN annotation_args TEXT")
     _backfill_declaration_keys(connection)
+
+
+def _count_candidates(connection: sqlite3.Connection, edge_columns: set[str]) -> None:
+    """Replace a format-6 store's candidate lists by their counts, in one transaction.
+
+    The lists were most of the file (1.6 GB of 2.6 GB on javaweb). Dropping the column rewrites
+    the table, which leaves the old pages free; the build that opened the store then compacts
+    them away (`_compact_if_drifted`), so the disk is given back by the same refresh.
+    """
+    logger.info("graph: replacing stored candidate lists by their counts (format %d)", GRAPH_FORMAT_VERSION)
+    if "candidate_count" not in edge_columns:
+        connection.execute("ALTER TABLE edges ADD COLUMN candidate_count INTEGER")
+    connection.execute(
+        "UPDATE edges SET candidate_count = COALESCE(json_array_length(candidates), 0) WHERE candidate_count IS NULL"
+    )
+    connection.execute("ALTER TABLE edges DROP COLUMN candidates")
+    connection.commit()
 
 
 #: Meta key saying the `decl_keys` table has been filled for this graph.
@@ -878,7 +947,7 @@ _EDGE_COLUMNS = (
     "kind",
     "line",
     "resolution",
-    "candidates",
+    "candidate_count",
     "arity",
     "receiver",
     "receiver_type",
@@ -900,7 +969,7 @@ def _edge_row(edge: Edge) -> tuple:
         edge.kind.value,
         edge.line,
         edge.resolution.value,
-        json.dumps(edge.candidates) if edge.candidates else None,
+        edge.ambiguity(),
         edge.arity,
         edge.receiver,
         edge.receiver_type,
@@ -912,7 +981,11 @@ def _edge_row(edge: Edge) -> tuple:
 
 
 def edge_from_row(row: sqlite3.Row) -> Edge:
-    """Rebuild an edge from a database row."""
+    """Rebuild an edge from a database row; a format-6 row still carrying its candidate list is counted."""
+    if "candidate_count" in row.keys():
+        count = row["candidate_count"] or 0
+    else:
+        count = len(json.loads(row["candidates"])) if row["candidates"] else 0
     return Edge(
         src_id=row["src_id"],
         dst_name=row["dst_name"],
@@ -920,7 +993,7 @@ def edge_from_row(row: sqlite3.Row) -> Edge:
         line=row["line"],
         dst_id=row["dst_id"],
         resolution=Resolution(row["resolution"]),
-        candidates=json.loads(row["candidates"]) if row["candidates"] else [],
+        candidate_count=count,
         arity=row["arity"],
         receiver=row["receiver"],
         receiver_type=row["receiver_type"],
@@ -1888,6 +1961,7 @@ def _reset(edge: Edge) -> Edge:
     edge.dst_id = None
     edge.resolution = Resolution.UNRESOLVED
     edge.candidates = []
+    edge.candidate_count = 0
     edge.source = TREE_SITTER_SOURCE
     edge.origin_ref = None
     return edge

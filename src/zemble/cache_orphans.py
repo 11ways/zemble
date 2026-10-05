@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from zemble.cache import cache_key
+from zemble.cache import cache_key, covered_variants, index_component_files, remove_index_components
 from zemble.embedding.gc import indexes_by_family, last_activity
 from zemble.graph.store import graph_root_of, retired_graph_files, sweep_graph_folder
 from zemble.openfiles import held_open
@@ -36,6 +36,7 @@ class OrphanKind(str, Enum):
     EMBEDDER_UNUSED = "embedder-unused"
     TEMP_LEFTOVER = "temp-leftover"
     RETIRED_GRAPH = "retired-graph"
+    INDEX_COVERED = "index-covered"
 
     @property
     def label(self) -> str:
@@ -53,6 +54,8 @@ class OrphanKind(str, Enum):
                 return "temporary leftover"
             case OrphanKind.RETIRED_GRAPH:
                 return "retired graph version or superseded graph.sqlite"
+            case OrphanKind.INDEX_COVERED:
+                return "index a wider index of the same root covers"
 
 
 @dataclass
@@ -89,6 +92,10 @@ def find_orphans(cache_folder: Path, *, max_age_days: int = DEFAULT_MAX_AGE_DAYS
         retired = tuple(retired_graph_files(graph)) if graph.is_dir() else ()
         if retired:
             orphans.append(Orphan(OrphanKind.RETIRED_GRAPH, graph, sum(map(_size, retired)), retired))
+        for covered in covered_variants(entry):
+            files = tuple(index_component_files(covered))
+            size = sum(_tree_size(path) if path.is_dir() else _size(path) for path in files)
+            orphans.append(Orphan(OrphanKind.INDEX_COVERED, covered, size, files))
     orphans.extend(_unused_embedders(cache_folder, oldest))
     orphans.extend(_temp_leftovers(cache_folder, doomed, now))
     return orphans
@@ -113,6 +120,10 @@ def remove_orphan(orphan: Orphan) -> bool:
         case OrphanKind.RETIRED_GRAPH:
             removed = sweep_graph_folder(orphan.target)
             return bool(removed)
+        case OrphanKind.INDEX_COVERED:
+            # Only the index's own stores go: the symbol graph shares the `index` folder.
+            remove_index_components(orphan.target)
+            return True
 
 
 def _key_dir_orphan(entry: Path, oldest: float) -> Orphan | None:

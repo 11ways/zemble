@@ -127,7 +127,8 @@ def save_index_to_cache(index: "ZembleIndex", path: str) -> None:
     build can never be written over the plain index of the same root.
     """
     if not index.loaded_from_disk:
-        index.save(find_index_from_cache_folder(path, index.content, index.exclude))
+        index.save(find_index_from_cache_folder(path, index.storage_content, index.exclude))
+        retire_covered_indexes(path, index.storage_content, index.exclude)
 
 
 def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[ContentType], capsule_key: str) -> bool:
@@ -220,32 +221,161 @@ def get_validated_cache(
     return index_path
 
 
+def _ordered(content: Collection[ContentType]) -> tuple[ContentType, ...]:
+    """Return content types in their declaration order, the spelling every key and folder uses."""
+    return tuple(content_type for content_type in ContentType if content_type in content)
+
+
+def stored_variants(folder: Path) -> list[tuple[tuple[ContentType, ...], Path, dict]]:
+    """Return every complete index stored in one key folder: its content, its folder and its metadata.
+
+    :param folder: A cache key folder, holding `index` and `index-<scope>` folders.
+    :return: The complete, readable variants, narrowest first.
+    """
+    found = []
+    for index_path in sorted(folder.glob("index*")) if folder.is_dir() else []:
+        content = _content_of_folder(index_path.name)
+        persistence_path = PersistencePath.from_path(index_path)
+        if content is None or persistence_path.non_existing():
+            continue
+        try:
+            with open(persistence_path.metadata, encoding="utf-8") as f:
+                metadata = json.load(f)
+        except (OSError, ValueError):
+            metadata = {}
+        found.append((content, index_path, metadata if isinstance(metadata, dict) else {}))
+    return sorted(found, key=lambda variant: len(variant[0]))
+
+
+def _content_of_folder(name: str) -> tuple[ContentType, ...] | None:
+    """Read the content selection back out of an index folder name `find_index_from_cache_folder` gave."""
+    if name == "index":
+        return (ContentType.CODE,)
+    scope = name.removeprefix("index-")
+    if scope == name:
+        return None
+    try:
+        return _ordered({ContentType(value) for value in scope.split("-")})
+    except ValueError:
+        return None
+
+
+def covering_content(
+    path: str,
+    embedder_id: str,
+    content: Sequence[ContentType],
+    capsules: CapsuleOptions | None = None,
+    exclude: Sequence[str] = (),
+) -> tuple[ContentType, ...]:
+    """Return the content selection a request for *content* is stored and served as.
+
+    One root keeps one index on disk: the widest compatible one that covers the request, or the
+    request itself when nothing covers it. A code request on a root that already has a code+docs
+    index is answered from that index, narrowed to code, instead of embedding and storing the
+    same code a second time; a narrower index left beside it is never read again.
+
+    :param path: Local path or git URL.
+    :param embedder_id: The normalized spec of the embedder that would answer the request.
+    :param content: The requested content types.
+    :param capsules: The requested context-capsule configuration.
+    :param exclude: The exclude patterns the index was built with.
+    :return: The content types to load or build.
+    """
+    wanted = _ordered(content)
+    if is_git_url(path):
+        return wanted
+    capsule_key = CapsuleOptions.resolve(capsules).key
+    variants = stored_variants(find_index_from_cache_folder(path, wanted, exclude).parent)
+    for stored, _index_path, metadata in reversed(variants):
+        if set(wanted) <= set(stored) and _metadata_matches(metadata, embedder_id, stored, capsule_key):
+            return stored
+    return wanted
+
+
+def covered_variants(folder: Path) -> list[Path]:
+    """Return the index folders in a key folder that a wider compatible sibling already covers.
+
+    A narrower index is covered when a sibling holds every content type it holds and was built
+    with the same embedder, capsules, chunk size and format: requests for it are answered from
+    the sibling, so nothing reads it again.
+    """
+    variants = stored_variants(folder)
+    covered = []
+    for content, index_path, metadata in variants:
+        for wider, _wider_path, wider_metadata in variants:
+            if not set(content) < set(wider):
+                continue
+            same_build = all(metadata.get(key) == wider_metadata.get(key) for key in _BUILD_IDENTITY)
+            if same_build and wider_metadata.get("cache_version") == CACHE_FORMAT_VERSION:
+                covered.append(index_path)
+                break
+    return covered
+
+
+#: The metadata that has to agree before one stored index may answer for another.
+_BUILD_IDENTITY = ("embedder", "capsules", "chunk_size", "cache_version", "exclude")
+
+
+def index_component_files(index_path: Path) -> list[Path]:
+    """Return what an index consists of, leaving out the symbol graph that shares its `index` folder."""
+    persistence = PersistencePath.from_path(index_path)
+    return [
+        persistence.chunks,
+        persistence.bm25_index,
+        persistence.semantic_index,
+        persistence.symbols,
+        persistence.metadata,
+    ]
+
+
+def remove_index_components(index_path: Path) -> None:
+    """Delete one stored index, metadata last so a half-removed one never reads as complete."""
+    *stores, metadata = index_component_files(index_path)
+    metadata.unlink(missing_ok=True)
+    for store in stores:
+        if store.is_dir():
+            shutil.rmtree(store)
+        else:
+            store.unlink(missing_ok=True)
+
+
+def retire_covered_indexes(path: str, content: Sequence[ContentType], exclude: Sequence[str] = ()) -> list[Path]:
+    """Delete the narrower indexes of a root that the index just saved for *content* covers.
+
+    :return: The index folders whose components were removed.
+    """
+    folder = find_index_from_cache_folder(path, content, exclude).parent
+    retired = covered_variants(folder)
+    for index_path in retired:
+        remove_index_components(index_path)
+        logger.info(
+            "removed %s: the %s index of the same root covers it", index_path, "-".join(c.value for c in content)
+        )
+    return retired
+
+
 def has_cached_index(
     path: str, content: Sequence[ContentType] = (ContentType.CODE,), exclude: Sequence[str] = ()
 ) -> bool:
-    """Return whether a complete index folder exists for a path, without checking it for staleness."""
-    return not PersistencePath.from_path(find_index_from_cache_folder(path, content, exclude)).non_existing()
+    """Return whether a complete index covering *content* exists for a path, without checking it for staleness."""
+    folder = find_index_from_cache_folder(path, content, exclude).parent
+    return any(set(content) <= set(stored) for stored, _path, _metadata in stored_variants(folder))
 
 
 def cached_index_compatible(
     path: str, embedder_id: str, content: Sequence[ContentType], capsules: CapsuleOptions | None = None
 ) -> bool:
-    """Return whether a complete on-disk index for *path* was built with these parameters.
+    """Return whether a complete on-disk index covering *content* for *path* was built with these parameters.
 
     Freshness is deliberately NOT checked: a stale ancestor index is still the right index to
     load and refresh incrementally, which is far cheaper than building a second one over a
     sub-tree it already covers.
     """
-    index_path = find_index_from_cache_folder(path, content)
-    persistence_path = PersistencePath.from_path(index_path)
-    if persistence_path.non_existing():
-        return False
-    try:
-        with open(persistence_path.metadata, encoding="utf-8") as f:
-            metadata = json.load(f)
-    except (OSError, ValueError):
-        return False
-    return _metadata_matches(metadata, embedder_id, content, CapsuleOptions.resolve(capsules).key)
+    capsule_key = CapsuleOptions.resolve(capsules).key
+    return any(
+        set(content) <= set(stored) and _metadata_matches(metadata, embedder_id, stored, capsule_key)
+        for stored, _path, metadata in stored_variants(find_index_from_cache_folder(path, content).parent)
+    )
 
 
 def _ancestor_directories(path: Path) -> list[Path]:

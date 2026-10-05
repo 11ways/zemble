@@ -121,7 +121,7 @@ def embed_status(
         raise FileNotFoundError(f"Path does not exist: {root}")
     root = root.resolve()
 
-    from zemble.cache import load_manifest_for_incremental
+    from zemble.cache import covering_content, load_manifest_for_incremental
     from zemble.index.create import plan_files
     from zemble.index.scope import measure_work, work_limit_bytes, work_refusal
 
@@ -135,6 +135,9 @@ def embed_status(
     # pending. Its CACHE is still read, at the width that file itself holds, because that is
     # what decides the bill; the manifest half of this lane stays pessimistic on purpose.
     model_id = resolved.embedder.model_id if not remote or dimensions is not None else None
+    if model_id is not None:
+        # A build rebuilds the wider index a root already stores, so that is what is reported.
+        content = covering_content(str(root), model_id, content, resolved_capsules, exclude)
 
     manifest = (
         load_manifest_for_incremental(str(root), model_id, content, resolved_capsules, exclude)

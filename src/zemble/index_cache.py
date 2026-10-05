@@ -14,6 +14,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from zemble.cache import (
+    covering_content,
     exclude_digest,
     get_validated_cache,
     has_cached_index,
@@ -37,6 +38,19 @@ MIN_REVALIDATE_FACTOR = 3  # Don't recheck staleness sooner than this many times
 #: (source, content), plus the exclude digest as a THIRD element only when a build pruned
 #: paths: a plain build's key is byte-identical to what it always was.
 CacheKey = tuple[str, tuple[ContentType, ...]] | tuple[str, tuple[ContentType, ...], str]
+
+
+def _narrowed(index: ZembleIndex, content: Sequence[ContentType], cache_key: CacheKey) -> ZembleIndex:
+    """Narrow an index stored under *cache_key* to the content a request asked for; itself when they agree.
+
+    :raises ValueError: If it holds no file of that content.
+    """
+    if set(content) == set(cache_key[1]):
+        return index
+    narrowed = index.for_content(content)
+    if narrowed is None:
+        raise ValueError(f"No {'/'.join(c.value for c in content)} files are indexed in this index.")
+    return narrowed
 
 
 def compute_cache_key(
@@ -232,9 +246,8 @@ class IndexCache:
             self.evict(cache_key)
 
     def loaded_roots(self, content: Sequence[ContentType]) -> set[str]:
-        """Return the roots held in memory right now for exactly these content types."""
-        wanted = tuple(content_type for content_type in ContentType if content_type in content)
-        return {key[0] for key, _index in self.loaded() if key[1] == wanted}
+        """Return the roots held in memory right now by an index covering these content types."""
+        return {key[0] for key, _index in self.loaded() if set(content) <= set(key[1])}
 
     async def get(
         self,
@@ -271,13 +284,20 @@ class IndexCache:
             resolve_index_root, source, embedder.model_id, content, None, self.loaded_roots(content)
         )
         if prefix is None:
-            return await self._get_exact(source, ref, content, build_exclude)
+            return await self._get_answering(source, ref, content, build_exclude)
         cache_key, index = await self._get_exact(root, ref, content)
         view = index.subtree(prefix)
         if view is not None:
-            return cache_key, view
+            return cache_key, _narrowed(view, content, cache_key)
         logger.info("the %s index holds nothing under %s; indexing it on its own", root, source)
-        return await self._get_exact(source, ref, content, build_exclude)
+        return await self._get_answering(source, ref, content, build_exclude)
+
+    async def _get_answering(
+        self, source: str, ref: str | None, content: Sequence[ContentType], exclude: Sequence[str]
+    ) -> tuple[CacheKey, ZembleIndex]:
+        """Return the stored index of exactly this source, narrowed to the requested content."""
+        cache_key, index = await self._get_exact(source, ref, content, exclude)
+        return cache_key, _narrowed(index, content, cache_key)
 
     def _build_exclude(self, source: str, content: Sequence[ContentType], exclude: Sequence[str]) -> tuple[str, ...]:
         """Return the patterns a BUILD must honour: none, once an index of this root exists.
@@ -302,8 +322,12 @@ class IndexCache:
         """Return the index built from exactly this source, building and caching it on first access.
 
         Local paths are revalidated against the on-disk cache on every call (subject to a
-        cooldown scaled by build time), so an entry is rebuilt once its files change.
+        cooldown scaled by build time), so an entry is rebuilt once its files change. The key
+        names the content the root is STORED with, which is wider than the request when a wider
+        index covers it; callers narrow what they answer with.
         """
+        embedder = await self._await_model()
+        content = await asyncio.to_thread(covering_content, source, embedder.model_id, content, None, exclude)
         cache_key = self._compute_cache_key(source, ref, content, exclude)
         if exclude:
             self._exclude_by_key[cache_key] = tuple(exclude)

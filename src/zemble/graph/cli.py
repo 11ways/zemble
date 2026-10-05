@@ -68,7 +68,7 @@ _refreshed: set[str] = set()
 
 def add_graph_parser(sub: argparse._SubParsersAction) -> None:
     """Register the `graph` subcommand tree on the main parser."""
-    from zemble.cli import add_root_arg
+    from zemble.cli import add_root_arg, declare_no_root
 
     graph_p = sub.add_parser("graph", help="Symbol graph: definitions, callers, implementations, tests.")
     graph_sub = graph_p.add_subparsers(dest="graph_command", required=True)
@@ -79,6 +79,12 @@ def add_graph_parser(sub: argparse._SubParsersAction) -> None:
     build_p.add_argument("--force", action="store_true", help="Re-extract every file instead of only changed ones.")
     build_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
     build_p.add_argument("--no-daemon", action="store_true", help="Do not use the warm daemon.")
+
+    declare_no_root(
+        graph_sub.add_parser(
+            "compact", help="Migrate every stored graph to the current format and give freed space back."
+        )
+    )
 
     facts_p = graph_sub.add_parser("facts", help="Inspect the graph facts overlay written by external tools.")
     facts_sub = facts_p.add_subparsers(dest="facts_command", required=True)
@@ -118,6 +124,8 @@ def run_graph(args: argparse.Namespace) -> int:
     try:
         if args.graph_command == "build":
             return _run_build(args)
+        if args.graph_command == "compact":
+            return _run_compact()
         if args.graph_command == "facts":
             return _run_facts_status(args)
         return _run_query(args)
@@ -154,6 +162,25 @@ def _run_build(args: argparse.Namespace) -> int:
             print(f"  skipped {count} {language} file(s): no graph extractor for {language}")
     if args.stats:
         print(json.dumps(stats.to_dict(), indent=2))
+    return 0
+
+
+def _run_compact() -> int:
+    """Migrate and compact every graph in the cache folder, reporting each one's size."""
+    from zemble.cache import resolve_cache_folder
+    from zemble.graph.store import compact_stored_graphs
+    from zemble.index.scope import megabytes
+
+    reports = compact_stored_graphs(resolve_cache_folder())
+    before = after = 0
+    for report in reports:
+        if report.skipped is not None:
+            print(f"Skipped {report.folder}: {report.skipped}")
+            continue
+        before += report.size_before
+        after += report.size_after
+        print(f"{report.folder}: {megabytes(report.size_before)} -> {megabytes(report.size_after)}")
+    print(f"{len(reports)} graph(s): {megabytes(before)} -> {megabytes(after)}")
     return 0
 
 
