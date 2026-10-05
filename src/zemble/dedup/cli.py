@@ -38,7 +38,7 @@ def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--kind",
         default="exact,renamed",
-        help="Which kinds to report: exact, renamed, logic, all, or a comma-separated list (default: exact,renamed).",
+        help="Literal kinds exact, renamed, logic, all, or architectural candidates (default: exact,renamed).",
     )
     parser.add_argument("--limit", type=int, default=25, help="Clone classes printed per section (default: 25).")
     parser.add_argument(
@@ -131,8 +131,35 @@ def _fail(message: str, as_json: bool) -> SystemExit:
     return SystemExit(EXIT_ERROR)
 
 
+def _architectural_cli(args: argparse.Namespace) -> int:
+    """Use the daemon's prepared graph and keep candidate output distinct from clones."""
+    from zemble.daemon.client import call
+
+    if args.baseline or args.save_baseline or args.lane != "all":
+        raise _fail("architectural candidates do not use literal baselines or lane filtering", args.json)
+    payload = call(
+        "architectural",
+        {
+            "path": args.path,
+            "paths": args.paths,
+            "exclude": args.exclude,
+            "limit": args.limit,
+            "min_files": args.min_files,
+        },
+    )
+    print(
+        json.dumps(payload, indent=2)
+        if args.json
+        else "Architectural candidates (behavioral review required):\n"
+        + "\n".join(f"{candidate['key']}: {candidate['reason']}" for candidate in payload.get("candidates", []))
+    )
+    return 0
+
+
 def run_dupes(args: argparse.Namespace) -> int:
     """Run `zemble dupes` and return its exit code, which is 0 however much it finds."""
+    if args.kind == "architectural":
+        return _architectural_cli(args)
     options = DupeOptions(
         kinds=_kinds(args.kind),
         min_tokens=args.min_tokens,

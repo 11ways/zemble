@@ -12,6 +12,20 @@ on hit rate, and they cost more tokens.** What they add is structure - reasons,
 outlines, callers, tests, and an explicit list of what did not fit. Read the
 [measurement](#measurement) section before reaching for them as a retrieval win.
 
+## Member-aware related reads
+
+Daemon `find_related` reads resolve the seed to its callable declaration, use
+member text alongside capsule neighbors, and add documented counterparts plus
+resolved callees/callers. Packages, fields and the seed's own type scaffolding do
+not consume the result window. One chunk per file prevents a source header from
+flooding the list; each returned result carries its `evidence` reasons.
+
+`ZEMBLE_RELATED_RERANK=1` enables the configured pairwise reranker for semantic
+candidates. Direct documented/delegation evidence keeps its priority. Ordinary
+`search` ranking remains the same. Source-backed counterpart hints are also
+available to `home`, whose strong matching table rows now seed named declarations
+rather than merely boosting declarations already found by semantic search.
+
 ## The bundle
 
 A bundle is an ordered list of items. Each item is a source region with a kind,

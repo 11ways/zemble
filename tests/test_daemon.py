@@ -213,6 +213,7 @@ async def test_every_command_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         "search": {"path": str(tmp_path), "query": "anything"},
         "find_related": {"path": str(tmp_path), "file_path": "a.py", "line": 1},
         "stats": {"path": str(tmp_path)},
+        "architectural": {"path": str(tmp_path)},
         "graph": {"path": str(tmp_path), "command": "callers", "symbol": "Foo"},
         "explain": {"path": str(tmp_path), "query": "anything"},
         "outline": {"path": str(tmp_path), "target": "Thing"},

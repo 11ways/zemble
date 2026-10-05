@@ -25,6 +25,22 @@ graph, but duplicated markup is `zenit-dev duplication`'s job: it matches
 alpha-renamed `.hwk` subtrees off the Hawkeye compiler's own AST, which is a
 better answer than anything a token stream could give here.
 
+## Architectural candidate channel
+
+`zemble dupes . --kind architectural --json` (MCP: `kind="architectural"`)
+uses the daemon's published symbol graph to find documented migrations and thin
+callable delegation. It reports `candidates`, distinct from literal `classes`.
+Each candidate includes its source declarations, evidence kind and reason, and
+`equivalence_proven: false`: discovery still needs behavioral review. Small bodies
+and changed control flow are allowed here; literal clone thresholds remain intact.
+The current whole-workspace scan covers files with explicit deprecation evidence.
+Unreadable or oversized source files are named in `unreadable_files`.
+
+`--paths`, `--exclude`, `--min-files` and `--limit` bound this channel. Literal
+baselines and lane filtering are refused for architectural candidates. `all`
+continues to select the literal clone channels. Graph construction shares the
+same isolated, bounded worker as `home` and related reads.
+
 ```
 zemble dupes /home/skerit/projects/javaweb --kind exact,renamed --limit 20
 zemble dupes . --kind logic --min-files 2 --json

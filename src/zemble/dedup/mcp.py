@@ -91,7 +91,9 @@ def register_dupes_tool(server: FastMCP) -> None:
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         kind: Annotated[
             str,
-            Field(description="Which duplication to report: exact, renamed, logic, or all."),
+            Field(
+                description="Which channel: exact, renamed, logic, all literal channels, or architectural candidates."
+            ),
         ] = "renamed",
         paths: Annotated[
             list[str] | None,
@@ -141,6 +143,27 @@ def register_dupes_tool(server: FastMCP) -> None:
         scaffolding can never outrank production duplication. Classes spanning modules declared
         in `.zemble/home.toml` carry a home verdict. This is a report, never a gate.
         """
+        if kind == "architectural":
+            from zemble.daemon.client import call
+
+            if baseline or save_baseline or lane != "all":
+                return {"error": "architectural candidates do not use literal baselines or lane filtering"}
+            payload = await asyncio.to_thread(
+                call,
+                "architectural",
+                {
+                    "path": resolve_repo(repo),
+                    "paths": paths,
+                    "exclude": exclude,
+                    "limit": limit,
+                    "min_files": min_files,
+                },
+            )
+            if format == "json":
+                return payload
+            return "Architectural candidates (behavioral review required):\n" + "\n".join(
+                f"{candidate['key']}: {candidate['reason']}" for candidate in payload.get("candidates", [])
+            )
         options = _options(kind, lane, paths, exclude, min_files)
         try:
             return await asyncio.to_thread(

@@ -170,6 +170,13 @@ def main() -> None:
             "stats": stats,
             "dataset_sha256": hashlib.sha256(args.pairs.read_bytes()).hexdigest(),
         }
+        if args.dupes_kind == "architectural":
+            architectural = rpc(runtime, "architectural", {"path": root, "limit": 1000000}, timeout=900)
+            payload = architectural["response"]["result"]
+            args.dupes_report = args.out / "architectural.json"
+            args.dupes_report.write_text(
+                json.dumps({"classes": payload["candidates"], "channel": payload}, indent=2) + "\n"
+            )
         (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         print(json.dumps(summary), flush=True)
     finally:

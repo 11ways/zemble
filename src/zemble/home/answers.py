@@ -14,7 +14,7 @@ from zemble.graph.model import TYPE_KINDS, Resolution, Symbol, SymbolKind
 from zemble.graph.provider import GraphProvider, display_name
 from zemble.home.config import HomeConfig
 from zemble.home.decide import DocHit, HomeAnswer, Mechanism, Similar, decide
-from zemble.home.tables import load_rows, match_rows
+from zemble.home.tables import RowMatch, load_rows, match_rows
 from zemble.index import ZembleIndex
 from zemble.types import ContentType, SearchResult
 
@@ -81,9 +81,10 @@ def build_answer(
     results = index.search(description, top_k=top_k)
     code_hits = [result for result in results if not _is_doc(result.chunk.file_path)]
     docs = _doc_hits(index, config, description, results)
+    rows = match_rows(load_rows(config), description) if use_tables else []
+    code_hits = _seed_declared(index, graph, config, rows, code_hits)
     mechanisms = _mechanisms(graph, config, code_hits)
     similar = _similar(index, config, code_hits)
-    rows = match_rows(load_rows(config), description) if use_tables else []
     return decide(config, description, code_hits, mechanisms, rows, similar, docs)
 
 
@@ -129,6 +130,59 @@ def _excerpt(content: str) -> str:
     """Return a one-line excerpt of a documentation chunk."""
     text = " ".join(content.split())
     return text[:DOC_EXCERPT_CHARS] + ("..." if len(text) > DOC_EXCERPT_CHARS else "")
+
+
+def _seed_declared(
+    index: ZembleIndex, graph: GraphProvider, config: HomeConfig, rows: Sequence[RowMatch], hits: Sequence[SearchResult]
+) -> list[SearchResult]:
+    """Resolve strong declared-table names to source instead of merely boosting discovered hits."""
+    from zemble.evidence.related import symbol_chunk
+
+    seeded = list(hits) + _counterpart_hits(index, graph, config, hits)
+    seen = {(hit.chunk.file_path, hit.chunk.start_line) for hit in hits}
+    for match in rows[:3]:
+        if match.score < 0.4:
+            continue
+        for name in match.row.symbols[:6]:
+            for symbol in graph.definition(name):
+                if config.module_of(symbol.file_path) not in match.row.home_modules:
+                    continue
+                chunk = symbol_chunk(index, symbol)
+                if chunk is None or (chunk.file_path, chunk.start_line) in seen:
+                    continue
+                seen.add((chunk.file_path, chunk.start_line))
+                seeded.append(
+                    SearchResult(chunk=chunk, score=max((hit.score for hit in hits), default=0.5) * match.score)
+                )
+    return sorted(seeded, key=lambda hit: -hit.score)
+
+
+def _counterpart_hits(
+    index: ZembleIndex, graph: GraphProvider, config: HomeConfig, hits: Sequence[SearchResult]
+) -> list[SearchResult]:
+    """Seed the canonical source explicitly documented by a relevant legacy declaration."""
+    from zemble.evidence.counterparts import counterparts
+    from zemble.evidence.related import symbol_chunk
+
+    found = []
+    seen = set()
+    for hit in hits[:12]:
+        symbols = graph.symbols_in_file(hit.chunk.file_path)
+        touching = [
+            symbol
+            for symbol in symbols
+            if symbol.start_line <= hit.chunk.end_line and symbol.end_line >= hit.chunk.start_line
+        ]
+        for symbol in touching[:4]:
+            for counterpart in counterparts(graph, config.root, symbol):
+                target = counterpart.symbol
+                if target.id in seen:
+                    continue
+                seen.add(target.id)
+                chunk = symbol_chunk(index, target)
+                if chunk is not None:
+                    found.append(SearchResult(chunk=chunk, score=hit.score * 0.98))
+    return found
 
 
 def _mechanisms(graph: GraphProvider, config: HomeConfig, hits: Sequence[SearchResult]) -> list[Mechanism]:

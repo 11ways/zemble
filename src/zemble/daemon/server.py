@@ -721,10 +721,10 @@ class Daemon:
         from zemble.workspace import resolve_home_root
 
         prepared = {**args, "path": str(resolve_home_root(_root_of(args)))} if command == "home" else args
-        if command in {"search", "find_related", "home", "explain", "stats"}:
+        if command in {"search", "find_related", "home", "explain", "stats", "architectural"}:
             async with asyncio.timeout_at(deadline):
                 await self.index_for(prepared)
-        if command in {"graph", "home", "explain", "outline", "signatures"}:
+        if command in {"graph", "home", "explain", "outline", "signatures", "find_related", "architectural"}:
             await self.graphs.ensure(_root_of(prepared), deadline)
 
     # -- serving ------------------------------------------------------------
@@ -950,15 +950,14 @@ async def _cmd_find_related(daemon: Daemon, args: dict[str, Any]) -> Any:
     chunk = index.chunk_at(file_path, line)
     if chunk is None:
         return {"error": describe_unresolved_location(index, file_path, line), "unresolved_location": True}
-    results = await asyncio.to_thread(
-        index.find_related,
-        chunk,
-        top_k=int(args.get("top_k", 5)),
-        max_snippet_lines=max_snippet_lines,
+    from zemble.evidence.related import related_payload
+
+    return await daemon.with_graph(
+        _root_of(args),
+        lambda graph: related_payload(
+            index, graph, Path(_root_of(args)), file_path, line, int(args.get("top_k", 5)), max_snippet_lines
+        ),
     )
-    if not results:
-        return {"error": f"No related chunks found for {file_path}:{line}."}
-    return format_results(f"Chunks related to {file_path}:{line}", results, max_snippet_lines)
 
 
 async def _cmd_stats(daemon: Daemon, args: dict[str, Any]) -> Any:
@@ -1117,6 +1116,20 @@ async def _cmd_shutdown(daemon: Daemon, args: dict[str, Any]) -> Any:
     return {"stopping": True, "pid": os.getpid()}
 
 
+async def _cmd_architectural(daemon: Daemon, args: dict[str, Any]) -> Any:
+    """Reviewable architectural evidence alongside, never inside, literal clone classes."""
+    from zemble.dedup.architectural import architectural_candidates
+
+    _key, index = await daemon.index_for(args)
+    files = sorted({index._public_chunk(index.chunks[row]).file_path for row in range(len(index.chunks))})
+    return await daemon.with_graph(
+        _root_of(args),
+        lambda graph: architectural_candidates(
+            Path(_root_of(args)), files, graph, int(args.get("limit", 100)), int(args.get("min_files", 1))
+        ),
+    )
+
+
 COMMANDS: dict[str, Handler] = {
     "ping": _cmd_ping,
     "status": _cmd_status,
@@ -1128,6 +1141,7 @@ COMMANDS: dict[str, Handler] = {
     "outline": _cmd_outline,
     "signatures": _cmd_signatures,
     "home": _cmd_home,
+    "architectural": _cmd_architectural,
     "refresh": _cmd_refresh,
     "evict": _cmd_evict,
     "shutdown": _cmd_shutdown,
