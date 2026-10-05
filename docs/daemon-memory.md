@@ -199,3 +199,16 @@ private memory on the 177,780-chunk zenit workspace, measured phase by phase:
 Admission reserves 192 MiB plus three bytes per byte of new source, measured against the
 stored manifest of the root that will answer, not the whole tree.
 
+The symbol graph had the same shape: a build held every extraction and, past 400 target
+files, the whole symbol table. It now extracts and resolves 100 files at a time through a
+scratch database (see [the graph doc](graph.md#nothing-more-than-the-targets-need)). Peak
+private memory of the graph worker on the same workspace:
+
+| Graph build | Before | After |
+| --- | --- | --- |
+| 1 file changed | 41 MiB | 41 MiB |
+| 1,000 files changed | 552 MiB | 162 MiB |
+| From nothing (12,458 files, 2.06M edges) | 2,184 MiB | 189 MiB |
+
+The worker's ceilings dropped accordingly: 2048 MiB construction, 4096 MiB aggregate.
+

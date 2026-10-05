@@ -399,19 +399,32 @@ A refresh of one file must not read the workspace. Four things used to, and none
 of them does any more.
 
 **The symbol tables the resolver runs on** live behind `SymbolLookup`
-(`zemble/graph/lookup.py`). `MemoryLookup` is the old behaviour - every dictionary
-built in one pass over the symbol list - and `SqliteLookup` answers each question
-with an indexed query and caches what it touched: by id, by qualified name, by
-simple name, by container, by file, by Hawkeye registration key, and the resolved
-supertypes of one type. `store` picks between them on the number of target files
-alone (`_MEMORY_LOOKUP_TARGETS`, 400): below it the indexes sqlite already keeps
-are cheaper, above it reading the table once is. Both must answer identically, and
-`tests/test_graph_incremental.py` runs its whole journey through each.
+(`zemble/graph/lookup.py`). `SqliteLookup` answers each question with an indexed
+query and caches what it touched: by id, by qualified name, by simple name, by
+container, by file, by Hawkeye registration key, and the resolved supertypes of one
+type. `MemoryLookup` builds every dictionary in one pass over the symbol list, and is
+used only when mapping a facts file has already read the whole table; on the zenit
+workspace it cost ~340 MiB and bought no speed over the indexed lookup.
+
+**The build itself is batched**, so its memory follows a batch, not the workspace.
+Changed files are extracted `_BATCH_FILES` (100) at a time; their symbols go into
+the store and their unresolved edges into a scratch database beside it
+(`graph-scratch.building-<pid>`, attached for the build and deleted after). The
+stored edges of every other file to re-resolve move there too. The supertype edges
+of all targets are then resolved and indexed at once - a call chain can climb
+through any of them - and everything else is resolved, derived and staged a batch at
+a time, the lookup forgetting its caches between batches. The staged result is
+copied into `edges` last. A full build of the zenit workspace (12,458 files, 2.06M
+edges) peaks at ~190 MiB of private memory, where holding every extraction and the
+whole symbol table took 2.2 GiB; it is ~10% slower. `tests/test_graph_incremental.py`
+runs its journeys one file per batch and as one batch, against a full rebuild.
 
 Reading the supertype map out of `edges` rather than out of a list handed to the
-resolver is what makes it work: the build deletes a target file's edges before
-resolution, so what the table holds at that moment is exactly the workspace minus
-the edges about to be rewritten.
+resolver is what makes it work: no re-resolved file's edges are in `edges` until
+every batch is done, so what the table holds meanwhile is exactly the workspace
+minus the edges about to be rewritten. The scratch database is attached before the
+build's first write and the build commits when it is detached, so a refresh stays one
+transaction; a failed one is rolled back.
 
 **The facts files** are read only when something must be mapped, and then only the
 ones that must. `plan_facts` decides that from `stat` alone: a facts file moved

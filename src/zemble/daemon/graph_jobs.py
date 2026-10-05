@@ -22,10 +22,15 @@ class GraphJobs:
     """Own one construction process and one joined job per canonical graph root."""
 
     def __init__(self, construction_lock: asyncio.Lock, serving_mb: int) -> None:
-        """Separate total, serving and construction limits, with an eight-GiB default total."""
+        """Separate total, serving and construction limits, with a four-GiB default total.
+
+        A build resolves a hundred files at a time, so a 200k-symbol workspace builds from
+        nothing in ~200 MiB; the ceilings leave room for mapping facts files, which reads
+        every symbol at once.
+        """
         self.lock = construction_lock
-        self.total_mb = int(os.environ.get(TOTAL_MEMORY_ENV, "8192"))
-        self.build_mb = int(os.environ.get(GRAPH_MEMORY_ENV, "6144"))
+        self.total_mb = int(os.environ.get(TOTAL_MEMORY_ENV, "4096"))
+        self.build_mb = int(os.environ.get(GRAPH_MEMORY_ENV, "2048"))
         if serving_mb <= 0 or not 0 < self.build_mb <= self.total_mb:
             raise ValueError("serving/total memory must be positive and contain the construction budget")
         self.jobs: dict[str, asyncio.Task[Any]] = {}

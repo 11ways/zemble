@@ -47,7 +47,7 @@ and successful graph publication generations; edits therefore invalidate answers
 without retaining old indexes. Errors are never cached. During a refresh, readers
 continue using the last published generation instead of waiting for construction.
 
-The aggregate default is 8192 MiB. Construction is capped at 6144 MiB and narrowed
+The aggregate default is 4096 MiB. Construction is capped at 2048 MiB and narrowed
 by the serving process's current private memory plus concurrent-read scratch.
 During construction the parent and worker private-memory limits (`RLIMIT_DATA`) sum
 to at most the aggregate budget; both are reported in `memory_configuration`.
@@ -261,8 +261,8 @@ output can end up in a backup.
 | `ZEMBLE_DAEMON=0` | unset | Never use or start a daemon in this process. |
 | `ZEMBLE_DAEMON_MAX_INDEXES` | 4 | Resident roots before LRU eviction; content variants of one root share a resident index. |
 | `ZEMBLE_DAEMON_MAX_RSS_MB` | min(15% of MemTotal, 4096) MiB | Serving-process private memory (`VmData`) budget and `RLIMIT_DATA` backstop; mapped index files are not counted. |
-| `ZEMBLE_DAEMON_TOTAL_MEMORY_MB` | 8192 MiB | Aggregate parent/graph-worker reservation ceiling. |
-| `ZEMBLE_GRAPH_BUILD_MEMORY_MB` | 6144 MiB | Construction cap, narrowed by aggregate headroom. |
+| `ZEMBLE_DAEMON_TOTAL_MEMORY_MB` | 4096 MiB | Aggregate parent/graph-worker private-memory ceiling. |
+| `ZEMBLE_GRAPH_BUILD_MEMORY_MB` | 2048 MiB | Construction cap, narrowed by aggregate headroom. |
 | `ZEMBLE_DAEMON_READ_SLOTS` | 4 | Concurrent immutable read tasks. |
 | `ZEMBLE_DAEMON_QUEUE_LIMIT` | 32 | Waiting-room capacity; excess requests receive retry information. |
 | `ZEMBLE_DAEMON_IDLE_MINUTES` | 30 | Idle shutdown delay; `0` never exits. |

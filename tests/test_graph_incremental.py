@@ -44,10 +44,10 @@ TAG_RENDER = "be.elevenways.hawkeye.generated.tags.demo.DemoCardImpl#render()"
 RENDER = "com.example.ui.WidgetFunctions#render(java.lang.String)"
 
 
-@pytest.fixture(params=[0, 1_000_000], ids=["sqlite-lookup", "memory-lookup"])
-def either_lookup(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> int:
-    """Force every build of a journey through one of the two symbol lookups."""
-    monkeypatch.setattr("zemble.graph.store._MEMORY_LOOKUP_TARGETS", request.param)
+@pytest.fixture(params=[1, 1_000_000], ids=["file-by-file", "one-batch"])
+def either_batching(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Run every build of a journey one file per batch, or the whole tree as one batch."""
+    monkeypatch.setattr("zemble.graph.store._BATCH_FILES", request.param)
     return request.param
 
 
@@ -89,7 +89,7 @@ def _write(workspace: Path, relative: str, text: str) -> Path:
 
 
 def test_java_edit_journey_matches_a_full_rebuild(
-    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path, either_lookup: int
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path, either_batching: int
 ) -> None:
     """A rename, a package move, a deletion and a new caller each refresh to the full answer."""
     workspace = tmp_path / "ws"
@@ -180,7 +180,7 @@ def generated_workspace(tmp_path: Path, graph_cache: Path) -> Path:  # noqa: ARG
 
 
 def test_template_and_facts_journey_matches_a_full_rebuild(
-    generated_workspace: Path, tmp_path: Path, either_lookup: int
+    generated_workspace: Path, tmp_path: Path, either_batching: int
 ) -> None:
     """Touching a template, editing one, and rewriting the facts all refresh to the full answer."""
     workspace = generated_workspace

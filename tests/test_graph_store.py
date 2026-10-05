@@ -6,6 +6,8 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from zemble.graph.model import Edge, EdgeKind, Resolution
 from zemble.graph.store import (
     _EDGE_COLUMNS_SQL,
@@ -371,3 +373,44 @@ def test_an_explicit_compact_reclaims_what_drift_waits_for(graph_cache: Path) ->
     connection = open_db(folder / _read_pointer(folder).current, read_only=True)
     assert connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 18_889, "step 2: no row was lost"
     connection.close()
+
+
+def test_a_failed_refresh_leaves_the_graph_it_started_from(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refresh that fails mid-resolution rolls back and leaves no scratch behind."""
+    import zemble.graph.store as store
+
+    workspace = _copy_workspace(graph_fixture_root, tmp_path / "ws")
+    path = str(workspace)
+    built = build_graph(path)
+    circle = workspace / "src/main/java/com/example/core/Circle.java"
+
+    def _tables() -> tuple[int, int, int]:
+        connection = connect(path)
+        counts = tuple(
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in ("symbols", "edges", "files")
+        )  # noqa: S608
+        connection.close()
+        return counts
+
+    # 1. An edit is refreshed in place, and resolution fails after its symbols and edges moved.
+    before = _tables()
+    circle.write_text(circle.read_text().replace("double area()", "double surface()"), encoding="utf-8")
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("resolution failed")
+
+    resolve_pass = store._resolve_pass
+    monkeypatch.setattr(store, "_resolve_pass", _fail)
+    with pytest.raises(RuntimeError, match="resolution failed"):
+        build_graph(path, changed_paths=[circle])
+
+    # 2. The graph is exactly the one before, and the scratch database is gone.
+    assert _tables() == before == (built.symbols, built.edges, before[2]), "step 2: nothing of the refresh was kept"
+    assert not list(graph_folder(path).glob("graph-scratch.building-*")), "step 2: no scratch left"
+
+    # 3. The next refresh picks the edit up as if nothing had happened.
+    monkeypatch.setattr(store, "_resolve_pass", resolve_pass)
+    refreshed = build_graph(path, changed_paths=[circle])
+    assert refreshed.extracted_files == 1, "step 3: the edit is still pending and is refreshed now"

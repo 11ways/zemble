@@ -172,6 +172,10 @@ class SymbolLookup(Protocol):
         """Return a file's package and imports."""
         ...
 
+    def release(self) -> None:
+        """Forget what earlier lookups cached; a batched build calls this between batches."""
+        ...
+
 
 class MemoryLookup:
     """Answers every lookup from dictionaries built in one pass over the symbol list."""
@@ -245,6 +249,9 @@ class MemoryLookup:
     def context(self, file_path: str) -> FileContext:
         """Return a file's package and imports."""
         return self._contexts.get(file_path) or FileContext(file_path)
+
+    def release(self) -> None:
+        """Keep everything: this lookup IS its dictionaries, built once for the whole table."""
 
 
 class SqliteLookup:
@@ -354,3 +361,17 @@ class SqliteLookup:
             found = context_from_row(row) if row is not None else FileContext(file_path)
             self._contexts[file_path] = found
         return found
+
+    def release(self) -> None:
+        """Drop every cache, so a build that resolves the tree in batches holds one batch's worth."""
+        for cache in (
+            self._by_id,
+            self._by_qualified,
+            self._by_name,
+            self._members,
+            self._types_in_file,
+            self._declarations,
+            self._supertypes,
+            self._contexts,
+        ):
+            cache.clear()

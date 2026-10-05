@@ -41,6 +41,7 @@ from zemble.graph.generic import extract_generic_file, language_parser
 from zemble.graph.hwk import extract_hwk_file
 from zemble.graph.java import FileExtraction, extract_java_file
 from zemble.graph.lookup import (
+    HIERARCHY_KINDS,
     FileContext,
     MemoryLookup,
     SqliteLookup,
@@ -117,10 +118,14 @@ def extractor_for(file_path: Path) -> Callable[[bytes, str], FileExtraction] | N
 
 
 _WORKER_CHUNK = 40
-#: Above this many files to re-resolve, materialising the whole symbol table once beats
-#: asking sqlite for each name a resolution touches. Both lookups answer identically; this
-#: only decides which is cheaper, and `tests/test_graph_incremental.py` pins that.
-_MEMORY_LOOKUP_TARGETS = 400
+#: Files one build step holds in memory: extracted ones before they are written out, and
+#: re-resolved ones while their edges resolve. A build's memory is bounded by this, never by
+#: the size of the workspace; `tests/test_graph_incremental.py` pins that the batch size
+#: changes nothing about the graph.
+_BATCH_FILES = 100
+#: The disposable database a build stages its unresolved and resolved edges in, beside the
+#: store it writes; named like every other build leftover so `zemble clear orphans` finds it.
+_SCRATCH_NAME = "graph-scratch.building-{pid}"
 _MAX_FILE_BYTES = 2_000_000
 
 _SCHEMA = """
@@ -1070,23 +1075,34 @@ def _extract_serial(jobs: Sequence[tuple[str, str]]) -> list[FileExtraction]:
 
 
 def _extract_many(jobs: Sequence[tuple[str, str]], workers: int) -> list[FileExtraction]:
-    """Extract a batch of files, using a process pool when the batch is large enough.
+    """Extract a handful of files at once; a build extracts through :func:`_extracted_batches`."""
+    return [extraction for batch in _extracted_batches(jobs, workers) for extraction in batch]
+
+
+def _extracted_batches(jobs: Sequence[tuple[str, str]], workers: int) -> Iterator[list[FileExtraction]]:
+    """Extract files :data:`_BATCH_FILES` at a time, using one process pool for all of them.
 
     The start method comes from `zemble.parallel.pool_context` (fork only in a
     single-threaded process, else spawn, else none); when no method is safe, or the pool
     fails for any reason, extraction runs in this process rather than aborting.
     """
-    if len(jobs) < _WORKER_CHUNK * 2 or workers <= 1:
-        return _extract_serial(jobs)
-    context = pool_context()
+    batches = [jobs[start : start + _BATCH_FILES] for start in range(0, len(jobs), _BATCH_FILES)]
+    context = pool_context() if len(jobs) >= _WORKER_CHUNK * 2 and workers > 1 else None
     if context is None:
-        return _extract_serial(jobs)
+        for batch in batches:
+            yield _extract_serial(batch)
+        return
+    done = 0
     try:
         with pooled(workers, context) as pool:
-            return [result for result in pool.map(_extract_one, jobs, chunksize=_WORKER_CHUNK) if result is not None]
+            for batch in batches:
+                extracted = [result for result in pool.map(_extract_one, batch, chunksize=_WORKER_CHUNK) if result]
+                done += 1
+                yield extracted
     except Exception:
         logger.warning("Parallel extraction unavailable; falling back to a single process", exc_info=True)
-        return _extract_serial(jobs)
+        for batch in batches[done:]:
+            yield _extract_serial(batch)
 
 
 @dataclass
@@ -1332,7 +1348,7 @@ def _run_build(
     workers: int,
     named_changes: list[Path] | None,
 ) -> None:
-    """Do the two-pass build inside an open connection."""
+    """Do the two-pass build inside an open connection, a batch of files at a time."""
     known = _stored_stamps(connection)
     changed = [job for job in scan.jobs if force or known.get(job[1]) != scan.stamps[job[1]]]
     removed = sorted(set(known) - set(scan.stamps))
@@ -1341,17 +1357,25 @@ def _run_build(
     stats.removed_files = len(removed)
 
     touched = sorted({job[1] for job in changed} | set(removed))
-    before = _declaration_index(connection, touched)
-    _delete_files(connection, touched)
+    # When every file is re-resolved anyway, which names moved cannot add a single target.
+    everything = set(scan.stamps) <= set(touched)
+    before = {} if everything else _declaration_index(connection, touched)
 
-    extractions = _extract_many(changed, workers)
-    _insert_extractions(connection, extractions, scan.stamps)
-    after = _index_extractions(extractions)
+    with _scratch(connection):
+        _delete_files(connection, touched)
+        after: dict[str, set[str]] = {}
+        for batch in _extracted_batches(changed, workers):
+            _insert_extractions(connection, batch, scan.stamps)
+            _stage(connection, (edge for extraction in batch for edge in extraction.edges))
+            if not everything:
+                for name, ids in _index_extractions(batch).items():
+                    after.setdefault(name, set()).update(ids)
 
-    targets = set(touched) | _dependent_files(connection, _moved_names(before, after))
-    targets &= set(scan.stamps)
-    _resolve_pass(connection, extractions, targets, root, stats, named_changes, workers)
-    connection.commit()
+        targets = (
+            set(touched) if everything else set(touched) | _dependent_files(connection, _moved_names(before, after))
+        )
+        targets &= set(scan.stamps)
+        _resolve_pass(connection, {job[1] for job in changed}, targets, root, stats, named_changes, workers)
     _write_meta(connection, root)
     _write_coverage(connection, stats.skipped_by_language)
     stats.symbols = connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
@@ -1360,6 +1384,77 @@ def _run_build(
         row["resolution"]: row["n"]
         for row in connection.execute("SELECT resolution, COUNT(*) AS n FROM edges GROUP BY resolution")
     }
+
+
+@contextmanager
+def _scratch(connection: sqlite3.Connection) -> Iterator[None]:
+    """Attach a disposable database holding the edges a build has extracted and resolved so far.
+
+    Resolution needs every changed file's symbols in the store before the first edge resolves,
+    and the store must not hold a re-resolved file's edges while it does (`SqliteLookup` reads
+    the stored hierarchy). Both halves of that wait here, on disk, instead of in memory.
+
+    sqlite attaches and detaches only outside a transaction, so this is entered before the
+    build's first write and commits the build when it leaves: a refresh stays one transaction,
+    and one that fails is rolled back rather than committed half done.
+    """
+    folder = Path(connection.execute("PRAGMA database_list").fetchone()["file"]).parent
+    path = folder / _SCRATCH_NAME.format(pid=os.getpid())
+    path.unlink(missing_ok=True)
+    connection.execute("ATTACH DATABASE ? AS scratch", (str(path),))
+    try:
+        connection.execute("PRAGMA scratch.journal_mode=OFF")
+        connection.execute("PRAGMA scratch.synchronous=OFF")
+        for table in ("pending", "resolved"):
+            connection.execute(f"CREATE TABLE scratch.{table} AS SELECT * FROM main.edges WHERE 0")  # noqa: S608
+        connection.execute("CREATE INDEX scratch.pending_file ON pending (file_path)")
+        yield
+    except BaseException:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+    finally:
+        connection.execute("DETACH DATABASE scratch")
+        path.unlink(missing_ok=True)
+
+
+def _stage(connection: sqlite3.Connection, edges: Iterable[Edge], table: str = "pending") -> None:
+    """Write edges into one of the scratch tables."""
+    connection.executemany(
+        f"INSERT INTO scratch.{table} ({_EDGE_COLUMNS_SQL}) VALUES ({_EDGE_PLACEHOLDERS})",  # noqa: S608
+        (_edge_row(edge) for edge in edges),
+    )
+
+
+def _staged(connection: sqlite3.Connection, paths: Sequence[str], *, hierarchy: bool) -> list[Edge]:
+    """Read back the unresolved edges of some files, the supertype ones or all the others."""
+    kinds = ",".join("?" * len(HIERARCHY_KINDS))
+    edges: list[Edge] = []
+    for chunk in _chunks(paths):
+        placeholders = ",".join("?" * len(chunk))
+        query = (  # noqa: S608
+            f"SELECT * FROM scratch.pending WHERE file_path IN ({placeholders}) "
+            f"AND kind {'IN' if hierarchy else 'NOT IN'} ({kinds}) ORDER BY rowid"
+        )
+        edges.extend(_reset(edge_from_row(row)) for row in connection.execute(query, [*chunk, *HIERARCHY_KINDS]))
+    return edges
+
+
+def _unstage(connection: sqlite3.Connection, paths: Sequence[str]) -> None:
+    """Move the stored extracted edges of files about to be re-resolved into the scratch table.
+
+    Derived edges are left behind and deleted: they are recomputed from the resolved ones.
+    """
+    derived = ",".join("?" * len(_DERIVED_KINDS))
+    for chunk in _chunks(paths):
+        placeholders = ",".join("?" * len(chunk))
+        connection.execute(
+            f"INSERT INTO scratch.pending SELECT * FROM main.edges "  # noqa: S608
+            f"WHERE file_path IN ({placeholders}) AND kind NOT IN ({derived})",
+            [*chunk, *_DERIVED_KINDS],
+        )
+    _delete_edges(connection, paths)
 
 
 def _write_meta(connection: sqlite3.Connection, root: Path) -> None:
@@ -1492,23 +1587,24 @@ def _load_contexts(connection: sqlite3.Connection) -> dict[str, FileContext]:
 
 def _resolve_pass(
     connection: sqlite3.Connection,
-    extractions: list[FileExtraction],
+    fresh: set[str],
     targets: set[str],
     root: Path,
     stats: GraphStats,
     named_changes: Iterable[Path] | None,
     workers: int,
 ) -> None:
-    """Run pass 2 for the target files against the whole workspace symbol table.
+    """Run pass 2 for the target files against the whole workspace symbol table, a batch at a time.
 
     The facts overlay is folded in here rather than afterwards, because the derived
     edges (overrides, exercises) must be derived from the edges the graph keeps, not
     from the extracted ones a facts file just replaced.
 
-    Nothing here reads more of the workspace than the target files need. The symbol table is
-    materialised only when the targets are numerous enough to make that the cheaper answer or
-    when a facts file has to be mapped; the facts files are parsed only when at least one of
-    them must be mapped; and a file the build is not re-resolving keeps every edge it had.
+    Nothing here reads more of the workspace than the target files need. The facts files are
+    parsed only when at least one of them must be mapped, and a file the build is not
+    re-resolving keeps every edge it had. The supertype edges of every target are resolved
+    first, because a call chain may climb through any of them; everything else resolves and
+    is written per batch of files, through a lookup that forgets between batches.
     """
     known_files = {row["path"] for row in connection.execute("SELECT path FROM files")}
     plan = _plan_facts(connection, root, named_changes)
@@ -1522,45 +1618,58 @@ def _resolve_pass(
     overlay, targets = _map_overlay_for(connection, root, plan, targets, known_files, load_symbols)
     stats.reresolved_files = len(targets)
 
-    fresh = {extraction.file_path for extraction in extractions}
-    pending: list[Edge] = [edge for extraction in extractions for edge in extraction.edges]
-    stored_targets = sorted(targets - fresh)
-    recovered = _recover_extracted_edges(root, plan, overlay, set(stored_targets), workers)
-    pending.extend(edge for extraction in recovered for edge in extraction.edges)
-    reloaded = [path for path in stored_targets if path not in {e.file_path for e in recovered}]
-    for chunk in _chunks(reloaded):
-        placeholders = ",".join("?" * len(chunk))
-        derived_placeholders = ",".join("?" * len(_DERIVED_KINDS))
-        query = (  # noqa: S608
-            f"SELECT * FROM edges WHERE file_path IN ({placeholders}) AND kind NOT IN ({derived_placeholders})"
-        )
-        pending.extend(_reset(edge_from_row(row)) for row in connection.execute(query, [*chunk, *_DERIVED_KINDS]))
-    _delete_edges(connection, stored_targets)
+    ordered = sorted(targets)
+    _unstage(connection, ordered)
+    recovered = _recover_extracted_edges(root, plan, overlay, targets - fresh, workers)
+    if recovered:
+        # A file whose facts coverage moved is re-read from source, not from degraded copies.
+        rereads = sorted({extraction.file_path for extraction in recovered})
+        for chunk in _chunks(rereads):
+            placeholders = ",".join("?" * len(chunk))
+            connection.execute(f"DELETE FROM scratch.pending WHERE file_path IN ({placeholders})", chunk)  # noqa: S608
+        _stage(connection, (edge for extraction in recovered for edge in extraction.edges))
+    del recovered
 
-    lookup = _lookup_for(connection, targets, overlay)
+    lookup = _lookup_for(connection, overlay)
     resolver = Resolver(lookup)
-    resolver.resolve_hierarchy(pending)
+    hierarchy = _staged(connection, ordered, hierarchy=True)
+    resolver.resolve_hierarchy(hierarchy)
     # The hierarchy a call chain is walked through is the one the graph will KEEP, so a file
     # whose facts own its supertypes contributes the tool's edges here rather than the
     # extractor's guesses. Resolving calls against the guesses and then storing the facts
     # would leave a chain the stored graph does not have.
-    resolver.index_hierarchy(_hierarchy_after_overlay(pending, overlay, targets))
-    resolver.resolve_members(pending)
-    pending = _apply_overlay(pending, overlay, targets)
+    resolver.index_hierarchy(_hierarchy_after_overlay(hierarchy, overlay, targets))
+    supertypes: dict[str, list[Edge]] = {}
+    for edge in hierarchy:
+        supertypes.setdefault(_file_of_edge(edge), []).append(edge)
+    del hierarchy
 
-    target_symbols = _target_symbols(connection, targets, lookup)
-    # A covered file's overrides come from its facts; deriving them again would double them.
-    derived = resolver.derive_overrides(
-        [symbol for symbol in target_symbols if EdgeKind.OVERRIDES not in overlay.kinds_owned(symbol.file_path)]
-    )
-    derived += resolver.derive_tests(target_symbols)
-    derived += resolver.derive_exercises(pending)
-    connection.executemany(
-        f"INSERT INTO edges ({_EDGE_COLUMNS_SQL}) VALUES ({_EDGE_PLACEHOLDERS})",  # noqa: S608
-        [_edge_row(edge) for edge in pending + derived],
+    for batch in _chunks(ordered, _BATCH_FILES):
+        files = set(batch)
+        members = _staged(connection, batch, hierarchy=False)
+        resolver.resolve_members(members)
+        pending = [edge for path in batch for edge in supertypes.pop(path, [])] + members
+        pending = _apply_overlay(pending, overlay, files)
+        target_symbols = _target_symbols(connection, files, lookup)
+        # A covered file's overrides come from its facts; deriving them again would double them.
+        derived = resolver.derive_overrides(
+            [symbol for symbol in target_symbols if EdgeKind.OVERRIDES not in overlay.kinds_owned(symbol.file_path)]
+        )
+        derived += resolver.derive_tests(target_symbols)
+        derived += resolver.derive_exercises(pending)
+        _stage(connection, pending + derived, table="resolved")
+        lookup.release()
+    columns = _EDGE_COLUMNS_SQL
+    connection.execute(
+        f"INSERT INTO main.edges ({columns}) SELECT {columns} FROM scratch.resolved ORDER BY rowid"  # noqa: S608
     )
     _write_facts_status(connection, overlay, plan)
     stats.facts = _facts_stats(connection)
+
+
+def _file_of_edge(edge: Edge) -> str:
+    """The file an edge is stored under: the one its source symbol is declared in."""
+    return edge.src_id.split("#", 1)[0]
 
 
 def _recover_extracted_edges(
@@ -1580,19 +1689,16 @@ def _recover_extracted_edges(
     return _extract_many(jobs, workers)
 
 
-def _lookup_for(connection: sqlite3.Connection, targets: set[str], overlay: FactsOverlay) -> SymbolLookup:
-    """Pick the cheaper way to reach the workspace's declarations for this build.
+def _lookup_for(connection: sqlite3.Connection, overlay: FactsOverlay) -> SymbolLookup:
+    """Reach the workspace's declarations through sqlite's indexes, or the table facts mapping already read.
 
-    Both answers are the same; only the cost differs. A refresh of a handful of files touches
-    a few thousand names and is far better served by the indexes sqlite already keeps, while a
-    build re-resolving a large part of the tree would ask for most of the table one row at a
-    time and should read it once instead.
+    Both answers are the same. Materialising the whole symbol table cost a full build ~340 MiB
+    on a 200k-symbol workspace and bought no speed over the indexed lookup, so it happens only
+    when mapping a facts file already had to read every symbol.
     """
-    if len(targets) <= _MEMORY_LOOKUP_TARGETS:
-        return SqliteLookup(connection)
     symbols = overlay.materialised_symbols
     if symbols is None:
-        symbols = [symbol_from_row(row) for row in connection.execute("SELECT * FROM symbols")]
+        return SqliteLookup(connection)
     return MemoryLookup(symbols, _load_contexts(connection), _stored_hierarchy(connection))
 
 
