@@ -26,15 +26,18 @@ from zemble.graph.facts import (
     TREE_SITTER_SOURCE,
     FactsFile,
     FactsFileState,
+    FactsFormatError,
     FactsOverlay,
     FactsPlan,
+    MappingSymbols,
+    OverlayEdges,
     SkipBucket,
     SourceContribution,
     discover_facts_files,
+    load_facts_file,
     map_facts_files,
     matches_facts_glob,
     plan_facts,
-    read_facts_files,
     symbol_facts,
 )
 from zemble.graph.generic import extract_generic_file, language_parser
@@ -42,11 +45,7 @@ from zemble.graph.hwk import extract_hwk_file
 from zemble.graph.java import FileExtraction, extract_java_file
 from zemble.graph.lookup import (
     HIERARCHY_KINDS,
-    FileContext,
-    MemoryLookup,
     SqliteLookup,
-    SymbolLookup,
-    context_from_row,
     declaration_keys,
     symbol_from_row,
 )
@@ -1145,11 +1144,6 @@ def _extract_serial(jobs: Sequence[tuple[str, str]]) -> list[FileExtraction]:
     return [result for job in jobs for result in [_extract_one(job)] if result is not None]
 
 
-def _extract_many(jobs: Sequence[tuple[str, str]], workers: int) -> list[FileExtraction]:
-    """Extract a handful of files at once; a build extracts through :func:`_extracted_batches`."""
-    return [extraction for batch in _extracted_batches(jobs, workers) for extraction in batch]
-
-
 def _extracted_batches(jobs: Sequence[tuple[str, str]], workers: int) -> Iterator[list[FileExtraction]]:
     """Extract files :data:`_BATCH_FILES` at a time, using one process pool for all of them.
 
@@ -1654,11 +1648,6 @@ def _insert_extractions(
     )
 
 
-def _load_contexts(connection: sqlite3.Connection) -> dict[str, FileContext]:
-    """Load every file's package and imports."""
-    return {row["path"]: context_from_row(row) for row in connection.execute("SELECT * FROM files")}
-
-
 def _resolve_pass(
     connection: sqlite3.Connection,
     fresh: set[str],
@@ -1685,26 +1674,15 @@ def _resolve_pass(
     targets |= plan.invalidated
     targets &= known_files
 
-    def load_symbols() -> list[Symbol]:
-        return [symbol_from_row(row) for row in connection.execute("SELECT * FROM symbols")]
-
     _write_facts_symbols_for_read(connection, root, plan)
-    overlay, targets = _map_overlay_for(connection, root, plan, targets, known_files, load_symbols)
+    overlay, targets = _map_overlay_for(connection, root, plan, targets, known_files)
     stats.reresolved_files = len(targets)
 
     ordered = sorted(targets)
     _unstage(connection, ordered)
-    recovered = _recover_extracted_edges(root, plan, overlay, targets - fresh, workers)
-    if recovered:
-        # A file whose facts coverage moved is re-read from source, not from degraded copies.
-        rereads = sorted({extraction.file_path for extraction in recovered})
-        for chunk in _chunks(rereads):
-            placeholders = ",".join("?" * len(chunk))
-            connection.execute(f"DELETE FROM scratch.pending WHERE file_path IN ({placeholders})", chunk)  # noqa: S608
-        _stage(connection, (edge for extraction in recovered for edge in extraction.edges))
-    del recovered
+    _recover_extracted_edges(connection, root, plan, overlay, targets - fresh, workers)
 
-    lookup = _lookup_for(connection, overlay)
+    lookup = SqliteLookup(connection)
     resolver = Resolver(lookup)
     hierarchy = _staged(connection, ordered, hierarchy=True)
     resolver.resolve_hierarchy(hierarchy)
@@ -1724,7 +1702,7 @@ def _resolve_pass(
         resolver.resolve_members(members)
         pending = [edge for path in batch for edge in supertypes.pop(path, [])] + members
         pending = _apply_overlay(pending, overlay, files)
-        target_symbols = _target_symbols(connection, files, lookup)
+        target_symbols = _target_symbols(connection, files)
         # A covered file's overrides come from its facts; deriving them again would double them.
         derived = resolver.derive_overrides(
             [symbol for symbol in target_symbols if EdgeKind.OVERRIDES not in overlay.kinds_owned(symbol.file_path)]
@@ -1744,58 +1722,38 @@ def _file_of_edge(edge: Edge) -> str:
 
 
 def _recover_extracted_edges(
-    root: Path, plan: FactsPlan, overlay: FactsOverlay, stored_targets: set[str], workers: int
-) -> list[FileExtraction]:
-    """Re-extract the target files whose facts coverage may have changed.
+    connection: sqlite3.Connection,
+    root: Path,
+    plan: FactsPlan,
+    overlay: FactsOverlay,
+    stored_targets: set[str],
+    workers: int,
+) -> None:
+    """Re-extract the target files whose facts coverage may have changed, staging their edges a batch at a time.
 
     A covered file's extracted edges are REPLACED by the overlay's, so they are not in the
     table to reload: a file that loses its facts would otherwise be re-resolved from degraded
     copies of the fact edges rather than from what its source actually says. Re-reading those
-    files is the only honest answer, and it is bounded by what one facts file covers.
+    files is the only honest answer; a moved facts file can cover thousands of them.
     """
     changed_coverage = (plan.invalidated | plan.moved_coverage(overlay)) & stored_targets
-    if not changed_coverage:
-        return []
     jobs = [(str(root / path), path) for path in sorted(changed_coverage) if extractor_for(root / path) is not None]
-    return _extract_many(jobs, workers)
+    for batch in _extracted_batches(jobs, workers):
+        rereads = sorted({extraction.file_path for extraction in batch})
+        for chunk in _chunks(rereads):
+            placeholders = ",".join("?" * len(chunk))
+            connection.execute(f"DELETE FROM scratch.pending WHERE file_path IN ({placeholders})", chunk)  # noqa: S608
+        _stage(connection, (edge for extraction in batch for edge in extraction.edges))
 
 
-def _lookup_for(connection: sqlite3.Connection, overlay: FactsOverlay) -> SymbolLookup:
-    """Reach the workspace's declarations through sqlite's indexes, or the table facts mapping already read.
-
-    Both answers are the same. Materialising the whole symbol table cost a full build ~340 MiB
-    on a 200k-symbol workspace and bought no speed over the indexed lookup, so it happens only
-    when mapping a facts file already had to read every symbol.
-    """
-    symbols = overlay.materialised_symbols
-    if symbols is None:
-        return SqliteLookup(connection)
-    return MemoryLookup(symbols, _load_contexts(connection), _stored_hierarchy(connection))
-
-
-def _target_symbols(connection: sqlite3.Connection, targets: set[str], lookup: SymbolLookup) -> list[Symbol]:
+def _target_symbols(connection: sqlite3.Connection, targets: set[str]) -> list[Symbol]:
     """Return every symbol declared in a file being re-resolved, in table order."""
-    if isinstance(lookup, MemoryLookup):
-        return [symbol for symbol in lookup.all_symbols() if symbol.file_path in targets]
     found: list[Symbol] = []
     for chunk in _chunks(sorted(targets)):
         placeholders = ",".join("?" * len(chunk))
         query = f"SELECT * FROM symbols WHERE file_path IN ({placeholders})"  # noqa: S608
         found.extend(symbol_from_row(row) for row in connection.execute(query, chunk))
     return found
-
-
-def _stored_hierarchy(connection: sqlite3.Connection) -> dict[str, list[str]]:
-    """Load the resolved supertype map of every file the graph still holds edges for."""
-    hierarchy: dict[str, list[str]] = {}
-    rows = connection.execute(
-        "SELECT src_id, dst_id FROM edges WHERE kind IN ('extends', 'implements') AND dst_id IS NOT NULL"
-    )
-    for row in rows:
-        parents = hierarchy.setdefault(row["src_id"], [])
-        if row["dst_id"] not in parents:
-            parents.append(row["dst_id"])
-    return hierarchy
 
 
 # ---- the facts overlay, incrementally ------------------------------------
@@ -1863,7 +1821,6 @@ def _map_overlay_for(
     plan: FactsPlan,
     targets: set[str],
     known_files: set[str],
-    load_symbols: Callable[[], list[Symbol]],
 ) -> tuple[FactsOverlay, set[str]]:
     """Read and map exactly the facts files, and the sources of them, this build depends on.
 
@@ -1877,14 +1834,13 @@ def _map_overlay_for(
     request = plan.mapping_request(targets)
     if not request:
         return FactsOverlay(root=root), targets
-    overlay = FactsOverlay(root=root)
+    # The fact edges wait in the scratch database and are read back a batch of files at a time.
+    overlay = FactsOverlay(root=root, edges=OverlayEdges(connection, "scratch"))
+    symbols = MappingSymbols.stored(connection)
     declared = StoredDeclaredSymbols(connection, "java")
-    _read_requested(connection, root, plan, overlay, request)
-    map_facts_files(overlay, load_symbols, request, declared)
+    map_facts_files(overlay, symbols, request, declared, plan.present)
     grown = targets | (plan.moved_coverage(overlay) & known_files)
-    second = plan.mapping_request(grown)
-    _read_requested(connection, root, plan, overlay, second)
-    map_facts_files(overlay, load_symbols, second, declared)
+    map_facts_files(overlay, symbols, plan.mapping_request(grown), declared, plan.present)
     return overlay, grown
 
 
@@ -1916,11 +1872,13 @@ class StoredDeclaredSymbols:
 
 
 def _write_facts_symbols_for_read(connection: sqlite3.Connection, root: Path, plan: FactsPlan) -> None:
-    """Make sure every facts file present on disk has its `symbol` facts in the table.
+    """Make sure every facts file present on disk has its current `symbol` facts in the table.
 
-    A facts file the graph has never read - or one written before this table existed - is
-    parsed here for its `symbol` facts alone, so the lookup speaks for the whole workspace
-    however little of it this build maps.
+    A ref written in one facts file can be answered by a `symbol` fact in another, so every
+    moved file's are rewritten before any file is mapped. A facts file the graph has never
+    read - or one written before this table existed - is parsed here too, so the lookup
+    speaks for the whole workspace however little of it this build maps. Files are parsed one
+    at a time: the mapping that follows parses them again rather than holding them all.
     """
     for relative in sorted(plan.vanished):
         connection.execute("DELETE FROM facts_symbols WHERE facts_file = ?", (relative,))
@@ -1928,41 +1886,23 @@ def _write_facts_symbols_for_read(connection: sqlite3.Connection, root: Path, pl
     # would have written its `symbol` facts, so holding none of them is the truth about it
     # rather than a gap to fill again on every build.
     stored = {row["facts_file"] for row in connection.execute("SELECT DISTINCT facts_file FROM facts_symbols")}
-    known = stored | plan.moved | set(plan.states)
-    missing = [plan.present[relative] for relative in sorted(set(plan.present) - known)]
-    if missing:
-        _write_facts_symbols(connection, read_facts_files(root, missing).files)
+    present = set(plan.present)
+    for relative in sorted((present - stored - set(plan.states)) | (plan.moved & present)):
+        try:
+            loaded = load_facts_file(plan.present[relative], root)
+        except FactsFormatError:
+            # Mapping reports it; the rows a previous read wrote stay until the file is readable.
+            continue
+        _write_facts_symbols(connection, loaded)
 
 
-def _write_facts_symbols(connection: sqlite3.Connection, files: Sequence[FactsFile]) -> None:
-    """Replace the `symbol` facts the graph holds for the given parsed facts files."""
-    for loaded in files:
-        connection.execute("DELETE FROM facts_symbols WHERE facts_file = ?", (loaded.relative_path,))
-        connection.executemany(
-            "INSERT INTO facts_symbols (ref, file_path, line, facts_file, language) VALUES (?,?,?,?,?)",
-            [
-                (ref, path, line, loaded.relative_path, loaded.header.language)
-                for ref, path, line in symbol_facts(loaded)
-            ],
-        )
-
-
-def _read_requested(
-    connection: sqlite3.Connection, root: Path, plan: FactsPlan, overlay: FactsOverlay, request: dict
-) -> None:
-    """Parse the facts files a mapping request names that the overlay does not hold yet.
-
-    Their `symbol` facts go into the table straight away, because the very mapping that is
-    about to run reads them back out of it.
-    """
-    have = {loaded.relative_path for loaded in overlay.files} | {path for path, _ in overlay.errors}
-    missing = [plan.present[relative] for relative in sorted(set(request) - have) if relative in plan.present]
-    if not missing:
-        return
-    more = read_facts_files(root, missing)
-    overlay.files.extend(more.files)
-    overlay.errors.extend(more.errors)
-    _write_facts_symbols(connection, more.files)
+def _write_facts_symbols(connection: sqlite3.Connection, loaded: FactsFile) -> None:
+    """Replace the `symbol` facts the graph holds for one parsed facts file."""
+    connection.execute("DELETE FROM facts_symbols WHERE facts_file = ?", (loaded.relative_path,))
+    connection.executemany(
+        "INSERT INTO facts_symbols (ref, file_path, line, facts_file, language) VALUES (?,?,?,?,?)",
+        [(ref, path, line, loaded.relative_path, loaded.header.language) for ref, path, line in symbol_facts(loaded)],
+    )
 
 
 #: The `facts_status` columns a status row carries, in the order `_write_facts_status`
@@ -2197,7 +2137,7 @@ def _hierarchy_after_overlay(pending: list[Edge], overlay: FactsOverlay, targets
         if edge.kind in kinds and edge.kind not in overlay.kinds_owned(edge.src_id.split("#", 1)[0])
     ]
     for file_path in sorted(overlay.covered_files & targets):
-        kept.extend(edge for edge in overlay.edges[file_path] if edge.kind in kinds)
+        kept.extend(overlay.edges.of(file_path, kinds))
     return kept
 
 
@@ -2213,5 +2153,5 @@ def _apply_overlay(pending: list[Edge], overlay: FactsOverlay, targets: set[str]
     """
     kept = [edge for edge in pending if edge.kind not in overlay.kinds_owned(edge.src_id.split("#", 1)[0])]
     for file_path in sorted(overlay.covered_files & targets):
-        kept.extend(overlay.edges[file_path])
+        kept.extend(overlay.edges.of(file_path))
     return kept

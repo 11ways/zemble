@@ -16,6 +16,7 @@ from zemble.graph.facts import (
     TREE_SITTER_SOURCE,
     FactsFile,
     FactsOverlay,
+    MappingSymbols,
     SkipBucket,
     facts_source_globs,
     load_overlay,
@@ -23,13 +24,13 @@ from zemble.graph.facts import (
 from zemble.graph.model import TYPE_KINDS, EdgeKind, Hit, Symbol, SymbolKind
 from zemble.graph.provider import AnyProvider, SqliteGraphProvider, display_name, open_provider
 from zemble.graph.store import (
+    StoredDeclaredSymbols,
     build_graph,
     graph_ancestor,
     graph_covers,
     graph_exists,
     refresh_graph,
     resolve_graph_root,
-    symbol_from_row,
 )
 
 QUERY_COMMANDS = (
@@ -194,8 +195,11 @@ def _run_facts_status(args: argparse.Namespace) -> int:
     root, _prefix = resolve_graph_root(args.path)
     provider = SqliteGraphProvider(root)
     try:
-        symbols = [symbol_from_row(row) for row in provider.connection.execute("SELECT * FROM symbols")]
-        overlay = load_overlay(Path(root).expanduser().resolve(), symbols)
+        overlay = load_overlay(
+            Path(root).expanduser().resolve(),
+            MappingSymbols.stored(provider.connection),
+            StoredDeclaredSymbols(provider.connection, "java"),
+        )
         calls = _call_grades(provider)
         by_source = {
             row["source"] or TREE_SITTER_SOURCE: row["n"]
@@ -242,10 +246,8 @@ def _skipped_summary(overlay: FactsOverlay, limit: int) -> list[dict[str, object
     reader has to be able to tell "none of that here" from "not looked at".
     """
     grouped: dict[SkipBucket, dict[tuple[str, str, str], int]] = {bucket: {} for bucket in SkipBucket}
-    for entry in overlay.skipped:
-        key = (entry.subject, entry.reason, entry.fact_kind)
-        counts = grouped[entry.bucket]
-        counts[key] = counts.get(key, 0) + 1
+    for entry, count in overlay.skipped.items():
+        grouped[entry.bucket][(entry.subject, entry.reason, entry.fact_kind)] = count
     summary = []
     for bucket, counts in grouped.items():
         ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))

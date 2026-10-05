@@ -42,6 +42,8 @@ RENDER_ROOT = (
 )
 TAG_RENDER = "be.elevenways.hawkeye.generated.tags.demo.DemoCardImpl#render()"
 RENDER = "com.example.ui.WidgetFunctions#render(java.lang.String)"
+LOCALIZED_CONFIG = "com.example.ui.WidgetFunctions#localizedConfig(java.lang.Object,java.lang.String)"
+FUNCTIONS = "src/common/java/com/example/ui/WidgetFunctions.java"
 
 
 @pytest.fixture(params=[1, 1_000_000], ids=["file-by-file", "one-batch"])
@@ -220,3 +222,56 @@ def test_template_and_facts_journey_matches_a_full_rebuild(
     (workspace / FACTS).unlink()
     build_graph(str(workspace), changed_paths=[workspace / FACTS])
     _assert_matches_full_rebuild(workspace, scratch, "step 6 facts gone")
+
+
+def test_a_facts_file_mapped_in_two_rounds_is_read_again(
+    generated_workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A facts file mapped for one source and released is parsed again when a later round asks more of it.
+
+    Round one maps the second facts file for the Java source being edited only; the first facts
+    file moved and now also covers the markdown template, so round two asks the second file for
+    its own generated class of that template too. Its facts were dropped after round one.
+    """
+    from zemble.graph import facts
+
+    workspace = generated_workspace
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    header = _facts_lines(workspace)[0]
+    first = ".zemble/facts/first.jsonl"
+    second = ".zemble/facts/second.jsonl"
+
+    def second_lines() -> list[dict]:
+        return [
+            header,
+            {"t": "file", "path": FUNCTIONS, "sha256": _sha(workspace, FUNCTIONS)},
+            {"t": "call", "from": RENDER, "to": "java.lang.String#valueOf(java.lang.Object)", "line": 10},
+            {"t": "file", "path": TPL, "sha256": _sha(workspace, TPL)},
+            {"t": "call", "from": RENDER_ROOT, "to": LOCALIZED_CONFIG, "path": TPL, "line": 74},
+        ]
+
+    tag_facts = [
+        {"t": "file", "path": TAG_IMPL, "sha256": _sha(workspace, TAG_IMPL)},
+        {"t": "call", "from": TAG_RENDER, "to": RENDER, "path": TAG_IMPL, "line": 11},
+    ]
+    _write(workspace, first, "\n".join(json.dumps(line) for line in [header, *tag_facts]) + "\n")
+    _write(workspace, second, "\n".join(json.dumps(line) for line in second_lines()) + "\n")
+    build_graph(str(workspace))
+    _assert_matches_full_rebuild(workspace, scratch, "step 1 two facts files")
+
+    # 2. The Java source changes and the first facts file starts covering the markdown template.
+    refills: list[str] = []
+    refill = facts._refill
+    monkeypatch.setattr(
+        facts,
+        "_refill",
+        lambda overlay, loaded, chosen: refills.append(loaded.relative_path) or refill(overlay, loaded, chosen),
+    )
+    functions = workspace / FUNCTIONS
+    functions.write_text(functions.read_text(encoding="utf-8") + "// edited\n", encoding="utf-8")
+    template_facts = _facts_lines(workspace)[1:3]
+    _write(workspace, first, "\n".join(json.dumps(line) for line in [header, *tag_facts, *template_facts]) + "\n")
+    build_graph(str(workspace), changed_paths=[functions, workspace / first])
+    assert refills == [second], "step 2: the second facts file was parsed again for round two"
+    _assert_matches_full_rebuild(workspace, scratch, "step 2 second round")

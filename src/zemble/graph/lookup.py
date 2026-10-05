@@ -160,6 +160,10 @@ class SymbolLookup(Protocol):
         """Return the type declarations of one file."""
         ...
 
+    def in_file(self, file_path: str) -> list[Symbol]:
+        """Return every declaration of one file."""
+        ...
+
     def declarations(self, key: DeclarationKey, value: str) -> list[Symbol]:
         """Return the symbols registered under one Hawkeye declaration key."""
         ...
@@ -187,18 +191,19 @@ class MemoryLookup:
         hierarchy: dict[str, list[str]] | None = None,
     ) -> None:
         """Index a whole workspace's symbols, contexts and already-resolved supertypes."""
-        self._symbols = symbols
         self._by_id: dict[str, Symbol] = {}
         self._by_qualified: dict[str, list[Symbol]] = defaultdict(list)
         self._types_by_simple: dict[str, list[Symbol]] = defaultdict(list)
         self._callables_by_simple: dict[str, list[Symbol]] = defaultdict(list)
         self._members: dict[str, list[Symbol]] = defaultdict(list)
         self._types_in_file: dict[str, list[Symbol]] = defaultdict(list)
+        self._in_file: dict[str, list[Symbol]] = defaultdict(list)
         self._declarations: dict[tuple[DeclarationKey, str], list[Symbol]] = defaultdict(list)
         self._contexts = contexts
         self._hierarchy = hierarchy or {}
         for symbol in symbols:
             self._by_id[symbol.id] = symbol
+            self._in_file[symbol.file_path].append(symbol)
             self._by_qualified[symbol.qualified_name].append(symbol)
             if symbol.kind in TYPE_KINDS:
                 self._types_by_simple[symbol.name].append(symbol)
@@ -209,10 +214,6 @@ class MemoryLookup:
                 self._members[symbol.container_id].append(symbol)
             for key, value in declaration_keys(symbol):
                 self._declarations[(key, value)].append(symbol)
-
-    def all_symbols(self) -> list[Symbol]:
-        """Return every symbol this lookup was built from, in the order it was given them."""
-        return self._symbols
 
     def by_id(self, symbol_id: str) -> Symbol | None:
         """Return the symbol with this id, or None."""
@@ -237,6 +238,10 @@ class MemoryLookup:
     def types_in_file(self, file_path: str) -> list[Symbol]:
         """Return the type declarations of one file."""
         return self._types_in_file.get(file_path, [])
+
+    def in_file(self, file_path: str) -> list[Symbol]:
+        """Return every declaration of one file."""
+        return self._in_file.get(file_path, [])
 
     def declarations(self, key: DeclarationKey, value: str) -> list[Symbol]:
         """Return the symbols registered under one Hawkeye declaration key."""
@@ -269,7 +274,7 @@ class SqliteLookup:
         self._by_qualified: dict[str, list[Symbol]] = {}
         self._by_name: dict[str, list[Symbol]] = {}
         self._members: dict[str, list[Symbol]] = {}
-        self._types_in_file: dict[str, list[Symbol]] = {}
+        self._in_file: dict[str, list[Symbol]] = {}
         self._declarations: dict[tuple[DeclarationKey, str], list[Symbol]] = {}
         self._supertypes: dict[str, list[str]] = {}
         self._contexts: dict[str, FileContext] = {}
@@ -322,10 +327,14 @@ class SqliteLookup:
 
     def types_in_file(self, file_path: str) -> list[Symbol]:
         """Return the type declarations of one file."""
-        found = self._types_in_file.get(file_path)
+        return [symbol for symbol in self.in_file(file_path) if symbol.kind in TYPE_KINDS]
+
+    def in_file(self, file_path: str) -> list[Symbol]:
+        """Return every declaration of one file."""
+        found = self._in_file.get(file_path)
         if found is None:
-            found = [symbol for symbol in self._select("file_path = ?", file_path) if symbol.kind in TYPE_KINDS]
-            self._types_in_file[file_path] = found
+            found = self._select("file_path = ?", file_path)
+            self._in_file[file_path] = found
         return found
 
     def declarations(self, key: DeclarationKey, value: str) -> list[Symbol]:
@@ -369,7 +378,7 @@ class SqliteLookup:
             self._by_qualified,
             self._by_name,
             self._members,
-            self._types_in_file,
+            self._in_file,
             self._declarations,
             self._supertypes,
             self._contexts,

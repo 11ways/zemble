@@ -17,18 +17,20 @@ import fnmatch
 import hashlib
 import logging
 import os
+import sqlite3
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 import orjson
 
 from zemble.graph.generated import GeneratedMapping, GeneratedSourceMapper, template_is_newer
+from zemble.graph.lookup import SqliteLookup, SymbolLookup, symbol_from_row
 from zemble.graph.model import (
     CALLABLE_KINDS,
     TYPE_KINDS,
@@ -199,8 +201,8 @@ class FactsFile:
     outside_root: int = 0
     mtime_ns: int = 0
     size: int = 0
-    #: Facts this file's own parse already threw away, with the bucket that says why.
-    skipped: list[SkippedFact] = field(default_factory=list)
+    #: How many facts this file's own parse already threw away, by what they are reported under.
+    skipped: Counter[SkipKey] = field(default_factory=Counter)
     #: The `.hwk` templates this file's generated-source facts were mapped back onto. They
     #: are edges this facts file owns just as much as the ones it declares by path, so they
     #: are re-resolved with it when it moves.
@@ -213,6 +215,14 @@ class FactsFile:
     #: Declared source path -> what mapping it contributed. Only the sources this build
     #: actually mapped are in here; the rest keep the accounting the graph already holds.
     contributions: dict[str, SourceContribution] = field(default_factory=dict)
+    #: False once the parsed facts were dropped; mapping more of the file parses it again.
+    holds_facts: bool = True
+
+    def release_facts(self) -> None:
+        """Drop every parsed fact, keeping what the file declares and what mapping it contributed."""
+        for source in self.sources.values():
+            source.facts = []
+        self.holds_facts = False
 
     @property
     def fresh_files(self) -> list[str]:
@@ -238,6 +248,20 @@ class SkippedFact:
     fact_kind: str
     facts_file: str
     source_path: str
+
+    @property
+    def key(self) -> SkipKey:
+        """What this fact is counted under."""
+        return SkipKey(self.bucket, self.subject, self.reason, self.fact_kind)
+
+
+class SkipKey(NamedTuple):
+    """What skipped facts are counted by; a workspace skips too many to keep one record each."""
+
+    bucket: SkipBucket
+    subject: str
+    reason: str
+    fact_kind: str
 
 
 # ---- discovery -----------------------------------------------------------
@@ -445,24 +469,26 @@ def load_facts_file(path: Path, root: Path) -> FactsFile:
     :raises FactsFormatError: If the header is missing, unreadable or of another version.
     """
     try:
-        lines = path.read_bytes().split(b"\n")
+        # Read line by line: a facts file is tens of megabytes, and its parsed facts weigh enough.
+        with path.open("rb") as handle:
+            first = handle.readline()
+            if not first.strip():
+                raise FactsFormatError(f"{path}: is empty")
+            header = _read_header(first, path)
+            facts_root = Path(header.root)
+            if not facts_root.is_absolute():
+                facts_root = (path.parent / facts_root).resolve()
+            stat = os.fstat(handle.fileno())
+            loaded = FactsFile(
+                path=path,
+                relative_path=_display_path(root, path),
+                header=header,
+                mtime_ns=stat.st_mtime_ns,
+                size=stat.st_size,
+            )
+            _read_body(handle, loaded, root, facts_root)
     except OSError as error:
         raise FactsFormatError(f"{path}: cannot be read") from error
-    if not lines or not lines[0].strip():
-        raise FactsFormatError(f"{path}: is empty")
-    header = _read_header(lines[0], path)
-    facts_root = Path(header.root)
-    if not facts_root.is_absolute():
-        facts_root = (path.parent / facts_root).resolve()
-    stat = path.stat()
-    loaded = FactsFile(
-        path=path,
-        relative_path=_display_path(root, path),
-        header=header,
-        mtime_ns=stat.st_mtime_ns,
-        size=stat.st_size,
-    )
-    _read_body(lines[1:], loaded, root, facts_root)
     return loaded
 
 
@@ -474,7 +500,7 @@ def _display_path(root: Path, path: Path) -> str:
         return str(path)
 
 
-def _read_body(lines: Sequence[bytes], loaded: FactsFile, root: Path, facts_root: Path) -> None:
+def _read_body(lines: Iterable[bytes], loaded: FactsFile, root: Path, facts_root: Path) -> None:
     """Group every fact under the source file it was declared for."""
     current: SourceFacts | None = None
     outside: str | None = None
@@ -519,16 +545,10 @@ def _record_unattached(
         loaded.orphan_facts += 1
         return
     loaded.parse_buckets[SkipBucket.OUTSIDE_INDEX.value] += 1
-    loaded.skipped.append(
-        SkippedFact(
-            bucket=SkipBucket.OUTSIDE_INDEX,
-            subject=declared,
-            reason="the source file is outside the indexed workspace",
-            fact_kind=str(_EDGE_KIND_BY_FACT[kind].value) if kind in _EDGE_KIND_BY_FACT else kind,
-            facts_file=loaded.relative_path,
-            source_path=declared,
-        )
-    )
+    fact_kind = str(_EDGE_KIND_BY_FACT[kind].value) if kind in _EDGE_KIND_BY_FACT else kind
+    loaded.skipped[
+        SkipKey(SkipBucket.OUTSIDE_INDEX, declared, "the source file is outside the indexed workspace", fact_kind)
+    ] += 1
 
 
 def _declare_file(payload: dict, loaded: FactsFile, root: Path, facts_root: Path) -> SourceFacts | None:
@@ -624,6 +644,10 @@ class RefMapper(Protocol):
         """Map one ref onto a workspace symbol, an external target, or nothing."""
         ...
 
+    def release(self) -> None:
+        """Forget what earlier refs cached; mapping calls this after every facts file."""
+        ...
+
 
 def _simple(name: str) -> str:
     """Reduce a possibly qualified type name to its last segment, keeping array brackets."""
@@ -677,68 +701,59 @@ class JavaRefMapper:
 
     language = "java"
 
-    def __init__(self, symbols: Iterable[Symbol], declared: DeclaredSymbols | None = None) -> None:
-        """Index the workspace symbols a ref can land on.
+    def __init__(self, lookup: SymbolLookup, declared: DeclaredSymbols | None = None) -> None:
+        """Map refs through a workspace lookup; nothing is read until a ref asks for it.
 
-        :param symbols: Every symbol in the workspace.
+        :param lookup: The workspace's declarations.
         :param declared: Optional `symbol` facts, ref -> (file path, line), used as a second
             rung when name matching fails.
         """
-        self.by_id: dict[str, Symbol] = {}
-        self.by_qualified: dict[str, list[Symbol]] = {}
-        self.by_container: dict[str, list[Symbol]] = {}
-        self.by_position: dict[tuple[str, int], list[Symbol]] = {}
-        for symbol in symbols:
-            self.by_id[symbol.id] = symbol
-            self.by_qualified.setdefault(symbol.qualified_name, []).append(symbol)
-            self.by_position.setdefault((symbol.file_path, symbol.start_line), []).append(symbol)
-            if symbol.container_id:
-                self.by_container.setdefault(symbol.container_id, []).append(symbol)
+        self.lookup = lookup
         self.declared: DeclaredSymbols = declared if declared is not None else {}
-        self._numbered: dict[str, list[Symbol]] = {}
-        self._locals: dict[tuple[str, str], list[Symbol]] = {}
-        self._index_flat_names()
+        self._flat: dict[str, _FlatNames] = {}
+        self._mapped: dict[str, MappedRef] = {}
+
+    def release(self) -> None:
+        """Forget every answer so far, so mapping a workspace holds one facts file's worth of symbols."""
+        self._flat.clear()
+        self._mapped.clear()
+        self.lookup.release()
 
     # ---- flat (javac) type names ----------------------------------------
 
-    def _index_flat_names(self) -> None:
-        """Group the declarations javac gives a `$N` name under their outermost type.
+    def _flat_names(self, top_name: str) -> _FlatNames:
+        """Group the declarations javac gives a `$N` name under the outermost type *top_name*.
 
         javac numbers anonymous classes, enum-constant bodies and local classes per
         OUTERMOST class in source order, which is the only handle there is: zemble names
         an anonymous class after the line it starts on and keeps an enum constant's body
         on the constant itself. Order is therefore the mapping, and it is best effort -
-        a ref that does not land is reported unmapped rather than guessed at.
+        a ref that does not land is reported unmapped rather than guessed at. Everything a
+        type encloses is declared in its own file, so only the files declaring *top_name* are read.
         """
-        for symbol in self.by_id.values():
-            top = self._outermost(symbol)
-            if top is None or top.id == symbol.id:
-                continue
-            if symbol.name.startswith("$anon@") or (symbol.kind is SymbolKind.ENUM_CONSTANT and self._has_body(symbol)):
-                self._numbered.setdefault(top.qualified_name, []).append(symbol)
-            elif symbol.kind in TYPE_KINDS and self._is_local(symbol):
-                self._locals.setdefault((top.qualified_name, symbol.name), []).append(symbol)
-        for group in (*self._numbered.values(), *self._locals.values()):
+        found = self._flat.get(top_name)
+        if found is not None:
+            return found
+        found = _FlatNames()
+        files = {symbol.file_path for symbol in self.lookup.by_qualified(top_name) if symbol.kind in TYPE_KINDS}
+        for file_path in sorted(files):
+            declared = self.lookup.in_file(file_path)
+            by_id = {symbol.id: symbol for symbol in declared}
+            with_members = {symbol.container_id for symbol in declared if symbol.container_id}
+            for symbol in declared:
+                top = _outermost(symbol, by_id)
+                if top is None or top.id == symbol.id or top.qualified_name != top_name:
+                    continue
+                if symbol.name.startswith("$anon@") or (
+                    symbol.kind is SymbolKind.ENUM_CONSTANT and symbol.id in with_members
+                ):
+                    found.numbered.append(symbol)
+                elif symbol.kind in TYPE_KINDS and _is_local(symbol, by_id):
+                    found.locals.setdefault(symbol.name, []).append(symbol)
+        for group in (found.numbered, *found.locals.values()):
             group.sort(key=lambda symbol: (symbol.start_line, symbol.id))
-
-    def _outermost(self, symbol: Symbol) -> Symbol | None:
-        """Return the outermost type declaration enclosing a symbol."""
-        found: Symbol | None = None
-        current: Symbol | None = symbol
-        while current is not None:
-            if current.kind in TYPE_KINDS:
-                found = current
-            current = self.by_id.get(current.container_id) if current.container_id else None
+        self._flat[top_name] = found
         return found
-
-    def _has_body(self, symbol: Symbol) -> bool:
-        """Return whether an enum constant declares members of its own."""
-        return bool(self.by_container.get(symbol.id))
-
-    def _is_local(self, symbol: Symbol) -> bool:
-        """Return whether a type is declared inside a method or constructor body."""
-        container = self.by_id.get(symbol.container_id) if symbol.container_id else None
-        return container is not None and container.kind in CALLABLE_KINDS
 
     def _flat_type(self, type_name: str) -> _TypeMatch:
         """Resolve a javac flat name (`pkg.Top$1`, `pkg.Top$1Local`) to a symbol."""
@@ -749,7 +764,8 @@ class JavaRefMapper:
         rest = tail[len(digits) :]
         if not digits or "$" in rest:
             return _TypeMatch(reason="anonymous flat name")
-        group = self._numbered.get(top, []) if not rest else self._locals.get((top, rest), [])
+        names = self._flat_names(top)
+        group = names.numbered if not rest else names.locals.get(rest, [])
         index = int(digits) - 1
         if len(group) == 1:
             return _TypeMatch(symbol=group[0])
@@ -761,7 +777,7 @@ class JavaRefMapper:
         """Resolve the left-hand side of a ref to the type it names."""
         if "$" in type_name:
             return self._flat_type(type_name)
-        found = [symbol for symbol in self.by_qualified.get(type_name, []) if symbol.kind in TYPE_KINDS]
+        found = [symbol for symbol in self.lookup.by_qualified(type_name) if symbol.kind in TYPE_KINDS]
         if len(found) == 1:
             return _TypeMatch(symbol=found[0])
         if len(found) > 1:
@@ -772,6 +788,13 @@ class JavaRefMapper:
 
     def map_ref(self, ref: str) -> MappedRef:
         """Map one Java ref onto a workspace symbol, an external target, or nothing."""
+        found = self._mapped.get(ref)
+        if found is None:
+            found = self._mapped[ref] = self._map(ref)
+        return found
+
+    def _map(self, ref: str) -> MappedRef:
+        """Walk the ladder for one ref."""
         parsed = parse_java_ref(ref)
         found = self._type(parsed.type_name)
         if found.symbol is None:
@@ -792,7 +815,7 @@ class JavaRefMapper:
             # A field or static initializer has no symbol of its own; the type it runs for
             # is the honest source of the edge, and is where a reader would look anyway.
             return MappedRef(symbol_id=owner.id, dst_name=owner.name)
-        members = self.by_container.get(owner.id, [])
+        members = self.lookup.members(owner.id)
         kinds = CALLABLE_KINDS if parsed.params is not None else _FIELD_KINDS
         candidates = [symbol for symbol in members if symbol.kind in kinds and symbol.name == name]
         if parsed.params is not None:
@@ -835,11 +858,39 @@ class JavaRefMapper:
         position = self.declared.get(ref)
         if position is None:
             return None
-        found = self.by_position.get(position, [])
+        file_path, line = position
+        found = [symbol for symbol in self.lookup.in_file(file_path) if symbol.start_line == line]
         if candidates:
             allowed = {symbol.id for symbol in candidates}
             found = [symbol for symbol in found if symbol.id in allowed]
         return found[0].id if len(found) == 1 else None
+
+
+@dataclass
+class _FlatNames:
+    """The declarations of one outermost type that javac names by number rather than by name."""
+
+    #: Anonymous classes and enum-constant bodies, in source order.
+    numbered: list[Symbol] = field(default_factory=list)
+    #: Local class name -> the local classes of that name, in source order.
+    locals: dict[str, list[Symbol]] = field(default_factory=dict)
+
+
+def _outermost(symbol: Symbol, by_id: dict[str, Symbol]) -> Symbol | None:
+    """Return the outermost type declaration enclosing a symbol, among one file's declarations."""
+    found: Symbol | None = None
+    current: Symbol | None = symbol
+    while current is not None:
+        if current.kind in TYPE_KINDS:
+            found = current
+        current = by_id.get(current.container_id) if current.container_id else None
+    return found
+
+
+def _is_local(symbol: Symbol, by_id: dict[str, Symbol]) -> bool:
+    """Return whether a type is declared inside a method or constructor body."""
+    container = by_id.get(symbol.container_id) if symbol.container_id else None
+    return container is not None and container.kind in CALLABLE_KINDS
 
 
 def _ref_name(parsed: ParsedRef) -> str:
@@ -867,9 +918,137 @@ MAPPER_FACTORIES = {"java": JavaRefMapper}
 # ---- the overlay ---------------------------------------------------------
 
 
-#: Every symbol of the workspace, or a callable producing them. Mapping refs needs the whole
-#: table, and a build that maps nothing must never pay for materialising it.
-SymbolSource = Iterable[Symbol] | Callable[[], Iterable[Symbol]]
+#: The symbol kinds generated Hawkeye code is mapped back onto.
+_TEMPLATE_KINDS = (SymbolKind.TEMPLATE, SymbolKind.BLOCK)
+
+
+@dataclass(frozen=True)
+class MappingSymbols:
+    """The workspace declarations mapping reads: a lookup for refs, and the templates generated code lands on."""
+
+    lookup: SymbolLookup
+    #: Every template and block symbol, read once a fresh source first has to be mapped.
+    templates: Callable[[], Iterable[Symbol]]
+
+    @classmethod
+    def stored(cls, connection: sqlite3.Connection) -> MappingSymbols:
+        """Answer from a graph's symbol table through its indexes, never holding the whole table."""
+
+        def templates() -> list[Symbol]:
+            placeholders = ",".join("?" * len(_TEMPLATE_KINDS))
+            rows = connection.execute(
+                f"SELECT * FROM symbols WHERE kind IN ({placeholders})",  # noqa: S608 - placeholders only
+                [kind.value for kind in _TEMPLATE_KINDS],
+            )
+            return [symbol_from_row(row) for row in rows]
+
+        return cls(SqliteLookup(connection), templates)
+
+
+class OverlayEdges:
+    """The fact edges of every covered file, kept in sqlite because a workspace's facts are a million edges.
+
+    Two facts files may write the same edge for one file; the table's key keeps it once.
+    """
+
+    _EDGE_COLUMNS = (
+        "src_id",
+        "dst_name",
+        "kind",
+        "line",
+        "dst_id",
+        "resolution",
+        "arity",
+        "is_new",
+        "source",
+        "origin_ref",
+    )
+
+    def __init__(self, connection: sqlite3.Connection | None = None, schema: str = "main") -> None:
+        """Keep the edges in a fresh table of *schema*; without a connection, in a temporary database."""
+        self._connection = connection
+        self._schema = schema
+        self._table = f"{schema}.overlay_edges"
+        self._ready = False
+        #: Every file at least one fact edge was collected for.
+        self.covered: set[str] = set()
+        columns = ", ".join(self._EDGE_COLUMNS)
+        placeholders = ",".join("?" * (len(self._EDGE_COLUMNS) + 1))
+        self._insert = f"INSERT OR IGNORE INTO {self._table} (file_path, {columns}) VALUES ({placeholders})"
+        self._select = f"SELECT {columns} FROM {self._table} WHERE file_path = ? ORDER BY rowid"
+
+    def _database(self) -> sqlite3.Connection:
+        """Create the table on first use."""
+        if self._connection is None:
+            # An empty name is a private on-disk database that sqlite deletes when it is closed.
+            self._connection = sqlite3.connect("")
+        if not self._ready:
+            self._connection.execute(f"DROP TABLE IF EXISTS {self._table}")
+            self._connection.execute(
+                f"CREATE TABLE {self._table} (file_path TEXT NOT NULL, src_id TEXT NOT NULL, "
+                "dst_name TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER NOT NULL, dst_id TEXT NOT NULL, "
+                "resolution TEXT NOT NULL, arity INTEGER NOT NULL, is_new INTEGER NOT NULL, source TEXT, "
+                "origin_ref TEXT)"
+            )
+            # The identity two facts files must agree on for their edges to be one edge. A missing
+            # destination is stored as '' because sqlite never finds two NULLs equal.
+            self._connection.execute(
+                f"CREATE UNIQUE INDEX {self._schema}.overlay_edges_key ON overlay_edges "
+                "(file_path, src_id, dst_id, dst_name, kind, line, arity, is_new)"
+            )
+            self._ready = True
+        return self._connection
+
+    def add(self, file_path: str, edge: Edge) -> bool:
+        """Collect one edge for a file, returning False when that file already has it."""
+        self.covered.add(file_path)
+        cursor = self._database().execute(
+            self._insert,
+            (
+                file_path,
+                edge.src_id,
+                edge.dst_name,
+                edge.kind.value,
+                edge.line,
+                edge.dst_id or "",
+                edge.resolution.value,
+                edge.arity,
+                int(edge.is_new),
+                edge.source,
+                edge.origin_ref,
+            ),
+        )
+        return cursor.rowcount == 1
+
+    def of(self, file_path: str, kinds: Collection[EdgeKind] | None = None) -> list[Edge]:
+        """Return a covered file's edges, optionally of some kinds only, in the order they were collected."""
+        if file_path not in self.covered:
+            return []
+        edges = [_overlay_edge(row) for row in self._database().execute(self._select, (file_path,))]
+        return edges if kinds is None else [edge for edge in edges if edge.kind in kinds]
+
+    def count(self) -> int:
+        """Return how many edges were collected."""
+        if not self.covered:
+            return 0
+        return int(self._database().execute(f"SELECT COUNT(*) FROM {self._table}").fetchone()[0])  # noqa: S608
+
+
+def _overlay_edge(row: Sequence) -> Edge:
+    """Rebuild one collected edge."""
+    src_id, dst_name, kind, line, dst_id, resolution, arity, is_new, source, origin_ref = row
+    return Edge(
+        src_id=src_id,
+        dst_name=dst_name,
+        kind=EdgeKind(kind),
+        line=line,
+        dst_id=dst_id or None,
+        resolution=Resolution(resolution),
+        arity=arity,
+        is_new=bool(is_new),
+        source=source,
+        origin_ref=origin_ref,
+    )
 
 
 @dataclass
@@ -877,14 +1056,15 @@ class FactsOverlay:
     """Every fact edge a workspace's facts files contribute, grouped by source file."""
 
     root: Path
+    #: The facts files mapped so far; their parsed facts are dropped once they are mapped.
     files: list[FactsFile] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
-    #: Every fact that did not become an edge, in the bucket that says why.
-    skipped: list[SkippedFact] = field(default_factory=list)
+    #: How many facts did not become an edge, by what they are reported under.
+    skipped: Counter[SkipKey] = field(default_factory=Counter)
     #: Edges kept with no `dst_id` because the target's type is a JDK or jar type.
     external_targets: int = 0
-    #: Workspace-relative source path -> the edges replacing that file's extracted ones.
-    edges: dict[str, list[Edge]] = field(default_factory=dict)
+    #: The edges replacing the extracted ones of every covered source file.
+    edges: OverlayEdges = field(default_factory=OverlayEdges)
     #: Workspace-relative source path -> the tools whose fresh facts cover it.
     tools: dict[str, set[str]] = field(default_factory=dict)
     #: Maps generated Hawkeye Java back onto templates; None when nothing needed it.
@@ -895,26 +1075,15 @@ class FactsOverlay:
     generated_mapped: int = 0
     #: Source path -> the prefix that keeps it out of the index, or "" when it is indexed.
     _ignored_prefixes: dict[str, str] = field(default_factory=dict, repr=False)
-    #: Covered file -> the identities of the edges already collected for it.
-    _edge_keys: dict[str, set[tuple]] = field(default_factory=dict, repr=False)
     #: Facts file -> the declared sources of it this overlay has already mapped. A build maps
     #: only the sources its targets need, so the rest keep the accounting the graph holds.
     mapped_sources: dict[str, set[str]] = field(default_factory=dict)
     #: Ref mappers built so far, per language, so a second round of mapping reuses them.
     mappers: dict[str, RefMapper] = field(default_factory=dict, repr=False)
-    _symbols: list[Symbol] | None = field(default=None, repr=False)
 
-    @property
-    def materialised_symbols(self) -> list[Symbol] | None:
-        """The workspace symbols, if mapping already had to read them; None otherwise."""
-        return self._symbols
-
-    def symbols(self, source: SymbolSource) -> list[Symbol]:
-        """Materialise the workspace symbols once, however many rounds of mapping there are."""
-        if self._symbols is None:
-            self._symbols = list(source() if callable(source) else source)
-            self.generated = GeneratedSourceMapper(self.root, self._symbols)
-        return self._symbols
+    def file(self, relative_path: str) -> FactsFile | None:
+        """Return the facts file already read under this path, or None."""
+        return next((loaded for loaded in self.files if loaded.relative_path == relative_path), None)
 
     @property
     def mapped_files(self) -> set[str]:
@@ -930,7 +1099,7 @@ class FactsOverlay:
         template extends or renders - so only `CALLS` is replaced there, and the extractor
         keeps the rest. A file with no fresh facts owns nothing and keeps every edge it had.
         """
-        if file_path not in self.edges:
+        if file_path not in self.edges.covered:
             return frozenset()
         return self.owned_kinds.get(file_path, OVERLAY_KINDS)
 
@@ -939,16 +1108,11 @@ class FactsOverlay:
         """The templates that carry mapped edges, which are not declared by any `file` line."""
         return {path for path, kinds in self.owned_kinds.items() if kinds != OVERLAY_KINDS}
 
-    @property
-    def unmapped(self) -> list[SkippedFact]:
-        """Only the refs the workspace should have answered and did not."""
-        return [entry for entry in self.skipped if entry.bucket is SkipBucket.UNMAPPED]
-
     def bucket_counts(self) -> dict[str, int]:
         """How many facts each bucket holds, every bucket present even at zero."""
         counted = {bucket.value: 0 for bucket in SkipBucket}
-        for entry in self.skipped:
-            counted[entry.bucket.value] += 1
+        for key, count in self.skipped.items():
+            counted[key.bucket.value] += count
         return counted
 
     def source_bucket(self, source_path: str) -> tuple[SkipBucket, str] | None:
@@ -969,12 +1133,12 @@ class FactsOverlay:
 
     def covers(self, file_path: str) -> bool:
         """Return whether a source file has fresh facts, so its extracted edges are dropped."""
-        return file_path in self.edges
+        return file_path in self.edges.covered
 
     @property
     def covered_files(self) -> set[str]:
         """Every source file the overlay owns the edges of."""
-        return set(self.edges)
+        return set(self.edges.covered)
 
     @property
     def fresh_sources(self) -> set[str]:
@@ -992,16 +1156,17 @@ class FactsOverlay:
 
     def stats(self) -> dict[str, object]:
         """Return a JSON-ready summary of what was loaded."""
+        buckets = self.bucket_counts()
         return {
             "facts_files": len(self.files),
             "errors": [{"path": path, "error": message} for path, message in self.errors],
             "files_declared": len(self.declared_files),
             "files_fresh": len(self.fresh_sources),
             "files_stale": len(self.declared_files) - len(self.fresh_sources),
-            "edges": sum(len(edges) for edges in self.edges.values()),
+            "edges": self.edges.count(),
             "external_targets": self.external_targets,
-            "skipped": self.bucket_counts(),
-            "unmapped": self.bucket_counts()[SkipBucket.UNMAPPED.value],
+            "skipped": buckets,
+            "unmapped": buckets[SkipBucket.UNMAPPED.value],
             "generated_mapped": self.generated_mapped,
             "generated_templates": len(self.template_targets),
         }
@@ -1013,94 +1178,114 @@ class FactsOverlay:
 MappingRequest = dict[str, set[str] | None]
 
 
-def load_overlay(
-    root: Path, symbols: SymbolSource, *, paths: Sequence[Path] | None = None, mapped: MappingRequest | None = None
-) -> FactsOverlay:
-    """Discover, read and map the facts files of a workspace.
+def load_overlay(root: Path, symbols: MappingSymbols, declared: DeclaredSymbols) -> FactsOverlay:
+    """Discover, read and map every facts file of a workspace.
 
     :param root: The workspace root.
-    :param symbols: Every symbol zemble extracted, or a callable producing them.
-    :param paths: The facts files to read; None discovers them.
-    :param mapped: Per facts file, the sources to turn into edges; None maps every one whole.
+    :param symbols: The workspace's declarations.
+    :param declared: Where `symbol` facts placed refs, for the whole workspace.
     :return: The overlay, ready to be applied to a resolved edge list.
     """
-    overlay = read_facts_files(root, paths)
-    request = {loaded.relative_path: None for loaded in overlay.files} if mapped is None else mapped
-    map_facts_files(overlay, symbols, request)
-    return overlay
-
-
-def read_facts_files(root: Path, paths: Sequence[Path] | None = None) -> FactsOverlay:
-    """Parse facts files into an overlay, deciding per source file whether it is still fresh."""
     overlay = FactsOverlay(root=root)
-    for path in discover_facts_files(root) if paths is None else paths:
-        try:
-            overlay.files.append(load_facts_file(path, root))
-        except FactsFormatError as error:
-            overlay.errors.append((_display_path(root, path), str(error)))
-            logger.warning("Ignoring facts file: %s", error)
+    paths = {_display_path(root, path): path for path in discover_facts_files(root)}
+    map_facts_files(overlay, symbols, dict.fromkeys(paths), declared, paths)
     return overlay
 
 
 def map_facts_files(
     overlay: FactsOverlay,
-    symbols: SymbolSource,
+    symbols: MappingSymbols,
     request: MappingRequest,
-    declared: DeclaredSymbols | None = None,
+    declared: DeclaredSymbols,
+    paths: Mapping[str, Path],
 ) -> None:
-    """Turn the requested sources into edges, recording what could not be mapped.
+    """Turn the requested sources into edges one facts file at a time, recording what could not be mapped.
 
     Callable more than once: a build learns from one round of mapping which further facts
-    files cover a file it is now re-resolving, and asks for those too. Nothing here reads the
-    symbol table until a source that is actually fresh has to be mapped, because a source
-    whose content moved on contributes no edge and needs no lookup to say so.
+    files cover a file it is now re-resolving, and asks for those too. A file's parsed facts
+    are dropped as soon as it is mapped, because a workspace's facts are gigabytes as Python
+    objects and one file's are not; a later round that asks more of a file parses it again.
+    Nothing here reads a symbol until a source that is actually fresh has to be mapped.
 
-    :param declared: Where a `symbol` fact placed a ref, for the whole workspace. None falls
-        back to the `symbol` facts of the files this overlay itself parsed, which is only the
-        whole workspace when it parsed all of them.
+    :param declared: Where a `symbol` fact placed a ref, for the whole workspace.
+    :param paths: Relative path -> the facts file on disk, for every file the request names.
     """
-    work: list[tuple[FactsFile, list[SourceFacts]]] = []
-    for loaded in overlay.files:
-        if loaded.relative_path not in request:
+    for relative in sorted(request):
+        if any(path == relative for path, _ in overlay.errors):
             continue
-        only = request[loaded.relative_path]
-        done = overlay.mapped_sources.get(loaded.relative_path, set())
+        loaded = overlay.file(relative)
+        if loaded is None:
+            if relative not in paths:
+                continue
+            loaded = _parse(overlay, paths[relative])
+            if loaded is None:
+                continue
+            overlay.files.append(loaded)
+        only = request[relative]
+        done = overlay.mapped_sources.get(relative, set())
         chosen = [
             source
             for source in loaded.sources.values()
             if (only is None or source.path in only) and source.path not in done
         ]
-        if chosen:
-            work.append((loaded, chosen))
-    if not work:
-        return
-    if not any(source.fresh for _, chosen in work for source in chosen):
-        # Nothing fresh to map: record the staleness, which the parse alone already decided.
-        for loaded, chosen in work:
-            _mark_mapped(overlay, loaded, chosen)
-            _map_file(overlay, loaded, _NO_MAPPER, {}, chosen)
-        return
-    symbol_list = overlay.symbols(symbols)
-    lines = {symbol.id: symbol.start_line for symbol in symbol_list}
-    for loaded, chosen in work:
-        factory = MAPPER_FACTORIES.get(loaded.header.language)
-        if factory is None:
-            overlay.errors.append((loaded.relative_path, f"no ref mapper for language {loaded.header.language!r}"))
+        if chosen and not loaded.holds_facts and not _refill(overlay, loaded, chosen):
             continue
-        mapper = overlay.mappers.get(loaded.header.language)
-        if mapper is None:
-            found = declared if declared is not None else _declared_symbols(overlay.files, loaded.header.language)
-            mapper = factory(symbol_list, found)
-            overlay.mappers[loaded.header.language] = mapper
-        _mark_mapped(overlay, loaded, chosen)
-        _map_file(overlay, loaded, mapper, lines, chosen)
+        if chosen:
+            _map_chosen(overlay, loaded, chosen, symbols, declared)
+        loaded.release_facts()
+
+
+def _parse(overlay: FactsOverlay, path: Path) -> FactsFile | None:
+    """Parse one facts file, recording why when it cannot be read."""
+    try:
+        return load_facts_file(path, overlay.root)
+    except FactsFormatError as error:
+        overlay.errors.append((_display_path(overlay.root, path), str(error)))
+        logger.warning("Ignoring facts file: %s", error)
+        return None
+
+
+def _refill(overlay: FactsOverlay, loaded: FactsFile, chosen: list[SourceFacts]) -> bool:
+    """Parse a released facts file again for the facts of some of its sources."""
+    again = _parse(overlay, loaded.path)
+    if again is None:
+        return False
+    for source in chosen:
+        found = again.sources.get(source.path)
+        source.facts = found.facts if found is not None else []
+    return True
+
+
+def _map_chosen(
+    overlay: FactsOverlay,
+    loaded: FactsFile,
+    chosen: list[SourceFacts],
+    symbols: MappingSymbols,
+    declared: DeclaredSymbols,
+) -> None:
+    """Map some sources of one parsed facts file, then let the mapper forget what it read."""
+    mapper: RefMapper = _NO_MAPPER
+    if any(source.fresh for source in chosen):
+        found = overlay.mappers.get(loaded.header.language)
+        factory = MAPPER_FACTORIES.get(loaded.header.language)
+        if found is None and factory is None:
+            overlay.errors.append((loaded.relative_path, f"no ref mapper for language {loaded.header.language!r}"))
+            return
+        if found is None:
+            found = overlay.mappers[loaded.header.language] = factory(symbols.lookup, declared)
+        mapper = found
+        if overlay.generated is None:
+            overlay.generated = GeneratedSourceMapper(overlay.root, symbols.templates())
+    _mark_mapped(overlay, loaded, chosen)
+    _map_file(overlay, loaded, mapper, symbols.lookup, chosen)
+    mapper.release()
 
 
 def _mark_mapped(overlay: FactsOverlay, loaded: FactsFile, chosen: list[SourceFacts]) -> None:
     """Record which sources of a facts file are now mapped, once per facts file."""
     done = overlay.mapped_sources.setdefault(loaded.relative_path, set())
     if not done:
-        overlay.skipped.extend(loaded.skipped)
+        overlay.skipped.update(loaded.skipped)
     done.update(source.path for source in chosen)
 
 
@@ -1110,6 +1295,9 @@ class _NoMapper:
     def map_ref(self, ref: str) -> MappedRef:  # pragma: no cover - a stale source maps nothing
         """Refuse every ref: reaching this would mean a stale source was mapped after all."""
         raise AssertionError(f"a stale source cannot map {ref}")
+
+    def release(self) -> None:
+        """Hold nothing."""
 
 
 _NO_MAPPER = _NoMapper()
@@ -1128,23 +1316,12 @@ def symbol_facts(loaded: FactsFile) -> Iterator[tuple[str, str, int]]:
                 yield ref, source.path, line
 
 
-def _declared_symbols(files: list[FactsFile], language: str) -> dict[str, tuple[str, int]]:
-    """Collect every `symbol` fact of one language as ref -> (file path, line).
-
-    Sorted by facts file, because two files may declare the same ref and a build must not
-    depend on the order it happened to read them in.
-    """
-    declared: dict[str, tuple[str, int]] = {}
-    for loaded in sorted(files, key=lambda entry: entry.relative_path):
-        if loaded.header.language != language:
-            continue
-        for ref, path, line in symbol_facts(loaded):
-            declared[ref] = (path, line)
-    return declared
-
-
 def _map_file(
-    overlay: FactsOverlay, loaded: FactsFile, mapper: RefMapper, lines: dict[str, int], sources: list[SourceFacts]
+    overlay: FactsOverlay,
+    loaded: FactsFile,
+    mapper: RefMapper,
+    lookup: SymbolLookup,
+    sources: list[SourceFacts],
 ) -> None:
     """Map the chosen sources of one facts file into edges, merging with what is collected."""
     for source in sources:
@@ -1160,14 +1337,14 @@ def _map_file(
             kind = _EDGE_KIND_BY_FACT.get(str(payload.get("t")))
             if kind is None:
                 continue
-            edge = _edge_from_fact(payload, kind, source, loaded, mapper, overlay, lines)
+            edge = _edge_from_fact(payload, kind, source, loaded, mapper, overlay, lookup)
             if edge is not None and _collect(overlay, source.path, edge):
                 loaded.contributions[source.path].edges += 1
 
 
 def _skip(overlay: FactsOverlay, loaded: FactsFile, entry: SkippedFact) -> None:
     """Record one fact that never became an edge, on the overlay and on its source's account."""
-    overlay.skipped.append(entry)
+    overlay.skipped[entry.key] += 1
     contribution = loaded.contributions.get(entry.source_path)
     if contribution is not None:
         contribution.buckets[entry.bucket.value] += 1
@@ -1175,14 +1352,7 @@ def _skip(overlay: FactsOverlay, loaded: FactsFile, entry: SkippedFact) -> None:
 
 def _collect(overlay: FactsOverlay, file_path: str, edge: Edge) -> bool:
     """Add an edge to the file it belongs to, dropping one two facts files both wrote."""
-    collected = overlay.edges.setdefault(file_path, [])
-    seen = overlay._edge_keys.setdefault(file_path, set())  # noqa: SLF001 - same module
-    key = _edge_key(edge)
-    if key in seen:
-        return False
-    seen.add(key)
-    collected.append(edge)
-    return True
+    return overlay.edges.add(file_path, edge)
 
 
 def _map_generated_source(overlay: FactsOverlay, loaded: FactsFile, source: SourceFacts, mapper: RefMapper) -> None:
@@ -1315,11 +1485,6 @@ def _record_stale(overlay: FactsOverlay, loaded: FactsFile, source: SourceFacts)
         )
 
 
-def _edge_key(edge: Edge) -> tuple:
-    """The identity two facts files must agree on for their edges to be one edge."""
-    return (edge.src_id, edge.dst_id, edge.dst_name, edge.kind.value, edge.line, edge.arity, edge.is_new)
-
-
 def _edge_from_fact(
     payload: dict,
     kind: EdgeKind,
@@ -1327,7 +1492,7 @@ def _edge_from_fact(
     loaded: FactsFile,
     mapper: RefMapper,
     overlay: FactsOverlay,
-    lines: dict[str, int],
+    lookup: SymbolLookup,
 ) -> Edge | None:
     """Build one edge from one fact, or record why it could not be built."""
     from_ref = payload.get("from")
@@ -1380,7 +1545,8 @@ def _edge_from_fact(
     # line is the honest answer, and is what the derived tree-sitter edges use too.
     line = payload.get("line")
     if not isinstance(line, int):
-        line = lines.get(origin.symbol_id, 0)
+        declaration = lookup.by_id(origin.symbol_id)
+        line = declaration.start_line if declaration is not None else 0
     parsed = parse_java_ref(to_ref)
     return Edge(
         src_id=origin.symbol_id,
