@@ -193,11 +193,15 @@ class ServerEmbedder:
         """
         if not texts:
             return np.empty((0, self.dimensions), dtype=np.float32)
-        parts = [
-            _vectors(self.client.post(DOCUMENTS_ROUTE, {"spec": self.spec, "texts": batch}), len(batch))
-            for _, batch in batched(texts, DOCUMENTS_PER_REQUEST, _MAX_REQUEST_CHARS)
-        ]
-        return np.concatenate(parts).astype(np.float32, copy=False)
+        # Filled in place: concatenating the batches would hold every vector twice at the peak.
+        matrix: EmbeddingMatrix | None = None
+        for start, batch in batched(texts, DOCUMENTS_PER_REQUEST, _MAX_REQUEST_CHARS):
+            vectors = _vectors(self.client.post(DOCUMENTS_ROUTE, {"spec": self.spec, "texts": batch}), len(batch))
+            if matrix is None:
+                matrix = np.empty((len(texts), vectors.shape[1]), dtype=np.float32)
+            matrix[start : start + len(batch)] = vectors
+        assert matrix is not None
+        return matrix
 
     def embed_queries(self, texts: list[str]) -> EmbeddingMatrix:
         """Embed queries through the server, which never stores them.

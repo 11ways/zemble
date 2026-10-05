@@ -32,7 +32,8 @@ caller supplies `paths` or `exclude`. BM25 corpus statistics are the covering in
 as with an ancestor/subtree view. The eval below measures this intentional difference.
 On disk too, one root keeps one index: the widest one stored (`cache.covering_content`);
 saving it removes the narrower ones it covers, and `zemble clear orphans` removes those
-an older zemble left.
+an older zemble left. A wider index saved before a narrower one covers nothing: the
+narrower one keeps answering until the wider one is synced and saved again.
 
 The daemon rereads its env file at startup using an explicit path. An inherited
 `_ZEMBLE_USER_ENV_LOADED` from a long-running MCP client no longer suppresses newly

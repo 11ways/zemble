@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from tests.conftest import FakeEmbedder
 from zemble.cache import (
     cached_index_compatible,
+    covering_content,
     find_index_from_cache_folder,
     has_cached_index,
     resolve_index_root,
@@ -139,3 +141,40 @@ def test_a_sub_root_an_ancestor_answers_for_is_an_orphan(
         "src/main/java/com/example/core",
     )
     assert resolve_graph_root(str(sub)) == (str(workspace), "src/main/java/com/example/core"), "step 3: graph too"
+
+
+def test_an_older_wider_index_never_replaces_a_current_narrower_one(
+    tmp_project: Path, mock_embedder: FakeEmbedder
+) -> None:
+    """A code+docs index saved before the root's code index neither answers for it nor gets it cleared."""
+    root = str(tmp_project)
+    cache_folder = find_index_from_cache_folder(root, CODE).parent.parent
+    code_folder = find_index_from_cache_folder(root, CODE)
+    wide_folder = find_index_from_cache_folder(root, CODE_DOCS)
+    save_index_to_cache(ZembleIndex.from_path(tmp_project, content=CODE, embedder=mock_embedder), root)
+    kept = code_folder.parent / "kept-code-index"
+    shutil.copytree(code_folder, kept)
+    save_index_to_cache(ZembleIndex.from_path(tmp_project, content=CODE_DOCS, embedder=mock_embedder), root)
+    # The state a long-unused code+docs index leaves: the code index was kept current after it.
+    shutil.rmtree(code_folder)
+    kept.rename(code_folder)
+    wide_metadata = PersistencePath.from_path(wide_folder).metadata
+    stale = json.loads(wide_metadata.read_text())
+    stale["time"] -= 3600
+    wide_metadata.write_text(json.dumps(stale))
+
+    # 1. A code request is answered from the code index, not the older wider one.
+    assert covering_content(root, mock_embedder.model_id, CODE) == CODE, "step 1: the current index answers"
+    served = ZembleIndex.from_path(tmp_project, content=CODE, embedder=mock_embedder)
+    assert served.storage_content == CODE, "step 1: and is what gets loaded"
+
+    # 2. Clearing orphans keeps both: the code index is the current one, the wider one holds docs.
+    assert not [orphan for orphan in find_orphans(cache_folder) if orphan.kind is OrphanKind.INDEX_COVERED]
+
+    # 3. Once a docs request syncs the wider index it is current, and the code index is retired.
+    (tmp_project / "README.md").touch()
+    wide = ZembleIndex.from_path(tmp_project, content=CODE_DOCS, embedder=mock_embedder)
+    assert not wide.loaded_from_disk, "step 3: the wider index was stale and is synced"
+    save_index_to_cache(wide, root)
+    assert PersistencePath.from_path(code_folder).non_existing(), "step 3: the covered code index is gone"
+    assert covering_content(root, mock_embedder.model_id, CODE) == CODE_DOCS, "step 3: code+docs answers now"

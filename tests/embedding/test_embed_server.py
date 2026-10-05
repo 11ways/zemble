@@ -22,7 +22,7 @@ from zemble.embedding.served import ServerEmbedder, ServerReranker
 from zemble.embedding.server import KeyRing, add_key, make_server
 from zemble.embedding.server_cli import run_embed_server
 from zemble.embedding.service import EmbeddingService
-from zemble.embedding.wire import SERVER_ENV, SERVER_KEY_ENV
+from zemble.embedding.wire import DOCUMENTS_PER_REQUEST, SERVER_ENV, SERVER_KEY_ENV
 from zemble.rerank.registry import load_reranker
 
 SPEC = "voyage:voyage-4-lite@8"
@@ -200,6 +200,13 @@ def test_server_journey(served: Running) -> None:
     assert status["families"][0]["vectors"] == 4, "step 9: alpha, beta, gamma, delta are stored"
     assert status["documents_missed"] == 4
     assert status["queries"] == 1 and status["rerank_passages"] == 2
+
+
+def test_a_request_spanning_several_batches_keeps_its_order(served: Running) -> None:
+    """Texts sent in several requests come back as one matrix in input order."""
+    many = [f"text {n}" for n in range(DOCUMENTS_PER_REQUEST * 2 + 3)]
+    vectors = build_embedder(SPEC).embedder.embed_documents(many)
+    np.testing.assert_allclose(vectors, served.provider.vectors(many), atol=1e-6)
 
 
 def test_an_unknown_key_is_refused(served: Running, monkeypatch: pytest.MonkeyPatch) -> None:

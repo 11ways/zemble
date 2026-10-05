@@ -285,25 +285,42 @@ def covering_content(
     if is_git_url(path):
         return wanted
     capsule_key = CapsuleOptions.resolve(capsules).key
-    variants = stored_variants(find_index_from_cache_folder(path, wanted, exclude).parent)
-    for stored, _index_path, metadata in reversed(variants):
-        if set(wanted) <= set(stored) and _metadata_matches(metadata, embedder_id, stored, capsule_key):
+    compatible = [
+        (stored, metadata)
+        for stored, _index_path, metadata in stored_variants(find_index_from_cache_folder(path, wanted, exclude).parent)
+        if set(wanted) <= set(stored) and _metadata_matches(metadata, embedder_id, stored, capsule_key)
+    ]
+    exact = next((metadata for stored, metadata in compatible if stored == wanted), None)
+    for stored, metadata in reversed(compatible):
+        if exact is None or _written_since(metadata, exact):
             return stored
     return wanted
+
+
+def _written_since(wider: dict, narrower: dict) -> bool:
+    """Return whether a wider index was saved at or after a narrower one, so it is at least as current.
+
+    An older wider index would answer with a stale tree, and syncing it costs a rebuild of every
+    file changed since; until something saves it again, the narrower one keeps answering.
+    """
+    try:
+        return float(wider.get("time", 0)) >= float(narrower.get("time", 0))
+    except (TypeError, ValueError):
+        return False
 
 
 def covered_variants(folder: Path) -> list[Path]:
     """Return the index folders in a key folder that a wider compatible sibling already covers.
 
-    A narrower index is covered when a sibling holds every content type it holds and was built
-    with the same embedder, capsules, chunk size and format: requests for it are answered from
-    the sibling, so nothing reads it again.
+    A narrower index is covered when a sibling holds every content type it holds, was built
+    with the same embedder, capsules, chunk size and format, and was saved at or after it:
+    requests for it are answered from the sibling, so nothing reads it again.
     """
     variants = stored_variants(folder)
     covered = []
     for content, index_path, metadata in variants:
         for wider, _wider_path, wider_metadata in variants:
-            if not set(content) < set(wider):
+            if not set(content) < set(wider) or not _written_since(wider_metadata, metadata):
                 continue
             same_build = all(metadata.get(key) == wider_metadata.get(key) for key in _BUILD_IDENTITY)
             if same_build and wider_metadata.get("cache_version") == CACHE_FORMAT_VERSION:
