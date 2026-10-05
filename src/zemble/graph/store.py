@@ -16,7 +16,7 @@ import sqlite3
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -616,6 +616,45 @@ def sweep_graph_folder(folder: Path) -> list[Path] | None:
         if pointer is not None:
             _sweep(folder, pointer)
         return [path for path in before if not path.exists()]
+
+
+def graph_files(folder: Path) -> list[Path]:
+    """Return every file a graph folder's graph consists of: versions, sidecars, pointer, lock, legacy store."""
+    names = [entry for entry in sorted(os.listdir(folder)) if _VERSION_FILE.fullmatch(entry)] if folder.is_dir() else []
+    files = [folder / name for name in names]
+    files += [path for path in (folder / GRAPH_POINTER_NAME, folder / GRAPH_LOCK_NAME) if path.exists()]
+    return files + _legacy_files(folder)
+
+
+def remove_graph(folder: Path) -> bool:
+    """Delete a whole stored graph, as its writer, unless a writer or any reader has part of it.
+
+    Every version is held exclusively before anything is deleted, so a reader is never left on a
+    half-removed graph; the pointer goes first, so a new reader finds no graph rather than a
+    missing version.
+
+    :return: Whether the graph was removed.
+    """
+    with _writer_lock(folder, wait=False) as taken:
+        if not taken or (_legacy_files(folder) and not _legacy_unheld(folder)):
+            return False
+        names = sorted(
+            {
+                _version_name(int(match.group(1)))
+                for entry in os.listdir(folder)
+                if (match := _VERSION_FILE.fullmatch(entry))
+            }
+        )
+        with ExitStack() as holds:
+            if not all(holds.enter_context(_exclusive_hold(folder, name)) for name in names):
+                return False
+            (folder / GRAPH_POINTER_NAME).unlink(missing_ok=True)
+            for name in names:
+                _discard(folder / name)
+            for path in _legacy_files(folder):
+                path.unlink(missing_ok=True)
+        (folder / GRAPH_LOCK_NAME).unlink(missing_ok=True)
+    return True
 
 
 def _legacy_files(folder: Path) -> list[Path]:

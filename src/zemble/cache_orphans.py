@@ -11,9 +11,24 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from zemble.cache import cache_key, covered_variants, index_component_files, remove_index_components
+from zemble.cache import (
+    ancestor_answering,
+    cache_key,
+    covered_variants,
+    index_component_files,
+    remove_index_components,
+    stored_variants,
+)
 from zemble.embedding.gc import indexes_by_family, last_activity
-from zemble.graph.store import graph_root_of, retired_graph_files, sweep_graph_folder
+from zemble.graph.store import (
+    graph_covers,
+    graph_files,
+    graph_present,
+    graph_root_of,
+    remove_graph,
+    retired_graph_files,
+    sweep_graph_folder,
+)
 from zemble.openfiles import held_open
 
 #: A cache entry's folder name: the sha256 of its source.
@@ -37,6 +52,8 @@ class OrphanKind(str, Enum):
     TEMP_LEFTOVER = "temp-leftover"
     RETIRED_GRAPH = "retired-graph"
     INDEX_COVERED = "index-covered"
+    INDEX_UNDER_ANCESTOR = "index-under-ancestor"
+    GRAPH_UNDER_ANCESTOR = "graph-under-ancestor"
 
     @property
     def label(self) -> str:
@@ -56,6 +73,10 @@ class OrphanKind(str, Enum):
                 return "retired graph version or superseded graph.sqlite"
             case OrphanKind.INDEX_COVERED:
                 return "index a wider index of the same root covers"
+            case OrphanKind.INDEX_UNDER_ANCESTOR:
+                return "sub-root index an ancestor's index answers for"
+            case OrphanKind.GRAPH_UNDER_ANCESTOR:
+                return "sub-root graph an ancestor's graph answers for"
 
 
 @dataclass
@@ -92,10 +113,10 @@ def find_orphans(cache_folder: Path, *, max_age_days: int = DEFAULT_MAX_AGE_DAYS
         retired = tuple(retired_graph_files(graph)) if graph.is_dir() else ()
         if retired:
             orphans.append(Orphan(OrphanKind.RETIRED_GRAPH, graph, sum(map(_size, retired)), retired))
-        for covered in covered_variants(entry):
-            files = tuple(index_component_files(covered))
-            size = sum(_tree_size(path) if path.is_dir() else _size(path) for path in files)
-            orphans.append(Orphan(OrphanKind.INDEX_COVERED, covered, size, files))
+        covered = covered_variants(entry)
+        for index_path in covered:
+            orphans.append(_index_components_orphan(OrphanKind.INDEX_COVERED, index_path))
+        orphans.extend(_under_ancestor(entry, set(covered)))
     orphans.extend(_unused_embedders(cache_folder, oldest))
     orphans.extend(_temp_leftovers(cache_folder, doomed, now))
     return orphans
@@ -120,10 +141,52 @@ def remove_orphan(orphan: Orphan) -> bool:
         case OrphanKind.RETIRED_GRAPH:
             removed = sweep_graph_folder(orphan.target)
             return bool(removed)
-        case OrphanKind.INDEX_COVERED:
+        case OrphanKind.INDEX_COVERED | OrphanKind.INDEX_UNDER_ANCESTOR:
             # Only the index's own stores go: the symbol graph shares the `index` folder.
             remove_index_components(orphan.target)
             return True
+        case OrphanKind.GRAPH_UNDER_ANCESTOR:
+            return remove_graph(orphan.target)
+
+
+def _index_components_orphan(kind: OrphanKind, index_path: Path, detail: str = "") -> Orphan:
+    """Describe one stored index to remove, sized by its own stores, never the graph beside it."""
+    files = tuple(index_component_files(index_path))
+    size = sum(_tree_size(path) if path.is_dir() else _size(path) for path in files)
+    return Orphan(kind, index_path, size, files, detail)
+
+
+def _under_ancestor(entry: Path, covered: set[Path]) -> list[Orphan]:
+    """List a sub-root's indexes and graph that an ancestor root's own already answers for.
+
+    Routing sends a sub-path to its ancestor whenever the sub-root has nothing of its own, so
+    these are only ever read because they exist. The sub-root must still exist: one that is gone
+    is `INDEX_ROOT_GONE` / `GRAPH_ROOT_GONE` already.
+    """
+    orphans: list[Orphan] = []
+    for content, index_path, metadata in stored_variants(entry):
+        root = metadata.get("root_path")
+        if index_path in covered or not isinstance(root, str) or not Path(root).is_dir():
+            continue
+        exclude = metadata.get("exclude")
+        if cache_key(root, exclude if isinstance(exclude, list) else []) != entry.name:
+            continue
+        ancestor = ancestor_answering(root, content, metadata)
+        if ancestor is not None:
+            detail = f"{root} (answered from {ancestor})"
+            orphans.append(_index_components_orphan(OrphanKind.INDEX_UNDER_ANCESTOR, index_path, detail))
+    graph = entry / "index"
+    root = graph_root_of(graph) if graph.is_dir() else None
+    if root is not None and Path(root).is_dir() and cache_key(root) == entry.name:
+        for ancestor in Path(root).parents:
+            if graph_present(str(ancestor)) and graph_covers(
+                str(ancestor), Path(root).relative_to(ancestor).as_posix()
+            ):
+                files = tuple(graph_files(graph))
+                detail = f"{root} (answered from {ancestor})"
+                orphans.append(Orphan(OrphanKind.GRAPH_UNDER_ANCESTOR, graph, sum(map(_size, files)), files, detail))
+                break
+    return orphans
 
 
 def _key_dir_orphan(entry: Path, oldest: float) -> Orphan | None:

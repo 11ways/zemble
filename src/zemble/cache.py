@@ -354,6 +354,36 @@ def retire_covered_indexes(path: str, content: Sequence[ContentType], exclude: S
     return retired
 
 
+def ancestor_answering(root: str, content: Sequence[ContentType], metadata: dict) -> str | None:
+    """Return the nearest ancestor whose stored index would answer for a sub-root's index, or None.
+
+    The ancestor has to be what routing would pick (a compatible index covering the content, see
+    `resolve_index_root`) and has to hold files under the sub-root: an ancestor whose walk skipped
+    it, a nested repository it excludes, answers nothing there and the sub-root's own index stays.
+
+    :param root: The sub-root the index was built for.
+    :param content: The content types it holds.
+    :param metadata: Its stored metadata, whose embedder and capsules the ancestor must share.
+    :return: The ancestor root, or None.
+    """
+    embedder = metadata.get("embedder")
+    if not isinstance(embedder, str):
+        return None
+    capsule_key = str(metadata.get("capsules", ""))
+    resolved = Path(root)
+    for ancestor in _ancestor_directories(resolved):
+        variants = stored_variants(find_index_from_cache_folder(str(ancestor), content).parent)
+        for stored, _path, ancestor_metadata in variants:
+            if not (
+                set(content) <= set(stored) and _metadata_matches(ancestor_metadata, embedder, stored, capsule_key)
+            ):
+                continue
+            prefix = f"{resolved.relative_to(ancestor).as_posix()}/"
+            if any(path.startswith(prefix) for path in ancestor_metadata.get("files", {})):
+                return str(ancestor)
+    return None
+
+
 def has_cached_index(
     path: str, content: Sequence[ContentType] = (ContentType.CODE,), exclude: Sequence[str] = ()
 ) -> bool:

@@ -12,9 +12,11 @@ from zemble.cache import (
     cached_index_compatible,
     find_index_from_cache_folder,
     has_cached_index,
+    resolve_index_root,
     save_index_to_cache,
 )
 from zemble.cache_orphans import OrphanKind, find_orphans, remove_orphan
+from zemble.graph.store import build_graph, graph_present, resolve_graph_root
 from zemble.index import ZembleIndex
 from zemble.index.types import PersistencePath
 from zemble.index_cache import IndexCache
@@ -104,3 +106,34 @@ def test_a_covered_index_left_from_before_is_an_orphan(tmp_project: Path, mock_e
     assert PersistencePath.from_path(code_folder).non_existing(), "step 2: its stores are gone"
     assert (code_folder / "graph-1.sqlite").read_bytes() == b"graph", "step 2: the graph stays"
     assert not [orphan for orphan in find_orphans(cache_folder) if orphan.kind is OrphanKind.INDEX_COVERED]
+
+
+def test_a_sub_root_an_ancestor_answers_for_is_an_orphan(
+    tmp_path: Path, mock_embedder: FakeEmbedder, graph_fixture_root: Path, graph_cache: Path
+) -> None:
+    """A sub-repo's own index and graph go once its workspace's index and graph answer for it."""
+    workspace = tmp_path / "work"
+    shutil.copytree(graph_fixture_root, workspace)
+    sub = workspace / "src" / "main" / "java" / "com" / "example" / "core"
+    save_index_to_cache(ZembleIndex.from_path(sub, content=CODE, embedder=mock_embedder), str(sub))
+    build_graph(str(sub))
+
+    # 1. Before the workspace has an index or graph of its own, the sub-root's are not orphans.
+    kinds = {OrphanKind.INDEX_UNDER_ANCESTOR, OrphanKind.GRAPH_UNDER_ANCESTOR}
+    assert not [orphan for orphan in find_orphans(graph_cache) if orphan.kind in kinds], "step 1: still needed"
+
+    # 2. Once the workspace has both, the sub-root's are reported, naming who answers instead.
+    save_index_to_cache(ZembleIndex.from_path(workspace, content=CODE, embedder=mock_embedder), str(workspace))
+    build_graph(str(workspace))
+    found = {orphan.kind: orphan for orphan in find_orphans(graph_cache) if orphan.kind in kinds}
+    assert set(found) == kinds, "step 2: the sub-root's index and graph are both orphans"
+    assert all(str(workspace) in orphan.detail for orphan in found.values()), "step 2: the answering root is named"
+
+    # 3. Removing them leaves routing to the workspace, which still answers for the sub-path.
+    assert all(remove_orphan(orphan) for orphan in found.values()), "step 3: both are removed"
+    assert not graph_present(str(sub)), "step 3: the sub-root graph is gone"
+    assert resolve_index_root(str(sub), mock_embedder.model_id, CODE) == (
+        str(workspace),
+        "src/main/java/com/example/core",
+    )
+    assert resolve_graph_root(str(sub)) == (str(workspace), "src/main/java/com/example/core"), "step 3: graph too"
