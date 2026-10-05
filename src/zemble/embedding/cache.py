@@ -252,8 +252,11 @@ class EmbeddingCache:
                 self._connection.executemany(
                     "INSERT OR IGNORE INTO wanted (digest) VALUES (?)", [(digest,) for digest in digests]
                 )
+            # EXISTS pins the probe direction: as a JOIN, sqlite chose to scan the whole embeddings
+            # key for every request, 1.6 s per call on a server holding millions of vectors.
             rows = self._connection.execute(
-                "SELECT w.digest FROM wanted w JOIN embeddings e ON e.text_sha256 = w.digest WHERE e.dims >= ?",
+                "SELECT w.digest FROM wanted w WHERE EXISTS "
+                "(SELECT 1 FROM embeddings e WHERE e.text_sha256 = w.digest AND e.dims >= ?)",
                 (dims,),
             ).fetchall()
         return {row[0] for row in rows}

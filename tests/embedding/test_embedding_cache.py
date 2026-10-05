@@ -172,3 +172,26 @@ def test_a_failure_mid_call_keeps_the_vectors_already_paid_for(tmp_path: Path, m
     healthy = CountingEmbedder(dimensions=8)
     CachingEmbedder(healthy, "fake:counting", tmp_path).embed_documents(texts)
     assert healthy.document_batches == [texts[4:6]], "step 3: the retry must ask only for the unflushed tail"
+
+
+def test_coverage_probes_the_key_once_per_text_and_never_scans_the_store(tmp_path: Path) -> None:
+    """A coverage lookup costs what it asks, not what the cache holds."""
+    cache = EmbeddingCache("voyage:voyage-code-4", tmp_path)
+    vector = np.ones(4, dtype=np.float32).tobytes()
+    cache.put_missing([(text_hash(f"text {i}"), 4, vector) for i in range(50)])
+
+    # 1. Stored texts are covered at their width and below it, never above it.
+    asked = [text_hash("text 1"), text_hash("text 2"), text_hash("missing")]
+    assert cache.covered(asked, 4) == set(asked[:2]), "step 1: stored texts are covered"
+    assert cache.covered(asked, 2) == set(asked[:2]), "step 1: a wider vector serves a narrower width"
+    assert cache.covered(asked, 8) == set(), "step 1: a narrower vector never serves a wider one"
+
+    # 2. The lookup searches the key per wanted text; scanning the store made every call cost
+    #    the whole file on a server holding millions of vectors.
+    statements: list[str] = []
+    cache._connection.set_trace_callback(statements.append)
+    cache.covered(asked, 4)
+    cache._connection.set_trace_callback(None)
+    lookup = next(statement for statement in statements if statement.startswith("SELECT w.digest"))
+    plan = [row[3] for row in cache._connection.execute(f"EXPLAIN QUERY PLAN {lookup}")]
+    assert not any(step.startswith("SCAN e") for step in plan), f"step 2: the store is never scanned: {plan}"
