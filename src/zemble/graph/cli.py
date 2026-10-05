@@ -199,7 +199,7 @@ def _run_facts_status(args: argparse.Namespace) -> int:
         calls = _call_grades(provider)
         by_source = {
             row["source"] or TREE_SITTER_SOURCE: row["n"]
-            for row in provider.connection.execute("SELECT source, COUNT(*) AS n FROM edges GROUP BY source")
+            for row in provider.connection.execute("SELECT source, COUNT(*) AS n FROM edge_rows GROUP BY source")
         }
     finally:
         provider.close()
@@ -214,7 +214,7 @@ def _call_grades(provider: SqliteGraphProvider) -> dict[str, dict[str, int]]:
     """Count CALLS edges by resolution, split into the ones a tool wrote and the rest."""
     grades: dict[str, dict[str, int]] = {"with_facts": {}, "without_facts": {}}
     rows = provider.connection.execute(
-        "SELECT source, resolution, COUNT(*) AS n FROM edges WHERE kind = 'calls' GROUP BY source, resolution"
+        "SELECT source, resolution, COUNT(*) AS n FROM edge_rows WHERE kind = 'calls' GROUP BY source, resolution"
     )
     for row in rows:
         bucket = "without_facts" if (row["source"] or TREE_SITTER_SOURCE) == TREE_SITTER_SOURCE else "with_facts"

@@ -275,7 +275,7 @@ Sqlite in the index cache folder, created on demand: the graph is buildable with
 no search index present (`zemble/graph/store.py`). The folder holds versions,
 `graph-<n>.sqlite`, and a pointer, `graph.current`, naming the current version on
 its first line and the one it replaced on its second. Tables:
-`symbols`, `edges` (each carrying the `source` that produced it), `files` (path,
+`symbols`, `edges` (each carrying the `source` that produced it; see below), `files` (path,
 mtime, size, package, imports), `decl_keys` (the Hawkeye registration keys a symbol
 declares - element tag, template tag, template id, function name and namespaced
 function key), `facts_symbols` (the `symbol` facts of every facts file, so mapping
@@ -283,10 +283,18 @@ one file can reach the others without parsing them), `facts_status` (one row per
 facts file, see [the facts overlay](graph-facts.md)) and `meta` (format version,
 root, covered languages, skipped languages). Format version 7: an ambiguous edge stores
 how many symbols it could mean, not their ids, because nothing ever read the list and on
-javaweb it was 1.6 GB of a 2.6 GB store (0.9 GB after the migration). A column a graph
+javaweb it was 1.6 GB of a 2.6 GB store (0.9 GB after the migration). Format version 8:
+an edge spelled its source and destination symbol ids and its file as text, ~400 bytes a
+row, and three indexes copied those strings again. Each id and file is now stored once in
+`refs` and `edge_rows` holds its integer key; `edges` is a view with the old columns, so
+every reader keeps its SQL and the plan reaches `edge_rows` through its integer indexes.
+The zenit workspace graph went from 2.1 GB to 0.63 GB, and its adjacency and `dst_name`
+queries got faster with it (fewer pages). Interned ids no edge uses any more are pruned
+when a store is compacted. A column a graph
 built by an older zemble lacks is added on the next open and `decl_keys` is filled
 in one pass over the symbol table, so a version-4 graph is migrated rather than
-rebuilt; a graph is derived data either way.
+rebuilt; a graph is derived data either way. A format-7 graph is converted on its next
+writable open (20 s and 48 MiB for the 2.1 GB one) and compacted by that build.
 
 ### Durability
 
@@ -367,8 +375,7 @@ An incremental refresh writes **in place** in the current version: copying a
 safe. What it cannot do is give freed pages back, so a refresh that leaves more
 than a quarter of the store on the freelist is followed by a `VACUUM INTO` the next
 version, published the same way (`_compact_if_drifted`; stores under 4096 pages
-are left alone). `zemble graph compact` reclaims anything over 2% free. Size alone is not drift: the javaweb graph is genuinely 1.9 GB,
-953 MB of it the `edges` table and 644 MB its indexes.
+are left alone). `zemble graph compact` reclaims anything over 2% free.
 
 A store sqlite calls malformed, or a pointer naming no version that exists, is
 never repaired and never read past. `build_graph` catches it, says so at ERROR

@@ -62,7 +62,7 @@ from zemble.types import ContentType
 logger = logging.getLogger(__name__)
 DEFAULT_WORKERS = min(10, os.cpu_count() or 2)
 
-GRAPH_FORMAT_VERSION = 7
+GRAPH_FORMAT_VERSION = 8
 #: The file naming the current graph version (first line) and the one it replaced (second).
 GRAPH_POINTER_NAME = "graph.current"
 #: The file whose OS lock is held by the one process allowed to write a workspace's graph.
@@ -139,11 +139,17 @@ CREATE TABLE IF NOT EXISTS symbols (
     annotations TEXT, signature TEXT, is_test INTEGER, param_types TEXT,
     annotation_args TEXT
 );
-CREATE TABLE IF NOT EXISTS edges (
-    src_id TEXT, dst_id TEXT, dst_name TEXT, kind TEXT, line INTEGER,
+CREATE TABLE IF NOT EXISTS refs (key INTEGER PRIMARY KEY, text TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS edge_rows (
+    src INTEGER NOT NULL, dst INTEGER, dst_name TEXT, kind TEXT, line INTEGER,
     resolution TEXT, candidate_count INTEGER, arity INTEGER, receiver TEXT,
-    receiver_type TEXT, is_new INTEGER, file_path TEXT, source TEXT, origin_ref TEXT
+    receiver_type TEXT, is_new INTEGER, file INTEGER NOT NULL, source TEXT, origin_ref TEXT
 );
+CREATE VIEW IF NOT EXISTS edges AS
+    SELECT s.text AS src_id, d.text AS dst_id, e.dst_name, e.kind, e.line, e.resolution,
+           e.candidate_count, e.arity, e.receiver, e.receiver_type, e.is_new, f.text AS file_path,
+           e.source, e.origin_ref
+    FROM edge_rows e JOIN refs s ON s.key = e.src LEFT JOIN refs d ON d.key = e.dst JOIN refs f ON f.key = e.file;
 CREATE TABLE IF NOT EXISTS facts_status (
     path TEXT PRIMARY KEY, tool TEXT, tool_version TEXT, generated_at TEXT, language TEXT,
     mtime_ns INTEGER, size INTEGER, files_declared INTEGER, files_fresh INTEGER,
@@ -161,10 +167,10 @@ CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified ON symbols(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
 CREATE INDEX IF NOT EXISTS idx_symbols_container ON symbols(container_id);
-CREATE INDEX IF NOT EXISTS idx_edges_dst_kind ON edges(dst_id, kind);
-CREATE INDEX IF NOT EXISTS idx_edges_src_kind ON edges(src_id, kind);
-CREATE INDEX IF NOT EXISTS idx_edges_dstname_kind ON edges(dst_name, kind);
-CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_path);
+CREATE INDEX IF NOT EXISTS idx_edge_rows_dst_kind ON edge_rows(dst, kind);
+CREATE INDEX IF NOT EXISTS idx_edge_rows_src_kind ON edge_rows(src, kind);
+CREATE INDEX IF NOT EXISTS idx_edge_rows_dstname_kind ON edge_rows(dst_name, kind);
+CREATE INDEX IF NOT EXISTS idx_edge_rows_file ON edge_rows(file);
 CREATE INDEX IF NOT EXISTS idx_facts_symbols_ref ON facts_symbols(ref, language);
 CREATE INDEX IF NOT EXISTS idx_facts_symbols_file ON facts_symbols(facts_file);
 CREATE INDEX IF NOT EXISTS idx_decl_keys_value ON decl_keys(key, value);
@@ -794,6 +800,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE edges ADD COLUMN origin_ref TEXT")
     if "candidates" in edge_columns:
         _count_candidates(connection, edge_columns)
+    _normalize_edges(connection)
     status_columns = {row["name"] for row in connection.execute("PRAGMA table_info(facts_status)")}
     if "template_paths" not in status_columns:
         connection.execute("ALTER TABLE facts_status ADD COLUMN template_paths TEXT")
@@ -820,6 +827,70 @@ def _count_candidates(connection: sqlite3.Connection, edge_columns: set[str]) ->
         "UPDATE edges SET candidate_count = COALESCE(json_array_length(candidates), 0) WHERE candidate_count IS NULL"
     )
     connection.execute("ALTER TABLE edges DROP COLUMN candidates")
+    connection.commit()
+
+
+#: Spell a format-7 row's file the way `_edge_row` does: the part of its source id before `#`.
+_LEGACY_FILE = "COALESCE(file_path, substr(src_id, 1, instr(src_id || '#', '#') - 1))"
+
+
+def _normalize_edges(connection: sqlite3.Connection) -> None:
+    """Turn a format-7 `edges` table into `edge_rows` over interned `refs`, behind the `edges` view.
+
+    Each edge spelled its source and destination symbol ids and its file as text (~400 bytes
+    with them), and three indexes copied those strings again: 2.1 GB of a zenit workspace graph,
+    0.6 GB once every id is stored once in `refs` and edges hold its key. Readers keep their SQL:
+    `edges` is now a view with the old columns, and the plan reaches `edge_rows` through its
+    integer indexes. The old table's pages are freed; the build that opened the store compacts
+    them away (`_compact_if_drifted`), as `zemble graph compact` does for a store nobody writes.
+    """
+    kind = connection.execute("SELECT type FROM sqlite_master WHERE name = 'edges'").fetchone()
+    if kind is None or kind[0] != "table":
+        return
+    logger.info("graph: storing edge endpoints as interned keys (format %d)", GRAPH_FORMAT_VERSION)
+    connection.execute("INSERT OR IGNORE INTO refs (text) SELECT src_id FROM edges")
+    connection.execute("INSERT OR IGNORE INTO refs (text) SELECT dst_id FROM edges WHERE dst_id IS NOT NULL")
+    connection.execute(f"INSERT OR IGNORE INTO refs (text) SELECT {_LEGACY_FILE} FROM edges")  # noqa: S608
+    connection.execute(
+        f"INSERT INTO edge_rows SELECT s.key, d.key, e.dst_name, e.kind, e.line, e.resolution, "  # noqa: S608
+        f"e.candidate_count, e.arity, e.receiver, e.receiver_type, e.is_new, f.key, e.source, e.origin_ref "
+        f"FROM (SELECT rowid AS r, *, {_LEGACY_FILE} AS file FROM edges) e "
+        f"JOIN refs s ON s.text = e.src_id LEFT JOIN refs d ON d.text = e.dst_id JOIN refs f ON f.text = e.file "
+        f"ORDER BY e.r"
+    )
+    connection.execute("DROP TABLE edges")
+    connection.executescript(_SCHEMA)
+    connection.commit()
+
+
+def insert_edges(connection: sqlite3.Connection, edges: Iterable[Edge]) -> None:
+    """Store edges, interning their endpoints; the one way an edge reaches `edge_rows` outside a build."""
+    with _scratch(connection):
+        _stage(connection, edges, table="resolved")
+        _publish_resolved(connection)
+
+
+def _publish_resolved(connection: sqlite3.Connection) -> None:
+    """Copy a build's resolved edges out of the scratch database into `edge_rows`, interning their endpoints."""
+    for column in ("src_id", "dst_id", "file_path"):
+        connection.execute(
+            f"INSERT OR IGNORE INTO main.refs (text) SELECT {column} FROM scratch.resolved "  # noqa: S608
+            f"WHERE {column} IS NOT NULL"
+        )
+    connection.execute(
+        "INSERT INTO main.edge_rows SELECT s.key, d.key, r.dst_name, r.kind, r.line, r.resolution, "
+        "r.candidate_count, r.arity, r.receiver, r.receiver_type, r.is_new, f.key, r.source, r.origin_ref "
+        "FROM scratch.resolved r JOIN main.refs s ON s.text = r.src_id LEFT JOIN main.refs d ON d.text = r.dst_id "
+        "JOIN main.refs f ON f.text = r.file_path ORDER BY r.rowid"
+    )
+
+
+def _prune_refs(connection: sqlite3.Connection) -> None:
+    """Forget interned ids no edge uses any more: an incremental build only ever adds to `refs`."""
+    connection.execute(
+        "DELETE FROM refs WHERE key NOT IN (SELECT src FROM edge_rows) AND key NOT IN "
+        "(SELECT dst FROM edge_rows WHERE dst IS NOT NULL) AND key NOT IN (SELECT file FROM edge_rows)"
+    )
     connection.commit()
 
 
@@ -1322,6 +1393,8 @@ def _compact_if_drifted(folder: Path, current: str, free_fraction: float = _COMP
         free = connection.execute("PRAGMA freelist_count").fetchone()[0]
         if pages < _COMPACT_MIN_PAGES or free < pages * free_fraction:
             return False
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'edge_rows'").fetchone():
+            _prune_refs(connection)
         name = _next_version(folder)
         target = folder / name
         _discard(target)
@@ -1379,10 +1452,10 @@ def _run_build(
     _write_meta(connection, root)
     _write_coverage(connection, stats.skipped_by_language)
     stats.symbols = connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
-    stats.edges = connection.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+    stats.edges = connection.execute("SELECT COUNT(*) FROM edge_rows").fetchone()[0]
     stats.resolution_counts = {
         row["resolution"]: row["n"]
-        for row in connection.execute("SELECT resolution, COUNT(*) AS n FROM edges GROUP BY resolution")
+        for row in connection.execute("SELECT resolution, COUNT(*) AS n FROM edge_rows GROUP BY resolution")
     }
 
 
@@ -1515,8 +1588,9 @@ def _delete_files(connection: sqlite3.Connection, paths: Sequence[str]) -> None:
     """Drop every row belonging to the given files."""
     for chunk in _chunks(paths):
         placeholders = ",".join("?" * len(chunk))
-        for table in ("symbols", "edges", "decl_keys"):
+        for table in ("symbols", "decl_keys"):
             connection.execute(f"DELETE FROM {table} WHERE file_path IN ({placeholders})", chunk)  # noqa: S608
+        _delete_edges(connection, chunk)
         connection.execute(f"DELETE FROM files WHERE path IN ({placeholders})", chunk)  # noqa: S608
 
 
@@ -1659,10 +1733,7 @@ def _resolve_pass(
         derived += resolver.derive_exercises(pending)
         _stage(connection, pending + derived, table="resolved")
         lookup.release()
-    columns = _EDGE_COLUMNS_SQL
-    connection.execute(
-        f"INSERT INTO main.edges ({columns}) SELECT {columns} FROM scratch.resolved ORDER BY rowid"  # noqa: S608
-    )
+    _publish_resolved(connection)
     _write_facts_status(connection, overlay, plan)
     stats.facts = _facts_stats(connection)
 
@@ -2100,7 +2171,10 @@ def _delete_edges(connection: sqlite3.Connection, paths: Sequence[str]) -> None:
     """Drop the edges of files that are about to be re-resolved."""
     for chunk in _chunks(paths):
         placeholders = ",".join("?" * len(chunk))
-        connection.execute(f"DELETE FROM edges WHERE file_path IN ({placeholders})", chunk)  # noqa: S608
+        connection.execute(
+            f"DELETE FROM edge_rows WHERE file IN (SELECT key FROM refs WHERE text IN ({placeholders}))",  # noqa: S608
+            chunk,
+        )
 
 
 def _reset(edge: Edge) -> Edge:

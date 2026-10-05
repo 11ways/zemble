@@ -10,12 +10,9 @@ import pytest
 
 from zemble.graph.model import Edge, EdgeKind, Resolution
 from zemble.graph.store import (
-    _EDGE_COLUMNS_SQL,
-    _EDGE_PLACEHOLDERS,
     GRAPH_FORMAT_VERSION,
     GRAPH_POINTER_NAME,
     _compact_if_drifted,
-    _edge_row,
     _Pointer,
     _publish,
     _read_pointer,
@@ -26,8 +23,20 @@ from zemble.graph.store import (
     graph_db_path,
     graph_exists,
     graph_folder,
+    insert_edges,
     open_db,
 )
+
+
+def _as_edge_table(db: Path) -> None:
+    """Rewrite a store into the format-7 layout: one `edges` table spelling every id as text."""
+    legacy = sqlite3.connect(db)
+    legacy.executescript(
+        "CREATE TABLE legacy AS SELECT * FROM edges; DROP VIEW edges; DROP TABLE edge_rows; DROP TABLE refs; "
+        "ALTER TABLE legacy RENAME TO edges; UPDATE meta SET value = '7' WHERE key = 'format_version';"
+    )
+    legacy.commit()
+    legacy.close()
 
 
 def _copy_workspace(source: Path, destination: Path) -> Path:
@@ -272,7 +281,7 @@ def test_a_format_6_store_keeps_only_candidate_counts(tmp_path: Path) -> None:
     fresh = Edge(src_id="a/A.java#A.go()", dst_name="id", kind=EdgeKind.CALLS, line=9, candidates=ids[:7])
     fresh.resolution = Resolution.AMBIGUOUS
     writer = open_db(db)
-    writer.execute(f"INSERT INTO edges ({_EDGE_COLUMNS_SQL}) VALUES ({_EDGE_PLACEHOLDERS})", _edge_row(fresh))
+    insert_edges(writer, [fresh])
     stored = edge_from_row(writer.execute("SELECT * FROM edges WHERE line = 9").fetchone())
     writer.close()
     assert stored.ambiguity() == 7, "step 3: a new ambiguous edge keeps its count"
@@ -284,7 +293,8 @@ def test_compact_brings_every_stored_graph_to_the_current_format(graph_fixture_r
     built = build_graph(path)
     db = graph_db_path(path)
     assert db is not None
-    # The state a format-6 zemble left: every edge carries a long candidate list.
+    # The state a format-6 zemble left: an edges table where every edge carries a long candidate list.
+    _as_edge_table(db)
     legacy = sqlite3.connect(db)
     legacy.execute("ALTER TABLE edges ADD COLUMN candidates TEXT")
     legacy.execute("UPDATE edges SET candidates = ?", (json.dumps([f"x/Y.java#Y.m{n}()" for n in range(10000)]),))
@@ -302,8 +312,16 @@ def test_compact_brings_every_stored_graph_to_the_current_format(graph_fixture_r
     connection = connect(path)
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(edges)")}
     count = connection.execute("SELECT COUNT(*), MIN(candidate_count) FROM edges").fetchone()
+    layout = connection.execute("SELECT type FROM sqlite_master WHERE name = 'edges'").fetchone()[0]
+    spelled = connection.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
+    distinct = connection.execute(
+        "SELECT COUNT(*) FROM "
+        "(SELECT src_id FROM edges UNION SELECT dst_id FROM edges UNION SELECT file_path FROM edges)"
+    ).fetchone()[0]
     connection.close()
     assert "candidates" not in columns, "step 2: the list column is gone"
+    assert layout == "view", "step 2: edges are read through the view over interned keys"
+    assert spelled == distinct - 1, "step 2: every id and file is spelled once (the NULL dst_id is not one)"
     assert tuple(count) == (built.edges, 10000), "step 2: every edge kept its count"
 
     # 3. Running it again finds nothing left to do.
