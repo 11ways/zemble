@@ -1,5 +1,7 @@
 """Plan and write one index generation, streaming it to disk in memory bounded by one batch."""
 
+import errno
+import os
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -33,6 +35,8 @@ from zemble.types import Chunk, ContentType
 #: bound a build's vector memory: neither the fresh nor the reused vectors are ever held whole.
 _EMBED_ROWS = 2048
 _COPY_ROWS = 16384
+#: Bytes before the first row of a written vector matrix: one 4 KiB block (see `_create_vectors`).
+_HEADER_BYTES = 4096
 
 
 @dataclass
@@ -157,6 +161,39 @@ def plan_changed_files(
             yield planned
 
 
+def change_set_moves_anything(
+    path: Path,
+    changed: Iterable[Path],
+    content: ContentType | Sequence[ContentType] = (ContentType.CODE,),
+    display_root: Path | None = None,
+    previous_manifest: dict[str, FileManifestEntry] | None = None,
+    exclude: Sequence[str] = (),
+) -> bool:
+    """Return whether :func:`plan_changed_files` would plan anything but reuse for this change set.
+
+    A watcher reports facts files, build output and touched-but-unchanged files as readily as
+    edits, and writing a whole generation to learn that nothing moved costs seconds and the
+    index's size in disk writes. Same rules as the plan: a named path is reused while its
+    modification time stands, dropped when it is gone or no longer indexable, chunked otherwise.
+    """
+    normalized = (content,) if isinstance(content, ContentType) else tuple(content)
+    manifest = previous_manifest or {}
+    for indexed_path, file_path in changed_indexed_paths(path, changed, normalized, display_root, exclude).items():
+        entry = manifest.get(indexed_path)
+        try:
+            stat = file_path.stat()
+            indexable = get_file_status(file_path, None, stat) == FileStatus.VALID
+        except OSError:
+            indexable = False
+        if not indexable:
+            if entry is not None:
+                return True
+            continue
+        if entry is None or entry.mtime_ns != stat.st_mtime_ns:
+            return True
+    return False
+
+
 def _plan_one(
     file_path: Path,
     indexed_path: str,
@@ -251,18 +288,19 @@ def _write_vectors(
     fresh = _EmbeddingTexts(chunks, [(start, count) for start, count, previous in runs if previous < 0])
     require_affordable_bill(embedder, fresh)
     dimensions = previous_vectors.shape[1] if previous_vectors is not None else embedder.dimensions
-    vectors = np.lib.format.open_memmap(
-        directory / "vectors.npy", mode="w+", dtype=np.float32, shape=(total, dimensions)
-    )
+    path = directory / "vectors.npy"
+    _create_vectors(path, total, dimensions)
+    reused = [(start, count, previous) for start, count, previous in runs if previous >= 0]
+    copied = previous_vectors is not None and bool(reused) and _copy_in_kernel(previous_vectors, path, reused)
+    vectors = np.memmap(path, dtype=np.float32, mode="r+", offset=_HEADER_BYTES, shape=(total, dimensions))
     try:
-        for start, count, previous in runs:
-            if previous < 0 or previous_vectors is None:
-                continue
-            for offset in range(0, count, _COPY_ROWS):
-                step = min(_COPY_ROWS, count - offset)
-                vectors[start + offset : start + offset + step] = previous_vectors[
-                    previous + offset : previous + offset + step
-                ]
+        if previous_vectors is not None and not copied:
+            for start, count, previous in reused:
+                for offset in range(0, count, _COPY_ROWS):
+                    step = min(_COPY_ROWS, count - offset)
+                    vectors[start + offset : start + offset + step] = previous_vectors[
+                        previous + offset : previous + offset + step
+                    ]
         batch_rows: list[int] = []
         batch_texts: list[str] = []
         for row, text in zip(fresh.rows(), fresh, strict=True):
@@ -277,6 +315,56 @@ def _write_vectors(
     finally:
         del vectors
     return len(fresh)
+
+
+def _create_vectors(path: Path, total: int, dimensions: int) -> None:
+    """Create a zeroed float32 `.npy` matrix whose rows start on a filesystem block boundary.
+
+    numpy pads its header to 64 bytes, which leaves every row off the 4 KiB blocks a copy-on-write
+    filesystem shares; padded to :data:`_HEADER_BYTES`, a 1024-wide row IS a block, and copying
+    reused rows can share them instead of writing them again.
+    """
+    header = f"{{'descr': '<f4', 'fortran_order': False, 'shape': ({total}, {dimensions}), }}"
+    length = _HEADER_BYTES - 10
+    with open(path, "wb") as handle:
+        handle.write(b"\x93NUMPY\x01\x00" + length.to_bytes(2, "little"))
+        handle.write(header.ljust(length - 1).encode("latin1") + b"\n")
+        handle.truncate(_HEADER_BYTES + total * dimensions * 4)
+
+
+def _copy_in_kernel(previous_vectors: np.ndarray, target: Path, runs: list[tuple[int, int, int]]) -> bool:
+    """Copy reused rows file to file with `copy_file_range`, which btrfs and xfs answer by sharing blocks.
+
+    :return: False when the previous matrix is not one whole mapped float32 file or the platform
+        cannot copy between files; the caller then copies every reused row through memory.
+    """
+    filename = getattr(previous_vectors, "filename", None)
+    offset = getattr(previous_vectors, "offset", None)
+    if filename is None or offset is None or not hasattr(os, "copy_file_range"):
+        return False
+    if (
+        previous_vectors.dtype != np.float32
+        or not previous_vectors.flags.c_contiguous
+        or os.path.getsize(filename) != offset + previous_vectors.nbytes
+    ):
+        # A view of part of a mapping carries its parent's offset; only a whole file is safe to address.
+        return False
+    row = previous_vectors.shape[1] * previous_vectors.itemsize
+    with open(filename, "rb") as source, open(target, "r+b") as destination:
+        for start, count, previous in runs:
+            read_at, write_at, remaining = offset + previous * row, _HEADER_BYTES + start * row, count * row
+            while remaining:
+                try:
+                    copied = os.copy_file_range(source.fileno(), destination.fileno(), remaining, read_at, write_at)
+                except OSError as error:
+                    if error.errno in (errno.EXDEV, errno.ENOSYS, errno.EOPNOTSUPP, errno.EINVAL):
+                        # The memory copy that follows rewrites every reused row, these included.
+                        return False
+                    raise
+                if not copied:
+                    raise OSError(f"{filename} ended before row {previous + count}")
+                read_at, write_at, remaining = read_at + copied, write_at + copied, remaining - copied
+    return True
 
 
 def _extend(runs: list[tuple[int, int, int]], start: int, count: int, previous: int) -> None:
@@ -369,15 +457,30 @@ def write_index(
     manifest: dict[str, FileManifestEntry] = {}
     runs: list[tuple[int, int, int]] = []
     row = 0
+    # Unchanged files arrive in the previous generation's order, so their rows form a few long
+    # runs; each run is copied in one step rather than file by file (13k calls on the workspace).
+    reuse_first, reuse_count = 0, 0
+
+    def copy_reused() -> None:
+        nonlocal reuse_count
+        if reuse_count and previous is not None:
+            chunk_writer.reuse(previous.chunks, reuse_first, reuse_count)
+            bm25_writer.reuse(reuse_first, reuse_count)
+            symbol_writer.reuse(reuse_first, reuse_count)
+        reuse_count = 0
+
     for planned in plan:
         manifest[planned.indexed_path] = FileManifestEntry(mtime_ns=planned.mtime_ns, start=row, count=planned.count)
         if planned.reused and previous is not None and planned.previous_entry is not None:
             first = planned.previous_entry.start
-            chunk_writer.reuse(previous.chunks, first, planned.count)
-            bm25_writer.reuse(first, planned.count)
-            symbol_writer.reuse(first, planned.count)
+            if reuse_count and first != reuse_first + reuse_count:
+                copy_reused()
+            if not reuse_count:
+                reuse_first = first
+            reuse_count += planned.count
             _extend(runs, row, planned.count, first)
         else:
+            copy_reused()
             for slot, chunk in enumerate(planned.chunks):
                 chunk_writer.append(chunk)
                 bm25_writer.add(
@@ -387,6 +490,7 @@ def write_index(
                 symbol_writer.add(chunk.content)
             _extend(runs, row, planned.count, -1)
         row += planned.count
+    copy_reused()
     chunk_writer.finish()
     if not row:
         raise ValueError(f"No supported files found under {path}.")

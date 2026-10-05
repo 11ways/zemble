@@ -57,6 +57,7 @@ from zemble.embedding.base import Embedder
 from zemble.graph.facts import matches_facts_glob
 from zemble.index import ZembleIndex
 from zemble.index.chunk_store import ChunkList
+from zemble.index.create import change_set_moves_anything
 from zemble.index.files import get_extensions
 from zemble.index.scope import TreeEstimate, estimate_tree, measure_work, require_declared_scope
 from zemble.index.types import PreviousIndex
@@ -190,6 +191,9 @@ def rebuild_index(
 ) -> tuple[ZembleIndex, dict[str, int]]:
     """Write and publish the next generation of a served root, returning it loaded and what moved.
 
+    A change set that moves nothing the index holds - a facts file, build output, a touched file -
+    hands back *current* itself rather than writing a copy of it.
+
     :param current: The index currently serving this root; it is read, never written.
     :param cache_key: The root and content types being rebuilt.
     :param changed_paths: The paths a watcher saw move; None re-walks the whole tree.
@@ -199,6 +203,10 @@ def rebuild_index(
         raise TypeError("a served index is always loaded from its stores")
     root = Path(cache_key[0])
     content = cache_key[1]
+    if changed_paths is not None and not change_set_moves_anything(
+        root, changed_paths, content, root, current._manifest, current.exclude
+    ):
+        return current, {"added": 0, "removed": 0, "changed": 0}
     previous = PreviousIndex(
         chunks=current.chunks,
         vectors=current._semantic_index.vectors,

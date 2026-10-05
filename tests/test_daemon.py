@@ -306,6 +306,47 @@ async def test_watcher_rebuild_makes_a_new_file_searchable(tmp_project: Path) ->
 
 
 @pytest.mark.anyio
+async def test_a_change_set_that_moves_nothing_writes_no_generation(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Watcher noise keeps the served index as it is; only a real move writes a generation."""
+    daemon = _daemon_with_fake_embedder(watch=False)
+    cache_key, served = await daemon.index_for({"path": str(tmp_project)})
+    writes: list[int] = []
+    build = server.ZembleIndex.build
+    monkeypatch.setattr(
+        server.ZembleIndex,
+        "build",
+        classmethod(lambda _cls, *args, **kwargs: writes.append(1) or build(*args, **kwargs)),
+    )
+    facts = tmp_project / "build" / "zemble" / "facts.jsonl"
+    facts.parent.mkdir(parents=True)
+    facts.write_text("{}\n", encoding="utf-8")
+    auth = tmp_project / "auth.py"
+    stamp = auth.stat().st_mtime_ns
+    os.utime(auth, ns=(stamp, stamp))
+
+    # 1. A facts file, a vanished file the index never held, and a file touched without moving
+    #    its modification time: nothing to write, and the very same index keeps serving.
+    noise = [facts, tmp_project / "gone.py", auth]
+    result = await daemon.rebuild(cache_key, java_changed=False, changed_paths=noise)
+    assert (result["added"], result["changed"], result["removed"]) == (0, 0, 0), "step 1: nothing moved"
+    assert writes == [], "step 1: no generation was written"
+    assert await daemon.cache.get(str(tmp_project)) is served, "step 1: the served index is kept"
+
+    # 2. An edit is a real move and writes the next generation.
+    auth.write_text(auth.read_text(encoding="utf-8") + "\ndef logout():\n    return None\n", encoding="utf-8")
+    os.utime(auth, ns=(stamp + 1_000_000_000, stamp + 1_000_000_000))
+    result = await daemon.rebuild(cache_key, java_changed=False, changed_paths=[auth])
+    assert result["changed"] == 1 and writes == [1], "step 2: an edit writes one generation"
+
+    # 3. Deleting a file the index holds is a move too.
+    auth.unlink()
+    result = await daemon.rebuild(cache_key, java_changed=False, changed_paths=[auth])
+    assert result["removed"] == 1 and writes == [1, 1], "step 3: a deletion writes one generation"
+
+
+@pytest.mark.anyio
 async def test_a_refused_paid_rebuild_leaves_the_old_index_serving(
     tmp_project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

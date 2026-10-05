@@ -8,6 +8,7 @@ import pytest
 
 from zemble.cache import load_previous_for_incremental
 from zemble.chunking.capsule import CapsuleOptions
+from zemble.index import create as create_module
 from zemble.index.bm25 import BM25, BM25Writer
 from zemble.index.chunk_store import ChunkList, load_chunks, save_chunks
 from zemble.index.index import ZembleIndex
@@ -329,3 +330,45 @@ def test_vectors_are_written_in_bounded_batches_and_unit_length(
     np.testing.assert_allclose(
         np.asarray(second._semantic_index.vectors), mock_embedder.embed_documents(texts), rtol=1e-6
     )
+
+
+@pytest.mark.parametrize("kernel", [True, False], ids=["kernel-copy", "memory-copy"])
+def test_reused_runs_broken_by_a_deletion_keep_every_row_in_place(
+    mock_embedder: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kernel: bool
+) -> None:
+    """Unchanged files on either side of a deleted one keep their exact chunks, postings and vectors.
+
+    Both ways of copying reused vector rows are held to it: file to file in the kernel, and through
+    memory where the kernel cannot.
+    """
+    copies: list[bool] = []
+    real = create_module._copy_in_kernel
+
+    def copy(*args: Any) -> bool:
+        copies.append(kernel and real(*args))
+        return copies[-1]
+
+    monkeypatch.setattr(create_module, "_copy_in_kernel", copy)
+    root = tmp_path / "src"
+    _write_files(root, {f"f{index}.py": f"def symbol_number_{index}():\n    return {index}\n" for index in range(6)})
+    first = _build(root, mock_embedder, tmp_path / "one")
+
+    # 1. Deleting files in the middle splits the previous rows into runs that must not be joined.
+    for name in ("f2.py", "f4.py"):
+        (root / name).unlink()
+    after = _build(root, mock_embedder, tmp_path / "two", previous=first, changed=[root / "f2.py", root / "f4.py"])
+    assert sorted(after._manifest) == ["f0.py", "f1.py", "f3.py", "f5.py"], "1: only the deleted files left"
+    assert copies == [kernel], "1: the reused rows went through the copy under test, and it succeeded"
+    assert after._semantic_index.vectors.offset == 4096, "1: rows start on a 4 KiB block"
+
+    # 2. Every kept file's rows hold what its previous rows held, chunk, vector and postings.
+    for path, entry in after._manifest.items():
+        was = first._manifest[path]
+        for offset in range(entry.count):
+            row, old = entry.start + offset, was.start + offset
+            assert after.chunks[row].content == first.chunks[old].content, f"2: {path} chunk {offset} moved intact"
+            np.testing.assert_array_equal(
+                after._semantic_index.vectors[row], first._semantic_index.vectors[old], err_msg=f"2: {path} vector"
+            )
+        number = path[1]
+        assert after._bm25_index.get_scores([f"symbol_number_{number}"])[entry.start] > 0, f"2: {path} postings"
