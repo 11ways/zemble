@@ -416,6 +416,9 @@ class Daemon:
                     exclude = self.cache._exclude_by_key.get(key, ())
                     self.cache.evict(key)
                     break
+        joined = await self._join_build(requested[0], path, content)
+        if joined is not None:
+            return joined
         gc.collect()
         release_free_heap()
         reserve = 128.0
@@ -428,6 +431,29 @@ class Daemon:
                 f"Loading {path} needs ~{reserve:.0f} MiB headroom within {self.max_rss_mb} MiB ({MEMORY_ENV})."
             )
         return await self.cache.get_with_key(path, ref=ref, content=content, exclude=exclude)
+
+    async def _join_build(
+        self, requested: str, path: str, content: tuple[ContentType, ...]
+    ) -> tuple[CacheKey, ZembleIndex] | None:
+        """Wait for an in-flight build of a covering root instead of reserving a second load of it.
+
+        That build was admitted when it started; a request arriving after its first waiter gave
+        up would otherwise ask for the same headroom again and be refused by the build's own use.
+        """
+        for key in [key for key in self.cache._tasks if self.cache.is_building(key)]:
+            if not set(content) <= set(key[1]):
+                continue
+            if key[0] == requested:
+                prefix = None
+            elif not is_git_url(path) and Path(requested).is_relative_to(Path(key[0])):
+                prefix = Path(requested).relative_to(Path(key[0])).as_posix()
+            else:
+                continue
+            index = await asyncio.shield(self.cache._tasks[key])
+            view = index if prefix is None else index.subtree(prefix)
+            if view is not None:
+                return key, view
+        return None
 
     def _ensure_watcher(self, cache_key: CacheKey) -> None:
         """Start watching a local root the first time it is served."""

@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import weakref
 from pathlib import Path
 
@@ -199,6 +200,43 @@ async def test_rebuild_defers_without_allocating_and_old_generation_survives(tmp
     assert instance.cache.loaded()[0][1] is index
     assert instance.last_error[key]["knob"] == MEMORY_ENV
     assert not instance.rebuilding
+
+
+@pytest.mark.anyio
+async def test_a_request_during_a_build_joins_it_instead_of_reserving_another_load(tmp_project, monkeypatch):
+    """Once the request that started a build gave up, the next one waits for that build, not for headroom."""
+    (tmp_project / "src").mkdir()
+    (tmp_project / "src" / "inner.py").write_text("def inner():\n    return 3\n")
+    instance = daemon()
+    started = threading.Event()
+    release = threading.Event()
+    real = instance.cache._build_index
+
+    def gated(*args, **kwargs):
+        started.set()
+        release.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(instance.cache, "_build_index", gated)
+
+    # 1. The first request starts the build and gives up waiting for it, as a deadline does.
+    first = asyncio.create_task(instance.index_for({"path": str(tmp_project)}))
+    await asyncio.to_thread(started.wait, 10)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    key = next(iter(instance.cache._tasks))
+    assert instance.cache.is_building(key), "step 1: the build carries on without its first waiter"
+
+    # 2. A request for a sub-path arriving now joins it, though no headroom is left for a second load.
+    monkeypatch.setattr(instance, "_admit", lambda *args, **kwargs: False)
+    second = asyncio.create_task(instance.index_for({"path": str(tmp_project / "src")}))
+    await asyncio.sleep(0.05)
+    assert not second.done(), "step 2: it waits for the build rather than being refused"
+    release.set()
+    joined_key, view = await asyncio.wait_for(second, 10)
+    assert joined_key == key, "step 2: and answers from the root being built"
+    assert view.indexed_paths() and all(path.startswith("src/") for path in view._file_mapping), "step 2: narrowed"
 
 
 @pytest.mark.anyio
