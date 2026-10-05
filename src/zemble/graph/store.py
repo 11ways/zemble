@@ -89,6 +89,8 @@ _CORRUPTION_MARKERS = ("malformed", "is not a database", "corrupt", "encrypted")
 #: Free-page share above which a store is compacted into a fresh generation. Deletes never
 #: return pages to the filesystem on their own, and an incremental refresh is mostly deletes.
 _COMPACT_FREE_FRACTION = 0.25
+#: The share `zemble graph compact` reclaims: asked for explicitly, it need not wait for drift.
+_EXPLICIT_COMPACT_FREE_FRACTION = 0.02
 #: Stores below this many pages are left alone; compacting a small file buys nothing.
 _COMPACT_MIN_PAGES = 4096
 # Edge kinds that are computed from resolved symbols rather than extracted from source.
@@ -772,7 +774,7 @@ def compact_stored_graphs(cache_folder: Path) -> list[CompactedGraph]:
                 continue
             before = _version_size(folder, pointer.current)
             open_db(folder / pointer.current).close()
-            _compact_if_drifted(folder, pointer.current)
+            _compact_if_drifted(folder, pointer.current, _EXPLICIT_COMPACT_FREE_FRACTION)
             current = _sweep(folder, _read_pointer(folder) or pointer).current
             reports.append(CompactedGraph(folder, before, _version_size(folder, current)))
     return reports
@@ -1290,7 +1292,7 @@ def _build_into(
     return stats
 
 
-def _compact_if_drifted(folder: Path, current: str) -> bool:
+def _compact_if_drifted(folder: Path, current: str, free_fraction: float = _COMPACT_FREE_FRACTION) -> bool:
     """Rewrite a version whose deleted rows have left too much of it free, as a new version.
 
     Sqlite never returns freed pages to the filesystem, and an incremental refresh is mostly
@@ -1302,7 +1304,7 @@ def _compact_if_drifted(folder: Path, current: str) -> bool:
     try:
         pages = connection.execute("PRAGMA page_count").fetchone()[0]
         free = connection.execute("PRAGMA freelist_count").fetchone()[0]
-        if pages < _COMPACT_MIN_PAGES or free < pages * _COMPACT_FREE_FRACTION:
+        if pages < _COMPACT_MIN_PAGES or free < pages * free_fraction:
             return False
         name = _next_version(folder)
         target = folder / name

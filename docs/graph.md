@@ -367,7 +367,7 @@ An incremental refresh writes **in place** in the current version: copying a
 safe. What it cannot do is give freed pages back, so a refresh that leaves more
 than a quarter of the store on the freelist is followed by a `VACUUM INTO` the next
 version, published the same way (`_compact_if_drifted`; stores under 4096 pages
-are left alone). Size alone is not drift: the javaweb graph is genuinely 1.9 GB,
+are left alone). `zemble graph compact` reclaims anything over 2% free. Size alone is not drift: the javaweb graph is genuinely 1.9 GB,
 953 MB of it the `edges` table and 644 MB its indexes.
 
 A store sqlite calls malformed, or a pointer naming no version that exists, is

@@ -344,3 +344,30 @@ def test_a_bloated_store_is_compacted(tmp_path: Path) -> None:
     assert connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 1, "step 3: the surviving row survived"
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal", "step 3: in the store's journal mode"
     connection.close()
+
+
+def test_an_explicit_compact_reclaims_what_drift_waits_for(graph_cache: Path) -> None:
+    """`zemble graph compact` gives back a free share too small for a build's own compaction."""
+    folder = graph_cache / "some-root" / "index"
+    folder.mkdir(parents=True)
+    db = folder / "graph-1.sqlite"
+    connection = open_db(db)
+    connection.executemany(
+        "INSERT INTO symbols (id, name) VALUES (?, ?)", [(f"id{i}", "x" * 400) for i in range(20_000)]
+    )
+    # Contiguous rows, so their pages come free whole: about a twentieth of the store.
+    connection.execute("DELETE FROM symbols WHERE id LIKE 'id19%'")
+    connection.commit()
+    connection.close()
+    _publish(folder, _Pointer(db.name))
+    grown = db.stat().st_size
+
+    # 1. A twentieth of the store free is below what a build compacts.
+    assert not _compact_if_drifted(folder, db.name), "step 1: a build leaves it free"
+
+    # 2. The explicit command reclaims it, rows intact.
+    report = compact_stored_graphs(graph_cache)[0]
+    assert report.size_before == grown and report.size_after < grown * 0.95, "step 2: the command reclaims it"
+    connection = open_db(folder / _read_pointer(folder).current, read_only=True)
+    assert connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 18_889, "step 2: no row was lost"
+    connection.close()
