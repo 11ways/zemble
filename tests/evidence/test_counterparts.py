@@ -58,9 +58,9 @@ def test_reranker_resolves_existing_seam_and_preserves_direct_evidence(monkeypat
 
     monkeypatch.setenv("ZEMBLE_RELATED_RERANK", "1")
     direct = SearchResult(Chunk("direct", "core.java", 1, 2), 2.0)
-    first = SearchResult(Chunk("first", "a.java", 1, 2), .9)
-    second = SearchResult(Chunk("second", "b.java", 1, 2), .8)
-    scorer = SimpleNamespace(score=Mock(return_value=[.1, .99]))
+    first = SearchResult(Chunk("first", "a.java", 1, 2), 0.9)
+    second = SearchResult(Chunk("second", "b.java", 1, 2), 0.8)
+    scorer = SimpleNamespace(score=Mock(return_value=[0.1, 0.99]))
     resolver = Mock(return_value=scorer)
     index = SimpleNamespace(_resolve_reranker=resolver)
     ranked = _rerank(index, [direct, first, second], "behavior")
