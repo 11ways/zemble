@@ -132,6 +132,8 @@ def test_a_sub_root_an_ancestor_answers_for_is_an_orphan(
     # 3. Removing them leaves routing to the workspace, which still answers for the sub-path.
     assert all(remove_orphan(orphan) for orphan in found.values()), "step 3: both are removed"
     assert not graph_present(str(sub)), "step 3: the sub-root graph is gone"
+    sub_folder = find_index_from_cache_folder(str(sub), CODE).parent
+    assert not sub_folder.exists(), "step 3: and so is the cache folder they left empty"
     assert resolve_index_root(str(sub), mock_embedder.model_id, CODE) == (
         str(workspace),
         "src/main/java/com/example/core",

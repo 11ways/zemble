@@ -144,9 +144,21 @@ def remove_orphan(orphan: Orphan) -> bool:
         case OrphanKind.INDEX_COVERED | OrphanKind.INDEX_UNDER_ANCESTOR:
             # Only the index's own stores go: the symbol graph shares the `index` folder.
             remove_index_components(orphan.target)
+            _prune_empty(orphan.target)
             return True
         case OrphanKind.GRAPH_UNDER_ANCESTOR:
-            return remove_graph(orphan.target)
+            removed = remove_graph(orphan.target)
+            _prune_empty(orphan.target)
+            return removed
+
+
+def _prune_empty(folder: Path) -> None:
+    """Remove a variant folder and the root folder above it once nothing is left in them."""
+    for path in (folder, folder.parent):
+        try:
+            path.rmdir()
+        except OSError:
+            return
 
 
 def _index_components_orphan(kind: OrphanKind, index_path: Path, detail: str = "") -> Orphan:
