@@ -144,7 +144,9 @@ Source-guard convention applies: an entry is `<key>` followed by whitespace and
 a **justification**, and an entry **without** one is itself reported as a
 violation and suppresses nothing. An entry that matches no class this run is
 reported as **stale** -- except for kinds the run did not scan, so `--kind exact`
-never declares a `renamed:` entry dead.
+never declares a `renamed:` entry dead, and except in a run that saw only part of
+the root (`--paths`, `--focus`): there an entry whose class lies elsewhere matched
+nothing, which says nothing about whether it is stale.
 
 Suppressed classes leave the report and are counted in a trailing
 `suppressed: N` line; `--show-suppressed` prints them.
@@ -403,6 +405,7 @@ overlapping window lengths of one copied run into the single widest one.
 | `--logic-threshold` | 0.92 | Cosine a logic candidate needs |
 | `--logic-top-k` | 10 | Embedding neighbours considered per body |
 | `--paths` | whole root | Restrict the scan to these paths, resolved against the scan root (absolute paths taken as given) |
+| `--focus` | none | Report only the classes with a member under these paths, compared against everything scanned (see Focused runs) |
 | `--exclude` | none | Gitignore-style pattern dropped before parsing (repeatable) |
 | `--lane` | `all` | Report one lane: `production`, `mixed`, `test` |
 | `--brief` | off | Header plus one line per class |
@@ -414,9 +417,52 @@ overlapping window lengths of one copied run into the single widest one.
 | `--json` | off | Machine-readable output |
 | `-y`/`--yes` | off | Embed whatever `--kind logic` costs, past the spending budget |
 
+## Focused runs
+
+`--focus PATH...` (MCP: `focus`) answers "does THIS code duplicate anything?" at a
+cost that follows the focus, not the workspace. It reports exactly the classes a
+whole run reports that have a member under a focus path -- same kinds, floors,
+keys, members and reasons -- and leaves every other class out. The JSON gains
+`"focus": [...]` (empty on a whole run); nothing else in the shape changes.
+`--baseline`/`--save-baseline` are refused with it: a baseline would read every
+class it leaves out as resolved.
+
+How it stays cheap:
+
+- **Unit index.** Every scanned file's row -- both stream hashes of every unit,
+  and its whole-body units -- is kept in `dupes-units.sqlite` in the root's cache
+  folder, keyed by path, content digest and an extraction signature (options,
+  the source of the dedup and language modules, grammar package versions). A
+  warm run parses nothing but the files holding a hash that a focus unit holds
+  and some other unit holds too; a clean focus parses nothing at all. Rows of a
+  file a whole-root walk no longer finds go, and so do extractions nobody ran
+  for a week. A `--kind logic` whole run refreshes the index too.
+- **Vector mirror.** Logic mode needs every body's vector; an embedding server
+  keeps no local copy, and fetching 57k vectors back from one took 22 s. They are
+  mirrored in `dupes-vectors/` beside the index (the embedding cache's own store)
+  and swept once it holds more than twice what a run reads.
+- **Walk, not all-pairs.** A pair is a logic candidate when either body has the
+  other among its `--logic-top-k` neighbours, and a class is the union of its
+  accepted pairs. The walk starts at the focus bodies and, for every body it
+  reaches, takes its own neighbour row (forward) and every body that holds it in
+  ITS row (reverse: a similarity scan, then that body's own row), until no new
+  body joins. Both run modes read their rows from one cosine space, so they can
+  only differ where two matrix products of one row round apart.
+
+Measured on the javaweb workspace (11 982 files, 1 757 515 units, 56 874 bodies,
+voyage-4-lite through an embedding server), `--json --kind exact,renamed,logic
+--logic-threshold 0.6 --lane all`, focus = 23 Java files across zenit, hawkeye,
+protoblast and plumage:
+
+| Run | Wall clock | Peak RSS |
+| --- | --- | --- |
+| whole workspace, before this mode | 326 s | 7.1 GB |
+| focused, cold (index and mirror empty) | 134-175 s | 0.9 GB |
+| focused, warm | 8 s | 0.8 GB |
+
 ## The MCP tool
 
-`dupes(repo, kind, paths, exclude, lane, limit, min_files, format, brief,
+`dupes(repo, kind, paths, focus, exclude, lane, limit, min_files, format, brief,
 baseline, save_baseline)`.
 
 `format="text"` (the default) returns the report exactly as the CLI prints it,
@@ -424,7 +470,7 @@ as a plain string; `brief=true` trims it to the class lines. `format="json"`
 returns the structured object itself -- FastMCP encodes it once, so a client
 never has to parse JSON out of a JSON string. `baseline`/`save_baseline` are
 booleans against the fixed `<repo>/.zemble/dupes.baseline.json` (see
-Baselines). Neither surface needs a daemon or an index.
+Baselines). Neither surface needs a daemon or a search index.
 
 The `--kind all` text report is roughly a third of the tokens the JSON form
 costs. Reasons are collapsed on both surfaces: one reason per class when every

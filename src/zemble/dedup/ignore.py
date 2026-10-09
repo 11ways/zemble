@@ -91,7 +91,11 @@ class Suppression:
 
 
 def apply_ignores(
-    classes: Sequence[CloneClass], ignores: Sequence[IgnoreFile], scanned_kinds: Sequence[str] = ()
+    classes: Sequence[CloneClass],
+    ignores: Sequence[IgnoreFile],
+    scanned_kinds: Sequence[str] = (),
+    *,
+    judge_stale: bool = True,
 ) -> Suppression:
     """Split classes into the reported ones and the suppressed ones.
 
@@ -101,6 +105,8 @@ def apply_ignores(
     :param classes: The ranked classes of one run.
     :param ignores: The parsed ignore files, in the order they were found.
     :param scanned_kinds: The kind names this run looked for; empty means all of them.
+    :param judge_stale: False for a run that saw only part of the root (`--paths`, `--focus`): an entry
+        whose class lies outside it matched nothing there, which says nothing about whether it is stale.
     :return: The kept classes, the suppressed classes and every ignore-file violation.
     """
     entries = [entry for ignore in ignores for entry in ignore.entries]
@@ -115,7 +121,8 @@ def apply_ignores(
         else:
             kept.append(clone)
     problems = [problem for ignore in ignores for problem in ignore.problems]
-    problems.extend(_stale(entries, matched, tuple(scanned_kinds)))
+    if judge_stale:
+        problems.extend(_stale(entries, matched, tuple(scanned_kinds)))
     return Suppression(kept=tuple(kept), suppressed=tuple(suppressed), problems=tuple(problems))
 
 

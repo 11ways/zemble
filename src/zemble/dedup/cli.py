@@ -68,6 +68,14 @@ def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
         help="Restrict the scan to these paths, relative to the workspace directory (or absolute).",
     )
     parser.add_argument(
+        "--focus",
+        nargs="+",
+        default=None,
+        metavar="PATH",
+        help="Report only the classes with a member under these paths, compared against everything scanned; "
+        "the other files are read from a per-root unit index, so the cost follows the focus, not the workspace.",
+    )
+    parser.add_argument(
         "--exclude",
         action="append",
         default=None,
@@ -135,8 +143,8 @@ def _architectural_cli(args: argparse.Namespace) -> int:
     """Use the daemon's prepared graph and keep candidate output distinct from clones."""
     from zemble.daemon.client import call
 
-    if args.baseline or args.save_baseline or args.lane != "all":
-        raise _fail("architectural candidates do not use literal baselines or lane filtering", args.json)
+    if args.baseline or args.save_baseline or args.lane != "all" or args.focus:
+        raise _fail("architectural candidates do not use literal baselines, lane filtering or --focus", args.json)
     payload = call(
         "architectural",
         {
@@ -160,6 +168,9 @@ def run_dupes(args: argparse.Namespace) -> int:
     """Run `zemble dupes` and return its exit code, which is 0 however much it finds."""
     if args.kind == "architectural":
         return _architectural_cli(args)
+    if args.focus and (args.baseline or args.save_baseline):
+        # A focused run leaves out every class without a focus member: a baseline would read them as resolved.
+        raise _fail("--focus reports part of the classes, so it takes no --baseline or --save-baseline", args.json)
     options = DupeOptions(
         kinds=_kinds(args.kind),
         min_tokens=args.min_tokens,
@@ -170,6 +181,7 @@ def run_dupes(args: argparse.Namespace) -> int:
         logic_top_k=args.logic_top_k,
         embedder=args.embedder,
         paths=tuple(args.paths or ()),
+        focus=tuple(args.focus or ()),
         exclude=tuple(args.exclude or ()),
         lane=None if args.lane == "all" else Lane(args.lane),
         jobs=args.jobs,

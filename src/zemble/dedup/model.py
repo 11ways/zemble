@@ -237,6 +237,8 @@ class DupeReport:
     kinds: tuple[CloneKind, ...] = tuple(CloneKind)
     #: The lane this run was restricted to, or None when every lane was reported.
     lane: Lane | None = None
+    #: The paths a focused run reported classes for (`--focus`); empty for a run that reported every class.
+    focus: tuple[str, ...] = ()
     #: Classes a justified `.zemble/dupes.ignore` entry took out of the report.
     suppressed: list[CloneClass] = field(default_factory=list)
     #: Ignore-file violations: entries without a justification, and entries matching nothing.
@@ -275,6 +277,7 @@ class DupeReport:
             "min_statements": self.min_statements,
             "kinds": [kind.value for kind in self.kinds],
             "lane": self.lane.value if self.lane is not None else None,
+            "focus": list(self.focus),
             "notes": list(self.notes),
             "suppressed": len(self.suppressed),
             "ignore_problems": list(self.ignore_problems),

@@ -28,13 +28,21 @@ _REPO_DESCRIPTION = with_default_note(
 DupeFormat = Literal["text", "json"]
 
 
-def _options(kind: str, lane: str, paths: list[str] | None, exclude: list[str] | None, min_files: int) -> DupeOptions:
+def _options(
+    kind: str,
+    lane: str,
+    paths: list[str] | None,
+    exclude: list[str] | None,
+    min_files: int,
+    focus: list[str] | None = None,
+) -> DupeOptions:
     """Build the run options from the tool's arguments."""
     kinds = tuple(CloneKind) if kind == "all" else (CloneKind(kind),)
     return DupeOptions(
         kinds=kinds,
         min_files=min_files,
         paths=tuple(paths or ()),
+        focus=tuple(focus or ()),
         exclude=tuple(exclude or ()),
         lane=None if lane == "all" else Lane(lane),
     )
@@ -99,6 +107,13 @@ def register_dupes_tool(server: FastMCP) -> None:
             list[str] | None,
             Field(description="Restrict the scan to these paths, relative to the workspace root (or absolute)."),
         ] = None,
+        focus: Annotated[
+            list[str] | None,
+            Field(
+                description="Report only the classes with a member under these paths, compared against "
+                "everything scanned (no baseline; the cost follows the focus, not the workspace)."
+            ),
+        ] = None,
         exclude: Annotated[
             list[str] | None,
             Field(description="Gitignore-style patterns, relative to the workspace root, dropped before parsing."),
@@ -146,8 +161,8 @@ def register_dupes_tool(server: FastMCP) -> None:
         if kind == "architectural":
             from zemble.daemon.client import call
 
-            if baseline or save_baseline or lane != "all":
-                return {"error": "architectural candidates do not use literal baselines or lane filtering"}
+            if baseline or save_baseline or lane != "all" or focus:
+                return {"error": "architectural candidates do not use literal baselines, lane filtering or focus"}
             payload = await asyncio.to_thread(
                 call,
                 "architectural",
@@ -164,7 +179,9 @@ def register_dupes_tool(server: FastMCP) -> None:
             return "Architectural candidates (behavioral review required):\n" + "\n".join(
                 f"{candidate['key']}: {candidate['reason']}" for candidate in payload.get("candidates", [])
             )
-        options = _options(kind, lane, paths, exclude, min_files)
+        if focus and (baseline or save_baseline):
+            return {"error": "focus reports part of the classes, so it takes no baseline"}
+        options = _options(kind, lane, paths, exclude, min_files, focus)
         try:
             return await asyncio.to_thread(
                 _run, options, resolve_repo(repo), limit, format, brief, baseline, save_baseline

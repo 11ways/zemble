@@ -1823,3 +1823,133 @@ def test_long_capability_titles_are_truncated_in_the_text(tmp_path: Path) -> Non
     assert verdict is not None and verdict.evidence[0].capability.startswith(long_title.strip()), (
         "the whole capability survives in data"
     )
+
+
+_LOGIC_D = """package fixtures;
+
+/** A third copy of the logic pair: other names, the heading kept in a local of its own. */
+public class LogicD {
+
+    public String summarize(Order order) {
+        StringBuilder text = new StringBuilder();
+        String label = order.title();
+        text.append(label);
+        if (order.isPaid()) {
+            text.append(format(order.total()));
+        } else {
+            text.append(fallback());
+        }
+        String done = text.toString();
+        return done;
+    }
+}
+"""
+
+
+def _focus_workspace(tmp_path: Path) -> Path:
+    """Copy the dedup fixtures and add a third logic copy, so a logic class reaches outside any one file."""
+    workspace = tmp_path / "focus"
+    (workspace / "src").mkdir(parents=True)
+    for source in (FIXTURES / "src").iterdir():
+        (workspace / "src" / source.name).write_text(source.read_text())
+    (workspace / "src" / "LogicD.java").write_text(_LOGIC_D)
+    return workspace
+
+
+def _wire(classes) -> list[dict]:
+    """Classes as the wire prints them: key, kind, members, tokens and reasons."""
+    return [clone.to_dict() for clone in classes]
+
+
+@pytest.mark.parametrize("top_k", [1, 10])
+def test_a_focused_run_answers_what_the_whole_run_does_for_its_files(tmp_path: Path, top_k: int) -> None:
+    """Every file as the focus gets exactly the whole run's classes that touch it, logic chains included."""
+    workspace = _focus_workspace(tmp_path)
+    options = DupeOptions(kinds=tuple(CloneKind), logic_threshold=0.5, logic_top_k=top_k)
+    whole = find_duplication(workspace, options, embedder=BagOfWordsEmbedder())
+    logic = whole.of_kind(CloneKind.LOGIC)
+    assert any(len(clone.members) >= 3 for clone in logic), "setup: a logic class spans three files"
+    assert whole.of_kind(CloneKind.EXACT) and whole.of_kind(CloneKind.RENAMED), "setup: literal classes exist"
+
+    for source in sorted((workspace / "src").iterdir()):
+        relative = f"src/{source.name}"
+        focused = find_duplication(workspace, replace(options, focus=(relative,)), embedder=BagOfWordsEmbedder())
+        expected = [clone for clone in whole.classes if any(m.file_path == relative for m in clone.members)]
+        assert _wire(focused.classes) == _wire(expected), f"{relative}: the focus gets the whole run's classes"
+        assert focused.units == whole.units and focused.body_units == whole.body_units, f"{relative}: same scan"
+        assert focused.to_dict()["focus"] == [relative], f"{relative}: the report names its focus"
+
+
+def test_a_focused_run_reads_the_unit_index(tmp_path: Path) -> None:
+    """A warm focused run parses only its focus and the files sharing a hash; an edit is picked up."""
+    workspace = _focus_workspace(tmp_path)
+    options = DupeOptions(kinds=tuple(CloneKind), logic_threshold=0.5, focus=("src/LogicA.java",))
+
+    def extracted(report) -> str:
+        return next(note for note in report.notes if note.startswith("focus:"))
+
+    # 1. The first run builds the index: every file is extracted once.
+    cold = find_duplication(workspace, options, embedder=BagOfWordsEmbedder())
+    files = cold.analyzed_files
+    assert f"{files} of {files} file(s) extracted" in extracted(cold), "step 1: a cold index extracts everything"
+
+    # 2. The second run reads every row from the index and finds the same classes.
+    warm = find_duplication(workspace, options, embedder=BagOfWordsEmbedder())
+    assert f"0 of {files} file(s) extracted" in extracted(warm), "step 2: a warm index extracts nothing"
+    assert _wire(warm.classes) == _wire(cold.classes), "step 2: the index changes no answer"
+    assert any("0 not mirrored yet" in note for note in warm.notes), "step 2: every vector comes from the mirror"
+
+    # 3. An edited file is extracted again, and its new copy is compared.
+    (workspace / "src" / "LogicE.java").write_text(_LOGIC_D.replace("LogicD", "LogicE"))
+    edited = find_duplication(workspace, options, embedder=BagOfWordsEmbedder())
+    assert f"1 of {files + 1} file(s) extracted" in extracted(edited), "step 3: only the new file is parsed"
+    joined = [clone for clone in edited.classes if any(m.startswith("src/LogicE.java:") for m in _members(clone))]
+    assert joined, "step 3: the new copy joins a class with the focus"
+
+    # 4. A deleted file leaves the index with the next whole-root walk.
+    (workspace / "src" / "LogicE.java").unlink()
+    gone = find_duplication(workspace, options, embedder=BagOfWordsEmbedder())
+    assert _wire(gone.classes) == _wire(cold.classes), "step 4: the deleted copy is gone again"
+
+
+def test_a_partial_scan_never_calls_an_ignore_entry_stale(tmp_path: Path) -> None:
+    """An entry whose class lies outside a --paths or --focus scan matched nothing there; that is not stale."""
+    workspace = _focus_workspace(tmp_path)
+    options = DupeOptions(kinds=(CloneKind.EXACT, CloneKind.RENAMED))
+    whole = find_duplication(workspace, options)
+    elsewhere = next(clone for clone in whole.classes if not any("Logic" in m for m in _members(clone)))
+    _ignore_file(workspace, f"{elsewhere.key}  deliberate, reviewed", "exact:000000000000  long gone")
+
+    # 1. The whole run suppresses the class and names the dead entry.
+    full = find_duplication(workspace, options)
+    assert [clone.key for clone in full.suppressed] == [elsewhere.key], "step 1: the entry suppresses its class"
+    assert [p for p in full.ignore_problems if "stale" in p] == [
+        ".zemble/dupes.ignore:2: exact:000000000000 is stale, it matches no clone class"
+    ], "step 1: only the dead entry is stale"
+
+    # 2. Neither a focused nor a path-limited run calls any entry stale.
+    for partial in (replace(options, focus=("src/LogicA.java",)), replace(options, paths=("src/LogicA.java",))):
+        report = find_duplication(workspace, partial)
+        assert not [p for p in report.ignore_problems if "stale" in p], f"step 2: {partial.focus or partial.paths}"
+
+
+def test_focus_refuses_a_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """A focused run leaves classes out, so a baseline diff would call them resolved: refused on the CLI."""
+    from zemble.cli import main
+
+    monkeypatch.setattr(
+        sys, "argv", ["zemble", "dupes", str(FIXTURES), "--focus", "src/ExactA.java", "--baseline", "x", "--json"]
+    )
+    with pytest.raises(SystemExit) as raised:
+        main()
+    assert raised.value.code == 1, "the refusal is an error exit"
+    assert "--focus" in json.loads(capsys.readouterr().out)["error"], "the refusal names the flag"
+
+
+def test_a_digest_ending_in_zero_bytes_survives_the_index_table() -> None:
+    """A fixed-width numpy byte string drops trailing NULs; the hex a unit carries must come back whole."""
+    from zemble.dedup.detect import _HASH_DTYPE, _hex_digests
+
+    digest = "ab" * 14 + "0000"
+    table = np.frombuffer(bytes.fromhex(digest) * 2, dtype=_HASH_DTYPE)
+    assert _hex_digests(table["exact"]) == {digest}, "the zero tail is restored"
