@@ -449,7 +449,7 @@ def test_extraction_failures_are_counted_not_swallowed(tmp_path: Path, monkeypat
     def _boom(source: bytes, file_path: str, **kwargs: object) -> list:
         raise RuntimeError("No tree-sitter java grammar available")
 
-    monkeypatch.setattr(detect, "extract_units", _boom)
+    monkeypatch.setattr(detect, "extract_file", _boom)
     report = find_duplication(tmp_path, DupeOptions(kinds=(CloneKind.EXACT,), jobs=1))
 
     # 1. The files were walked, and every one of them failed.

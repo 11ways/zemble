@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from zemble.dedup.model import CloneClass, CloneKind, Unit
+from zemble.dedup.model import CloneClass, Unit
 from zemble.home.config import ConfigError, HomeConfig
 from zemble.home.tables import DeclaredRow, RowMatchKind, load_rows, row_match_kind
 
@@ -195,7 +195,7 @@ _RENDERINGS: dict[HomeVerdictKind, _Rendering] = {
         head=lambda verdict: f"no shared ancestor (spans {verdict.span}; {verdict.detail})",
     ),
     HomeVerdictKind.REVIEW_REQUIRED: _Rendering(
-        head=lambda verdict: f"possible existing mechanism {verdict.home}: {verdict.symbol} (logic clone)",
+        head=lambda verdict: f"possible existing mechanism {verdict.home}: {verdict.symbol} ({_lead_label(verdict)})",
         action=lambda verdict: "semantic review required; structural similarity is not equivalence",
     ),
 }
@@ -328,11 +328,18 @@ def _undeclared_step(
     return HomeVerdict(HomeVerdictKind.NO_SHARED_ANCESTOR, ranked, None, detail)
 
 
+def _lead_label(verdict: HomeVerdict) -> str:
+    """What kind of lead a review-required verdict is about (`logic clone`), read off its clone-kind evidence."""
+    lead = next((item.text for item in verdict.evidence if item.kind is EvidenceKind.CLONE_KIND), "lead")
+    return lead.split(":", 1)[0]
+
+
 def _logic_step(
     clone: CloneClass, ranked: tuple[str, ...], config: HomeConfig, rows: Sequence[DeclaredRow]
 ) -> HomeVerdict | None:
-    """A logic clone is a lead, never a duplicate: structural similarity is not equivalence."""
-    if clone.kind is not CloneKind.LOGIC:
+    """A class of a lead kind (logic, holed, idiom, re-implementation) is a lead, never a duplicate."""
+    lead = clone.kind.facts.lead
+    if lead is None:
         return None
     declared: tuple[Evidence, ...] = ()
     member: Unit | None = None
@@ -346,12 +353,12 @@ def _logic_step(
     if member is None:
         member = _most_core_member(clone, config)
         home = config.module_of(member.file_path)
-    clone_kind = Evidence(EvidenceKind.CLONE_KIND, "logic clone: similar control flow and call set, not the same code")
+    clone_kind = Evidence(EvidenceKind.CLONE_KIND, lead)
     return HomeVerdict(
         HomeVerdictKind.REVIEW_REQUIRED,
         ranked,
         home,
-        f"{member.name} in {home} is the best-evidenced copy of a logic clone",
+        f"{member.name} in {home} is the best-evidenced copy of a {lead.split(':', 1)[0]}",
         symbol=member.name,
         location=f"{member.file_path}:{member.start_line}",
         evidence=(*declared, clone_kind),

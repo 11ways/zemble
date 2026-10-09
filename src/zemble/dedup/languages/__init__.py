@@ -9,7 +9,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from zemble.dedup.languages.base import Container, LanguageProfile, Visibility, node_text
+from zemble.dedup.languages.base import (
+    CONSTANT_HOLE,
+    Container,
+    LanguageProfile,
+    ShapeHooks,
+    SiteKind,
+    Visibility,
+    VocabularyFact,
+    literal_hole,
+    node_text,
+)
 from zemble.dedup.languages.generic import profile_from_spec
 from zemble.dedup.languages.java import JAVA
 from zemble.dedup.languages.zig import ZIG
@@ -56,19 +66,30 @@ def body_unit_kinds() -> frozenset[str]:
     return frozenset(kind for profile in _ALL for kind in profile.member_kinds.values())
 
 
+def shape_languages() -> list[str]:
+    """The language names whose profile has shape hooks: the ones with idiom and vocabulary sites."""
+    return sorted(profile.name for profile in _ALL if profile.shapes is not None)
+
+
 def supported_languages() -> list[str]:
     """The language names a duplication scan understands, sorted."""
     return sorted(profile.name for profile in _ALL)
 
 
 __all__ = [
+    "CONSTANT_HOLE",
     "PROFILES",
     "Container",
     "LanguageProfile",
+    "ShapeHooks",
+    "SiteKind",
     "Visibility",
+    "VocabularyFact",
+    "literal_hole",
     "body_unit_kinds",
     "node_text",
     "profile_for",
+    "shape_languages",
     "supported_extensions",
     "supported_languages",
 ]

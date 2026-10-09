@@ -13,6 +13,10 @@ _SECTION_TITLES = {
     CloneKind.EXACT: "EXACT",
     CloneKind.RENAMED: "RENAMED (alpha-renamed: only declared locals differ)",
     CloneKind.LOGIC: "LOGIC (embedding candidates that passed the structural check)",
+    CloneKind.HOLED: "HOLED (the same code with different literal values and constants)",
+    CloneKind.IDIOM: "IDIOM (one call shape repeated at many sites)",
+    CloneKind.REIMPLEMENTS: "REIMPLEMENTS (code that redoes an existing method: call that method)",
+    CloneKind.VOCABULARY: "VOCABULARY (one value or value set declared in several places)",
 }
 
 _LANE_TITLES = {
@@ -68,7 +72,10 @@ def _head_line(index: int, clone: CloneClass, *, with_kind: bool) -> str:
 def _class_lines(index: int, clone: CloneClass, verdict: HomeVerdict | None = None) -> list[str]:
     """Render one clone class the way the reference report does."""
     lines = [_head_line(index, clone, with_kind=False)]
-    lines.extend(f"    {member.location}" for member in clone.members)
+    lines.extend(f"    {member.location}" for member in clone.shown_members)
+    hidden = len(clone.members) - len(clone.shown_members)
+    if hidden:
+        lines.append(f"    ... and {hidden} more site(s)")
     if verdict is not None:
         head, *rest = verdict.describe_lines()
         lines.append(f"    home: {head}")

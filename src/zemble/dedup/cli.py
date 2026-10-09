@@ -31,14 +31,16 @@ def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
     languages = supported_languages()
     parser = sub.add_parser(
         "dupes",
-        help=f"Report duplicated code (exact, alpha-renamed, logic clone classes; {len(languages)} languages).",
+        help="Report duplicated code: clone classes, idioms, re-implementations, vocabularies "
+        f"({len(languages)} languages).",
         epilog=f"Languages: {', '.join(languages)}. File types: {', '.join(supported_extensions())}.",
     )
     add_root_arg(parser, nargs="?", default=".", help="Workspace directory (default: current directory).")
     parser.add_argument(
         "--kind",
         default="exact,renamed",
-        help="Literal kinds exact, renamed, logic, all, or architectural candidates (default: exact,renamed).",
+        help="Channels, comma-separated: exact, renamed, logic, holed, idiom, reimplements, vocabulary, all, "
+        "or architectural candidates (default: exact,renamed).",
     )
     parser.add_argument("--limit", type=int, default=25, help="Clone classes printed per section (default: 25).")
     parser.add_argument(

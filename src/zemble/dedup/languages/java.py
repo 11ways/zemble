@@ -7,9 +7,20 @@ but nothing else is: the graph answers "what does this file declare", this modul
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace
+
 from tree_sitter import Node
 
-from zemble.dedup.languages.base import Container, LanguageProfile, Visibility, node_text
+from zemble.dedup.languages.base import (
+    Container,
+    LanguageProfile,
+    ShapeHooks,
+    SiteKind,
+    Visibility,
+    VocabularyFact,
+    node_text,
+)
 from zemble.graph.java import java_parser
 
 _CALLABLE_KINDS = {
@@ -174,6 +185,290 @@ def _modifiers(node: Node, source: bytes) -> tuple[str, ...]:
     return tuple(node_text(source, child) for child in modifiers.children if not child.is_named)
 
 
+#: Upper snake case of at least two characters: `ID`, `STATUS_FAILED`, never a type parameter `T`.
+_CONSTANT_NAME = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*")
+_FIELD_DECLARATIONS = frozenset({"field_declaration", "constant_declaration"})
+_ANNOTATIONS = frozenset({"annotation", "marker_annotation"})
+#: JDK calls whose first string argument is a regular expression.
+_REGEX_CALLS = frozenset({"compile", "matches", "replaceAll", "replaceFirst", "split"})
+#: Smallest value set a switch, an enum or a constant group declares to count as a vocabulary.
+_MIN_SET = 3
+
+
+def _is_constant_name(text: str) -> bool:
+    """Whether an identifier follows the Java constant convention."""
+    return len(text) >= 2 and _CONSTANT_NAME.fullmatch(text) is not None
+
+
+def _call_parts(node: Node) -> tuple[Node | None, Node | None, list[Node]]:
+    """A `method_invocation`'s receiver, name and arguments."""
+    arguments = node.child_by_field_name("arguments")
+    values = [child for child in arguments.named_children if "comment" not in child.type] if arguments else []
+    return node.child_by_field_name("object"), node.child_by_field_name("name"), values
+
+
+def _forward_target(member: Node, body: Node, source: bytes) -> str | None:
+    """`Type.member` when a body is one `return Type.member(p1, ..., pn);` of its own parameters, in order.
+
+    Only a receiver spelled like a type counts: a call on a field or a parameter is delegation to an
+    object, which is a design, not a facade over a static API.
+    """
+    statements = [child for child in body.named_children if "comment" not in child.type]
+    if len(statements) != 1 or statements[0].type not in {"return_statement", "expression_statement"}:
+        return None
+    expression = next((child for child in statements[0].named_children if "comment" not in child.type), None)
+    if expression is None or expression.type != "method_invocation":
+        return None
+    receiver, name, arguments = _call_parts(expression)
+    if receiver is None or name is None or receiver.type != "identifier":
+        return None
+    owner = node_text(source, receiver)
+    if not owner[:1].isupper() or _is_constant_name(owner):
+        return None
+    parameters = member.child_by_field_name("parameters")
+    names = []
+    for parameter in parameters.named_children if parameters is not None else ():
+        if parameter.type != "formal_parameter":
+            return None
+        declared = parameter.child_by_field_name("name")
+        if declared is None:
+            return None
+        names.append(node_text(source, declared))
+    if [node_text(source, argument) for argument in arguments] != names:
+        return None
+    return f"{owner}.{node_text(source, name)}"
+
+
+def _implements_contract(node: Node, source: bytes) -> bool:
+    """Whether a member carries `@Override`."""
+    modifiers = next((child for child in node.children if child.type == "modifiers"), None)
+    if modifiers is None:
+        return False
+    return any(
+        child.type == "marker_annotation"
+        and node_text(source, child).replace(" ", "") in {"@Override", "@java.lang.Override"}
+        for child in modifiers.named_children
+    )
+
+
+def _string_value(node: Node, source: bytes) -> str | None:
+    """The content of a plain one-line string literal, or None for a text block."""
+    text = node_text(source, node)
+    if node.type != "string_literal" or text.startswith('"""') or len(text) < 2:
+        return None
+    return text[1:-1]
+
+
+class _VocabularyWalk:
+    """Collects one file's constants, literal uses, value sets and regex literals."""
+
+    def __init__(self, source: bytes) -> None:
+        """Start an empty walk over one file."""
+        self.source = source
+        self.facts: list[VocabularyFact] = []
+
+    def visit(self, node: Node, owner: str, folded: Visibility, member: str | None) -> None:
+        """Visit one node inside `owner`, whose visibility is already folded through its enclosing types."""
+        kind = node.type
+        if "comment" in kind or kind in _ANNOTATIONS:
+            return
+        if kind in _TYPE_DECLARATIONS:
+            self._type(node, owner, folded)
+            return
+        if kind in _FIELD_DECLARATIONS and member is None:
+            self._field(node, owner, folded)
+            return
+        if kind in _CALLABLE_KINDS:
+            name = node.child_by_field_name("name")
+            inner = f"{owner}.{node_text(self.source, name)}" if name is not None else owner
+            for child in node.children:
+                self.visit(child, owner, folded, inner)
+            return
+        if kind == "string_literal":
+            self._literal(node, member or owner)
+            return
+        if kind == "switch_block":
+            self._switch(node, member or owner)
+        elif kind == "method_invocation":
+            self._regex(node, member or owner)
+        for child in node.children:
+            self.visit(child, owner, folded, member)
+
+    def _type(self, node: Node, owner: str, folded: Visibility) -> None:
+        """A type declaration: its own scope, plus a value set when it is an enum."""
+        name = node.child_by_field_name("name")
+        inner = f"{owner}.{node_text(self.source, name)}" if owner else node_text(self.source, name or node)
+        level = _visibility(node, self.source).narrower(folded)
+        body = node.child_by_field_name("body")
+        if body is None:
+            return
+        if node.type == "enum_declaration":
+            self._enum(node, body, inner, level)
+        constants: list[VocabularyFact] = []
+        for child in body.named_children:
+            if child.type == "enum_constant":
+                continue  # walked by `_enum`, which names each constant's literal uses after it
+            if child.type == "enum_body_declarations":
+                for nested in child.named_children:
+                    self._collect(nested, inner, level, constants)
+            else:
+                self._collect(child, inner, level, constants)
+        self._groups(constants, inner, level)
+
+    def _collect(self, node: Node, owner: str, level: Visibility, constants: list[VocabularyFact]) -> None:
+        """Visit one member of a type body, keeping the constants it declares for the group sets."""
+        before = len(self.facts)
+        self.visit(node, owner, level, None)
+        if node.type in _FIELD_DECLARATIONS:
+            constants.extend(fact for fact in self.facts[before:] if fact.kind is SiteKind.CONSTANT)
+
+    def _enum(self, node: Node, body: Node, owner: str, level: Visibility) -> None:
+        """An enum's members, lower-cased, plus every string its constants pass: one value set."""
+        values: list[str] = []
+        for constant in body.named_children:
+            if constant.type != "enum_constant":
+                continue
+            name = constant.child_by_field_name("name")
+            if name is not None:
+                values.append(node_text(self.source, name).lower())
+            arguments = constant.child_by_field_name("arguments")
+            if arguments is not None:
+                values.extend(self._strings(arguments))
+            # A constant's arguments are uses of their values too ("instance-devices" passed to a builder).
+            for child in constant.children:
+                self.visit(child, owner, level, f"{owner}.{node_text(self.source, name or constant)}")
+        distinct = tuple(dict.fromkeys(values))
+        if len(distinct) >= _MIN_SET:
+            self.facts.append(_span_fact(SiteKind.SET, owner, distinct, node, level, level))
+
+    def _strings(self, node: Node) -> list[str]:
+        """Every plain string literal under a node."""
+        if node.type == "string_literal":
+            value = _string_value(node, self.source)
+            return [value] if value is not None else []
+        return [value for child in node.named_children for value in self._strings(child)]
+
+    def _field(self, node: Node, owner: str, folded: Visibility) -> None:
+        """A field: a constant when it is final (or an interface field) with one plain string value."""
+        modifiers = set(_modifiers(node, self.source))
+        constant = node.type == "constant_declaration" or {"static", "final"} <= modifiers
+        level = _visibility(node, self.source)
+        for declarator in node.children_by_field_name("declarator"):
+            name, value = declarator.child_by_field_name("name"), declarator.child_by_field_name("value")
+            if name is None or value is None:
+                continue
+            text = _string_value(value, self.source) if constant else None
+            qualified = f"{owner}.{node_text(self.source, name)}"
+            if text is not None:
+                self.facts.append(_span_fact(SiteKind.CONSTANT, qualified, (text,), declarator, level, folded))
+            else:
+                self.visit(value, owner, folded, qualified)
+
+    def _groups(self, constants: list[VocabularyFact], owner: str, level: Visibility) -> None:
+        """One value set per run of constants sharing a name prefix (`STATUS_*`), or the type's unprefixed ones."""
+        groups: dict[str, list[VocabularyFact]] = {}
+        for fact in constants:
+            simple = fact.name.rsplit(".", 1)[-1]
+            prefix = simple.split("_", 1)[0] if "_" in simple else ""
+            groups.setdefault(prefix, []).append(fact)
+        for prefix, members in groups.items():
+            values = tuple(dict.fromkeys(fact.values[0] for fact in members))
+            if len(values) < _MIN_SET:
+                continue
+            label = f"{owner}.{prefix}_*" if prefix else f"{owner}.*"
+            self.facts.append(
+                VocabularyFact(
+                    SiteKind.SET,
+                    label,
+                    values,
+                    min(fact.start_line for fact in members),
+                    max(fact.end_line for fact in members),
+                    level,
+                    level,
+                )
+            )
+
+    def _literal(self, node: Node, member: str) -> None:
+        """A string literal used in code."""
+        value = _string_value(node, self.source)
+        if value is not None:
+            self.facts.append(_span_fact(SiteKind.LITERAL, member, (value,), node))
+
+    def _switch(self, node: Node, member: str) -> None:
+        """The string labels of one switch, when it has enough of them to be a value set."""
+        labels: list[str] = []
+        for child in node.named_children:
+            for label in (part for part in child.named_children if part.type == "switch_label"):
+                labels.extend(self._strings(label))
+            if child.type == "switch_label":
+                labels.extend(self._strings(child))
+        distinct = tuple(dict.fromkeys(labels))
+        if len(distinct) < _MIN_SET:
+            return
+        condition = node.parent.child_by_field_name("condition") if node.parent is not None else None
+        selector = node_text(self.source, condition).strip() if condition is not None else ""
+        if selector.startswith("(") and selector.endswith(")"):
+            selector = selector[1:-1].strip()
+        fact = _span_fact(SiteKind.SWITCH, member, distinct, node.parent or node)
+        self.facts.append(replace(fact, detail=selector))
+
+    def _regex(self, node: Node, member: str) -> None:
+        """The first string argument of a call that takes a regular expression."""
+        _receiver, name, arguments = _call_parts(node)
+        if name is None or node_text(self.source, name) not in _REGEX_CALLS or not arguments:
+            return
+        value = _string_value(arguments[0], self.source)
+        if value is not None:
+            self.facts.append(_span_fact(SiteKind.REGEX, member, (value,), arguments[0]))
+
+
+def _span_fact(
+    kind: SiteKind,
+    name: str,
+    values: tuple[str, ...],
+    node: Node,
+    visibility: Visibility = Visibility.UNKNOWN,
+    container_visibility: Visibility = Visibility.UNKNOWN,
+) -> VocabularyFact:
+    """A fact spanning one node's lines."""
+    return VocabularyFact(
+        kind, name, values, node.start_point[0] + 1, node.end_point[0] + 1, visibility, container_visibility
+    )
+
+
+def _vocabulary(root: Node, source: bytes) -> list[VocabularyFact]:
+    """Every constant, literal use, value set and regex literal of one Java file."""
+    walk = _VocabularyWalk(source)
+    walk.visit(root, "", Visibility.PUBLIC, None)
+    return walk.facts
+
+
+_SHAPES = ShapeHooks(
+    call_kinds=frozenset({"method_invocation"}),
+    call_parts=_call_parts,
+    is_constant_name=_is_constant_name,
+    forward_target=_forward_target,
+    vocabulary=_vocabulary,
+    implements_contract=_implements_contract,
+    node_kinds=frozenset(
+        {
+            "annotation",
+            "constant_declaration",
+            "enum_body_declarations",
+            "enum_constant",
+            "expression_statement",
+            "field_declaration",
+            "formal_parameter",
+            "marker_annotation",
+            "return_statement",
+            "string_literal",
+            "switch_block",
+            "switch_label",
+        }
+    ),
+)
+
+
 JAVA = LanguageProfile(
     name="java",
     extensions=(".java",),
@@ -207,4 +502,5 @@ JAVA = LanguageProfile(
             "object_creation_expression",
         }
     ),
+    shapes=_SHAPES,
 )

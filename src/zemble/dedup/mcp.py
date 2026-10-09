@@ -100,7 +100,10 @@ def register_dupes_tool(server: FastMCP) -> None:
         kind: Annotated[
             str,
             Field(
-                description="Which channel: exact, renamed, logic, all literal channels, or architectural candidates."
+                description="Which channel: exact, renamed, logic; holed (bodies equal up to literal values), "
+                "idiom (one call shape at many sites), reimplements (code redoing an existing public method, or a "
+                "forwarding facade), vocabulary (one value or value set declared in several places); all of them; "
+                "or architectural candidates."
             ),
         ] = "renamed",
         paths: Annotated[
@@ -154,7 +157,10 @@ def register_dupes_tool(server: FastMCP) -> None:
         `exact` matches token streams with comments and whitespace removed, `renamed` also
         normalizes locals, parameters and lambda parameters (a differing literal or field name
         never matches), and `logic` reports embedding candidates that passed a control-flow and
-        call-set check, with the reason stated per pair. Classes are sectioned by lane, so test
+        call-set check, with the reason stated per pair. `holed` lets literal values and constants differ,
+        `idiom` reports call shapes repeated at many sites (wrappers included) ranked by spread,
+        `reimplements` names the existing method a body should call, and `vocabulary` reports values, value
+        sets and regexes declared in several places with a suggested home. Classes are sectioned by lane, so test
         scaffolding can never outrank production duplication. Classes spanning modules declared
         in `.zemble/home.toml` carry a home verdict. This is a report, never a gate.
         """

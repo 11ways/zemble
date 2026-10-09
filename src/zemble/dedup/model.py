@@ -12,11 +12,88 @@ from zemble.graph.model import is_test_path
 
 
 class CloneKind(str, Enum):
-    """The three duplication kinds, from strictest to loosest."""
+    """The duplication channels: three clone kinds from strictest to loosest, then the sub-body and vocabulary ones.
+
+    Every per-kind decision reads :attr:`facts`, whose table names every member; a kind missing
+    from it raises instead of falling back to another kind's behaviour.
+    """
 
     EXACT = "exact"
     RENAMED = "renamed"
     LOGIC = "logic"
+    HOLED = "holed"
+    IDIOM = "idiom"
+    REIMPLEMENTS = "reimplements"
+    VOCABULARY = "vocabulary"
+
+    @property
+    def facts(self) -> KindFacts:
+        """What this kind is keyed, ranked and judged by."""
+        return _KIND_FACTS[self]
+
+
+class Ranking(str, Enum):
+    """How a kind's classes are weighed against each other."""
+
+    #: tokens x copies x files, the weighting `zenit-dev duplication` uses.
+    MASS = "mass"
+    #: copies x files, copies counted up to `SPREAD_PER_FILE` per file: a shape at 900 sites in 200 files
+    #: outranks a long one at four, and 250 sites packed into 7 migration files rank as the 21 they spread like.
+    SPREAD = "spread"
+
+
+#: Copies per file a spread ranking counts; more sites in one file are local repetition, not spread.
+SPREAD_PER_FILE = 3
+
+
+@dataclass(frozen=True, slots=True)
+class KindFacts:
+    """The per-kind facts every consumer reads instead of switching over the kind."""
+
+    #: The unit attribute a class of this kind is keyed by.
+    key_attribute: str
+    ranking: Ranking
+    #: Why a class of this kind is only a lead, or None when its members are provably the same code or value.
+    lead: str | None
+    #: Members a rendered class lists before summing up the rest; None lists every member.
+    site_cap: int | None
+    #: Whether a focused run answers this kind from the per-root unit index (the others are filtered from a whole run).
+    indexed_focus: bool
+    #: Whether this kind reads body vectors from the embedder.
+    embeds: bool
+
+
+#: Members a sub-body or vocabulary class prints: a 900-site idiom must not print 900 lines.
+SITE_CAP = 12
+
+_KIND_FACTS: dict[CloneKind, KindFacts] = {
+    CloneKind.EXACT: KindFacts("exact_hash", Ranking.MASS, None, None, True, False),
+    CloneKind.RENAMED: KindFacts("renamed_hash", Ranking.MASS, None, None, True, False),
+    # Logic classes have no stream of their own, so they are keyed by the alpha-renamed body hash of each member.
+    CloneKind.LOGIC: KindFacts(
+        "renamed_hash",
+        Ranking.MASS,
+        "logic clone: similar control flow and call set, not the same code",
+        None,
+        True,
+        True,
+    ),
+    CloneKind.HOLED: KindFacts(
+        "shape_hash", Ranking.MASS, "holed clone: the same code with different literal values", SITE_CAP, False, False
+    ),
+    CloneKind.IDIOM: KindFacts(
+        "shape_hash", Ranking.SPREAD, "idiom: one call shape repeated at many sites", SITE_CAP, False, False
+    ),
+    CloneKind.REIMPLEMENTS: KindFacts(
+        "renamed_hash",
+        Ranking.MASS,
+        "re-implementation candidate: similar embedding and call set, not the same code",
+        None,
+        False,
+        True,
+    ),
+    CloneKind.VOCABULARY: KindFacts("shape_hash", Ranking.SPREAD, None, SITE_CAP, False, False),
+}
 
 
 class Lane(str, Enum):
@@ -32,14 +109,6 @@ class Lane(str, Enum):
 BODY_KINDS: tuple[str, ...] = tuple(sorted(body_unit_kinds()))
 #: The one kind that is never a body: a run of consecutive statements inside one.
 WINDOW_KIND = "window"
-
-#: The normalized stream a class of each kind is keyed by. Logic classes have no stream of
-#: their own, so they are keyed by the alpha-renamed body hash of each member.
-KEY_HASH_ATTRIBUTE: dict[CloneKind, str] = {
-    CloneKind.EXACT: "exact_hash",
-    CloneKind.RENAMED: "renamed_hash",
-    CloneKind.LOGIC: "renamed_hash",
-}
 
 #: Copies at or above which a logic class's reasons are aggregated instead of listed per pair.
 AGGREGATE_FROM = 3
@@ -78,6 +147,14 @@ class Unit:
     visibility: Visibility = Visibility.UNKNOWN
     #: The same for the innermost declaring type, already folded through its enclosing types.
     container_visibility: Visibility = Visibility.UNKNOWN
+    #: The hash the holed, idiom and vocabulary channels group by; "" on a unit no such channel reads.
+    shape_hash: str = ""
+    #: That shape as text with typed holes (`<str>`, `<const>`), or the value a vocabulary site declares.
+    shape: str = ""
+    #: `Type.member` when the whole body only hands its parameters, in order, to that one callable.
+    forwards_to: str | None = None
+    #: Whether the member implements a declared contract (`@Override`): a role implementation, not a utility.
+    implements_contract: bool = False
 
     @property
     def location(self) -> str:
@@ -118,6 +195,8 @@ class CloneClass:
     members: tuple[Unit, ...]
     tokens: int
     reasons: tuple[PairReason, ...] = ()
+    #: Class-level findings (a representative shape, a suggested home); printed before any pair reason.
+    notes: tuple[str, ...] = ()
 
     @property
     def files(self) -> int:
@@ -126,8 +205,20 @@ class CloneClass:
 
     @property
     def score(self) -> int:
-        """Rank of the class: tokens x copies x files, the weighting `zenit-dev duplication` uses."""
-        return self.tokens * len(self.members) * self.files
+        """Rank of the class, weighed the way its kind declares (:class:`Ranking`)."""
+        files = self.files
+        ranking = self.kind.facts.ranking
+        if ranking is Ranking.MASS:
+            return self.tokens * len(self.members) * files
+        if ranking is Ranking.SPREAD:
+            return min(len(self.members), SPREAD_PER_FILE * files) * files
+        raise ValueError(f"Unhandled ranking {ranking!r}")
+
+    @property
+    def shown_members(self) -> tuple[Unit, ...]:
+        """The members a rendering lists: all of them, or the first `site_cap` for a many-site kind."""
+        cap = self.kind.facts.site_cap
+        return self.members if cap is None else self.members[:cap]
 
     @property
     def lane(self) -> Lane:
@@ -147,7 +238,7 @@ class CloneClass:
         a file, or scanning from a different ancestor root all keep the key; adding or removing
         a copy changes it, which is what makes a stale ignore entry visible.
         """
-        attribute = KEY_HASH_ATTRIBUTE[self.kind]
+        attribute = self.kind.facts.key_attribute
         parts = sorted(getattr(member, attribute) for member in self.members)
         digest = hashlib.sha256("\n".join(parts).encode()).hexdigest()
         return f"{self.kind.value}:{digest[:12]}"
@@ -175,18 +266,19 @@ class CloneClass:
 
     @property
     def wire_reasons(self) -> list[str]:
-        """The reasons for the wire: an aggregate for 3+ copies, deduped pairs below that."""
+        """The reasons for the wire: the class notes, then an aggregate for 3+ copies or deduped pairs below that."""
+        notes = list(self.notes)
         if not self.reasons:
-            return []
+            return notes
         if len(self.members) >= AGGREGATE_FROM:
-            return self.aggregate_reasons
+            return notes + self.aggregate_reasons
         verdicts = {reason.reason for reason in self.reasons}
         if len(verdicts) == 1:
-            return [self.reasons[0].reason]
-        return [str(reason) for reason in self.reasons]
+            return [*notes, self.reasons[0].reason]
+        return notes + [str(reason) for reason in self.reasons]
 
     def to_dict(self) -> dict[str, Any]:
-        """Render the class for the wire."""
+        """Render the class for the wire; a many-site kind lists only its first `site_cap` members."""
         return {
             "key": self.key,
             "kind": self.kind.value,
@@ -209,7 +301,7 @@ class CloneClass:
                     "visibility": member.visibility.value,
                     "container_visibility": member.container_visibility.value,
                 }
-                for member in self.members
+                for member in self.shown_members
             ],
         }
 

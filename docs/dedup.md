@@ -48,7 +48,145 @@ zemble dupes . --lane production --brief
 zemble dupes . --baseline dupes-baseline.json
 ```
 
-## The three kinds
+## Sub-body and vocabulary channels: holed, idiom, reimplements, vocabulary
+
+A deduplication audit of Hohenheim and the Zenit framework (2026-10) found about 1,800 lines of real
+duplication that `exact`/`renamed`/`logic` could not see: the same call chain with different literals
+983 times, 3-line twins below the 30-token floor, private copies of an existing framework method, and
+one status vocabulary declared in eleven places. Four kinds cover those classes.
+
+### Design: one more set of kinds, not a parallel tool
+
+What existed: `exact`/`renamed`/`logic` compare whole bodies and statement windows, keep literals verbatim
+by design and drop anything under 30 tokens; `architectural` needs the daemon's graph and only looks at
+files that mention a deprecation; `home` judges a described capability, not code; `find_related` answers
+one chunk at a time. None of them could carry a site list, a typed hole or a declared value.
+
+Decision: the four channels are new `CloneKind` members, so they reuse everything downstream of a clone
+class unchanged: lanes, content keys, `.zemble/dupes.ignore` (justified entries suppress them, stale and
+unjustified entries are reported), baselines, `--brief`, home verdicts, `--limit` with totals, and the
+`--kind` vocabulary on both surfaces (`--kind holed,idiom`, MCP `kind="vocabulary"`; `all` selects every
+kind). One home per vocabulary:
+
+- `CloneKind.facts` (`KindFacts`) is the only place a kind's key attribute, ranking (`Ranking.MASS` or
+  `Ranking.SPREAD`), lead text, member cap, focus lane and embedding need are declared; a kind missing
+  from the table raises, and `tests/test_dedup_shapes.py` fails on one without facts.
+- `SiteKind` (`chain`, `wrapper`, `pair`, `constant`, `literal`, `set`, `switch`, `regex`) is the unit
+  kind of a site. Sites live in their own lists beside the clone units, so exact and renamed never see one.
+- `ShapeHooks` on the language profile is the home of every language fact the channels read (call
+  receivers, the constant naming convention, forwarding bodies, `@Override`, the vocabulary walk). Java
+  has them; a profile without them takes part in `holed` and `reimplements` through its literal kinds and
+  call names, and has no idiom or vocabulary sites. A run of `idiom` or `vocabulary` names the languages
+  it covered (`idiom and vocabulary sites cover: java`), so an empty Python result never reads as clean.
+- `dupes` stays cache-free: no graph, no index. The re-implementation lane reads the same body vectors
+  and local mirror `logic` reads (`find_related`'s embedding space), never the daemon.
+
+The holed stream is the common normalisation: the renamed stream with every literal a typed hole
+(`<str>`, `<num>`, `<chr>`, `<bool>`, `<null>`, `<lit>`, typed by the literal node kind's own name) and
+every qualified constant reference (`Egress.NONE`, `MAX_SIZE`, the profile's `is_constant_name`) one
+`<const>` hole.
+
+### holed: bodies equal up to literal values
+
+Whole bodies of at least 8 tokens grouped by holed stream. Floors replace the 30-token one: a class needs
+`tokens x copies >= 40` (two copies of 20 tokens, three of 14, five of 8). A group that is one renamed
+stream at 30+ tokens is exact or renamed duplication and stays there. Below 30 tokens a body that calls
+nothing (`this.x = x;`) or only hands literals to one call (`return Icon.of("x");`) declares data and is
+dropped. Ranked by mass like the clone kinds. Notes: the shape with its holes, copies and literal variants.
+
+### idiom: one call shape at many sites
+
+Sites, not bodies: every call chain of at least two calls and 8 tokens, the receiver-holed tails of a
+chain whose head varies (`<anything>.resolve($0.getLocales(), $0.getMessageResolver())`, and every longer
+suffix of an outermost chain, `<anything>.offset(n).limit(1000).all()`), and every
+pair of different calls on one receiver with the same first argument (`getAttribute(K)` ...
+`setAttribute(K, v)`). The key erases every typed hole AND every placeholder the site uses once, so a
+wrapper `copy(String key) { return Microcopy.of(key).withFilter("scope", "x"); }` and an inline
+`Microcopy.of("title").withFilter("scope", "x")` are one idiom; a placeholder used twice stays, because it
+is the site's data flow. A chain that is its method's whole body is a `wrapper` site, and the class names
+its wrappers.
+
+A shape needs 3 sites in 2 files AND evidence that it is duplication rather than an API used as designed
+(`.icon(Icon.of("x"))` at 95 sites is not a finding): some sites already wrap it while others inline it;
+nearly every site (90%) repeats one literal; one value is wired into several calls; four or more different
+calls are chained; or a read/write pair of one noun (`getAttribute`/`setAttribute`). A class whose only
+evidence is a repeated literal that a better-ranked idiom inside it already repeats is dropped
+(`_.label(Microcopy.of(...)...)` says nothing beyond the Microcopy idiom). Ranked by spread: copies x
+files, copies counted up to 3 per file, so 255 sites packed into 7 migration files rank as the 21 they
+spread like. Each class lists its first 12 sites (`... and N more site(s)`; the JSON keeps `copies`).
+
+### reimplements: code that redoes an existing method
+
+Each class is one API and the bodies that redo it, copies first and the API last:
+`X, Z (2 bodies) re-implement Y; call Y (file:line)`, then one evidence line per copy.
+
+- **Forwarding facade**: a type whose bodies (75% of them, at least 2) only pass their parameters, in
+  order, to one other type that the scan holds (`Slugs` over `SlugText`). Read off the syntax.
+- **Re-implementation**: a public method of a public type, outside the tests, not an `@Override` and not
+  a builder (under 40% of its calls chained on a call result), at most 20 different calls, that a
+  non-test body in another file and type repeats without calling it. Candidates come from three lanes,
+  each with its own bar: the same code with locals renamed (a private copy of a public helper); a close
+  embedding neighbour (cosine >= 0.85 among the 10 nearest) repeating 75% of the API's calls, two of them
+  uncommon, control flow within 3 edits; or a pair sharing four uncommon calls (cosine >= 0.75, 60% of the
+  API's calls, flow within 4 edits). A call made by more than 0.5% of the scanned bodies is common. When
+  the API has two or more literals the copy must repeat half of them. Two same-named members only count
+  when the copy is private or package-private: a public or protected namesake is an override or a
+  parallel implementation. Embedding similarity alone never reports anything.
+
+To find copies of framework methods in an app, scan a root holding both and focus on the app:
+`zemble dupes <workspace> --kind reimplements --focus apps/hohenheim`.
+
+### vocabulary: one value declared in several places
+
+Read from the language's vocabulary walk: constants with a plain string value, literal uses, value sets
+(an enum's lower-cased members plus the strings its constants pass, a run of constants sharing a name
+prefix such as `STATUS_*`, or a type's unprefixed constants), the string labels of a switch with what it
+dispatches on, and regex literals (the first string argument of `compile`, `matches`, `replaceAll`,
+`replaceFirst`, `split`). Four flavours, each ranked on its own and taking turns in the report:
+
+- **values**: a value declared by 3+ constants in 2+ files under one meaning (names that spell the value,
+  `FAILED`/`STATUS_FAILED`, or one repeated name, `STATE_COLUMN`; six constants holding "hohenheim" for six
+  purposes are not one vocabulary), or a compound value (`instance-devices`, `host_admission`) written
+  as a literal where a reachable constant holds it. A common word's literal uses are counted, never listed.
+- **value sets**: sets sharing 3 values and 60% of the smaller one, unioned into families; a near twin
+  (`success` beside `succeeded`, 5 shared leading characters) counts toward the overlap and is reported
+  as drift.
+- **dispatch**: switches on one call (`switch (column.name())`) in 3+ files, each restating its labels.
+- **regex**: a regex of 8+ characters (an anchor, a class, an escape) written in 2+ places, as a call
+  argument or a constant.
+
+Each class carries a suggested home: the existing public declaration in a shared (`common`) source set,
+shallowest first, or the members' deepest common directory.
+
+### Measured (2026-10-10)
+
+On the Hohenheim tree before its cleanup (b9b8f221, 912 production files; `exact`/`renamed` find 0
+production classes there and `logic` 61): holed 85 classes, idiom 397, vocabulary 87 in 2-7 s each. On a
+scratch root holding that tree plus zenit, zenit-cms and protoblast sources (4 512 files, 31 645 compared
+bodies), reimplements 26 classes in 15-25 s warm. Every case the audit listed was looked up in these
+outputs; the misses are below under Limits.
+
+Precision, top 30 per channel read and judged (real = a helper, constant or call would remove it):
+
+| Channel | Hohenheim b9b8f221 | zenit-cms |
+| --- | --- | --- |
+| holed | 2 borderline of 30 (a DI constructor, a migration `down`) | 9 classes; 1 borderline |
+| idiom | 5 of 30 borderline (column-builder DSL chains) | 4-5 of 30 (a log call, a test table builder, migrations) |
+| reimplements | 5-6 of 26 (panel declarations, parallel registrations; on the scratch root) | not run alone (no API side) |
+| vocabulary | 0-2 of 30 | 12 classes, all real |
+
+Whole javaweb workspace (`/home/skerit/projects/zenit-workspace`, 11 986 files, load average ~30 from other
+agents): holed 16 s, idiom 24 s, vocabulary 16 s, reimplements 59 s warm (490 s the first time, 227 s of it
+embedding 79 315 bodies with voyage-4-lite), all four together 95 s / 1.6 GB warm; `--kind exact,renamed` on
+the same machine and tree took 179 s.
+
+### Focus
+
+`--focus` works for all four kinds: they keep no per-root index, so a focused run computes the whole
+run's classes for them and keeps the ones with a member under the focus. The clone kinds keep their
+indexed focus lane; a run asking for both does both.
+
+## The three clone kinds
 
 **`exact`** hashes the token stream with comments and whitespace removed.
 Literals stay verbatim. Two bodies match when they are the same code, formatted
@@ -250,7 +388,7 @@ under its members and as a `home` object in the JSON.
   all (sibling apps, a checkout the workspace does not describe): the
   architecture cannot judge code it does not know about, and the verdict names
   the modules it could not place.
-- **review-required** -- the class is a LOGIC clone. Structural similarity is
+- **review-required** -- the class is a LOGIC clone (or a holed, idiom or re-implementation lead). Structural similarity is
   not equivalence, so the answer is a lead and never an instruction: the
   best-evidenced copy (a copy a declared row names, else the most core one) is
   named as a *possible* existing mechanism.
@@ -269,7 +407,9 @@ One ordered decision function, first answer wins, every step failing closed:
    outranks every declaration: when a member may not depend on the module that
    declares the mechanism, calling it is not the fix, whatever the table says.
 2. A member module that `home.toml` does not declare -> `no-shared-ancestor`.
-3. `kind` is `logic` -> `review-required`, never anything stronger.
+3. `kind` is a lead kind (`logic`, `holed`, `idiom`, `reimplements`: its `KindFacts.lead` is set) ->
+   `review-required`, never anything stronger; the head names the lead (`(logic clone)`, `(holed clone)`).
+   `vocabulary` classes hold the same value, so they take the ordinary steps.
 4. Dependency topology, when the workspace has a dependency graph at all: the
    home candidates are the member modules every other member module can reach
    (`Reachability.DIRECT` or `TRANSITIVE`), most core first. When there is no
@@ -396,7 +536,7 @@ overlapping window lengths of one copied run into the single widest one.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--kind` | `exact,renamed` | `exact`, `renamed`, `logic`, `all`, or a comma-separated list |
+| `--kind` | `exact,renamed` | `exact`, `renamed`, `logic`, `holed`, `idiom`, `reimplements`, `vocabulary`, `all`, or a comma-separated list |
 | `--limit` | 25 | Clone classes printed per section |
 | `--min-files` | 1 | Only report classes spanning at least N files |
 | `--min-tokens` | 30 | Smallest unit that may form a class |
@@ -464,6 +604,9 @@ protoblast and plumage:
 
 `dupes(repo, kind, paths, focus, exclude, lane, limit, min_files, format, brief,
 baseline, save_baseline)`.
+
+`kind` takes one channel name (`exact`, `renamed`, `logic`, `holed`, `idiom`, `reimplements`,
+`vocabulary`), `all`, or `architectural`; the parameters are the CLI's.
 
 `format="text"` (the default) returns the report exactly as the CLI prints it,
 as a plain string; `brief=true` trims it to the class lines. `format="json"`
@@ -590,6 +733,25 @@ language widens logic mode by itself. A file whose extension no profile claims i
 never walked at all.
 
 ## Limits
+
+- The sub-body channels are leads, not proofs: `holed`, `idiom` and `reimplements` classes carry
+  `review-required` home verdicts. Their floors were tuned on Hohenheim and zenit-cms (see Measured).
+- `idiom` and `vocabulary` read Java only (`ShapeHooks`); another language reports none and the run says
+  so. `holed` folds constants into `<const>` only where the profile names a constant convention.
+- `idiom` reports nested variants of one family separately (`_.tabs(...)` and `_.tabs(...).build()`);
+  only a variant whose sole evidence is a literal the better-ranked one repeats is folded away. Fluent
+  builder DSLs with four or more calls still pass the chain evidence.
+- `holed` drops call-free and single-call bodies under 30 tokens and small twins inside one file, so a
+  copied `return a != null ? a : b;` coalesce or a family of one-file conveniences is not reported.
+- `reimplements` only sees a copy that shares code, calls or a close embedding with the API. A copy that
+  does the same thing with different calls is invisible to it: Hohenheim's seven `effective*` helpers
+  (`has`/`get`/`getName`/`byId` against `Row.afterWrite`'s `has`/`get`/`getDefaultValue`, cosine 0.39-0.66),
+  hand-written `Integer.parseInt` copies against `PrimitiveCoercion.toInteger` (no shared call),
+  `durationLabel` against `RelativeTime.duration` (cosine 0.27) and `trimmedOrNull`/`blankToNull` against
+  `Texts` (two generic calls) were all missed. A facade over a type outside the scan (a JDK type) is not
+  reported, so scan the root that holds both sides.
+- `vocabulary` reads string constants and literals; numeric vocabularies, values built by concatenation
+  and regexes passed to a non-JDK API are not seen.
 
 - A derived profile is only as precise as its spec: a grammar whose call node the spec
   does not describe compares bodies with an empty call list, so its logic clones lean on

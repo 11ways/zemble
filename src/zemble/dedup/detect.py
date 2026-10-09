@@ -6,16 +6,19 @@ import os
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from itertools import zip_longest
 from pathlib import Path
 from typing import TypeVar
 
 import numpy as np
 
 from zemble.dedup.homes import judge_classes
+from zemble.dedup.idioms import holed_classes, idiom_classes
 from zemble.dedup.ignore import apply_ignores, find_ignore_files
-from zemble.dedup.languages import profile_for, supported_extensions
+from zemble.dedup.languages import profile_for, shape_languages, supported_extensions
 from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Lane, PairReason, Unit
+from zemble.dedup.reimplements import forwarding_classes, reimplementation_candidates, reimplementation_classes
 from zemble.dedup.structure import MAX_SKELETON_DISTANCE, check_pair
 from zemble.dedup.unitcache import (
     VECTOR_FOLDER_NAME,
@@ -25,14 +28,15 @@ from zemble.dedup.unitcache import (
     extraction_signature,
     root_cache_folder,
 )
-from zemble.dedup.units import extract_units
+from zemble.dedup.units import FileUnits, extract_file
+from zemble.dedup.vocabulary import vocabulary_classes
 from zemble.embedding.base import Embedder
 from zemble.index.file_walker import compile_ignore, walk_files
 from zemble.parallel import pool_context, pooled
 
 _WORKER_CHUNK = 60
 #: One file's full extraction: its root-relative path, content digest ("" unreadable) and units (None failed).
-_Extracted = tuple[str, str, list[Unit] | None]
+_Extracted = tuple[str, str, FileUnits | None]
 _Result = TypeVar("_Result")
 #: One unit's two hashes as an index row stores them (`unitcache.HASH_BYTES` per unit).
 _HASH_DTYPE = np.dtype([("exact", "S16"), ("renamed", "S16")])
@@ -80,6 +84,11 @@ class DupeOptions:
         """Whether this run has to embed anything."""
         return CloneKind.LOGIC in self.kinds
 
+    @property
+    def wants_windows(self) -> bool:
+        """Whether statement windows are cut: only the indexed clone kinds compare them (or store them)."""
+        return self.windows and any(kind.facts.indexed_focus for kind in self.kinds)
+
 
 @dataclass
 class _Scan:
@@ -95,6 +104,10 @@ class _Extraction:
     units: list[Unit] = field(default_factory=list)
     files: int = 0
     failed: list[str] = field(default_factory=list)
+    #: Every body the holed and re-implementation channels compare, small ones included.
+    shaped: list[Unit] = field(default_factory=list)
+    #: Idiom and vocabulary sites.
+    sites: list[Unit] = field(default_factory=list)
 
 
 def _selected_paths(root: Path, paths: Sequence[str]) -> list[Path]:
@@ -139,7 +152,7 @@ def _is_under(file_path: Path, choice: Path) -> bool:
     return file_path == choice or choice in file_path.parents
 
 
-def _extract_file(absolute: str, relative: str, options: dict[str, object]) -> tuple[str, list[Unit] | None]:
+def _extract_file(absolute: str, relative: str, options: dict[str, object]) -> tuple[str, FileUnits | None]:
     """Read and extract one file, returning its content digest ("" when unreadable) and its units (None on failure).
 
     A failure never fails the run, but it is counted and reported: a missing grammar or an
@@ -151,7 +164,7 @@ def _extract_file(absolute: str, relative: str, options: dict[str, object]) -> t
         return "", None
     digest = content_digest(source)
     try:
-        return digest, extract_units(source, relative, **options)  # type: ignore[arg-type]
+        return digest, extract_file(source, relative, **options)  # type: ignore[arg-type]
     except Exception:
         return digest, None
 
@@ -164,7 +177,10 @@ def _extract_full_batch(payload: tuple[list[tuple[str, str]], dict[str, object]]
 
 def _extract_row_batch(payload: tuple[list[tuple[str, str]], dict[str, object]]) -> list[FileRow]:
     """Worker entry point: every file of a batch as its compact unit-index row."""
-    return [FileRow.of(*result) for result in _extract_full_batch(payload)]
+    return [
+        FileRow.of(relative, digest, extracted.units if extracted is not None else None)
+        for relative, digest, extracted in _extract_full_batch(payload)
+    ]
 
 
 def _batches(jobs: list[tuple[str, str]], size: int) -> Iterator[list[tuple[str, str]]]:
@@ -173,14 +189,26 @@ def _batches(jobs: list[tuple[str, str]], size: int) -> Iterator[list[tuple[str,
         yield jobs[start : start + size]
 
 
-def _extract_options(options: DupeOptions, *, include_text: bool) -> dict[str, object]:
-    """The keyword arguments every file of a run is extracted with."""
-    return {
+def _extract_options(options: DupeOptions, *, include_text: bool, shapes: bool = True) -> dict[str, object]:
+    """The keyword arguments every file of a run is extracted with.
+
+    The sub-body requests are only named when one is on, so a clone-only run keeps the options (and the
+    unit-index signature) it always had; `shapes=False` leaves them out for the indexed focus lane.
+    """
+    extract: dict[str, object] = {
         "min_tokens": options.min_tokens,
         "min_statements": options.min_statements,
-        "windows": options.windows,
-        "include_text": include_text,
+        "windows": options.wants_windows,
+        "include_text": include_text or (shapes and CloneKind.REIMPLEMENTS in options.kinds),
     }
+    if shapes:
+        requests = {
+            "shaped": CloneKind.HOLED in options.kinds or CloneKind.REIMPLEMENTS in options.kinds,
+            "idioms": CloneKind.IDIOM in options.kinds,
+            "vocabulary": CloneKind.VOCABULARY in options.kinds,
+        }
+        extract.update({name: True for name, wanted in requests.items() if wanted})
+    return extract
 
 
 def _run_batches(
@@ -218,15 +246,19 @@ def collect_units(root: Path, options: DupeOptions) -> _Extraction:
     extract_options = _extract_options(options, include_text=options.wants_logic)
     extraction = _Extraction(files=len(scan.jobs))
     rows: list[FileRow] = []
-    for relative, digest, units in _run_batches(_extract_full_batch, scan.jobs, extract_options, options.jobs):
-        if units is None:
+    for relative, digest, extracted in _run_batches(_extract_full_batch, scan.jobs, extract_options, options.jobs):
+        if extracted is None:
             extraction.failed.append(relative)
         else:
-            extraction.units.extend(units)
+            extraction.units.extend(extracted.units)
+            extraction.shaped.extend(extracted.shaped)
+            extraction.sites.extend(extracted.sites)
         if options.wants_logic and digest:
-            rows.append(FileRow.of(relative, digest, units))
+            rows.append(FileRow.of(relative, digest, extracted.units if extracted is not None else None))
     if rows:
-        _refresh_index(root, extract_options, rows, None if options.paths else [job[1] for job in scan.jobs])
+        # The index serves the focused clone lane, whose extraction never names the sub-body requests.
+        index_options = _extract_options(options, include_text=True, shapes=False)
+        _refresh_index(root, index_options, rows, None if options.paths else [job[1] for job in scan.jobs])
     return extraction
 
 
@@ -632,19 +664,50 @@ def focused_logic_classes(
 # ---- ranking -------------------------------------------------------------
 
 
-def _covers(bigger: CloneClass, smaller: CloneClass) -> bool:
-    """Whether every member of one class sits inside a member of another, equally copied one."""
-    if len(bigger.members) < len(smaller.members):
-        return False
-    for member in smaller.members:
-        if not any(
-            other.file_path == member.file_path
-            and other.start_line <= member.start_line
-            and member.end_line <= other.end_line
-            for other in bigger.members
-        ):
-            return False
-    return True
+class _Kept:
+    """The classes ranking has kept so far, with every member span indexed by file for the cover check."""
+
+    def __init__(self) -> None:
+        """Start empty."""
+        self.classes: list[CloneClass] = []
+        self.spans: list[dict[str, list[tuple[int, int, int]]]] = []
+        self.by_file: dict[str, list[int]] = defaultdict(list)
+
+    def add(self, clone: CloneClass) -> None:
+        """Keep one class."""
+        index = len(self.classes)
+        spans: dict[str, list[tuple[int, int, int]]] = defaultdict(list)
+        for member in clone.members:
+            spans[member.file_path].append((member.start_line, member.end_line, member.token_count))
+        self.classes.append(clone)
+        self.spans.append(spans)
+        for file_path in spans:
+            self.by_file[file_path].append(index)
+
+    def _inside(self, index: int, member: Unit) -> bool:
+        """Whether a kept class has a member enclosing this one: its lines, and at least its tokens.
+
+        The token condition is what a nested window or body always meets; it keeps a short call chain from
+        swallowing a longer one written on the same line.
+        """
+        return any(
+            start <= member.start_line and member.end_line <= end and tokens >= member.token_count
+            for start, end, tokens in self.spans[index].get(member.file_path, ())
+        )
+
+    def covers(self, clone: CloneClass) -> bool:
+        """Whether a kept, at least equally copied class already contains every member of this one."""
+        first, *rest = clone.members
+        candidates = [
+            index
+            for index in self.by_file.get(first.file_path, ())
+            if len(self.classes[index].members) >= len(clone.members) and self._inside(index, first)
+        ]
+        for member in rest:
+            if not candidates:
+                return False
+            candidates = [index for index in candidates if self._inside(index, member)]
+        return bool(candidates)
 
 
 def rank(classes: Sequence[CloneClass], min_files: int) -> list[CloneClass]:
@@ -658,14 +721,14 @@ def rank(classes: Sequence[CloneClass], min_files: int) -> list[CloneClass]:
     :return: The surviving classes, best first.
     """
     ordered = sorted(classes, key=lambda clone: (-clone.score, clone.members[0].location))
-    kept: list[CloneClass] = []
+    kept = _Kept()
     for clone in ordered:
         if clone.files < min_files:
             continue
-        if any(_covers(other, clone) for other in kept):
+        if kept.covers(clone):
             continue
-        kept.append(clone)
-    return kept
+        kept.add(clone)
+    return kept.classes
 
 
 @dataclass
@@ -692,7 +755,48 @@ def _whole_run(root: Path, options: DupeOptions, embedder: Embedder | None) -> _
         found, notes = logic_classes(units, options, embedder, root)
         classes.extend(rank(found, options.min_files))
         report.notes.extend(notes)
-    return _Found(report, classes, [unit.file_path for unit in units])
+    shaped, notes = _shape_classes(root, options, extraction, embedder)
+    classes.extend(shaped)
+    report.notes.extend(notes)
+    return _Found(report, classes, _unit_paths(extraction))
+
+
+def _unit_paths(extraction: _Extraction) -> list[str]:
+    """Every file that produced a unit, shaped body or site, once: where ignore files are looked for."""
+    return list(
+        dict.fromkeys(
+            unit.file_path for units in (extraction.units, extraction.shaped, extraction.sites) for unit in units
+        )
+    )
+
+
+def _shape_classes(
+    root: Path, options: DupeOptions, extraction: _Extraction, embedder: Embedder | None
+) -> tuple[list[CloneClass], list[str]]:
+    """The holed, idiom, re-implementation and vocabulary classes of one extraction, each kind ranked on its own."""
+    classes: list[CloneClass] = []
+    notes: list[str] = []
+    if CloneKind.HOLED in options.kinds:
+        classes.extend(rank(holed_classes(extraction.shaped, options.min_tokens), options.min_files))
+    if CloneKind.IDIOM in options.kinds:
+        classes.extend(rank(idiom_classes(extraction.sites), options.min_files))
+    if CloneKind.REIMPLEMENTS in options.kinds:
+        candidates = reimplementation_candidates(extraction.shaped)
+        found = forwarding_classes(extraction.shaped)
+        if len(candidates) >= 2:
+            vectors = _body_vectors(candidates, options, embedder, root)
+            found.extend(reimplementation_classes(candidates, vectors.vectors))
+            notes.append(
+                f"reimplements: compared {len(candidates)} bodies with {vectors.model_id} in {vectors.seconds:.1f}s"
+            )
+        classes.extend(rank(found, options.min_files))
+    if CloneKind.VOCABULARY in options.kinds:
+        flavours = [rank(flavour, options.min_files) for flavour in vocabulary_classes(extraction.sites)]
+        # Each flavour is ranked on its own and they take turns, so a regex is never buried under 400 values.
+        classes.extend(clone for turn in zip_longest(*flavours) for clone in turn if clone is not None)
+    if CloneKind.IDIOM in options.kinds or CloneKind.VOCABULARY in options.kinds:
+        notes.append(f"idiom and vocabulary sites cover: {', '.join(shape_languages()) or 'no language'}")
+    return classes, notes
 
 
 def _report(root: Path, options: DupeOptions, files: int, failed: Sequence[str], units: int, bodies: int) -> DupeReport:
@@ -738,8 +842,8 @@ def _literal_universe(
     exact_hex, renamed_hex = _hex_digests(exact), _hex_digests(renamed)
     return [
         unit
-        for *_, units in _run_batches(_extract_full_batch, jobs, extract_options, options.jobs)
-        for unit in units or ()
+        for *_, extracted in _run_batches(_extract_full_batch, jobs, extract_options, options.jobs)
+        for unit in (extracted.units if extracted is not None else ())
         if unit.exact_hash in exact_hex or unit.renamed_hash in renamed_hex
     ]
 
@@ -774,13 +878,37 @@ def _focus_files(root: Path, focus: Sequence[str], scan: _Scan) -> set[str]:
 
 
 def _focused_run(root: Path, options: DupeOptions, embedder: Embedder | None) -> _Found:
-    """Report the classes with a member under the focus paths, every other scanned file read from the unit index.
+    """Report the classes with a member under the focus paths; the answer for those classes is the whole run's.
 
-    The answer for those classes is the whole run's: a class's other members may lie anywhere scanned.
+    The clone kinds read every other scanned file from the unit index; the sub-body and vocabulary kinds keep no
+    index, so their classes are a whole run's, filtered to the ones touching the focus.
     """
     scan = _scan(root, options.paths, options.exclude)
     focus = _focus_files(root, options.focus, scan)
-    extract_options = _extract_options(options, include_text=True)
+    clone_kinds = any(kind.facts.indexed_focus for kind in options.kinds)
+    found = _focused_clone_run(root, options, embedder, scan, focus) if clone_kinds else None
+    shape_kinds = tuple(kind for kind in options.kinds if not kind.facts.indexed_focus)
+    if not shape_kinds:
+        assert found is not None
+        return found
+    whole = replace(options, kinds=shape_kinds, focus=(), windows=False)
+    extraction = collect_units(root, whole)
+    classes, notes = _shape_classes(root, whole, extraction, embedder)
+    if found is None:
+        bodies = sum(unit.is_body for unit in extraction.units)
+        report = _report(root, options, extraction.files, extraction.failed, len(extraction.units), bodies)
+        found = _Found(report, [], [])
+    found.classes.extend(clone for clone in classes if _touches(clone, focus))
+    found.report.notes.extend(notes)
+    found.unit_paths.extend(_unit_paths(extraction))
+    return found
+
+
+def _focused_clone_run(
+    root: Path, options: DupeOptions, embedder: Embedder | None, scan: _Scan, focus: set[str]
+) -> _Found:
+    """The focused answer of the clone kinds, every file outside the focus read from the unit index."""
+    extract_options = _extract_options(options, include_text=True, shapes=False)
     indexed = _indexed_scan(root, options, scan, extract_options)
     rows = indexed.rows
     bodies = [body for row in rows for body in row.bodies]
