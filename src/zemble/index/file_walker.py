@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import threading
@@ -65,10 +66,12 @@ _DEFAULT_IGNORED_DIRS: frozenset[str] = frozenset(
     }
 )
 
-#: Compiled ignore specs, keyed by directory and the ignore files' modification times, so the
-#: two walks a single index build performs do not recompile every .gitignore in the tree.
+#: Compiled ignore specs, keyed by directory and the ignore files' contents, so the two walks a
+#: single index build performs do not recompile every .gitignore in the tree.
+#: AIDEV-NOTE: never key on modification time: two writes inside one filesystem timestamp tick
+#: (coarse kernel clock, a few ms) share an mtime, and the cache then served the stale spec.
 _SPEC_CACHE: OrderedDict[
-    tuple[str, int | None, int | None],
+    tuple[str, str | None, str | None],
     tuple[GitIgnoreSpec, tuple[PreparedPattern, ...], re.Pattern[str] | None] | None,
 ] = OrderedDict()
 _MAX_SPEC_CACHE = 4096
@@ -114,19 +117,18 @@ def _prefilter(patterns: tuple[PreparedPattern, ...]) -> re.Pattern[str] | None:
         return None
 
 
-def _mtime_or_none(path: str) -> int | None:
-    """Return a file's modification time, or None when it is not a readable file."""
+def _read_or_none(path: str) -> str | None:
+    """Return a text file's content, undecodable bytes ignored, or None when it is not a readable file."""
     try:
-        stat = os.stat(path)
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            return handle.read()
     except OSError:
         return None
-    return stat.st_mtime_ns
 
 
-def _read_lines(path: str) -> list[str]:
-    """Read a text file's lines, ignoring undecodable bytes."""
-    with open(path, encoding="utf-8", errors="ignore") as handle:
-        return handle.read().splitlines()
+def _digest(text: str) -> str:
+    """A short content digest: the cache keeps keys, never whole ignore files."""
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).hexdigest()
 
 
 def _load_ignore_for_dir(
@@ -135,17 +137,14 @@ def _load_ignore_for_dir(
     """Load and compile the gitignore and zembleignore of a dir, with their per-pattern decisions."""
     gitignore = f"{directory}/.gitignore"
     zembleignore = f"{directory}/.zembleignore"
-    key = (directory, _mtime_or_none(gitignore), _mtime_or_none(zembleignore))
+    contents = (_read_or_none(gitignore), _read_or_none(zembleignore))
+    key = (directory, *(None if text is None else _digest(text) for text in contents))
     with _SPEC_LOCK:
         if key in _SPEC_CACHE:
             _SPEC_CACHE.move_to_end(key)
             return _SPEC_CACHE[key]
 
-    lines = []
-    if key[1] is not None:
-        lines.extend(_read_lines(gitignore))
-    if key[2] is not None:
-        lines.extend(_read_lines(zembleignore))
+    lines = [line for text in contents if text is not None for line in text.splitlines()]
     loaded = None
     if lines:
         spec = GitIgnoreSpec.from_lines(lines)
