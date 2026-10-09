@@ -464,6 +464,21 @@ def test_extraction_failures_are_counted_not_swallowed(tmp_path: Path, monkeypat
     assert any("extraction failed for 2 file(s)" in note for note in payload["notes"]), "step 2: and notes it"
 
 
+def test_files_without_a_language_profile_are_never_attempted(tmp_path: Path) -> None:
+    """A whitelist re-including docs and config files hands them to the walk; no profile means not code, not failed."""
+    (tmp_path / ".gitignore").write_text("*\n!.gitignore\n!README.md\n!notes.toml\n!src/\n!src/*.java\n")
+    (tmp_path / "README.md").write_text("# Readme\n")
+    (tmp_path / "notes.toml").write_text("[a]\nb = 1\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "Alpha.java").write_text("class Alpha { void m() { int a = 1; } }\n")
+
+    report = find_duplication(tmp_path, DupeOptions(kinds=(CloneKind.EXACT,), jobs=1))
+
+    # 1. Only the Java file is analyzed, and nothing is reported as a failed extraction.
+    assert report.analyzed_files == 1, "step 1: only the file a profile claims is analyzed"
+    assert report.failed_files == 0 and report.failed_examples == [], "step 1: the re-included docs never fail"
+
+
 def test_relative_paths_resolve_against_the_scan_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`--paths` and `--exclude` are root-relative, whatever directory the process happens to be in."""
     from zemble.dedup.mcp import _options, _run

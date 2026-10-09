@@ -14,7 +14,7 @@ import numpy as np
 
 from zemble.dedup.homes import judge_classes
 from zemble.dedup.ignore import apply_ignores, find_ignore_files
-from zemble.dedup.languages import supported_extensions
+from zemble.dedup.languages import profile_for, supported_extensions
 from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Lane, PairReason, Unit
 from zemble.dedup.structure import MAX_SKELETON_DISTANCE, check_pair
 from zemble.dedup.unitcache import (
@@ -116,6 +116,10 @@ def _scan(root: Path, paths: Sequence[str], exclude: Sequence[str] = ()) -> _Sca
     selected = _selected_paths(root, paths)
     excluded = compile_ignore(exclude)
     for file_path in walk_files(root, extensions=supported_extensions()):
+        # A gitignore negation naming a file (`!README.md`) lets the walk yield it whatever its extension; with no
+        # profile it is not code, never a failed extraction.
+        if profile_for(file_path) is None:
+            continue
         if selected and not any(_is_under(file_path, choice) for choice in selected):
             continue
         if excluded is not None and excluded.match_file(file_path.relative_to(root).as_posix()):

@@ -63,6 +63,13 @@ def _touch(path: Path, content: str = "x = 1\n") -> None:
             "*.kjs\n!special.kjs\n",
             {"main.py", "special.kjs"},
         ),
+        # A re-included dotfile name (.gitignore) has no extension: the `!` is not part of the name.
+        (
+            [".gitignore", ".zembleignore", ".zemble/home.toml", ".zemble/cache.bin", "main.py"],
+            "*\n!.gitignore\n!.zembleignore\n!.zemble/\n.zemble/*\n!.zemble/home.toml\n!main.py\n",
+            None,
+            {".zemble/home.toml", "main.py"},
+        ),
         # Glob negation without suffix does NOT bypass extension filter.
         (
             [".github/workflows/ci.yaml", "src/main.py"],

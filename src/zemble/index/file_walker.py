@@ -84,8 +84,9 @@ def _prepare(spec: GitIgnoreSpec) -> tuple[PreparedPattern, ...]:
         # Bypass the extension filter only for negation patterns with a file extension suffix
         # (e.g. !special.kjs, !*.py). Patterns without a suffix (e.g. !vendor/, !.github/*)
         # target directories or broad globs and should not bypass extension filtering.
+        # The suffix is read off the pattern's name, never its `!`: `!.gitignore` names a dotfile, which has none.
         raw = pattern.pattern
-        has_suffix = isinstance(raw, str) and bool(Path(raw.rstrip("/")).suffix)
+        has_suffix = isinstance(raw, str) and not raw.endswith("/") and bool(Path(raw.lstrip("!")).suffix)
         prepared.append(PreparedPattern(pattern=pattern, include=pattern.include, bypasses_extensions=has_suffix))
     return tuple(prepared)
 
