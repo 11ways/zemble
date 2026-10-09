@@ -114,6 +114,11 @@ evidence is a repeated literal that a better-ranked idiom inside it already repe
 (`_.label(Microcopy.of(...)...)` says nothing beyond the Microcopy idiom). Ranked by spread: copies x
 files, copies counted up to 3 per file, so 255 sites packed into 7 migration files rank as the 21 they
 spread like. Each class lists its first 12 sites (`... and N more site(s)`; the JSON keeps `copies`).
+A shape and its prefix-extension cut at the same sites are one family: when they share 75% of the larger
+site set (`SAME_SITES_SHARE`), the variant with more sites stays (the longer shape on a tie) and names the
+other (`one family: 29 of these sites as _.tabs(...).build()`). An extension found at fewer of the prefix's
+sites is a narrower finding and stays its own class. On zenit-cms this folds 535 idiom classes into 481,
+on Hohenheim b9b8f221 397 into 350; no other class changes.
 
 ### reimplements: code that redoes an existing method
 
@@ -738,9 +743,9 @@ never walked at all.
   `review-required` home verdicts. Their floors were tuned on Hohenheim and zenit-cms (see Measured).
 - `idiom` and `vocabulary` read Java only (`ShapeHooks`); another language reports none and the run says
   so. `holed` folds constants into `<const>` only where the profile names a constant convention.
-- `idiom` reports nested variants of one family separately (`_.tabs(...)` and `_.tabs(...).build()`);
-  only a variant whose sole evidence is a literal the better-ranked one repeats is folded away. Fluent
-  builder DSLs with four or more calls still pass the chain evidence.
+- `idiom` folds a prefix-extension into its prefix only when both are cut at the same sites (see idiom);
+  a nested variant at a quarter or more fewer sites is still its own class. Fluent builder DSLs with four
+  or more calls still pass the chain evidence.
 - `holed` drops call-free and single-call bodies under 30 tokens and small twins inside one file, so a
   copied `return a != null ? a : b;` coalesce or a family of one-file conveniences is not reported.
 - `reimplements` only sees a copy that shares code, calls or a close embedding with the API. A copy that

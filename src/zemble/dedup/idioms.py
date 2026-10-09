@@ -12,7 +12,7 @@ import os
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from zemble.dedup.languages import SiteKind
 from zemble.dedup.model import SPREAD_PER_FILE, CloneClass, CloneKind, Unit
@@ -24,6 +24,8 @@ IDIOM_MIN_SITES = 3
 IDIOM_MIN_FILES = 2
 #: Share of an idiom's sites one literal value must appear at to be a repeated hidden constant.
 _FIXED_SHARE = 0.9
+#: Share of the larger site set a shape and its prefix-extension must share to be reported as one family.
+SAME_SITES_SHARE = 0.75
 #: Distinct call names that make a chain more than one API's ordinary call.
 _MIN_CHAIN_NAMES = 4
 #: Shortest shared camel-case noun that makes two calls a read/write pair.
@@ -125,6 +127,8 @@ class _Idiom:
     fixed: list[str]
     #: Evidence other than the repeated literals.
     other: list[str]
+    #: Prefix-extensions of this shape cut at the same sites, folded into it (`_.tabs(...).build()`).
+    variants: list[str] = field(default_factory=list)
 
     @property
     def spread(self) -> int:
@@ -159,6 +163,42 @@ def _idiom(members: list[Unit]) -> _Idiom:
     return _Idiom(members, shape, wrappers, fixed, other)
 
 
+def _sites(idiom: _Idiom) -> frozenset[tuple[str, int]]:
+    """Where an idiom's sites are, whatever shape each was cut at."""
+    return frozenset((unit.file_path, unit.start_line) for unit in idiom.members)
+
+
+def _extends(longer: str, shorter: str) -> bool:
+    """Whether one shape is another with more calls chained on its result."""
+    return len(longer) > len(shorter) and longer.startswith(shorter) and longer[len(shorter) :].startswith(".")
+
+
+def _merge_extensions(candidates: Sequence[_Idiom]) -> list[_Idiom]:
+    """One idiom per family: a shape and its prefix-extension cut at the same sites are reported once.
+
+    Nearly every site of `_.tabs(...)` goes on as `_.tabs(...).build()`, so the two are one finding. The
+    variant with more sites stays (the longer shape on a tie, being what every site does) and names the
+    other; an extension found at only some of the prefix's sites is a narrower finding and stays apart.
+    """
+    kept: list[tuple[_Idiom, frozenset[tuple[str, int]]]] = []
+    for idiom in sorted(candidates, key=lambda candidate: (-len(candidate.members), -len(candidate.shape))):
+        sites = _sites(idiom)
+        family = next(
+            (
+                (other, where)
+                for other, where in kept
+                if (_extends(other.shape, idiom.shape) or _extends(idiom.shape, other.shape))
+                and len(sites & where) >= SAME_SITES_SHARE * max(len(sites), len(where))
+            ),
+            None,
+        )
+        if family is None:
+            kept.append((idiom, sites))
+        else:
+            family[0].variants.append(f"{len(sites & family[1])} of these sites as {idiom.shape}")
+    return [idiom for idiom, _ in kept]
+
+
 def _explained(idiom: _Idiom, kept: Sequence[_Idiom]) -> bool:
     """Whether an idiom's only evidence is literals a better-ranked idiom inside it already repeats.
 
@@ -189,17 +229,24 @@ def idiom_classes(sites: Sequence[Unit]) -> list[CloneClass]:
                 candidates.append(idiom)
     kept: list[_Idiom] = []
     classes = []
-    for idiom in sorted(candidates, key=lambda candidate: (-candidate.spread, candidate.shape)):
+    for idiom in sorted(_merge_extensions(candidates), key=lambda candidate: (-candidate.spread, candidate.shape)):
         if _explained(idiom, kept):
             continue
         kept.append(idiom)
-        files = len({unit.file_path for unit in idiom.members})
-        notes = [f"idiom: {quoted(idiom.shape)}", f"{len(idiom.members)} sites in {files} files"]
-        if idiom.fixed:
-            notes.append(f"nearly every site repeats {', '.join(idiom.fixed[:_NAMES_SHOWN])}")
-        notes.extend(idiom.other)
-        if idiom.wrappers:
-            notes.append(f"wrapper method(s) whose whole body is this idiom: {_names(idiom.wrappers)}")
         tokens = min(unit.token_count for unit in idiom.members)
-        classes.append(CloneClass(CloneKind.IDIOM, _ordered(idiom.members), tokens, notes=tuple(notes)))
+        classes.append(CloneClass(CloneKind.IDIOM, _ordered(idiom.members), tokens, notes=_notes(idiom)))
     return classes
+
+
+def _notes(idiom: _Idiom) -> tuple[str, ...]:
+    """The class-level findings of one reported idiom: its shape, its spread and its evidence."""
+    files = len({unit.file_path for unit in idiom.members})
+    notes = [f"idiom: {quoted(idiom.shape)}", f"{len(idiom.members)} sites in {files} files"]
+    if idiom.fixed:
+        notes.append(f"nearly every site repeats {', '.join(idiom.fixed[:_NAMES_SHOWN])}")
+    notes.extend(idiom.other)
+    if idiom.variants:
+        notes.extend(f"one family: {quoted(variant)}" for variant in idiom.variants)
+    if idiom.wrappers:
+        notes.append(f"wrapper method(s) whose whole body is this idiom: {_names(idiom.wrappers)}")
+    return tuple(notes)

@@ -73,6 +73,30 @@ def test_idiom_journey() -> None:
     assert copy.score == 8 * 4, "step 5: spread score"
 
 
+def test_idiom_folds_a_prefix_extension_cut_at_the_same_sites(tmp_path: Path) -> None:
+    """`_.tabs(...)` and `_.tabs(...).build()` at the same sites are one family; an extension at few of them is not."""
+    chain = "b.tabs(Tabs.none().withHistory().withContributions())"
+
+    def write(count: int, built: int) -> None:
+        for index in range(count):
+            tail = ".build()" if index < built else ""
+            (tmp_path / f"A{index}.java").write_text(f"class A{index} {{ void declare(Builder b) {{ {chain}{tail}; }} }}\n")
+
+    # 1. Three of four sites go on with `.build()`: one class, the prefix with every site, naming the extension.
+    write(4, 3)
+    tabs = [clone for clone in _run(tmp_path, CloneKind.IDIOM).classes if ".tabs(" in clone.notes[0]]
+    assert len(tabs) == 1, "step 1: one family, one class"
+    assert len(tabs[0].members) == 4, "step 1: the variant with more sites stays"
+    family = [note for note in tabs[0].notes if note.startswith("one family: 3 of these sites as ")]
+    assert family and family[0].endswith(".build()"), "step 1: the folded extension is named with its site count"
+
+    # 2. Near miss: three of seven sites build; the extension is a narrower finding and stays its own class.
+    write(7, 3)
+    tabs = [clone for clone in _run(tmp_path, CloneKind.IDIOM).classes if ".tabs(" in clone.notes[0]]
+    assert sorted(len(clone.members) for clone in tabs) == [3, 7], "step 2: prefix and extension apart"
+    assert not any(note.startswith("one family") for clone in tabs for note in clone.notes), "step 2: nothing folded"
+
+
 def test_holed_journey() -> None:
     """Bodies equal up to literal values and constants are one holed class; data and field differences are not."""
     report = _run("holed", CloneKind.HOLED)
