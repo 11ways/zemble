@@ -21,7 +21,7 @@ from functools import lru_cache
 import numpy as np
 
 from zemble.dedup.languages import LanguageProfile, Signature, Visibility, profile_for
-from zemble.dedup.model import CloneClass, CloneKind, Unit
+from zemble.dedup.model import CloneClass, CloneKind, Demotion, Unit
 from zemble.dedup.settings import ShapeSettings
 from zemble.dedup.structure import edit_distance
 from zemble.graph.model import is_test_path
@@ -788,42 +788,65 @@ def _classes(
     architecture: Architecture,
     standard: Sequence[tuple[Unit, str]],
 ) -> list[CloneClass]:
-    """One class per API, kind of evidence: the copies by location, then the API.
+    """One class per API, kind of evidence and demotion: the copies by location, then the API.
 
     Copies only intent evidences form their own class beside the code-evidenced copies of the same API, so a
     class the code lanes report is the same class whatever the intent lane adds. A copy whose module or source set
-    may not reach the API has no original to call and is not reported; neither is a copy that is itself, or whose
-    API is, a standard-library call (:func:`_standard_classes` reports those).
+    may not reach the API has no original to call: it is still a copy, reported last with the advice to move the
+    mechanism where both can reach it. A copy that is itself, or whose API is, a standard-library call is left to
+    :func:`_standard_classes`.
     """
     replaced = {_identity(unit) for unit, _ in standard}
     classes = []
-    by_api: dict[tuple[int, bool, bool], list[tuple[int, str]]] = defaultdict(list)
+    by_api: dict[tuple[int, bool, Demotion | None], list[tuple[int, str]]] = defaultdict(list)
     for copy_index, verdict in best.items():
         copy, api = candidates[copy_index], candidates[verdict.api]
-        if architecture.blocked(copy, api) or {_identity(copy), _identity(api)} & replaced:
+        if {_identity(copy), _identity(api)} & replaced:
             continue
-        rebinding = _rebinding(copy, api)
         reason = verdict.reason
-        if rebinding is not None:
+        demotion = None
+        if architecture.blocked(copy, api):
+            demotion = Demotion.UNREACHABLE
+        elif (rebinding := _rebinding(copy, api)) is not None:
+            demotion = Demotion.REBOUND
             reason = f"{reason}; {api.name} binds {', '.join(rebinding)}, which {copy.name} does not"
-        by_api[(verdict.api, verdict.inferred, rebinding is not None)].append((copy_index, reason))
-    for (api_index, inferred, rebound), found in by_api.items():
+        by_api[(verdict.api, verdict.inferred, demotion)].append((copy_index, reason))
+    for (api_index, inferred, demotion), found in by_api.items():
         api = candidates[api_index]
         copies = sorted((candidates[index] for index, _ in found), key=lambda unit: (unit.file_path, unit.start_line))
-        if rebound:
-            head = (
-                f"{_listed(copies)} {api.name} ({api.location}) over other constants: one mechanism bound to two "
-                "capabilities or registries; extract the constant as a parameter rather than call it"
-            )
-        else:
-            head = f"{_listed(copies)} {api.name}; call {api.name} ({api.location})"
-        notes = [head, *(reason for _, reason in sorted(found)[:_CALLS_SHOWN])]
+        notes = [_head(copies, api, demotion, architecture), *(reason for _, reason in sorted(found)[:_CALLS_SHOWN])]
         tokens = min(unit.token_count for unit in (*copies, api))
         members = (*copies, api)
         classes.append(
-            CloneClass(CloneKind.REIMPLEMENTS, members, tokens, notes=tuple(notes), inferred=inferred, demoted=rebound)
+            CloneClass(CloneKind.REIMPLEMENTS, members, tokens, notes=tuple(notes), inferred=inferred, demoted=demotion)
         )
     return classes
+
+
+def _head(copies: Sequence[Unit], api: Unit, demotion: Demotion | None, architecture: Architecture) -> str:
+    """A class's first note: what the copies re-implement and what to do about it."""
+    match demotion:
+        case None:
+            return f"{_listed(copies)} {api.name}; call {api.name} ({api.location})"
+        case Demotion.REBOUND:
+            return (
+                f"{_listed(copies)} {api.name} ({api.location}) over other constants: one mechanism bound to two "
+                "capabilities or registries; extract the constant as a parameter rather than call it"
+            )
+        case Demotion.UNREACHABLE:
+            modules = ", ".join(sorted({_place(unit, architecture) for unit in copies}))
+            reaches = ", ".join(sorted({architecture.reach(unit, api).value for unit in copies}))
+            return (
+                f"{_listed(copies)} {api.name} ({api.location}): no reachable original; the copies agree with "
+                f"{api.name} in {_place(api, architecture)}, a module {modules} may not depend on ({reaches}), "
+                "consider moving it to a module both can reach"
+            )
+    raise ValueError(f"Unhandled demotion {demotion!r}")
+
+
+def _place(unit: Unit, architecture: Architecture) -> str:
+    """The declared module a body lives in, or its source set where no module is declared."""
+    return architecture.module(unit) or architecture.settings.source_set(unit.file_path).value
 
 
 def _listed(copies: Sequence[Unit]) -> str:

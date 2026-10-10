@@ -210,7 +210,7 @@ folds otherwise).
 | --- | --- | --- |
 | all four | migration DSL (`alterTable`, `addColumn`) counted as idioms, holed bodies and literal uses | Frozen code (`[dupes] frozen`, default `*/migration/*`, `*/migrations/*`, `*/db/migrate/*`) takes part in no shape kind: it repeats its DSL and writes values out by design |
 | holed | `this(new InstanceService())` x10 | A body that only hands over to another constructor (`ShapeHooks.delegates`) binds a default |
-| holed | `find().orderBy(A, B).all()`, `schedulesWhen(List.of(fallback("cron")), ROLE)` | Below 30 tokens, copies that take no parameter, decide nothing and differ in their values (literals or constants) each declare their own value |
+| holed | `find().orderBy(A, B).all()`, `schedulesWhen(List.of(fallback("cron")), ROLE)` | Below 30 tokens, copies that take no parameter and decide nothing each declare their own value when every copy holds a value of its own among those they differ in (a literal it writes, or a constant of its own type, named unqualified and read per file) and no two copies hold the same values. A copy whose differing values are all references to another declaration (`Path.of(SETTINGS_VALUES.getValue(Settings.Backup.STAGING_PATH))`, `Boolean.TRUE.equals(SETTINGS_VALUES.getValue(Settings.Sftp.ENABLED))`) declares nothing: it restates a declared value and re-writes its read, and stays a copy; so do two copies restating the same value or default |
 | holed | `"lit" + x`, `return "a" + "b"`, `substring(lastIndexOf(c))` | Below 30 tokens, copies whose every call is the standard library (`StandardLibrary.members`) and that differ in their values are the language applied to other data |
 | idiom | `String.valueOf((Object) x)`, `Boolean.TRUE.equals(x)` | A static call on a standard-library type or constant (`ShapeHooks.standard_receiver`) never counts toward the two calls an idiom chains |
 | idiom | roots named after an arbitrary member (`instanceRefusalText`, a migration) | `CloneClass.root`: an idiom is rooted at its site kind and shape (`chain Models.get(InstanceModel.class).find()`), also on the wire (`root`) |
@@ -219,11 +219,11 @@ folds otherwise).
 | vocabulary | a `server` home suggested to `common` sites | A literal use is listed only beside a constant its source set can read; the suggested home is the one most members can read (an unclassified fold reaches and is reached) |
 | vocabulary | `INSTANCES("hohenheim:instances:")` matched against the `instances` slug | A member whose own string holds its name as one token of a longer value is named after it and is no value itself |
 | vocabulary | sections not ordered by score | One order by score after each flavour's own cover check |
-| reimplements | pairs differing by one constant (`canManage` CONFIG vs MANAGE, `closeSession` over another registry, a different permission tier) | Demotion: a copy missing a constant its API names (its own constants and the ones it calls on, `SESSIONS.remove`) is one mechanism over two capabilities or registries; the class is `demoted`, says "extract the constant as a parameter" and ranks after every other class; an original that binds the same constants is preferred |
+| reimplements | pairs differing by one constant (`canManage` CONFIG vs MANAGE, `closeSession` over another registry, a different permission tier) | Demotion: a copy missing a constant its API names (its own constants and the ones it calls on, `SESSIONS.remove`) is one mechanism over two capabilities or registries; the class is `demoted` `rebound`, says "extract the constant as a parameter" and ranks after every other class; an original that binds the same constants is preferred |
 | reimplements | helpers that are `Objects.toString(v, "")` sent to `IndexedScopes.stringOf`, `ZenitFormsFunctions.inputText` | JDK home table: a body whose holed shape is a canonical body of `StandardLibrary.source` (`Objects.toString`, `Objects.requireNonNullElse`, `Math.clamp`, `Objects.equals`, `Boolean.TRUE.equals`, several spellings each) forms a class `... re-implement Objects.toString(value, fallback); call it`; such a body is a root, never a copy of a domain helper, and the copies of it follow it |
 | reimplements | `NumberFunctions.parseInt`, `MapFunctions.getString`, `StringFunctions.trim` as homes | A member carrying any annotation outside the JDK and nullness set (`@HawkeyeFunction(...)`) is registered by a framework: a role, never an original (fails closed on an unknown annotation) |
 | reimplements | instance methods `ScheduledTask.getSettings` as homes for static helpers | Calling an instance method takes an instance of its type, and converting an untyped input (`Object raw`) never makes one |
-| reimplements | originals in modules the app may not depend on | Not reported (see the original by architecture above); source sets count too |
+| reimplements | originals in modules the app may not depend on | Never advised as a call (source sets count too), but still copies of each other: the class is `demoted` `unreachable`, ranks after every other class (after the `rebound` ones too) and says "no reachable original; the copies agree with X in Y, a module Z may not depend on (...), consider moving it to a module both can reach". The demotions are one vocabulary, `model.Demotion`, each member carrying its standing; on the wire `demoted` is its value |
 
 Measured on Hohenheim bc4f341d (production lane; `reimplements` on a frozen copy of the workspace with that tree,
 focused on `apps/hohenheim`), top 30 read per kind, noise counted by the triage's classes:
@@ -234,6 +234,17 @@ focused on `apps/hohenheim`), top 30 read per kind, noise counted by the triage'
 | idiom | 292 -> 264 | 3 -> 0 | column-builder DSL chains, as before |
 | vocabulary | 77 -> 36 | 11 -> 0 | a status family kept by two switches, `credentials`/`HohenheimMicrocopy` name coincidences (borderline) |
 | reimplements | 53 -> 34 | 18 -> 5 | `fingerprint`/`backup`, `close`, two header getters, `CheckedHandOver.list`; 11 demoted classes sit last |
+
+Two recall regressions of that pass, fixed the same day. Holed dropped Hohenheim's settings-read classes
+(`HohenheimSftp.isEnabled` x4, `InstanceBackups.stagingRoot` x3, #11 and #25 before it) with the 10x and 6x
+`schedules()` declarations; the value rule above now tells them apart: 55 -> 57 classes, both back (#8 and #19),
+every `schedules()`, `findLive`, `HostFact.label` and `databaseRefusal` class still dropped, top 30 named noise
+still 0. Reimplements dropped copies with no reachable original; on a scratch root of the snapshot plus zenit
+3b480689, zenit-cms 1df66bd7 and protoblast 71016159 (`home.toml` protoblast -> zenit -> zenit-cms -> hohenheim,
+`--focus hohenheim`) it gives 31 -> 33 classes, the top 31 identical in order and key, and the two unreachable
+classes (`CmsRecordLinks.detailIn` and `RecoveryArchive.deleteQuietly`, framework copies of Hohenheim helpers)
+ranked last; top 30 named noise 3 before and after (`fingerprint`/`backup`, `close`, a header getter; the
+other two of the 5 above need the whole workspace).
 
 `exact`, `renamed` and `logic` are unchanged: on zenit-cms 1df66bd7 their text report and JSON classes are
 byte-identical before and after (only the logic timing note differs).

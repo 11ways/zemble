@@ -84,6 +84,33 @@ def _declares_value(unit: Unit) -> bool:
     return unit.signature is not None and not unit.signature.parameters and not set(unit.skeleton) - _NOT_A_DECISION
 
 
+def _own_values(members: Sequence[Unit]) -> bool:
+    """Whether each copy declares a value of its own and no two copies restate the same values.
+
+    A value a copy differs in is its own when it is written there (a literal, the cron of `fallback("0 3 * * *")`)
+    or names a constant of its own type (unqualified, `orderBy(CREATED_AT)`), which is read per file. A copy whose
+    differing values are all references to another declaration (`getValue(Settings.Sftp.ENABLED)`) declares
+    nothing: it restates a value declared elsewhere and re-writes the read, so the group stays a copy; so does a
+    group in which two copies hold the same values.
+
+    AIDEV-NOTE: a statically imported constant reads as the copy's own; only a qualified reference is foreign.
+    """
+    held = [{*unit.literals, *unit.constants} for unit in members]
+    shared = set.intersection(*held)
+    keys = set()
+    for unit, values in zip(members, held, strict=True):
+        differing = values - shared
+        own = {value for value in differing if value in unit.literals or "." not in value}
+        if not own:
+            return False
+        keys.add(
+            frozenset(
+                f"{unit.file_path}:{value}" if value in own - set(unit.literals) else value for value in differing
+            )
+        )
+    return len(keys) == len(members)
+
+
 def _language_only(unit: Unit) -> bool:
     """Whether every call a body makes is its language's standard library (`substring`, `lastIndexOf`), or none."""
     profile = profile_for(unit.file_path)
@@ -96,15 +123,17 @@ def _values_only(members: Sequence[Unit]) -> bool:
     """Whether a small holed group is no copy: its bodies differ in their values and share nothing beyond them.
 
     What the copies share is then a constructor overload binding its defaults (`this(new Service())`), a body
-    declaring its own value through one API, or the language applied to different data (`"prefix" + value`,
-    `path.substring(path.lastIndexOf('/') + 1)` beside `.lastIndexOf('.')`). Copies holding the same values are
-    one helper written twice, whatever they call.
+    declaring its own value through one API (`_own_values`), or the language applied to different data
+    (`"prefix" + value`, `path.substring(path.lastIndexOf('/') + 1)` beside `.lastIndexOf('.')`). Copies holding
+    the same values are one helper written twice, whatever they call.
     """
     if all(unit.delegates for unit in members):
         return True
     if len({(unit.literals, unit.constants) for unit in members}) < 2:
         return False
-    return all(_declares_value(unit) for unit in members) or all(_language_only(unit) for unit in members)
+    if all(_declares_value(unit) for unit in members) and _own_values(members):
+        return True
+    return all(_language_only(unit) for unit in members)
 
 
 def holed_classes(shaped: Sequence[Unit], min_tokens: int) -> list[CloneClass]:

@@ -61,6 +61,41 @@ def test_holed_values_only_groups_are_no_copies(tmp_path: Path) -> None:
     assert {"T0.name", "T1.name", "T2.name"} <= names, "step 2: one helper written three times"
 
 
+def test_holed_value_declarations_keep_restated_values(tmp_path: Path) -> None:
+    """A body passing its own value to one helper declares it; one re-reading a value declared elsewhere copies."""
+    files = {}
+    values = (
+        ("0 1 * * *", "CREATED", "SFTP_ON", "STAGING", 30),
+        ("0 2 * * *", "NAME", "BANS_ON", "STAGING", 30),
+        ("0 3 * * *", "CREATED", "WATCH_ON", "SNAPSHOTS", 60),
+    )
+    for index, (cron, column, flag, path, ttl) in enumerate(values):
+        files[f"T{index}.java"] = (
+            f"class T{index} {{\n"
+            f'  List<Object> schedules() {{ return Roles.when(List.of(Decl.at("{cron}")), Roles.Role.R{index}); }}\n'
+            f"  List<Row> live() {{ return find().orderBy({column}, Order.DESC).all(); }}\n"
+            f"  boolean enabled() {{ return Boolean.TRUE.equals(Zenit.SETTINGS.getValue(Settings.Flags.{flag})); }}\n"
+            f"  Path root() {{ return Path.of(Zenit.SETTINGS.getValue(Settings.Paths.{path})); }}\n"
+            f"  int ttl() {{ return Budget.positive(Zenit.SETTINGS.getValue(Settings.Ttl.{path}), {ttl}); }}\n"
+            "}\n"
+        )
+    report = _run(_write(tmp_path, files), CloneKind.HOLED)
+    names = _names(report)
+
+    # 1. Each `schedules()` passes its own cron to one helper, each `live()` its own type's column: declarations,
+    #    even though every schedule also names a role declared elsewhere and two `CREATED` columns are spelled alike.
+    for member in ("T0.schedules", "T0.live"):
+        assert member not in names, f"step 1: {member} declares its own value"
+
+    # 2. Near miss: `enabled()` only re-reads settings declared elsewhere and converts them, nothing of its own.
+    assert {"T0.enabled", "T1.enabled", "T2.enabled"} <= names, "step 2: a restated read is a copy"
+
+    # 3. Near miss: two `root()` bodies read the same declared value, `Settings.Paths.STAGING`, and two `ttl()` bodies
+    #    restate the same default, 30, beside their own literal: each is one helper written twice.
+    assert {"T0.root", "T1.root", "T2.root"} <= names, "step 3: the same declared value restated"
+    assert {"T0.ttl", "T1.ttl", "T2.ttl"} <= names, "step 3: the same literal restated"
+
+
 def test_idiom_language_calls_are_no_idiom_links_and_roots_name_the_shape(tmp_path: Path) -> None:
     """`String.valueOf((Object) x)` and `Boolean.TRUE.equals(x)` are the language; a domain wrapper is an idiom."""
     files = {}

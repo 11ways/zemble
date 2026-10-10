@@ -10,7 +10,7 @@ import pytest
 from tests.test_dedup import BagOfWordsEmbedder
 from zemble.dedup.detect import DupeOptions, find_duplication
 from zemble.dedup.languages import SiteKind
-from zemble.dedup.model import SITE_CAP, CloneKind, Ranking, Unit
+from zemble.dedup.model import SITE_CAP, CloneKind, Demotion, Ranking, Unit
 from zemble.dedup.report import format_report, report_json
 
 SHAPES = Path(__file__).parent / "fixtures" / "dedup_shapes"
@@ -206,9 +206,15 @@ def test_reimplements_original_by_architecture() -> None:
     assert [member.name for member in by_copy["Mail.tidied"].members] == ["Mail.tidied", "Texts.tidy"], "step 1"
 
     # 2. `Lower.upper` (base) only matches `Labels.shout` (app), and base must never depend on app: with no
-    #    original it may call, it is no re-implementation finding at all.
-    assert "Lower.upper" not in by_copy, "step 2: an unreachable original is never reported"
-    assert not any("Labels.shout" in _text(clone) for clone in report.classes), "step 2: never advised"
+    #    original it may call it is still a copy, named as such, told to move the mechanism, and ranked last.
+    blocked = by_copy["Lower.upper"]
+    head = blocked.notes[0]
+    assert "no reachable original; the copies agree with Labels.shout in app" in head, "step 2: named"
+    assert "a module base may not depend on (forbidden)" in head, "step 2: the edge it may not cross"
+    assert "consider moving it to a module both can reach" in head, "step 2: what to do"
+    assert "call Labels.shout" not in head, "step 2: never advised to call it"
+    assert blocked.demoted is Demotion.UNREACHABLE and report.classes[-1] is blocked, "step 2: ranked last"
+    assert blocked.to_dict()["demoted"] == "unreachable", "step 2: on the wire"
 
     # 3. Near miss: without a home.toml the modules are unknown, and the path order of before is kept.
     generic = _run_without_architecture("origins")

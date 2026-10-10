@@ -104,6 +104,25 @@ class Lane(str, Enum):
     TEST = "test"
 
 
+class Demotion(str, Enum):
+    """Why a class is a lesser finding of its kind; each ranks after every actionable class, in this order."""
+
+    #: A copy bound to other constants than its original: a parameter to extract rather than a call to make.
+    REBOUND = "rebound"
+    #: Copies with no original their module may call: a mechanism to move where both sides can reach it.
+    UNREACHABLE = "unreachable"
+
+    @property
+    def standing(self) -> int:
+        """The class standing it takes, after code-evidenced (0) and inferred (1) classes."""
+        match self:
+            case Demotion.REBOUND:
+                return 2
+            case Demotion.UNREACHABLE:
+                return 3
+        raise ValueError(f"Unhandled demotion {self!r}")
+
+
 #: Unit kinds that own a whole declaration body, as opposed to a statement window. The
 #: language profiles are the home of the vocabulary; a new profile widens this by itself.
 BODY_KINDS: tuple[str, ...] = tuple(sorted(body_unit_kinds()))
@@ -210,8 +229,8 @@ class CloneClass:
     inferred: bool = False
     #: What the class is rooted at when no member names it well (an idiom's shape); None roots it at its first member.
     root: str | None = None
-    #: Whether the class is a lesser finding of its kind (a copy bound to other constants): it ranks after the rest.
-    demoted: bool = False
+    #: Why the class is a lesser finding of its kind, if it is: it ranks after the rest (`Demotion.standing`).
+    demoted: Demotion | None = None
 
     @property
     def root_label(self) -> str:
@@ -224,7 +243,9 @@ class CloneClass:
     @property
     def standing(self) -> tuple[int, int]:
         """The sort key within one kind: code-evidenced classes first, then inferred, then demoted; then by score."""
-        return (2 if self.demoted else 1 if self.inferred else 0), -self.score
+        if self.demoted is not None:
+            return self.demoted.standing, -self.score
+        return (1 if self.inferred else 0), -self.score
 
     @property
     def files(self) -> int:
@@ -314,7 +335,7 @@ class CloneClass:
             "score": self.score,
             **({"inferred": True} if self.inferred else {}),
             **({"root": self.root} if self.root is not None else {}),
-            **({"demoted": True} if self.demoted else {}),
+            **({"demoted": self.demoted.value} if self.demoted is not None else {}),
             "tokens": self.tokens,
             "copies": len(self.members),
             "files": self.files,
