@@ -11,11 +11,12 @@ call a build affordable while the pre-parse guard refused the very same tree.
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from zemble.chunking.capsule import CapsuleOptions, embedding_text
+from zemble.dedup.model import CloneKind
 from zemble.embedding.base import declared_dimensions, is_remote
 from zemble.embedding.cache import text_hash
 from zemble.embedding.pricing import (
@@ -29,7 +30,7 @@ from zemble.embedding.pricing import (
     pending_purchase,
     price_per_million,
 )
-from zemble.embedding.registry import build_embedder, resolve_embedder_spec
+from zemble.embedding.registry import ResolvedEmbedder, build_embedder, resolve_embedder_spec
 from zemble.types import ContentType
 
 
@@ -58,6 +59,8 @@ class EmbedStatus:
     would_refuse: bool
     chunk_seconds: float
     cache_lookup_seconds: float
+    #: What a whole `zemble dupes` run of the asked kinds would embed, or None when no kind was asked.
+    dupes: DupesStatus | None = None
 
     def to_dict(self) -> dict:
         """Return the JSON shape."""
@@ -93,7 +96,28 @@ class EmbedStatus:
                 f"budget     {self._spending_ceilings()}",
                 f"verdict    a build would be {'REFUSED' if self.would_refuse else 'allowed'}",
                 f"timing     {self.chunk_seconds:.1f}s chunking, {self.cache_lookup_seconds:.1f}s cache lookup",
+                *([self.dupes.to_text(price)] if self.dupes is not None else []),
             ]
+        )
+
+
+@dataclass(frozen=True)
+class DupesStatus:
+    """What a whole `zemble dupes` run of some kinds would embed: its own purchase, judged by its own bill guard."""
+
+    kinds: list[str]
+    texts: int
+    uncached: int
+    estimated_tokens: int
+    estimated_usd: float | None
+    would_refuse: bool
+
+    def to_text(self, price: float | None) -> str:
+        """One report line: texts, what is left to buy, and the run's verdict."""
+        return (
+            f"dupes      {','.join(self.kinds)}: {self.texts} texts, {self.uncached} uncached, "
+            f"~{format_cost(self.estimated_tokens, price)}; a run would be "
+            f"{'REFUSED' if self.would_refuse else 'allowed'}"
         )
 
 
@@ -107,6 +131,7 @@ def embed_status(
     embedder_spec: str | None = None,
     capsules: CapsuleOptions | None = None,
     exclude: Sequence[str] = (),
+    dupes: Sequence[CloneKind] = (),
 ) -> EmbedStatus:
     """Report what building an index over a root would chunk, embed, cost, and whether it is refused.
 
@@ -116,6 +141,7 @@ def embed_status(
     :param capsules: Context-capsule knobs; None resolves the environment override.
     :param exclude: Gitignore-style patterns the build would skip; the sanctioned way past a
         refusal, so a report that cannot model it answers for a build nobody is running.
+    :param dupes: `zemble dupes` kinds whose embedding texts are estimated too; kinds that embed nothing add none.
     :return: The pre-flight numbers.
     :raises FileNotFoundError: If the root does not exist.
     :raises EmbedderSpecError: If the spec cannot be parsed.
@@ -160,16 +186,18 @@ def embed_status(
     uncached_texts: list[str] = []
     batch: list[str] = []
 
-    def settle() -> None:
+    def uncached_of(texts: Sequence[str]) -> list[str]:
         nonlocal lookup_seconds
-        if lookup is not None and batch:
-            asked = time.monotonic()
-            digests = [text_hash(text) for text in batch]
-            covered = lookup(digests)
-            lookup_seconds += time.monotonic() - asked
-            uncached_texts.extend(text for text, digest in zip(batch, digests, strict=True) if digest not in covered)
-        else:
-            uncached_texts.extend(batch)
+        if lookup is None or not texts:
+            return list(texts)
+        asked = time.monotonic()
+        digests = [text_hash(text) for text in texts]
+        covered = lookup(digests)
+        lookup_seconds += time.monotonic() - asked
+        return [text for text, digest in zip(texts, digests, strict=True) if digest not in covered]
+
+    def settle() -> None:
+        uncached_texts.extend(uncached_of(batch))
         batch.clear()
 
     started = time.monotonic()
@@ -214,6 +242,10 @@ def embed_status(
     estimate = measure_work(root, content, exclude, manifest)
     refused = work_refusal(estimate) is not None or bill_refusal(tokens, resolved.family) is not None
 
+    dupes_status = None
+    if any(kind.facts.embeds for kind in dupes):
+        dupes_status = _dupes_status(root, dupes, exclude, resolved, uncached_of)
+
     return EmbedStatus(
         path=str(root),
         embedder=model_id or spec,
@@ -236,4 +268,33 @@ def embed_status(
         would_refuse=refused,
         chunk_seconds=round(chunk_seconds, 2),
         cache_lookup_seconds=round(lookup_seconds, 2),
+        dupes=dupes_status,
+    )
+
+
+def _dupes_status(
+    root: Path,
+    kinds: Sequence[CloneKind],
+    exclude: Sequence[str],
+    resolved: ResolvedEmbedder,
+    uncached_of: Callable[[Sequence[str]], list[str]],
+) -> DupesStatus:
+    """Estimate a whole dupes run's purchase from the texts its kinds would embed (:func:`embedding_texts`).
+
+    AIDEV-NOTE: a run whose embedder keeps no shared cache reads a per-root mirror this report cannot see, so its
+    texts all count as uncached there: pessimistic, never under the bill the run's own guard measures.
+    """
+    from zemble.dedup.detect import DupeOptions, embedding_texts
+
+    texts = embedding_texts(root, DupeOptions(kinds=tuple(kinds), exclude=tuple(exclude)))
+    uncached = uncached_of(texts)
+    tokens = estimate_tokens(pending_purchase(resolved.embedder, uncached, may_probe=False))
+    price = price_per_million(resolved.family)
+    return DupesStatus(
+        kinds=[kind.value for kind in kinds if kind.facts.embeds],
+        texts=len(texts),
+        uncached=len(uncached),
+        estimated_tokens=tokens,
+        estimated_usd=estimate_cost(tokens, price),
+        would_refuse=bill_refusal(tokens, resolved.family) is not None,
     )

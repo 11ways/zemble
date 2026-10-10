@@ -1,0 +1,22 @@
+# base -> core -> app, and base must never depend on app.
+order = ["base", "core", "app"]
+
+[modules.base]
+globs = ["base/**"]
+depends_on = []
+
+[modules.core]
+globs = ["core/**"]
+depends_on = ["base"]
+
+[modules.app]
+globs = ["app/**"]
+depends_on = ["core", "base"]
+
+[dependencies]
+source = "declared"
+
+[[forbidden]]
+from = "base"
+to = "app"
+why = "base never depends on app"

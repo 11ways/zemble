@@ -19,10 +19,11 @@ from zemble.dedup.ignore import apply_ignores, find_ignore_files
 from zemble.dedup.languages import profile_for, shape_languages, supported_extensions
 from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Lane, PairReason, Unit
 from zemble.dedup.reimplements import (
+    Architecture,
     forwarding_classes,
-    intent_text,
     reimplementation_candidates,
     reimplementation_classes,
+    reimplementation_texts,
 )
 from zemble.dedup.structure import MAX_SKELETON_DISTANCE, check_pair
 from zemble.dedup.unitcache import (
@@ -36,6 +37,7 @@ from zemble.dedup.unitcache import (
 from zemble.dedup.units import FileUnits, extract_file
 from zemble.dedup.vocabulary import vocabulary_classes
 from zemble.embedding.base import Embedder
+from zemble.home.config import ConfigError, HomeConfig
 from zemble.index.file_walker import compile_ignore, walk_files
 from zemble.parallel import pool_context, pooled
 
@@ -454,7 +456,46 @@ def _body_vectors(
     candidates: Sequence[Unit], options: DupeOptions, embedder: Embedder | None, root: Path | None
 ) -> _BodyVectors:
     """Vectors for every candidate body's text (:func:`_text_vectors`)."""
-    return _text_vectors([unit.text or "" for unit in candidates], options, embedder, root)
+    return _text_vectors(_body_texts(candidates), options, embedder, root)
+
+
+def _body_texts(candidates: Sequence[Unit]) -> list[str]:
+    """The text each candidate body is embedded as."""
+    return [unit.text or "" for unit in candidates]
+
+
+def _logic_texts(extraction: _Extraction) -> list[str]:
+    """Every text a logic run embeds: its candidate bodies (:func:`_logic_candidates`)."""
+    return _body_texts(_logic_candidates(extraction.units))
+
+
+def _reimplementation_texts(extraction: _Extraction) -> list[str]:
+    """Every text a re-implementation run embeds: its bodies and their intents, when there is a pair to compare."""
+    candidates = reimplementation_candidates(extraction.shaped)
+    return reimplementation_texts(candidates)[1] if len(candidates) >= 2 else []
+
+
+#: The texts each kind that embeds (`KindFacts.embeds`) hands the embedder; a kind missing here fails closed.
+_KIND_TEXTS: dict[CloneKind, Callable[[_Extraction], list[str]]] = {
+    CloneKind.LOGIC: _logic_texts,
+    CloneKind.REIMPLEMENTS: _reimplementation_texts,
+}
+
+
+def embedding_texts(root: Path, options: DupeOptions) -> list[str]:
+    """Every text a whole run of `options.kinds` would hand the embedder, embedding nothing (`embed-status`).
+
+    :raises ValueError: If a kind embeds but declares no texts here.
+    """
+    extraction = collect_units(root, options)
+    texts: list[str] = []
+    for kind in options.kinds:
+        if not kind.facts.embeds:
+            continue
+        if kind not in _KIND_TEXTS:
+            raise ValueError(f"{kind.value} embeds but declares no embedding texts")
+        texts.extend(_KIND_TEXTS[kind](extraction))
+    return texts
 
 
 def _text_vectors(
@@ -796,13 +837,16 @@ def _shape_classes(
         candidates = reimplementation_candidates(extraction.shaped)
         found = forwarding_classes(extraction.shaped)
         if len(candidates) >= 2:
-            intents = {index: text for index, unit in enumerate(candidates) if (text := intent_text(unit))}
             # One purchase for bodies and intents, so the bill guard judges the run's whole spend at once.
-            texts = [unit.text or "" for unit in candidates] + list(intents.values())
+            intents, texts = reimplementation_texts(candidates)
             vectors = _text_vectors(texts, options, embedder, root)
             bodies = vectors.vectors[: len(candidates)]
+            architecture, problems = _architecture(root)
+            notes.extend(problems)
             found.extend(
-                reimplementation_classes(candidates, bodies, dict(zip(intents, vectors.vectors[len(candidates) :])))
+                reimplementation_classes(
+                    candidates, bodies, dict(zip(intents, vectors.vectors[len(candidates) :])), architecture
+                )
             )
             notes.append(
                 f"reimplements: compared {len(candidates)} bodies and {len(intents)} intents with "
@@ -816,6 +860,14 @@ def _shape_classes(
     if CloneKind.IDIOM in options.kinds or CloneKind.VOCABULARY in options.kinds:
         notes.append(f"idiom and vocabulary sites cover: {', '.join(shape_languages()) or 'no language'}")
     return classes, notes
+
+
+def _architecture(root: Path) -> tuple[Architecture, list[str]]:
+    """The declared modules a re-implementation's original is chosen by, or path order plus a note on a broken file."""
+    try:
+        return Architecture(HomeConfig.load(root)), []
+    except ConfigError as error:
+        return Architecture(), [f"home.toml error, re-implementation originals ranked by path: {error}"]
 
 
 def _report(root: Path, options: DupeOptions, files: int, failed: Sequence[str], units: int, bodies: int) -> DupeReport:

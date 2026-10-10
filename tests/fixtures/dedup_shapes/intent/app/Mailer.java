@@ -1,4 +1,6 @@
 class Mailer {
+    private boolean muted;
+
     /** @return the value, or null when it is blank */
     private static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : String.valueOf(value);
@@ -9,6 +11,6 @@ class Mailer {
     }
 
     String blankAsText(String value) {
-        return value == null || value.isBlank() ? null : String.valueOf(value);
+        return value == null || value.isBlank() || muted ? null : String.valueOf(value);
     }
 }

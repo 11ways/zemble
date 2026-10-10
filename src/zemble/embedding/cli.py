@@ -35,6 +35,13 @@ def add_embed_status_parser(sub: argparse._SubParsersAction) -> None:
         metavar="PATTERN",
         help="Gitignore-style patterns a build would skip, so the report answers for the build you would run.",
     )
+    parser.add_argument(
+        "--dupes",
+        default=None,
+        metavar="KINDS",
+        help="Also estimate a whole `zemble dupes` run of these kinds (same names as its --kind, e.g. "
+        "logic,reimplements); kinds that embed nothing add nothing.",
+    )
     _add_content_args(parser)
     _add_embedder_arg(parser)
 
@@ -42,10 +49,12 @@ def add_embed_status_parser(sub: argparse._SubParsersAction) -> None:
 def run_embed_status(args: argparse.Namespace) -> int:
     """Run `zemble embed-status` and return its exit code."""
     from zemble.cli import _resolve_content
+    from zemble.dedup.cli import parse_kinds
 
     content = _resolve_content(args.content, args.include_text_files)
+    dupes = parse_kinds(args.dupes) if args.dupes else ()
     try:
-        status = embed_status(args.path, content, args.embedder, exclude=tuple(args.exclude))
+        status = embed_status(args.path, content, args.embedder, exclude=tuple(args.exclude), dupes=dupes)
     except (FileNotFoundError, EmbedderSpecError) as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_ERROR

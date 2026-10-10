@@ -95,10 +95,13 @@ class Signature:
     returns: str
     #: Types that accept any value here: the language's top type and the member's own type variables.
     open_types: frozenset[str]
-    #: Whether the member reads no instance: a static helper, callable from anywhere it is visible.
+    #: Whether the member is declared static: callable without an instance of its type.
     static: bool
     #: The member's documentation comment as plain text, "" when it has none.
     summary: str
+    #: Whether the body may read the state of an instance (`this`, an instance field or method); False only when
+    #: the profile proved it does not, so an instance method that reads nothing of its own is a helper too.
+    reads_instance: bool = True
 
 
 @dataclass(frozen=True, eq=False)

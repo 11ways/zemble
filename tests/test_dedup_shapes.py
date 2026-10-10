@@ -35,9 +35,12 @@ def _text(clone) -> str:
 
 def test_every_kind_declares_its_facts() -> None:
     """Every channel is keyed, ranked and judged by a declared fact: a new kind without one fails here."""
+    from zemble.dedup.detect import _KIND_TEXTS
+
     for kind in CloneKind:
         facts = kind.facts
         assert facts.ranking in Ranking, f"{kind} declares a ranking"
+        assert facts.embeds == (kind in _KIND_TEXTS), f"{kind} declares the texts it embeds, or embeds nothing"
         assert facts.key_attribute in Unit.__dataclass_fields__, f"{kind} keys by a real unit attribute"
     assert {kind for kind in CloneKind if kind.facts.indexed_focus} == {
         CloneKind.EXACT,
@@ -149,7 +152,14 @@ def test_reimplements_journey() -> None:
 
 def test_reimplements_intent_journey() -> None:
     """A static helper stating a public method's intent is a copy of it; its twin follows; parallels do not."""
-    from zemble.dedup.reimplements import INTENT_MIN_SCORE, Signal, _may_replace, _NameWords, _substitution
+    from zemble.dedup.reimplements import (
+        INTENT_MIN_SCORE,
+        Architecture,
+        Signal,
+        _may_replace,
+        _NameWords,
+        _substitution,
+    )
 
     report = _run("intent", CloneKind.REIMPLEMENTS)
 
@@ -163,10 +173,15 @@ def test_reimplements_intent_journey() -> None:
     assert "Courier.nullIfBlank" in _names(clone), "step 2: the twin of a copy is a copy"
     assert any(note.startswith("the same code as Mailer.blankToNull") for note in clone.notes), "step 2: says so"
 
-    # 3. Near misses: an instance method, a helper with its own literal, a helper returning something else.
+    # 3. Near misses: an instance method reading its own state (`muted`), a helper with its own literal, a helper
+    #    returning something else. An instance method that reads nothing of its own is a helper like a static one.
     assert not _names(clone) & {"Mailer.blankAsText", "Mailer.scoped", "Courier.blankCount"}, "step 3: none"
+    assert "Courier.blankOrNull" in _names(clone), "step 3: a stateless instance method is judged"
     shaped = {unit.name: unit for unit in _shaped("intent")}
-    assert not _may_replace(shaped["Mailer.scoped"], shaped["Texts.scoped"]), "step 3: its own scope literal"
+    assert shaped["Mailer.blankAsText"].signature.reads_instance, "step 3: a field read is instance state"
+    assert not shaped["Courier.blankOrNull"].signature.reads_instance, "step 3: parameters only"
+    own_scope = _may_replace(shaped["Mailer.scoped"], shaped["Texts.scoped"], Architecture())
+    assert not own_scope, "step 3: its own scope literal"
     assert _substitution(shaped["Courier.blankCount"], shaped["Texts.blankAsNull"]) == 0.0, "step 3: int is no text"
     assert _substitution(shaped["Mailer.blankToNull"], shaped["Texts.blankAsNull"]) == 1.0, "step 3: text is"
 
@@ -179,6 +194,68 @@ def test_reimplements_intent_journey() -> None:
 
     # 5. The weights are shares of one score: they sum to one, and the bar is a share of it.
     assert abs(sum(signal.weight for signal in Signal) - 1.0) < 1e-9 and 0 < INTENT_MIN_SCORE < 1, "step 5"
+
+
+def test_reimplements_original_by_architecture() -> None:
+    """The original is the API in the most core module the copy may reach; a forbidden edge is named, not crossed."""
+    report = _run("origins", CloneKind.REIMPLEMENTS)
+    by_copy = {clone.members[0].name: clone for clone in report.classes}
+
+    # 1. `Mail.tidied` (app) is the same code as `Labels.clean` (app, the shallower path) and `Texts.tidy` (core):
+    #    app depends on core, and core is the more core module, so core's method is the one to call.
+    assert [member.name for member in by_copy["Mail.tidied"].members] == ["Mail.tidied", "Texts.tidy"], "step 1"
+
+    # 2. `Lower.upper` (base) only matches `Labels.shout` (app), and base must never depend on app: the class
+    #    says so instead of telling base to call app.
+    blocked = by_copy["Lower.upper"].notes[0]
+    assert "but base may not depend on app (forbidden): no original to call" in blocked, "step 2: named"
+    assert "call Labels.shout" not in blocked, "step 2: never advised"
+
+    # 3. Near miss: without a home.toml the modules are unknown, and the path order of before is kept.
+    generic = _run_without_architecture("origins")
+    clone = next(clone for clone in generic.classes if clone.members[0].name == "Mail.tidied")
+    assert clone.members[-1].name == "Labels.clean", "step 3: shallower path wins without declared modules"
+    assert not any("no original" in clone.notes[0] for clone in generic.classes), "step 3: no reach is claimed"
+
+
+def _run_without_architecture(folder: str):
+    """Scan a copy of a fixture folder with its `.zemble` declarations removed."""
+    import shutil
+    import tempfile
+
+    root = Path(tempfile.mkdtemp()) / folder
+    shutil.copytree(SHAPES / folder, root, ignore=shutil.ignore_patterns(".zemble"))
+    return _run(root, CloneKind.REIMPLEMENTS)
+
+
+def _unit(name: str, path: str, tokens: int = 40, calls: tuple[str, ...] = ()) -> Unit:
+    """A minimal body for the decision functions that read names, paths, sizes and calls."""
+    return Unit(path, 1, 3, "method", name, tokens, "", "", (), calls, ())
+
+
+def test_reimplements_chase_and_size_gates() -> None:
+    """A copy of a copy points at the root original; code evidence never rests on intent; big pairs share a call."""
+    from zemble.dedup.reimplements import Architecture, _chase, _Copy, _shares_mechanism
+
+    units = [_unit("A.copy", "app/A.java"), _unit("B.helper", "app/B.java"), _unit("C.core", "core/C.java")]
+
+    # 1. A copies B, which copies C: A is told to call C, and the reason names the hop.
+    chased = _chase(units, {0: _Copy(0.9, 1, "r", False), 1: _Copy(0.9, 2, "r", False)}, Architecture())
+    assert chased[0].api == 2 and "B.helper is itself a copy of C.core" in chased[0].reason, "step 1: chased"
+
+    # 2. Near miss: a code-evidenced copy never follows an intent-only link, so code classes stay as they were.
+    held = _chase(units, {0: _Copy(0.9, 1, "r", False), 1: _Copy(0.9, 2, "r", True)}, Architecture())
+    assert held[0].api == 1, "step 2: code evidence stops at an inferred link"
+
+    # 3. A cycle ends where it started instead of looping.
+    looped = _chase(units, {0: _Copy(0.9, 1, "r", True), 1: _Copy(0.9, 0, "r", True)}, Architecture())
+    assert looped[0].api == 1, "step 3: no loop"
+
+    # 4. Helper-sized pairs are judged on intent alone; a bigger one must also share an uncommon call.
+    small, big = _unit("S.a", "s.java", 100, ("x",)), _unit("L.b", "l.java", 300, ("x", "y"))
+    assert _shares_mechanism(small, _unit("S.b", "t.java", 100), frozenset()), "step 4: helpers"
+    assert _shares_mechanism(big, small, frozenset()), "step 4: a shared uncommon call"
+    assert not _shares_mechanism(big, small, frozenset({"x"})), "step 4: a common call is no shared mechanism"
 
 
 def _shaped(folder: str) -> list[Unit]:

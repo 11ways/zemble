@@ -226,6 +226,7 @@ def test_embed_status_json_shape(tmp_project: Path, paid_embedder: PricedEmbedde
         "would_refuse",
         "chunk_seconds",
         "cache_lookup_seconds",
+        "dupes",
     }, "the JSON shape is a contract; add a key deliberately"
 
 
@@ -271,3 +272,33 @@ def test_cli_embed_status_missing_path(
         _cli_main()
     assert raised.value.code == 1, "a missing root is an error"
     assert "does not exist" in capsys.readouterr().err, "and it says why"
+
+
+def test_embed_status_estimates_a_dupes_run(tmp_path: Path, paid_embedder: PricedEmbedder) -> None:
+    """The texts a dupes run would buy are estimated from the same builders the run embeds, then cached away."""
+    from zemble.dedup.detect import DupeOptions, embedding_texts
+    from zemble.dedup.model import CloneKind
+
+    for name in ("Mailer", "Courier"):
+        (tmp_path / f"{name}.java").write_text(
+            f"class {name} {{\n    /** @return the value, or null when blank */\n"
+            "    static String blankToNull(String value) {\n"
+            "        String text = value.strip();\n        return text.isEmpty() ? null : text;\n    }\n}\n"
+        )
+    texts = embedding_texts(tmp_path, DupeOptions(kinds=(CloneKind.REIMPLEMENTS,)))
+    assert texts, "the fixture yields bodies and intents to embed"
+
+    # 1. Cold: every body and intent text of the run is pending, priced like a build's chunks.
+    status = embed_status(tmp_path, dupes=(CloneKind.REIMPLEMENTS, CloneKind.HOLED)).dupes
+    assert status is not None and status.kinds == ["reimplements"], "step 1: only a kind that embeds is estimated"
+    assert (status.texts, status.uncached) == (len(texts), len(texts)), "step 1: nothing cached yet"
+    assert status.estimated_tokens > 0 and not status.would_refuse, "step 1: a small run is affordable"
+    assert paid_embedder.document_batches == [], "step 1: the estimate embeds nothing"
+
+    # 2. Once the run's texts are cached, the run is free.
+    seed(texts, 8)
+    status = embed_status(tmp_path, dupes=(CloneKind.REIMPLEMENTS,)).dupes
+    assert status is not None and (status.uncached, status.estimated_tokens) == (0, 0), "step 2: all cached"
+
+    # 3. Near miss: kinds that embed nothing add no dupes line at all.
+    assert embed_status(tmp_path, dupes=(CloneKind.HOLED,)).dupes is None, "step 3: holed embeds nothing"

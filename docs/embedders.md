@@ -227,6 +227,15 @@ the work guard refused - and then, one layer down, computed the work verdict her
 different inputs. `--exclude` takes the same patterns a build does, so the report can model
 the recovery a refusal advertises rather than answering for a build nobody is running.
 
+`--dupes KINDS` (the names `zemble dupes --kind` takes, e.g. `logic,reimplements`) adds one line
+for a whole `dupes` run of those kinds: how many texts it embeds, how many are uncached, the
+estimated cost and its own bill verdict. The texts come from the same per-kind builders the run
+embeds (`dedup.detect.embedding_texts`, one entry per kind whose `KindFacts.embeds` is set, drift-tested),
+so the estimate cannot drift from the purchase. Kinds that embed nothing add nothing. A run whose
+embedder keeps no shared cache reads a per-root mirror the report cannot see, so there every text
+counts as uncached (pessimistic). On the javaweb workspace (2026-10-10): `reimplements` 155,873 texts,
+28 uncached, ~$0.0001, 34 s (23 s of it the embedding server's cache lookup).
+
 ```
 work       1.3 MB of source to chunk, against a 180.0 MB ceiling
 budget     $5.00 and 38,461,538 tokens

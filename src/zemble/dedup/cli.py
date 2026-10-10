@@ -108,7 +108,7 @@ def add_dupes_parser(sub: argparse._SubParsersAction) -> None:
     _add_confirm_arg(parser)
 
 
-def _kinds(raw: str) -> tuple[CloneKind, ...]:
+def parse_kinds(raw: str) -> tuple[CloneKind, ...]:
     """Parse the --kind flag into clone kinds.
 
     :param raw: The raw flag value.
@@ -174,7 +174,7 @@ def run_dupes(args: argparse.Namespace) -> int:
         # A focused run leaves out every class without a focus member: a baseline would read them as resolved.
         raise _fail("--focus reports part of the classes, so it takes no --baseline or --save-baseline", args.json)
     options = DupeOptions(
-        kinds=_kinds(args.kind),
+        kinds=parse_kinds(args.kind),
         min_tokens=args.min_tokens,
         min_statements=args.min_statements,
         windows=not args.no_windows,

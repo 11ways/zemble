@@ -302,8 +302,68 @@ def _summary(member: Node, source: bytes) -> str:
     return " ".join(text.replace("@return", "returns").split())[:_SUMMARY_CHARS]
 
 
+#: Nodes that name the current instance outright.
+_INSTANCE_REFERENCES = frozenset({"this", "super"})
+#: Nodes holding a type's member declarations (an enum's sit in its body declarations).
+_TYPE_BODIES = frozenset({"class_body", "enum_body_declarations", "interface_body"})
+
+
+def _names_of(nodes: list[Node], field: str, source: bytes) -> set[str]:
+    """The text of each node's `field` child, skipping nodes without one."""
+    return {node_text(source, name) for node in nodes if (name := node.child_by_field_name(field)) is not None}
+
+
+def _enclosing_names(member: Node, source: bytes) -> tuple[frozenset[str], frozenset[str]]:
+    """The instance fields (record components included) and the static methods of every type enclosing a member."""
+    fields: set[str] = set()
+    statics: set[str] = set()
+    node = member.parent
+    while node is not None:
+        if node.type in _TYPE_BODIES:
+            for child in node.named_children:
+                static = "static" in _modifiers(child, source)
+                if child.type == "field_declaration" and not static:
+                    fields |= _names_of(child.children_by_field_name("declarator"), "name", source)
+                elif child.type == "method_declaration" and static:
+                    statics |= _names_of([child], "name", source)
+        elif node.type == "record_declaration" and (components := node.child_by_field_name("parameters")):
+            fields |= _names_of(components.named_children, "name", source)
+        node = node.parent
+    return frozenset(fields), frozenset(statics)
+
+
+def _reads_instance(member: Node, source: bytes) -> bool:
+    """Whether a member's body may read instance state: `this`, `super`, an instance field or a non-static call.
+
+    AIDEV-NOTE: fails closed by design: a call counts unless an enclosing type declares that name static, and a
+    local shadowing a field, an inherited or statically imported call and a body-less member all count as reads,
+    so only a member proven to touch nothing of its own is a helper.
+    """
+    if "static" in _modifiers(member, source):
+        return False
+    body = member.child_by_field_name("body")
+    if body is None:
+        return True
+    fields, statics = _enclosing_names(member, source)
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        if node.type in _INSTANCE_REFERENCES:
+            return True
+        if node.type == "method_invocation" and node.child_by_field_name("object") is None:
+            name = node.child_by_field_name("name")
+            if name is None or node_text(source, name) not in statics:
+                return True
+        if node.type == "identifier" and node_text(source, node) in fields:
+            parent = node.parent
+            if parent is None or parent.type != "field_access" or parent.child_by_field_name("field") != node:
+                return True
+        stack.extend(node.children)
+    return False
+
+
 def _signature(member: Node, source: bytes) -> Signature | None:
-    """A method's or constructor's declared types, staticness and Javadoc."""
+    """A method's or constructor's declared types, staticness, Javadoc and whether it reads its instance."""
     if member.type not in _CALLABLE_KINDS:
         return None
     parameters = member.child_by_field_name("parameters")
@@ -328,6 +388,7 @@ def _signature(member: Node, source: bytes) -> Signature | None:
         | {"Object"},
         static="static" in _modifiers(member, source),
         summary=_summary(member, source),
+        reads_instance=_reads_instance(member, source),
     )
 
 

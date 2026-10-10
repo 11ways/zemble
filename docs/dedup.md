@@ -138,8 +138,13 @@ Each class is one API and the bodies that redo it, copies first and the API last
   when the copy is private or package-private: a public or protected namesake is an override or a
   parallel implementation. Embedding similarity alone never reports anything.
 - **Same intent** (a fourth lane, for the copies the three code lanes cannot see because they do the same
-  thing with different calls): a static helper outside the tests, both sides at most 160 tokens, whose
-  intent text sits among the 10 nearest of a public helper's (cosine >= 0.6). The intent text is what a
+  thing with different calls): a helper outside the tests whose intent text sits among the 10 nearest of a
+  public method's (cosine >= 0.6). A helper is a static method or an instance method the Java profile proves
+  reads no state of its own (`Signature.reads_instance`: no `this`/`super`, no instance field, no call an
+  enclosing type does not declare static; it fails closed, so a shadowing local or an inherited call counts
+  as a read). Both sides are at most 400 tokens (`INTENT_MAX_TOKENS`), and a pair with a side over 160
+  (`HELPER_MAX_TOKENS`) must also share an uncommon call: a mechanism that redoes another with none of its
+  calls is a parallel one. The intent text is what a
   member says it does: its name in words, its signature (`(Object) -> Integer`), its Javadoc and the names
   it calls, embedded beside the bodies in one purchase. The pair is then weighed by four signals, each
   declared once with its weight in `reimplements.Signal`: intent cosine 0.45, body cosine 0.25, name 0.20
@@ -150,9 +155,21 @@ Each class is one API and the bodies that redo it, copies first and the API last
   accepted copy again (body cosine >= 0.9, control flow within 2 edits, 60% shared calls) joins it.
   These classes carry `inferred: true` in the JSON and rank after every class code evidences, and their
   copies never join a code-evidenced class: the code lanes' classes are the same with or without them.
+- **The original, by architecture**: of every API a copy matches, the original is the one in the most core
+  module the copy's module may depend on (`reimplements.Architecture`, read from the scanned root's
+  `.zemble/home.toml` through `HomeConfig`: `order` ranks, the dependency graph and `[[forbidden]]` decide
+  reach). Preference: reachable (direct or transitive), then reach unknown, then the most core module, then
+  the best evidence. Of two public bodies the one in the more core module is the home and never a copy;
+  inside one module, a `common` source set and then the shallower path decide as before. When every API a
+  copy matches lives in a module its module may not depend on (forbidden or unreachable), the class says
+  so (`..., but zenit may not depend on hohenheim (unreachable): no original to call`) instead of advising
+  the call. Without a `home.toml` every body ranks alike and every reach is unknown, which reproduces the
+  path order exactly. An original that is itself a reported copy hands its copies on to its own original
+  (`B.helper is itself a copy of C.core`); a code-evidenced copy only follows code-evidenced links, and no
+  link is followed to an original the copy reaches worse.
 - **Signature facts**: the intent lane reads `Signature` (parameter and result types by simple name, open
-  types such as `Object` and type variables, staticness, Javadoc) from the profile's `ShapeHooks.signature`;
-  Java reads it, a profile without it takes no part in the lane.
+  types such as `Object` and type variables, staticness, whether the body reads its instance, Javadoc)
+  from the profile's `ShapeHooks.signature`; Java reads it, a profile without it takes no part in the lane.
 
 To find copies of framework methods in an app, scan a root holding both and focus on the app:
 `zemble dupes <workspace> --kind reimplements --focus apps/hohenheim`.
@@ -210,6 +227,66 @@ libraries) plus 5 inferred (`stringOf` copies, mostly real, its `stringOrEmpty` 
 `effective`; `HohenheimFormCopy.label`; `CmsSupport.textOf`; `intOf`): 8 of 30. Whole javaweb workspace (11 987
 files, 79 285 bodies, 76 578 intents): reimplements 717 s the first time (685 s of it buying ~3.9M intent
 tokens, ~$0.08, with voyage-4-lite), 23 s warm, 226 classes.
+
+Originals by architecture and the wider lane (2026-10-10; scratch root rebuilt from Hohenheim b9b8f221 plus
+the framework sources at their current heads, 5 532 Java files, 35 022 bodies, 33 318 intents, with a
+`home.toml` declaring protoblast -> zenit -> zenit-cms -> hohenheim). At 3b8aef0 the root gave 69 classes
+(27 code-evidenced, 41 inferred, one facade lane); now 70. Without a `home.toml` the 27 code classes are
+byte-identical; with it they are too, and the inferred ones change only where the architecture or the chase
+says so: four zenit or zenit-cms helpers matching a Hohenheim helper now read `... but zenit may not depend on
+hohenheim (unreachable): no original to call` instead of advising the call, a public zenit-cms method is no
+longer reported as a copy of Hohenheim code, `CreatorGrantHook.install` points at zenit's `ActivityLog.install`
+instead of Hohenheim's `ProxyReloadHooks.install`, and the two `bucketKeyOf` classes merged into one through
+`InstanceQuota.memoryBucketOf`, itself a copy of `InstanceDeviceQuota.diskBucketOf`. The wider lane admitted
+one new class, `HohenheimActivityAction.icon`/`ZenitCmsActivityAction.icon` re-implementing
+`ActivityActions.unknownIcon` (both `return Icon.of("circle-info")`). Precision, top 30 read and judged by the
+strict reading above: positions 1-29 are identical to 3b8aef0's on this root (27 code classes, then the
+`stringOf` and `effective` inferred ones; 9 noise: a panel declaration, a parallel parser, a serializer
+registration, a batch-insert pair, `fingerprint`/`backup`, two `close`/`listOf` parallels, two header
+getters), and #30 changed from the `HohenheimFormCopy.label` class (borderline, now split by architecture)
+to the `intOf` target class: 9 of 30 against 10 of 30. Recall on the audit's 14 bodies:
+
+| Target | Found | Rank, score | Original it points at |
+| --- | --- | --- | --- |
+| `effective` in SiteModel, InstanceVariableModel, InstanceTemplateModel, GitProviders | 4 of 4 | #29 (0.92) | `SiteDomainModel.effective` (not `Row.afterWrite`) |
+| `SiteDomainModel.effective`, `TenantWrites.effectiveSiteType`, `DnsZoneCascades.effectiveZoneId` | 0 of 3 | - | - |
+| `ResourceLimits.asInteger`, `GitRepositoryResolver.providerIdOf` | 2 of 2 | #30 (0.92) | `IndexedScopes.intOf` (zenit, the most core) |
+| `StackDeploymentsPage.durationLabel` | no | 0.69 | - |
+| `InstanceConsoles.trimmedOrNull`, `ApiProviderClient.blankToNull` | 2 of 2 | #56 (0.85), #62 (0.82) | `Texts.trimmedOrNull`, `Texts.blankAsNull` |
+| DatabaseParts regex, `DatabaseModel.isValidName` | no (not attempted) | - | - |
+| `AppDirectory.fixOf` (guard) | yes | #7 | `RecordHealthReads.fixCell` |
+| `Slugs` facade (guard) | yes | #20 | `SlugText` |
+
+Why `Row.afterWrite` is not reached: every pair from the `effective` family to it scores 0.44-0.62
+(`SiteDomainModel.effective`: intent 0.80, body 0.61, name 0, signature 1.0), and among the 4 196 gated pairs
+whose names share no word it ranks 219th and 265th, behind `Builder.storedIn -> Nested.of` and its kind. No
+pair whose names share nothing can reach 0.80 (the other three signals sum to at most 0.80 only when all are
+perfect), and reweighting to let one through would admit those 218 first. The chase is in place: the day
+`SiteDomainModel.effective` is linked to `Row.afterWrite`, its four copies follow. Why `durationLabel`
+scores 0.69 against `RelativeTime.duration`: the copy has no Javadoc and makes one call (`longValue`), so its
+intent text is its name and signature alone (intent 0.69); the API's name is one of its two words (name
+0.62); and the API holds literals the copy does not (`1000.0` where the copy has `1000`, three `false`
+flags, `null`), so the literal rule refuses it whatever the score. It also is not a drop-in copy: it prints
+`5s` where the API prints `5 seconds`. Two principled changes were weighed on the measured signals and not
+shipped: a name signal reading only the API's direction lifts it to 0.77, still under the bar, and number
+normalisation (`1000.0 == 1000`) leaves the `false` flags failing the literal rule.
+
+The wider lane, measured on the scratch root (same gates, signals and bar): judging every size took the
+intent matrix from 7 854 APIs x 8 511 copies (1.0 s) to 8 749 x 22 552 (2.7 s); instance methods admitted 25
+copies, every one but two reading its own state (`this.running`, an enum constant, `model()`), so only
+stateless ones are judged; past 160 tokens six pairs reached 0.75 and the one over the bar
+(`PanelRegistry.register -> PanelPlacements.register`, two registries) shared no uncommon call, so a side
+over 160 tokens needs one; past 400 tokens nothing reached the bar. On the whole workspace the lane takes
+5.2 s (3.7 s at the old gates, after its neighbour search was vectorised per block instead of per row) and
+buys nothing new: the bodies and intents it compares were already embedded (`embed-status --dupes
+reimplements`: 155 873 texts, 28 uncached by workspace drift, ~$0.0001). Whole workspace, load average
+10-15 from other agents: 36 s for the first run (buying those 28), 26-44 s after (3b8aef0: 26 s in the
+same window), 222 classes. The workspace's `home.toml` gives no dependency graph (its build files take the
+version catalog from a settings plugin the Gradle scan cannot read, and `apps/hohenheim` is not declared),
+so there `order` alone ranks originals and nothing is reported as unreachable; that already turns framework
+helpers away from app code (`IndexedScopes.intOf` is no longer a copy of zenit-auth's
+`CapabilityMatrixTransport.integer`, hawkeye's `NumberFunctions.parseInt` no longer one of Hohenheim's
+`RawValues.parsedInt`).
 
 Precision, top 30 per channel read and judged (real = a helper, constant or call would remove it):
 
@@ -788,12 +865,14 @@ never walked at all.
   or more calls still pass the chain evidence.
 - `holed` drops call-free and single-call bodies under 30 tokens and small twins inside one file, so a
   copied `return a != null ? a : b;` coalesce or a family of one-file conveniences is not reported.
-- `reimplements`' intent lane judges static helpers of at most 160 tokens; an instance method or a long
-  body that does the same thing with different calls is still invisible. Of two public bodies the more
-  core one is still chosen by path (a `common` source set, then the shallower path), so a public app
-  helper (`SiteDomainModel.effective`) is taken as the home of its copies instead of the framework method
-  it re-implements (`Row.afterWrite`); `TenantWrites.effectiveSiteType` and `DnsZoneCascades.effectiveZoneId`
-  (a constant field, no doc) and `durationLabel` (score 0.69) stay below the bar. A regex literal is not
+- `reimplements`' intent lane cannot link two members whose names share no word: `Row.afterWrite` is the
+  original of the `effective*` helpers, but each of those pairs scores 0.44-0.62 (name 0, see Measured), so
+  they still point at Hohenheim's public `SiteDomainModel.effective`, and `TenantWrites.effectiveSiteType`
+  and `DnsZoneCascades.effectiveZoneId` (a fixed field, signature 0.5) stay below the bar. `durationLabel`
+  is not a drop-in copy of `RelativeTime.duration` (score 0.69, see Measured). Instance methods that read
+  their own state are never intent copies. The architecture only knows the modules `home.toml` declares;
+  a workspace whose build files the Gradle scan cannot read (a version catalog served by a settings plugin)
+  has no dependency graph, so every reach there is unknown and `order` alone ranks. A regex literal is not
   linked to a predicate method over the same characters. A facade over a type outside the scan (a JDK type)
   is not reported, so scan the root that holds both sides.
 - `vocabulary` reads string constants and literals; numeric vocabularies, values built by concatenation
