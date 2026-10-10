@@ -209,3 +209,21 @@ def test_the_shared_home_is_the_deepest_one_not_the_most_core(tmp_path: Path) ->
     apart = _workspace(tmp_path / "apart", deps={"zenit-flow": ["zenit"], "zenit-widget": ["protoblast"]})
     assert apart.common_dependencies(["zenit-flow", "zenit-widget"]) == (), "step 4: no shared dependency"
     assert apart.nearest_common_dependency(["zenit-flow", "zenit-widget"]) is None, "step 4: and no suggestion"
+
+
+def test_a_module_known_to_depend_on_nothing_is_closed_not_unknown(tmp_path: Path) -> None:
+    """A read build file naming no module, or an empty `depends_on`, is an answer: nothing is reachable."""
+    builds = {
+        "protoblast": "    implementation 'org.checkerframework:checker-qual:4.2.0'",
+        "zenit": "    implementation ('be.elevenways:protoblast-server:0.1.0') { changing = true }",
+    }
+    config = _workspace(tmp_path, deps={"zenit-widget": []}, builds=builds)
+
+    # 1. The root library's build file was read and names only external libraries.
+    assert config.reachable("protoblast", "zenit") is Reachability.UNREACHABLE, "step 1: scanned, depends on none"
+
+    # 2. A declared empty list means exactly that.
+    assert config.reachable("zenit-widget", "zenit") is Reachability.UNREACHABLE, "step 2: declared empty"
+
+    # 3. A module with neither a build file nor a declaration is still UNKNOWN.
+    assert config.reachable("zenit-flow", "zenit") is Reachability.UNKNOWN, "step 3: nothing was said"

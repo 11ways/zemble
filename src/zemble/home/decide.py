@@ -47,6 +47,8 @@ UNCERTAIN_MARGIN = 0.15
 CONFIDENT_MARGIN = 0.4
 #: How many candidate homes are reported.
 MAX_CANDIDATES = 3
+#: Unresolved catalog accessors a note names before it only counts the rest.
+UNRESOLVED_SHOWN = 3
 #: What a strong match rests on when no declared row names it.
 GRAPH_EVIDENCE = "graph evidence (consumer spread and module position), no declared row names it"
 
@@ -262,6 +264,8 @@ class HomeAnswer:
     docs: list[DocHit] = field(default_factory=list)
     checklist: Checklist = field(default_factory=Checklist)
     notes: list[str] = field(default_factory=list)
+    #: What the module dependency graph held when the answer was made, None for a generic workspace.
+    dependencies: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Render the answer as JSON-ready data."""
@@ -281,6 +285,7 @@ class HomeAnswer:
             "docs": [entry.to_dict() for entry in self.docs],
             "checklist": self.checklist.to_dict(),
             "notes": list(self.notes),
+            "dependencies": self.dependencies,
         }
 
     def render(self) -> str:
@@ -292,6 +297,8 @@ class HomeAnswer:
         lines += _render_candidates(self)
         lines += _render_verdict(self)
         lines += _render_checklist(self.checklist)
+        if self.dependencies is not None:
+            lines += [f"Dependency graph: {self.dependencies['describe']}", ""]
         return "\n".join(lines).rstrip() + "\n"
 
 
@@ -610,6 +617,15 @@ def decide(
             " the first path segment, and no"
             " declared homes, forbidden dependencies, rules or skills were available."
         )
+    dependencies = None if config.generic else config.dependencies.summary()
+    if dependencies is not None and config.dependencies.unresolved:
+        shown = config.dependencies.unresolved[:UNRESOLVED_SHOWN]
+        more = len(config.dependencies.unresolved) - len(shown)
+        notes.append(
+            f"{len(config.dependencies.unresolved)} catalog accessor(s) in build files resolved to nothing, so"
+            f" their dependency edges are missing: {'; '.join(problem.describe() for problem in shown)}"
+            + (f"; and {more} more" if more else "")
+        )
     decided = _verdict(config, candidates, judged, row_matches)
     answer = HomeAnswer(
         description=description,
@@ -627,6 +643,7 @@ def decide(
         docs=list(docs),
         checklist=checklist_of(config, [candidate.module for candidate in candidates]),
         notes=notes,
+        dependencies=dependencies,
     )
     return answer
 

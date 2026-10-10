@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from zemble.home.deps import DependencyGraph, DependencySource, Reachability, build_graph
+from zemble.home.gradle import DEFAULT_CATALOG, CatalogDeclaration
 from zemble.home.source_sets import SourceSet, classify, compatible
 from zemble.workspace import HOME_CONFIG_RELATIVE_PATH
 
@@ -104,6 +105,8 @@ class HomeConfig:
     dependency_source: DependencySource = DependencySource.BOTH
     #: Directories to scan for build files; empty means the whole workspace.
     gradle_roots: tuple[str, ...] = ()
+    #: Version catalogs settings plugins apply, which no build file names.
+    catalogs: tuple[CatalogDeclaration, ...] = ()
     #: Source set -> the path globs declaring it; empty means the built-in defaults.
     source_set_globs: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
     tables: tuple[TableSpec, ...] = ()
@@ -186,6 +189,7 @@ class HomeConfig:
             forbidden=[(rule.source, rule.target) for rule in self.forbidden],
             source=self.dependency_source,
             gradle_roots=self.gradle_roots,
+            catalogs=self.catalogs,
         )
 
     def reachable(self, consumer: str, home: str) -> Reachability:
@@ -228,6 +232,7 @@ class HomeConfig:
             "forbidden": [rule.to_dict() for rule in self.forbidden],
             "depends_on": {name: list(targets) for name, targets in self.depends_on.items()},
             "dependency_source": self.dependency_source.value,
+            "catalogs": [catalog.to_dict() for catalog in self.catalogs],
             "source_sets": {name: list(globs) for name, globs in self.source_set_globs.items()},
             "tables": [table.to_dict() for table in self.tables],
             "skills": {name: list(values) for name, values in self.skills.items()},
@@ -274,9 +279,13 @@ class HomeConfig:
         for name in module_globs:
             if not module_globs[name]:
                 raise ConfigError(f"{path}: modules.{name} declares no globs")
-        dependency_source, gradle_roots = _dependencies(_table(raw, "dependencies", path), path)
+        dependency_source, gradle_roots, catalogs = _dependencies(root, _table(raw, "dependencies", path), path)
         source_set_globs = _source_sets(_table(raw, "source_sets", path), path)
-        forbidden = tuple(_forbidden(entry, index, path) for index, entry in enumerate(_array(raw, "forbidden", path)))
+        forbidden = tuple(
+            rule
+            for index, entry in enumerate(_array(raw, "forbidden", path))
+            for rule in _forbidden(entry, index, path)
+        )
         tables = tuple(_table_spec(entry, index, path) for index, entry in enumerate(_array(raw, "tables", path)))
         skills = {
             name: tuple(_strings(value, f"skills.{name}", path)) for name, value in _table(raw, "skills", path).items()
@@ -295,6 +304,7 @@ class HomeConfig:
             depends_on=depends_on,
             dependency_source=dependency_source,
             gradle_roots=gradle_roots,
+            catalogs=catalogs,
             source_set_globs=source_set_globs,
             tables=tables,
             skills=skills,
@@ -348,9 +358,11 @@ def _module_entry(value: Any, name: str, path: Path) -> tuple[tuple[str, ...], t
     return tuple(_strings(value, f"modules.{name}", path)), None
 
 
-def _dependencies(section: dict[str, Any], path: Path) -> tuple[DependencySource, tuple[str, ...]]:
-    """Read the [dependencies] section: which lanes may contribute edges, and where to scan."""
-    unknown = set(section) - {"source", "gradle_roots"}
+def _dependencies(
+    root: Path, section: dict[str, Any], path: Path
+) -> tuple[DependencySource, tuple[str, ...], tuple[CatalogDeclaration, ...]]:
+    """Read the [dependencies] section: which lanes may contribute edges, where to scan, which catalogs apply."""
+    unknown = set(section) - {"source", "gradle_roots", "catalogs"}
     if unknown:
         raise ConfigError(f"{path}: [dependencies] has unknown key(s): {', '.join(sorted(unknown))}")
     written = section.get("source", DependencySource.BOTH.value)
@@ -360,7 +372,26 @@ def _dependencies(section: dict[str, Any], path: Path) -> tuple[DependencySource
         allowed = ", ".join(member.value for member in DependencySource)
         raise ConfigError(f"{path}: [dependencies] source must be one of {allowed}, got {written!r}") from error
     roots = section.get("gradle_roots")
-    return source, tuple(_strings(roots, "dependencies.gradle_roots", path)) if roots is not None else ()
+    gradle_roots = tuple(_strings(roots, "dependencies.gradle_roots", path)) if roots is not None else ()
+    catalogs = tuple(
+        _catalog(root, entry, index, path) for index, entry in enumerate(_array(section, "catalogs", path))
+    )
+    return source, gradle_roots, catalogs
+
+
+def _catalog(root: Path, entry: dict[str, Any], index: int, path: Path) -> CatalogDeclaration:
+    """Parse one [[dependencies.catalogs]] entry, refusing a catalog file that is not there."""
+    where = f"[[dependencies.catalogs]] #{index + 1}"
+    unknown = set(entry) - {"plugin", "path", "name"}
+    if unknown:
+        raise ConfigError(f"{path}: {where} has unknown key(s): {', '.join(sorted(unknown))}")
+    name = entry.get("name", DEFAULT_CATALOG)
+    if not isinstance(name, str) or not name.isidentifier():
+        raise ConfigError(f"{path}: {where} 'name' must be a catalog accessor name, got {name!r}")
+    catalog_path = _required(entry, "path", where, path)
+    if Path(catalog_path).is_absolute() or not (root / catalog_path).is_file():
+        raise ConfigError(f"{path}: {where} path {catalog_path!r} is not a file relative to the workspace root")
+    return CatalogDeclaration(plugin=_required(entry, "plugin", where, path), path=catalog_path, name=name)
 
 
 def _source_sets(section: dict[str, Any], path: Path) -> dict[str, tuple[str, ...]]:
@@ -412,15 +443,31 @@ def _required(entry: dict[str, Any], key: str, where: str, path: Path) -> str:
     return value.strip()
 
 
-def _forbidden(entry: dict[str, Any], index: int, path: Path) -> ForbiddenRule:
-    """Parse one [[forbidden]] entry."""
+def _forbidden(entry: dict[str, Any], index: int, path: Path) -> list[ForbiddenRule]:
+    """Parse one [[forbidden]] entry; a list on either side refuses every pair, never a module to itself."""
     where = f"[[forbidden]] #{index + 1}"
     why = entry.get("why", "")
     if not isinstance(why, str):
         raise ConfigError(f"{path}: {where} 'why' must be a string")
-    return ForbiddenRule(
-        source=_required(entry, "from", where, path), target=_required(entry, "to", where, path), why=why.strip()
-    )
+    unknown = set(entry) - {"from", "to", "why"}
+    if unknown:
+        raise ConfigError(f"{path}: {where} has unknown key(s): {', '.join(sorted(unknown))}")
+    sources, targets = _sides(entry, "from", where, path), _sides(entry, "to", where, path)
+    return [
+        ForbiddenRule(source=source, target=target, why=why.strip())
+        for source in sources
+        for target in targets
+        if source != target
+    ]
+
+
+def _sides(entry: dict[str, Any], key: str, where: str, path: Path) -> list[str]:
+    """Read one side of a [[forbidden]] entry: a module name or a non-empty list of them."""
+    value = entry.get(key)
+    names = [value] if isinstance(value, str) else value
+    if not isinstance(names, list) or not names or not all(isinstance(name, str) and name.strip() for name in names):
+        raise ConfigError(f"{path}: {where} needs a non-empty {key!r} (a module name or a list of them)")
+    return [name.strip() for name in names]
 
 
 def _table_spec(entry: dict[str, Any], index: int, path: Path) -> TableSpec:

@@ -184,6 +184,14 @@ depends_on = ["protoblast", "hawkeye"]
 source = "both"
 gradle_roots = []
 
+# A version catalog a SETTINGS PLUGIN imports from compiled code, which no build file
+# names. It applies to exactly the builds whose settings file applies `plugin`; `name`
+# is the accessor (default "libs"), `path` is workspace-relative and must exist.
+[[dependencies.catalogs]]
+plugin = "be.elevenways.protoblast.settings"
+name = "libs"
+path = "protoblast/zenit-versions/libs.versions.toml"
+
 # Which fold of a module a path is compiled into. Declaring a fold REPLACES its defaults.
 # Keys are the source sets zemble knows: common, server, browser, test. Anything else is
 # a loud error rather than a silently ignored line.
@@ -193,10 +201,16 @@ server = ["src/server/**"]
 browser = ["src/browser/**", "src/client/**"]
 
 # Dependencies the workspace refuses. A candidate home that would create one loses.
+# Either side may be a list: every pair is refused, never a module to itself.
 [[forbidden]]
 from = "zenit-widget"
 to = "zenit-cms"
 why = "zenit-widget never depends on zenit-cms"
+
+[[forbidden]]
+from = ["zenit-forms", "zenit-cms"]
+to = "zenit-editor"
+why = "forms and CMS never depend on rich text"
 
 # Markdown tables that already DECLARE homes. Backticked names in the home column
 # that resolve to a declared module are read as the home; the rest stays prose.
@@ -234,7 +248,7 @@ Edges come from two lanes, merged per module:
 | Lane | What it reads |
 | --- | --- |
 | declared | `depends_on` on a `[modules.<name>]` table |
-| discovered | `settings.gradle(.kts)` for the project layout, then each `build.gradle(.kts)` for `project(':name')` references, `'group:artifact:version'` coordinates and `libs.*` version-catalog aliases, in any configuration ending in `implementation`, `api`, `compileOnly`, `compileOnlyApi` or `runtimeOnly` (so `commonCompileOnly`, `serverImplementation` and `browserTestImplementation` all count, while `annotationProcessor` does not) |
+| discovered | `settings.gradle(.kts)` for the project layout and its version catalogs, then each `build.gradle(.kts)` for `project(':name')` references, `'group:artifact:version'` coordinates and version-catalog accessors (`libs.zenit.cms`, comma lists continued across lines), in any configuration ending in `implementation`, `api`, `compileOnly`, `compileOnlyApi` or `runtimeOnly` (so `commonCompileOnly`, `serverImplementation` and `browserTestImplementation` all count, while `annotationProcessor` does not) |
 
 Discovery is a **heuristic text scan**, never a Gradle evaluation: a dependency built from
 a variable or a loop is invisible to it. It is evidence, so a declaration always wins - a
@@ -243,13 +257,43 @@ resolves to a module when the artifact name is that module, or is that module pl
 published fold suffix (`-common`, `-client`, `-browser`, `-server`, `-test-support`,
 `-test`); anything else is an external library and contributes no edge.
 
+### Version catalogs
+
+A build sees the catalogs its settings file gives it (`gradle.settings_catalogs`), the
+first source to name a catalog winning:
+
+1. the settings file's own `versionCatalogs { libs { from(files('...')) } }` (or
+   `create("libs") { ... }`); a `from('group:artifact:version')` import names a published
+   catalog the scan cannot read, and is reported as such;
+2. a `[[dependencies.catalogs]]` declaration whose `plugin` the settings file applies
+   (`id '...'`). This is the fallback for a catalog a settings plugin imports from compiled
+   code: zemble never evaluates Gradle or reads plugin sources, so the workspace names the
+   catalog's source file once, and it applies only where that plugin is applied;
+3. Gradle's convention file `gradle/libs.versions.toml` beside the settings file, as `libs`.
+
+Aliases are normalised the way Gradle builds accessors (`-`, `_` and `.` all separate
+segments). An accessor resolves to a library, to a bundle's libraries (`libs.bundles.x`),
+or, when it names a GROUP of libraries (`libs.hawkeye` over `hawkeye-common`, `-client`,
+`-server`), to the group's direct leaves only - never everything below it, so `libs.zenit`
+is not every `zenit-*` artifact.
+
+An accessor in a code configuration that resolves to nothing is REPORTED, never silently
+dropped: the graph keeps it as `unresolved` with a reason (`no-catalog`,
+`unreadable-catalog`, `unknown-alias`), `home` counts it in a note naming the first three,
+and the graph summary (`dependencies` in the JSON answer, the `Dependency graph:` line in
+the markdown) lists them all. Only `libs` and catalog names a build actually has are read as
+catalog accessors; `sourceSets.main` is not one.
+
 Discovery is lazy - nothing walks the workspace until something asks a dependency
-question - and it is cached on the config. On the javaweb workspace (30 declared modules,
-30 sibling repositories, each its own Gradle build) it takes 0.14 s and finds 154 edges
-out of 27 modules; the three without outgoing edges are `protoblast` (the root library),
-`emberglyph` (only external and test-only dependencies) and `alchemy` (the legacy Node.js
-tree, no Gradle build at all). `zenit-flow -> zenit-widget` is correctly absent: those two
-are siblings, which is exactly the case the verdict has to get right.
+question - and it is cached on the config. On the zenit workspace (41 declared modules, 7 of
+them apps under `apps/`, each repository its own Gradle build, every
+internal dependency a `libs.*` accessor of the catalog the settings plugin applies) it
+takes 0.04 s and finds 234 edges out of 37 modules with no unresolved accessor; the four
+without outgoing edges are `protoblast` (the root library), `emberglyph` (only external
+dependencies), `zenit-auth-test-support` (declared, no directory of its own) and `alchemy`
+(not checked out). Before the catalog was readable the same workspace had 0 edges, so
+every reach was UNKNOWN and only `order` ranked anything. `zenit-flow -> zenit-widget` is
+correctly absent: those two are siblings, which is exactly the case the verdict has to get right.
 
 `config.reachable(a, b)` answers with one of five values:
 
@@ -258,8 +302,8 @@ are siblings, which is exactly the case the verdict has to get right.
 | `DIRECT` | `a` declares or builds against `b` (and every module reaches itself) |
 | `TRANSITIVE` | `b` is reachable through other modules |
 | `FORBIDDEN` | a `[[forbidden]]` rule refuses the pair; it overrides every edge |
-| `UNREACHABLE` | the graph knows what `a` depends on, and `b` is not in it |
-| `UNKNOWN` | nothing at all is known about what `a` depends on |
+| `UNREACHABLE` | the graph knows what `a` depends on, and `b` is not in it; "knows" includes a declared empty `depends_on` and a build file that was read and named no workspace module (the root library) |
+| `UNKNOWN` | nothing at all is known about what `a` depends on: no declaration, no build file, or a build file with an unresolved catalog accessor (the missing edge may be the one asked about) |
 
 `UNKNOWN` is never permission (`Reachability.usable` is False for it), and it is never
 silently turned into "no" either: once a graph is known, an unknown pair fails closed for

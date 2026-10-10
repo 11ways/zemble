@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from zemble.home.gradle import GradleProject, RefKind, discover
+from zemble.home.gradle import CatalogDeclaration, GradleProject, RefKind, UnresolvedAlias, discover
 
 #: Artifact suffixes a workspace publishes one module under, stripped before an artifact
 #: name is read as a module name. The exact module name always wins, so a module that IS
@@ -90,6 +90,11 @@ class DependencyGraph:
     #: `(source, target)` pairs the workspace refuses outright.
     forbidden: frozenset[tuple[str, str]] = frozenset()
     source: DependencySource = DependencySource.BOTH
+    #: Catalog accessors in a module's build file that resolved to nothing: edges the graph may be missing.
+    unresolved: tuple[UnresolvedAlias, ...] = ()
+    #: Modules whose dependencies are KNOWN even without an edge: a declared `depends_on` (empty included)
+    #: or a build file that was read and named no other module.
+    described: frozenset[str] = frozenset()
 
     @property
     def known(self) -> bool:
@@ -105,8 +110,8 @@ class DependencyGraph:
         return tuple(found)
 
     def has_edges_from(self, module: str) -> bool:
-        """Whether anything is known about what this module depends on."""
-        return any(edge.source == module for edge in self.edges)
+        """Whether anything is known about what this module depends on, an empty answer included."""
+        return module in self.described or any(edge.source == module for edge in self.edges)
 
     def reachable(self, source: str, target: str) -> Reachability:
         """Answer whether `source` may use code that lives in `target`.
@@ -178,6 +183,31 @@ class DependencyGraph:
         # the answer total instead of reporting that the modules share nothing.
         return tuple(maximal or shared)
 
+    def summary(self) -> dict[str, Any]:
+        """Count what the graph holds, naming every unresolved catalog accessor."""
+        return {
+            "source": self.source.value,
+            "known": self.known,
+            "modules": len(self.nodes),
+            "modules_with_edges": len({edge.source for edge in self.edges}),
+            "edges": len(self.edges),
+            "declared_edges": sum(edge.origin is EdgeOrigin.DECLARED for edge in self.edges),
+            "discovered_edges": sum(edge.origin is EdgeOrigin.DISCOVERED for edge in self.edges),
+            "forbidden": len(self.forbidden),
+            "unresolved": [problem.describe() for problem in self.unresolved],
+            "describe": self.describe(),
+        }
+
+    def describe(self) -> str:
+        """One line saying how much the graph knows."""
+        line = (
+            f"{len(self.nodes)} modules, {len(self.edges)} edges out of "
+            f"{len({edge.source for edge in self.edges})} modules, {len(self.forbidden)} forbidden"
+        )
+        if self.unresolved:
+            line += f"; {len(self.unresolved)} catalog accessor(s) resolved to nothing"
+        return line
+
     def to_dict(self) -> dict[str, Any]:
         """Render the graph as JSON-ready data."""
         return {
@@ -186,6 +216,7 @@ class DependencyGraph:
             "nodes": list(self.nodes),
             "edges": [edge.to_dict() for edge in self.edges],
             "forbidden": [{"from": rule[0], "to": rule[1]} for rule in sorted(self.forbidden)],
+            "unresolved": [problem.to_dict() for problem in self.unresolved],
         }
 
 
@@ -197,6 +228,7 @@ def build_graph(
     forbidden: Iterable[tuple[str, str]] = (),
     source: DependencySource = DependencySource.BOTH,
     gradle_roots: tuple[str, ...] = (),
+    catalogs: Sequence[CatalogDeclaration] = (),
 ) -> DependencyGraph:
     """Merge what a workspace declares with what its build files say.
 
@@ -210,11 +242,15 @@ def build_graph(
     :param forbidden: Pairs the workspace refuses.
     :param source: Which lanes may contribute edges.
     :param gradle_roots: Directories to scan, empty meaning the whole tree.
+    :param catalogs: Catalogs settings plugins apply, which no build file names.
     :return: The merged graph.
     """
     known = tuple(modules)
     edges: list[DependencyEdge] = []
+    unresolved: list[UnresolvedAlias] = []
+    described: set[str] = set()
     if source in (DependencySource.DECLARED, DependencySource.BOTH):
+        described.update(declared)
         for module, targets in declared.items():
             edges.extend(
                 DependencyEdge(source=module, target=target, origin=EdgeOrigin.DECLARED)
@@ -223,31 +259,46 @@ def build_graph(
             )
     if source in (DependencySource.GRADLE, DependencySource.BOTH):
         overridden = set(declared) if source is DependencySource.BOTH else set()
-        edges.extend(
-            edge for edge in discovered_edges(root, known, module_of, gradle_roots) if edge.source not in overridden
+        projects = discover(root, gradle_roots, catalogs)
+        edges.extend(edge for edge in discovered_edges(projects, known, module_of) if edge.source not in overridden)
+        # AIDEV-NOTE: a module whose build file was read and named no other module (the root library) depends on
+        # nothing, which is an answer: it must read UNREACHABLE, not UNKNOWN. One with an unresolved accessor is
+        # left out, because the missing edge may be exactly the one asked about.
+        incomplete = {_owner(project, module_of) for project in projects if project.unresolved}
+        described.update(
+            owner for project in projects if (owner := _owner(project, module_of)) in known and owner not in incomplete
         )
-    return DependencyGraph(nodes=known, edges=_deduplicate(edges), forbidden=frozenset(forbidden), source=source)
+        unresolved.extend(
+            problem
+            for project in projects
+            if (owner := _owner(project, module_of)) in known and owner not in overridden
+            for problem in project.unresolved
+        )
+    return DependencyGraph(
+        nodes=known,
+        edges=_deduplicate(edges),
+        forbidden=frozenset(forbidden),
+        source=source,
+        unresolved=tuple(unresolved),
+        described=frozenset(described),
+    )
 
 
 def discovered_edges(
-    root: str | Path,
-    modules: Sequence[str],
-    module_of: Callable[[str], str],
-    gradle_roots: tuple[str, ...] = (),
+    projects: Sequence[GradleProject], modules: Sequence[str], module_of: Callable[[str], str]
 ) -> list[DependencyEdge]:
-    """Read the Gradle build files under a root as edges between the declared modules.
+    """Read discovered Gradle projects as edges between the declared modules.
 
     A reference that resolves to no declared module - an external library, a project the
     workspace does not check out - contributes nothing: an edge is only ever between two
     modules this answer already knows about.
     """
-    projects = discover(root, gradle_roots)
     by_path = {project.gradle_path: project for project in projects}
     by_name = {project.name: project for project in projects}
     names = {module.lower(): module for module in modules}
     edges: list[DependencyEdge] = []
     for project in projects:
-        owner = module_of(f"{project.directory}/build.gradle" if project.directory else "build.gradle")
+        owner = _owner(project, module_of)
         if owner not in names.values():
             continue
         for ref in project.refs:
@@ -292,11 +343,16 @@ def _target_module(
         project = by_path.get(ref.project_path) or by_name.get(ref.project_path.lstrip(":"))
         if project is None:
             return names.get(ref.project_path.lstrip(":").rsplit(":", 1)[-1].lower())
-        owner = module_of(f"{project.directory}/build.gradle" if project.directory else "build.gradle")
+        owner = _owner(project, module_of)
         return owner if owner in names.values() else None
     if ref.kind is RefKind.COORDINATE:
         return module_of_artifact(ref.artifact, names)
     raise ValueError(f"unhandled dependency reference kind: {ref.kind!r}")
+
+
+def _owner(project: GradleProject, module_of: Callable[[str], str]) -> str:
+    """The declared module a Gradle project's directory belongs to."""
+    return module_of(f"{project.directory}/build.gradle" if project.directory else "build.gradle")
 
 
 def _deduplicate(edges: Sequence[DependencyEdge]) -> tuple[DependencyEdge, ...]:
