@@ -27,7 +27,10 @@ Line 1 is the header:
   or relative to the facts file's own location, and it may be a **subdirectory**
   of the workspace zemble indexed: one Gradle module's compile task writing about
   its own module is the normal case. Paths that land outside the indexed
-  workspace are skipped and counted.
+  workspace are skipped and counted. zemble-javac-facts writes it relative, so a
+  facts file a build cache restores into another checkout resolves there; an absolute
+  `root` names the checkout that wrote it, and in any other checkout every path lands
+  outside the workspace.
 
 Every following line is one fact:
 

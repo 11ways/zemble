@@ -19,13 +19,15 @@ import java.util.stream.Stream;
 
 /**
  * Journey test for the facts file across several compilations in ONE JVM, as a Gradle daemon runs them:
- * an incremental compile merges, a deleted source drops out, a full compile never appends.
+ * an incremental compile merges, a deleted source drops out, a full compile never appends, and a file a
+ * build cache restores into another checkout resolves to and merges in that checkout.
  *
  * <p>Usage: {@code java -cp <plugin jar> test/MergeFacts.java <fixture dir> <scratch dir>}.
  */
 public final class MergeFacts {
 
     private static final Pattern FILE_PATH = Pattern.compile("^\\{\"t\":\"file\",\"path\":\"([^\"]+)\"");
+    private static final Pattern HEADER_ROOT = Pattern.compile("\"root\":\"([^\"]+)\"");
 
     private static final List<String> problems = new ArrayList<>();
 
@@ -85,6 +87,39 @@ public final class MergeFacts {
         expect(Files.getPosixFilePermissions(out).contains(PosixFilePermission.GROUP_READ),
                 "step 5: the facts file is group-readable, got " + Files.getPosixFilePermissions(out));
 
+        // 6. The header names the root relative to the file, so the bytes carry no checkout path.
+        String recorded = headerRoot(out);
+        expect(!Path.of(recorded).isAbsolute(), "step 6: the header root is relative, got " + recorded);
+        expect(out.getParent().resolve(recorded).toRealPath().equals(root.toRealPath()),
+                "step 6: the header root resolves to the compile's root, got " + recorded);
+
+        // 7. A byte-for-byte copy in another checkout at another absolute path resolves THERE, and an
+        //    incremental compile in that checkout merges into it instead of discarding it.
+        Path other = scratch.resolveSibling(scratch.getFileName() + "-elsewhere").resolve("checkout");
+        Path otherRoot = other.resolve("src");
+        Path otherOut = other.resolve("facts.jsonl");
+        copyTree(root, otherRoot);
+        copyTree(classes, other.resolve("classes"));
+        Files.copy(out, otherOut);
+        expect(otherOut.getParent().resolve(headerRoot(otherOut)).toRealPath().equals(otherRoot.toRealPath()),
+                "step 7: the restored header root resolves to the second checkout");
+        compile(otherRoot, other.resolve("classes"), otherOut, List.of(otherRoot.resolve("demo/Base.java")));
+        List<String> restored = paths(otherOut);
+        expect(restored.size() == 7 && restored.stream().distinct().count() == 7,
+                "step 7: the restored file is compatible, every block survives the merge, got " + restored);
+        expect(headerRoot(otherOut).equals(recorded), "step 7: the merged header is the same relative root");
+
+        // 8. A file from before the relative header (absolute root) still merges in its own checkout, and is
+        //    replaced whole in any other one: its root names the checkout that wrote it.
+        rewriteHeaderRoot(otherOut, otherRoot.toString());
+        compile(otherRoot, other.resolve("classes"), otherOut, List.of(otherRoot.resolve("demo/Base.java")));
+        expect(paths(otherOut).size() == 7, "step 8: an absolute root of this checkout is compatible");
+        expect(headerRoot(otherOut).equals(recorded), "step 8: and the next write records it relative");
+        rewriteHeaderRoot(otherOut, root.toString());
+        compile(otherRoot, other.resolve("classes"), otherOut, List.of(otherRoot.resolve("demo/Base.java")));
+        expect(paths(otherOut).equals(List.of("demo/Base.java")),
+                "step 8: an absolute root of another checkout is replaced whole, got " + paths(otherOut));
+
         if (!problems.isEmpty()) {
             problems.forEach(problem -> System.out.println("FAIL: " + problem));
             System.exit(1);
@@ -101,6 +136,32 @@ public final class MergeFacts {
             new FactsPlugin().init(task, "out=" + out, "root=" + root);
             if (!task.call()) {
                 throw new IllegalStateException("compilation failed for " + sources);
+            }
+        }
+    }
+
+    private static String headerRoot(Path out) throws IOException {
+        Matcher matcher = HEADER_ROOT.matcher(Files.readAllLines(out, StandardCharsets.UTF_8).get(0));
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
+    /** Rewrites line 1's root the way a facts file written before the relative header spelled it. */
+    private static void rewriteHeaderRoot(Path out, String root) throws IOException {
+        List<String> lines = new ArrayList<>(Files.readAllLines(out, StandardCharsets.UTF_8));
+        String spelled = Matcher.quoteReplacement("\"root\":\"" + root + "\"");
+        lines.set(0, HEADER_ROOT.matcher(lines.get(0)).replaceFirst(spelled));
+        Files.write(out, lines, StandardCharsets.UTF_8);
+    }
+
+    private static void copyTree(Path from, Path to) throws IOException {
+        try (Stream<Path> walk = Files.walk(from)) {
+            for (Path path : walk.toList()) {
+                Path target = to.resolve(from.relativize(path).toString());
+                if (Files.isDirectory(path)) {
+                    Files.createDirectories(target);
+                } else {
+                    Files.copy(path, target);
+                }
             }
         }
     }

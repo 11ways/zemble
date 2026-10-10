@@ -468,3 +468,41 @@ def test_a_symbols_only_read_yields_exactly_the_symbol_facts_of_a_full_read(
     quick = list(facts_module.symbol_facts(load_facts_file(path, workspace, symbols_only=True)))
     assert quick == full, "1: the same symbol facts in the same order"
     assert ("com.example.core.Circle", CIRCLE, 6) in quick and len(quick) == 4, "1: duplicates and paths kept"
+
+
+def test_a_facts_file_restored_into_another_checkout_resolves_there(graph_fixture_root: Path, tmp_path: Path) -> None:
+    """A build cache copies a facts file byte for byte; its relative root makes it the new checkout's facts."""
+    first = _workspace(graph_fixture_root, tmp_path / "a" / "checkout")
+    lines = [
+        # What zemble-javac-facts writes for `build/zemble/facts-compileJava.jsonl` of a root two folders up.
+        _header(tool="zemble-javac-facts"),
+        {"t": "file", "path": CONSUMER, "sha256": _sha(first, CONSUMER)},
+        {"t": "call", "from": MEASURE, "to": "com.example.core.Circle#area()", "path": CONSUMER, "line": 7},
+        {"t": "file", "path": CIRCLE, "sha256": _sha(first, CIRCLE)},
+        {"t": "symbol", "ref": "com.example.core.Circle", "kind": "class", "path": CIRCLE, "line": 5},
+    ]
+    written = _write_facts(first, lines, name="facts-compileJava.jsonl", where="build/zemble")
+    second = _workspace(first, tmp_path / "elsewhere" / "b" / "checkout")
+    restored = second / "build/zemble/facts-compileJava.jsonl"
+    assert restored.read_bytes() == written.read_bytes(), "the second checkout holds the same bytes"
+
+    # 1. Read in its own checkout, every source resolves and is fresh.
+    original = load_facts_file(written, first)
+    assert original.outside_root == 0, "step 1: nothing is outside the first checkout"
+    assert sorted(original.sources) == sorted([CONSUMER, CIRCLE]), "step 1: both sources resolve"
+
+    # 2. The restored copy yields the same facts in the second checkout, none dropped as outside the root.
+    moved = load_facts_file(restored, second)
+    assert moved.outside_root == 0, "step 2: the restored file is not resolved against the first checkout"
+    assert {path: (source.fresh, source.facts) for path, source in moved.sources.items()} == {
+        path: (source.fresh, source.facts) for path, source in original.sources.items()
+    }, "step 2: the same fresh facts per source"
+
+    # 3. A file from before the relative header names the checkout that wrote it: in another one it drops all.
+    lines[0] = {**lines[0], "root": str(first)}
+    legacy = _write_facts(second, lines, name="facts-compileJava.jsonl", where="build/zemble")
+    stale = load_facts_file(legacy, second)
+    assert stale.outside_root == 2 and not stale.sources, "step 3: an absolute foreign root resolves nothing here"
+    lines[0] = {**lines[0], "root": str(second)}
+    own = load_facts_file(_write_facts(second, lines, name="facts-compileJava.jsonl", where="build/zemble"), second)
+    assert sorted(own.sources) == sorted([CONSUMER, CIRCLE]), "step 3: an absolute root of its own checkout still reads"

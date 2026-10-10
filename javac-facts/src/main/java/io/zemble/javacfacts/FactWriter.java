@@ -6,6 +6,7 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -25,6 +26,10 @@ import java.util.UUID;
  * over the output, so a reader never sees a half-merged file. All state belongs to one instance,
  * i.e. one javac task: nothing leaks between compilations sharing a JVM (a Gradle daemon).
  * Two compilations writing the same output file CONCURRENTLY is unsupported; the later finish wins.
+ *
+ * <p>AIDEV-NOTE: the header records the root RELATIVE to the output's directory, so the file holds no
+ * checkout path: a build cache restoring it into another checkout (same layout, other absolute path)
+ * yields a file that resolves to, and merges in, that checkout.
  */
 final class FactWriter {
 
@@ -146,10 +151,45 @@ final class FactWriter {
         }
     }
 
+    /** Whether a previous header is ours and its root, absolute or relative to the output's directory, is this root. */
     private boolean compatible(String header) {
-        return header.contains("\"zemble_facts\":1,")
-                && TOOL.equals(Json.stringField(header, "tool"))
-                && root.toString().equals(Json.stringField(header, "root"));
+        if (!header.contains("\"zemble_facts\":1,") || !TOOL.equals(Json.stringField(header, "tool"))) {
+            return false;
+        }
+        String recorded = Json.stringField(header, "root");
+        if (recorded == null) {
+            return false;
+        }
+        try {
+            return canonical(output.getParent().resolve(recorded)).equals(canonical(root));
+        } catch (InvalidPathException invalid) {
+            return false;
+        }
+    }
+
+    /**
+     * The root as the header records it: relative to the output's directory, with forward slashes.
+     *
+     * <p>Relativized between real paths, because readers resolve it with symlinks followed. Only a root on
+     * another filesystem root (a Windows drive) has no relative form and is recorded absolute.
+     */
+    private String recordedRoot() {
+        Path from = canonical(output.getParent());
+        Path to = canonical(root);
+        if (from.getRoot() == null || !from.getRoot().equals(to.getRoot())) {
+            return to.toString();
+        }
+        String relative = from.relativize(to).toString().replace('\\', '/');
+        return relative.isEmpty() ? "." : relative;
+    }
+
+    /** The real path when it exists, else the normalized absolute one. */
+    private static Path canonical(Path path) {
+        try {
+            return path.toRealPath();
+        } catch (IOException missing) {
+            return path.toAbsolutePath().normalize();
+        }
     }
 
     private static String fileLine(String path, String sha256) {
@@ -177,7 +217,7 @@ final class FactWriter {
         out.append(',');
         Json.field(out, "language", "java");
         out.append(',');
-        Json.field(out, "root", root.toString());
+        Json.field(out, "root", recordedRoot());
         out.append("}\n");
         return out.toString();
     }

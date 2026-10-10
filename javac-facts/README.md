@@ -74,15 +74,17 @@ Options are space-separated `key=value` pairs inside the `-Xplugin:` value.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `out` | `build/zemble/facts.jsonl` | Output file, resolved against the compiler's working directory. |
-| `root` | the working directory | Emitted `path` values are relative to this, with forward slashes. |
+| `root` | the working directory | Emitted `path` values are relative to this, with forward slashes. The header records it relative to the output file's directory. |
 
 Every compilation MERGES into the file it finds: blocks for the sources it analyzed are replaced,
 blocks for sources that no longer exist under `root` are dropped, and every other block is kept. An
 incremental compile, which hands javac only the changed sources, therefore leaves facts for the
 whole source set, and several sequential javac invocations can share one file (a multi-module
-build). The merged file is written to a temp file and moved into place when the compilation ends,
-so it always has exactly one header. A file written by another tool or for another `root` is
-replaced whole. Two compilations writing one file at the same time are not supported. The retired
+build). The file holds no absolute path for sources under `root`, so a build cache that restores it
+into another checkout with the same layout restores a file that resolves to, and merges in, that
+checkout. The merged file is written to a temp file and moved into place when the compilation ends,
+so it always has exactly one header. A file written by another tool, or whose recorded `root`
+(absolute, or relative to the file's directory) resolves to another directory, is replaced whole. Two compilations writing one file at the same time are not supported. The retired
 `append` option is ignored.
 
 Any failure inside the plugin is caught: one line is printed to stderr as
@@ -94,7 +96,7 @@ still valid JSONL.
 Line 1 is the header:
 
 ```json
-{"zemble_facts":1,"tool":"zemble-javac-facts","tool_version":"0.1.0","generated_at":"...","language":"java","root":"/abs/path"}
+{"zemble_facts":1,"tool":"zemble-javac-facts","tool_version":"0.1.0","generated_at":"...","language":"java","root":"../.."}
 ```
 
 Then one fact per line. A `file` fact always precedes the facts about that file:
