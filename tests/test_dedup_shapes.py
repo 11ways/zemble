@@ -80,7 +80,8 @@ def test_idiom_folds_a_prefix_extension_cut_at_the_same_sites(tmp_path: Path) ->
     def write(count: int, built: int) -> None:
         for index in range(count):
             tail = ".build()" if index < built else ""
-            (tmp_path / f"A{index}.java").write_text(f"class A{index} {{ void declare(Builder b) {{ {chain}{tail}; }} }}\n")
+            body = f"class A{index} {{ void declare(Builder b) {{ {chain}{tail}; }} }}\n"
+            (tmp_path / f"A{index}.java").write_text(body)
 
     # 1. Three of four sites go on with `.build()`: one class, the prefix with every site, naming the extension.
     write(4, 3)
@@ -143,6 +144,48 @@ def test_reimplements_journey() -> None:
     #    already uses it.
     assert not any("specFor" in line or "firstFix" in line for line in lines), "step 3: neither is a re-implementation"
     assert len(report.classes) == 2, "step 3: nothing else"
+    assert not any(clone.inferred for clone in report.classes), "step 3: both rest on code"
+
+
+def test_reimplements_intent_journey() -> None:
+    """A static helper stating a public method's intent is a copy of it; its twin follows; parallels do not."""
+    from zemble.dedup.reimplements import INTENT_MIN_SCORE, Signal, _may_replace, _NameWords, _substitution
+
+    report = _run("intent", CloneKind.REIMPLEMENTS)
+
+    # 1. `blankToNull` states `Texts.blankAsNull`'s intent with other calls: an inferred class, copy then API.
+    (clone,) = report.classes
+    assert [member.name for member in clone.members][-1] == "Texts.blankAsNull", "step 1: the API comes last"
+    assert clone.inferred, "step 1: intent evidence alone ranks after code evidence"
+    assert any(note.startswith("same intent, score") for note in clone.notes), "step 1: the signals are shown"
+
+    # 2. `nullIfBlank` is `blankToNull` again: it joins through the twin lane, not on its own name.
+    assert "Courier.nullIfBlank" in _names(clone), "step 2: the twin of a copy is a copy"
+    assert any(note.startswith("the same code as Mailer.blankToNull") for note in clone.notes), "step 2: says so"
+
+    # 3. Near misses: an instance method, a helper with its own literal, a helper returning something else.
+    assert not _names(clone) & {"Mailer.blankAsText", "Mailer.scoped", "Courier.blankCount"}, "step 3: none"
+    shaped = {unit.name: unit for unit in _shaped("intent")}
+    assert not _may_replace(shaped["Mailer.scoped"], shaped["Texts.scoped"]), "step 3: its own scope literal"
+    assert _substitution(shaped["Courier.blankCount"], shaped["Texts.blankAsNull"]) == 0.0, "step 3: int is no text"
+    assert _substitution(shaped["Mailer.blankToNull"], shaped["Texts.blankAsNull"]) == 1.0, "step 3: text is"
+
+    # 4. Names: rare shared words count, a prefix matches (`int` in `integer`), a different verb does not.
+    units = list(shaped.values())
+    names = _NameWords(units)
+    index = {unit.name: position for position, unit in enumerate(units)}
+    assert names.similarity(index["Mailer.blankToNull"], index["Texts.blankAsNull"]) == 1.0, "step 4: same words"
+    assert names.similarity(index["Courier.blankCount"], index["Texts.blankAsNull"]) < 1.0, "step 4: count differs"
+
+    # 5. The weights are shares of one score: they sum to one, and the bar is a share of it.
+    assert abs(sum(signal.weight for signal in Signal) - 1.0) < 1e-9 and 0 < INTENT_MIN_SCORE < 1, "step 5"
+
+
+def _shaped(folder: str) -> list[Unit]:
+    """Every shaped body of one fixture folder, signatures read."""
+    from zemble.dedup.detect import collect_units
+
+    return collect_units(SHAPES / folder, DupeOptions(kinds=(CloneKind.REIMPLEMENTS,), jobs=1)).shaped
 
 
 def test_vocabulary_journey() -> None:

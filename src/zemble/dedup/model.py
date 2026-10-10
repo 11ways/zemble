@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from zemble.dedup.languages import Visibility, body_unit_kinds
+from zemble.dedup.languages import Signature, Visibility, body_unit_kinds
 from zemble.graph.model import is_test_path
 
 
@@ -155,6 +155,8 @@ class Unit:
     forwards_to: str | None = None
     #: Whether the member implements a declared contract (`@Override`): a role implementation, not a utility.
     implements_contract: bool = False
+    #: Declared types, staticness and documentation, on a shaped body whose profile reads them.
+    signature: Signature | None = None
 
     @property
     def location(self) -> str:
@@ -197,6 +199,14 @@ class CloneClass:
     reasons: tuple[PairReason, ...] = ()
     #: Class-level findings (a representative shape, a suggested home); printed before any pair reason.
     notes: tuple[str, ...] = ()
+    #: Whether the class rests on stated intent alone (names, signatures, documentation) rather than on code:
+    #: it ranks after every class of its kind that code evidences.
+    inferred: bool = False
+
+    @property
+    def standing(self) -> tuple[bool, int]:
+        """The sort key within one kind: code-evidenced classes first, then by score."""
+        return self.inferred, -self.score
 
     @property
     def files(self) -> int:
@@ -284,6 +294,7 @@ class CloneClass:
             "kind": self.kind.value,
             "lane": self.lane.value,
             "score": self.score,
+            **({"inferred": True} if self.inferred else {}),
             "tokens": self.tokens,
             "copies": len(self.members),
             "files": self.files,

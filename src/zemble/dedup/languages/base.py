@@ -85,6 +85,22 @@ class VocabularyFact:
     detail: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class Signature:
+    """What a member declares about itself beyond its body: the re-implementation channel's intent facts."""
+
+    #: Declared parameter types, simple names without generics or annotations (`Field<?, ?>` is `Field`).
+    parameters: tuple[str, ...]
+    #: The declared result type the same way, "" when the member returns nothing (`void`, a constructor).
+    returns: str
+    #: Types that accept any value here: the language's top type and the member's own type variables.
+    open_types: frozenset[str]
+    #: Whether the member reads no instance: a static helper, callable from anywhere it is visible.
+    static: bool
+    #: The member's documentation comment as plain text, "" when it has none.
+    summary: str
+
+
 @dataclass(frozen=True, eq=False)
 class ShapeHooks:
     """What the holed, idiom, re-implementation and vocabulary channels read beyond the clone vocabulary.
@@ -105,6 +121,8 @@ class ShapeHooks:
     vocabulary: Callable[[Node, bytes], list[VocabularyFact]]
     #: Whether a member implements a declared contract (Java `@Override`): a role, never a utility to call.
     implements_contract: Callable[[Node, bytes], bool]
+    #: A member's declared types, staticness and documentation, or None when the profile cannot read them.
+    signature: Callable[[Node, bytes], Signature | None]
     #: Node kinds only these hooks name, for the drift test.
     node_kinds: frozenset[str] = field(default_factory=frozenset)
 

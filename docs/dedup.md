@@ -137,6 +137,22 @@ Each class is one API and the bodies that redo it, copies first and the API last
   the API has two or more literals the copy must repeat half of them. Two same-named members only count
   when the copy is private or package-private: a public or protected namesake is an override or a
   parallel implementation. Embedding similarity alone never reports anything.
+- **Same intent** (a fourth lane, for the copies the three code lanes cannot see because they do the same
+  thing with different calls): a static helper outside the tests, both sides at most 160 tokens, whose
+  intent text sits among the 10 nearest of a public helper's (cosine >= 0.6). The intent text is what a
+  member says it does: its name in words, its signature (`(Object) -> Integer`), its Javadoc and the names
+  it calls, embedded beside the bodies in one purchase. The pair is then weighed by four signals, each
+  declared once with its weight in `reimplements.Signal`: intent cosine 0.45, body cosine 0.25, name 0.20
+  (how much of each name the other spells, rare words weighing most, a word matching its prefix so `int`
+  meets `integer`), signature 0.10 (whether the copy could hand its own inputs to the API and use its
+  result; below 0.5 the pair is refused). The weighted score must reach 0.80, and the copy must hold every
+  literal the API holds (`copy(key)` with its own `"scope"` is a parallel helper). A body that is an
+  accepted copy again (body cosine >= 0.9, control flow within 2 edits, 60% shared calls) joins it.
+  These classes carry `inferred: true` in the JSON and rank after every class code evidences, and their
+  copies never join a code-evidenced class: the code lanes' classes are the same with or without them.
+- **Signature facts**: the intent lane reads `Signature` (parameter and result types by simple name, open
+  types such as `Object` and type variables, staticness, Javadoc) from the profile's `ShapeHooks.signature`;
+  Java reads it, a profile without it takes no part in the lane.
 
 To find copies of framework methods in an app, scan a root holding both and focus on the app:
 `zemble dupes <workspace> --kind reimplements --focus apps/hohenheim`.
@@ -170,6 +186,30 @@ production classes there and `logic` 61): holed 85 classes, idiom 397, vocabular
 scratch root holding that tree plus zenit, zenit-cms and protoblast sources (4 512 files, 31 645 compared
 bodies), reimplements 26 classes in 15-25 s warm. Every case the audit listed was looked up in these
 outputs; the misses are below under Limits.
+
+Same-intent lane (2026-10-10, same scratch root, 5 139 Java files, 31 679 bodies, 31 420 intents): 26 -> 62
+classes, the 26 code-evidenced ones unchanged in membership, score and order (`AppDirectory.fixOf` still #6,
+the `Slugs` facade still #19), 36 inferred ones after them. Recall on the audit's misses:
+
+| Miss | Found | Rank, score | API it points at |
+| --- | --- | --- | --- |
+| `effective*` (7) | 4 of 7: SiteModel, InstanceVariableModel, InstanceTemplateModel, GitProviders | #27, 2100 (score 0.92) | `SiteDomainModel.effective`, the public copy; not `Row.afterWrite` |
+| `ResourceLimits.asInteger`, `GitRepositoryResolver.providerIdOf` | both (providerIdOf as its twin) | #30, 558 | `IndexedScopes.intOf` (zenit), not `CmsSupport.parsedInt` |
+| `StackDeploymentsPage.durationLabel` | no (score 0.69) | - | - |
+| `trimmedOrNull`, `blankToNull` | both | #51 (0.85), #58 (0.82) | `Texts.trimmedOrNull`, `Texts.blankAsNull` |
+| DatabaseParts regex vs `DatabaseModel.isValidName` | no (not attempted) | - | - |
+
+What moved recall, measured by ranking each target pair among every gated pair: the intent embedding is
+the signal that ranks the targets first or second (body cosine ranked them 11th to 784th); adding the called
+names to the intent text took `asInteger` from 9th to 1st; the twin lane added `providerIdOf`. A
+family-agreement signal (copies whose twins point at the same API) and an exact-signature bonus were
+tried and dropped: both admitted more noise than targets. Precision, top 30 of the scratch root read and
+judged: 25 code classes as before (7 noise by a strict reading: two panel declarations, two parallel
+parsers, a registration, `fingerprint`/`backup`, `listOf`/`shown`, two HTTP header getters across
+libraries) plus 5 inferred (`stringOf` copies, mostly real, its `stringOrEmpty` members borderline;
+`effective`; `HohenheimFormCopy.label`; `CmsSupport.textOf`; `intOf`): 8 of 30. Whole javaweb workspace (11 987
+files, 79 285 bodies, 76 578 intents): reimplements 717 s the first time (685 s of it buying ~3.9M intent
+tokens, ~$0.08, with voyage-4-lite), 23 s warm, 226 classes.
 
 Precision, top 30 per channel read and judged (real = a helper, constant or call would remove it):
 
@@ -748,13 +788,14 @@ never walked at all.
   or more calls still pass the chain evidence.
 - `holed` drops call-free and single-call bodies under 30 tokens and small twins inside one file, so a
   copied `return a != null ? a : b;` coalesce or a family of one-file conveniences is not reported.
-- `reimplements` only sees a copy that shares code, calls or a close embedding with the API. A copy that
-  does the same thing with different calls is invisible to it: Hohenheim's seven `effective*` helpers
-  (`has`/`get`/`getName`/`byId` against `Row.afterWrite`'s `has`/`get`/`getDefaultValue`, cosine 0.39-0.66),
-  hand-written `Integer.parseInt` copies against `PrimitiveCoercion.toInteger` (no shared call),
-  `durationLabel` against `RelativeTime.duration` (cosine 0.27) and `trimmedOrNull`/`blankToNull` against
-  `Texts` (two generic calls) were all missed. A facade over a type outside the scan (a JDK type) is not
-  reported, so scan the root that holds both sides.
+- `reimplements`' intent lane judges static helpers of at most 160 tokens; an instance method or a long
+  body that does the same thing with different calls is still invisible. Of two public bodies the more
+  core one is still chosen by path (a `common` source set, then the shallower path), so a public app
+  helper (`SiteDomainModel.effective`) is taken as the home of its copies instead of the framework method
+  it re-implements (`Row.afterWrite`); `TenantWrites.effectiveSiteType` and `DnsZoneCascades.effectiveZoneId`
+  (a constant field, no doc) and `durationLabel` (score 0.69) stay below the bar. A regex literal is not
+  linked to a predicate method over the same characters. A facade over a type outside the scan (a JDK type)
+  is not reported, so scan the root that holds both sides.
 - `vocabulary` reads string constants and literals; numeric vocabularies, values built by concatenation
   and regexes passed to a non-JDK API are not seen.
 

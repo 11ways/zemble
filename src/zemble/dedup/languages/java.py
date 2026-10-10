@@ -16,6 +16,7 @@ from zemble.dedup.languages.base import (
     Container,
     LanguageProfile,
     ShapeHooks,
+    Signature,
     SiteKind,
     Visibility,
     VocabularyFact,
@@ -251,6 +252,85 @@ def _implements_contract(node: Node, source: bytes) -> bool:
     )
 
 
+#: A documentation comment's markup the summary drops: delimiters, line stars, block tags that name parameters.
+_DOC_MARKUP = re.compile(r"^\s*\*+", re.MULTILINE)
+_DOC_INLINE = re.compile(r"\{@\w+\s+([^}]*)\}")
+_DOC_PARAMETER_TAGS = re.compile(r"@(?:param|throws|exception|author|since|see)\b[^@]*")
+#: Longest documentation summary kept: the intent text is a sentence or two, not the whole comment.
+_SUMMARY_CHARS = 400
+
+
+_NOT_A_TYPE = frozenset({"modifiers", "variable_declarator", "identifier", *_ANNOTATIONS})
+
+
+def _simple_type(node: Node, source: bytes) -> str:
+    """A declared type by its simple name: generics, annotations and package dropped, array brackets kept."""
+    if node.type == "generic_type":
+        return _simple_type(node.named_children[0], source) if node.named_children else node_text(source, node)
+    if node.type == "array_type":
+        element = node.child_by_field_name("element")
+        dimensions = node.child_by_field_name("dimensions")
+        suffix = node_text(source, dimensions) if dimensions is not None else "[]"
+        return (_simple_type(element, source) if element is not None else "") + suffix.replace(" ", "")
+    if node.type == "annotated_type":
+        inner = [child for child in node.named_children if child.type not in _ANNOTATIONS]
+        return _simple_type(inner[-1], source) if inner else node_text(source, node)
+    return node_text(source, node).rsplit(".", 1)[-1]
+
+
+def _parameter_type(parameter: Node, source: bytes) -> str | None:
+    """One parameter's simple type; a varargs parameter is its element type plus `...`."""
+    declared = parameter.child_by_field_name("type")
+    if declared is not None:
+        return _simple_type(declared, source)
+    if parameter.type == "spread_parameter":
+        element = next((child for child in parameter.named_children if child.type not in _NOT_A_TYPE), None)
+        return _simple_type(element, source) + "..." if element is not None else None
+    return None
+
+
+def _summary(member: Node, source: bytes) -> str:
+    """The member's Javadoc as one line of plain text, "" when the comment above it is not a Javadoc."""
+    comment = member.prev_named_sibling
+    if comment is None or comment.type != "block_comment":
+        return ""
+    text = node_text(source, comment)
+    if not text.startswith("/**"):
+        return ""
+    text = text[3:].removesuffix("*/")
+    text = _DOC_PARAMETER_TAGS.sub(" ", _DOC_INLINE.sub(r"\1", _DOC_MARKUP.sub(" ", text)))
+    return " ".join(text.replace("@return", "returns").split())[:_SUMMARY_CHARS]
+
+
+def _signature(member: Node, source: bytes) -> Signature | None:
+    """A method's or constructor's declared types, staticness and Javadoc."""
+    if member.type not in _CALLABLE_KINDS:
+        return None
+    parameters = member.child_by_field_name("parameters")
+    types = []
+    for parameter in parameters.named_children if parameters is not None else ():
+        if parameter.type in {"formal_parameter", "spread_parameter"}:
+            declared = _parameter_type(parameter, source)
+            if declared is None:
+                return None
+            types.append(declared)
+    returned = member.child_by_field_name("type")
+    returns = _simple_type(returned, source) if returned is not None else ""
+    variables = member.child_by_field_name("type_parameters")
+    return Signature(
+        parameters=tuple(types),
+        returns="" if returns == "void" else returns,
+        open_types=frozenset(
+            node_text(source, variable.named_children[0])
+            for variable in (variables.named_children if variables is not None else ())
+            if variable.type == "type_parameter" and variable.named_children
+        )
+        | {"Object"},
+        static="static" in _modifiers(member, source),
+        summary=_summary(member, source),
+    )
+
+
 def _string_value(node: Node, source: bytes) -> str | None:
     """The content of a plain one-line string literal, or None for a text block."""
     text = node_text(source, node)
@@ -450,20 +530,28 @@ _SHAPES = ShapeHooks(
     forward_target=_forward_target,
     vocabulary=_vocabulary,
     implements_contract=_implements_contract,
+    signature=_signature,
     node_kinds=frozenset(
         {
+            "annotated_type",
             "annotation",
+            "array_type",
+            "block_comment",
             "constant_declaration",
             "enum_body_declarations",
             "enum_constant",
             "expression_statement",
             "field_declaration",
             "formal_parameter",
+            "generic_type",
             "marker_annotation",
             "return_statement",
+            "spread_parameter",
             "string_literal",
             "switch_block",
             "switch_label",
+            "type_parameter",
+            "variable_declarator",
         }
     ),
 )

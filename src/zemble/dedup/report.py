@@ -115,7 +115,7 @@ def _ordered(classes: Sequence[CloneClass]) -> list[CloneClass]:
     """Order classes the way the sections print them: lane first, then kind, then rank."""
     lanes = list(Lane)
     kinds = list(CloneKind)
-    return sorted(classes, key=lambda clone: (lanes.index(clone.lane), kinds.index(clone.kind), -clone.score))
+    return sorted(classes, key=lambda clone: (lanes.index(clone.lane), kinds.index(clone.kind), clone.standing))
 
 
 def format_report(report: DupeReport, limit: int = 25, *, brief: bool = False, show_suppressed: bool = False) -> str:

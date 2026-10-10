@@ -3,20 +3,24 @@
 Two findings, both pointing from a copy at the API it should call. A forwarding facade is a type whose
 methods only hand their parameters to one other type, read off the syntax. A re-implementation is a
 body whose embedding sits next to a public method elsewhere AND repeats that method's calls and
-control flow without calling it; embedding similarity alone never reports anything.
+control flow without calling it, or a static helper that states the same intent as a public method
+(name, signature, documentation, the calls it makes) and could be replaced by a call to it. Embedding
+similarity alone never reports anything.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from functools import lru_cache
 
 import numpy as np
 
-from zemble.dedup.languages import Visibility
+from zemble.dedup.languages import Signature, Visibility
 from zemble.dedup.model import CloneClass, CloneKind, Unit
 from zemble.dedup.structure import edit_distance
 from zemble.graph.model import is_test_path
@@ -55,6 +59,48 @@ _OVERRIDABLE = frozenset({Visibility.PUBLIC, Visibility.PROTECTED})
 #: Unit kinds nothing calls by name.
 _UNCALLABLE = frozenset({"constructor", "initializer"})
 _CALLS_SHOWN = 5
+
+
+class Signal(Enum):
+    """The evidence the intent lane weighs, each with its share of the score; the shares sum to 1.
+
+    AIDEV-NOTE: measured on Hohenheim b9b8f221 plus zenit, zenit-cms and protoblast (docs/dedup.md): the body
+    embedding is the weakest of the four for a re-implementation, which by definition uses different calls.
+    """
+
+    #: Cosine of the two members' intent texts (:func:`intent_text`): name, signature, documentation, calls.
+    INTENT = 0.45
+    #: Cosine of the two raw bodies.
+    BODY = 0.25
+    #: How much of each member's name the other's name spells, rare words counting most.
+    NAME = 0.20
+    #: Whether the copy could hand its own inputs to the API and use what it returns.
+    SIGNATURE = 0.10
+
+    @property
+    def weight(self) -> float:
+        """The share of the score this signal carries."""
+        return float(self.value)
+
+
+#: Intent cosine an API must reach among a copy's nearest intents to be weighed at all.
+INTENT_FLOOR = 0.6
+INTENT_TOP_K = 10
+#: Weighted score (:class:`Signal`) an intent pair must reach.
+INTENT_MIN_SCORE = 0.80
+#: Largest body either side of an intent pair may be: the lane judges helpers, not whole mechanisms.
+HELPER_MAX_TOKENS = 160
+#: Share of the API's inputs the copy must be able to supply.
+MIN_SUBSTITUTION = 0.5
+#: A body this close to an accepted intent copy (cosine, control-flow edits, shared calls) is that copy again.
+TWIN_SIMILARITY = 0.9
+TWIN_FLOW_EDITS = 2
+TWIN_SHARED_CALLS = 0.6
+#: Words a member name spells that say nothing about what it does.
+_NAME_STOPWORDS = frozenset({"a", "an", "and", "as", "by", "for", "from", "get", "in", "is", "of", "on", "or", "to"})
+#: Suffixes folded off a name word (`parsed`, `parses` and `parse` are one word), longest first.
+_NAME_SUFFIXES = ("ing", "ed", "es", "s")
+_CAMEL = re.compile(r"([a-z0-9])([A-Z])")
 #: Bodies whose similarity row is computed at once.
 _BLOCK = 1024
 
@@ -171,6 +217,16 @@ class _Tier:
     min_calls: int = MIN_API_CALLS
 
 
+@dataclass(frozen=True, slots=True)
+class _Copy:
+    """One accepted copy: how strongly, under which API, why, and whether only intent evidences it."""
+
+    score: float
+    api: int
+    reason: str
+    inferred: bool
+
+
 #: A close embedding neighbour must repeat most of the API's calls and its control flow.
 _NEIGHBOURS = _Tier("embedding neighbour", REIMPLEMENT_THRESHOLD, MIN_CONTAINMENT, MAX_FLOW_EDITS, MIN_SPECIFIC_CALLS)
 #: A private copy of a public API's very code (locals renamed) needs no further evidence.
@@ -179,15 +235,22 @@ _TWINS = _Tier("the same code", 0.0, 0.0, 0, 0, min_calls=1)
 _SHARED_CALLS = _Tier("shared uncommon calls", 0.75, 0.6, 4, 4)
 
 
+def _may_copy(copy: Unit, api: Unit) -> bool:
+    """Whether one body may be reported as a copy of a public API at all, whatever the evidence."""
+    if _in_tests(copy) or (_is_api(copy) and _core_rank(copy) < _core_rank(api)):
+        return False  # test code is never the copy; of two public bodies the more core one is the home
+    if api.file_path == copy.file_path or _owner(api) == _owner(copy) or not _is_api(api):
+        return False
+    if _simple(api) == _simple(copy) and copy.visibility in _OVERRIDABLE:
+        return False  # a same-named member others can see is a parallel implementation or an override, not a copy
+    if _simple(api) in copy.calls or _simple(copy) in api.calls or copy.forwards_to or api.forwards_to:
+        return False
+    return 1 / MAX_SIZE_RATIO <= copy.token_count / api.token_count <= MAX_SIZE_RATIO
+
+
 def _verdict(copy: Unit, api: Unit, generic: frozenset[str], tier: _Tier) -> tuple[float, str] | None:
     """How closely a copy repeats an API under one tier, or None when it does not: its call containment and a reason."""
-    if _in_tests(copy) or (_is_api(copy) and _core_rank(copy) < _core_rank(api)):
-        return None  # test code is never the copy; of two public bodies the more core one is the home
-    if api.file_path == copy.file_path or _owner(api) == _owner(copy) or not _is_api(api):
-        return None
-    if _simple(api) == _simple(copy) and copy.visibility in _OVERRIDABLE:
-        return None  # a same-named member others can see is a parallel implementation or an override, not a copy
-    if _simple(api) in copy.calls or _simple(copy) in api.calls or copy.forwards_to or api.forwards_to:
+    if not _may_copy(copy, api):
         return None
     api_calls, copy_calls = set(api.calls), set(copy.calls)
     repeated = api_calls & copy_calls
@@ -198,8 +261,6 @@ def _verdict(copy: Unit, api: Unit, generic: frozenset[str], tier: _Tier) -> tup
         return None  # an API that mostly chains calls declares configuration (a builder), it implements nothing
     containment = len(repeated) / len(api_calls)
     if containment < tier.min_containment or not _literal_agreement(copy, api):
-        return None
-    if not 1 / MAX_SIZE_RATIO <= copy.token_count / api.token_count <= MAX_SIZE_RATIO:
         return None
     edits = edit_distance(copy.skeleton, api.skeleton, tier.max_flow_edits)
     if edits > tier.max_flow_edits:
@@ -268,14 +329,212 @@ def _call_pairs(candidates: Sequence[Unit], generic: frozenset[str]) -> Iterator
         yield from ((copy_index, api) for api, count in shared.items() if count >= _SHARED_CALLS.min_specific)
 
 
-def reimplementation_classes(candidates: Sequence[Unit], vectors: np.ndarray) -> list[CloneClass]:
+def _words(name: str) -> list[str]:
+    """The words a member name spells, lower-cased and folded (`parsedInt` is `pars`, `int`)."""
+    words = []
+    for word in _CAMEL.sub(r"\1 \2", name).replace("_", " ").lower().split():
+        if word in _NAME_STOPWORDS:
+            continue
+        suffix = next((end for end in _NAME_SUFFIXES if word.endswith(end) and len(word) - len(end) >= 3), "")
+        words.append(word[: len(word) - len(suffix)] if suffix else word)
+    return words
+
+
+def intent_text(unit: Unit) -> str | None:
+    """What a member says it does, for the intent embedding: its name, signature, documentation and calls.
+
+    :return: The text, or None for a body whose profile reads no signature (it then takes no part in the lane).
+    """
+    signature = unit.signature
+    if signature is None:
+        return None
+    name = " ".join(_CAMEL.sub(r"\1 \2", _simple(unit)).lower().split())
+    calls = " ".join(_CAMEL.sub(r"\1 \2", call).lower() for call in unit.calls)
+    returns = signature.returns or "nothing"
+    return f"{name} ({', '.join(signature.parameters)}) -> {returns}. {signature.summary} calls: {calls}".strip()
+
+
+class _NameWords:
+    """Every candidate's name words with their rarity in the scan, so a shared `duration` outweighs a shared `of`."""
+
+    def __init__(self, candidates: Sequence[Unit]) -> None:
+        """Read every candidate's name once."""
+        self.words = [frozenset(_words(_simple(unit))) for unit in candidates]
+        frequency = Counter(word for words in self.words for word in words)
+        self.rarity = {word: math.log(len(candidates) / count) for word, count in frequency.items()}
+
+    def _spelled(self, words: frozenset[str], other: frozenset[str]) -> float:
+        """The rarity-weighted share of `words` the other name spells; a word matches its own prefix (`int`)."""
+        total = sum(self.rarity[word] for word in words)
+        shared = sum(
+            self.rarity[word]
+            for word in words
+            if any(
+                word == mate
+                or (
+                    min(len(word), len(mate)) >= 3
+                    and word[:3] == mate[:3]
+                    and (word.startswith(mate) or mate.startswith(word))
+                )
+                for mate in other
+            )
+        )
+        return shared / total if total else 0.0
+
+    def similarity(self, left: int, right: int) -> float:
+        """How much each of two names spells of the other, the weaker direction counting."""
+        one, other = self.words[left], self.words[right]
+        if not one or not other:
+            return 0.0
+        return min(self._spelled(one, other), self._spelled(other, one))
+
+
+def _inputs(unit: Unit, signature: Signature) -> list[str]:
+    """What a member works on: its parameters, and its own type when it reads an instance."""
+    owner = _owner(unit).rsplit(".", 1)[-1]
+    return [*signature.parameters, *([owner] if owner and not signature.static else [])]
+
+
+def _substitution(copy: Unit, api: Unit) -> float:
+    """How far the copy could be replaced by a call: 0 when the results disagree, else the API inputs it can supply."""
+    mine, theirs = copy.signature, api.signature
+    if mine is None or theirs is None:
+        return 0.0
+    if mine.returns != theirs.returns and not (
+        mine.returns and theirs.returns and (theirs.returns in theirs.open_types or mine.returns in mine.open_types)
+    ):
+        return 0.0
+    needed = _inputs(api, theirs)
+    if not needed:
+        return 1.0
+    have = set(_inputs(copy, mine))
+    untyped = bool(have & mine.open_types)  # an untyped input (`Object raw`) is converted, whatever the API takes
+    return sum(1 for kind in needed if kind in have or kind in theirs.open_types or untyped) / len(needed)
+
+
+def _helper(unit: Unit) -> bool:
+    """Whether a body is helper-sized and carries the signature the intent lane reads."""
+    return unit.signature is not None and unit.token_count <= HELPER_MAX_TOKENS
+
+
+def _may_replace(copy: Unit, api: Unit) -> bool:
+    """Whether a helper may be reported as replaceable by an API: a copy at all, holding every value the API holds.
+
+    A helper with its own literal (`copy(key)` with its own `"scope"` value) is a parallel helper, not a copy:
+    a call to the API would change what it does.
+    """
+    return _may_copy(copy, api) and set(api.literals) <= set(copy.literals)
+
+
+def _intent_verdict(copy: Unit, api: Unit, signals: Mapping[Signal, float]) -> tuple[float, str] | None:
+    """The weighted score of an intent pair, or None when the copy is no static helper the API could replace."""
+    if not (_helper(copy) and _helper(api)) or copy.signature is None or not copy.signature.static:
+        return None
+    if signals[Signal.SIGNATURE] < MIN_SUBSTITUTION or not _may_replace(copy, api):
+        return None
+    score = sum(signal.weight * signals[signal] for signal in Signal)
+    if score < INTENT_MIN_SCORE:
+        return None
+    shown = ", ".join(f"{signal.name.lower()} {signals[signal]:.2f}" for signal in Signal)
+    return score, f"same intent, score {score:.2f} ({shown})"
+
+
+def _intent_pairs(candidates: Sequence[Unit], intents: Mapping[int, np.ndarray]) -> Iterator[tuple[int, int, float]]:
+    """Every static helper outside the tests with each of its nearest helper APIs in the intent embedding."""
+    from vicinity.utils import normalize_or_copy
+
+    apis = [index for index in intents if _is_api(candidates[index]) and _helper(candidates[index])]
+    copies = [
+        index
+        for index in intents
+        if not _in_tests(candidates[index]) and _helper(candidates[index]) and candidates[index].signature.static
+    ]
+    if not apis or not copies:
+        return
+    vectors = normalize_or_copy(np.stack([intents[index] for index in [*apis, *copies]]))
+    columns, rows = vectors[: len(apis)].T, vectors[len(apis) :]
+    for start in range(0, len(copies), _BLOCK):
+        similarities = rows[start : start + _BLOCK].dot(columns)
+        for row, line in enumerate(similarities):
+            nearest = np.argpartition(-line, min(INTENT_TOP_K, len(apis) - 1))[:INTENT_TOP_K]
+            for column in nearest:
+                if line[column] >= INTENT_FLOOR and apis[column] != copies[start + row]:
+                    yield copies[start + row], apis[column], float(line[column])
+
+
+def _twins_of_copies(
+    candidates: Sequence[Unit], unit_vectors: np.ndarray, accepted: Sequence[int], taken: Mapping[int, object]
+) -> Iterator[tuple[int, int, float]]:
+    """Every static helper outside the tests that is an accepted intent copy again (`TWIN_SIMILARITY`, flow)."""
+    if not accepted:
+        return
+    rows = [
+        index
+        for index, unit in enumerate(candidates)
+        if index not in taken and not _in_tests(unit) and _helper(unit) and unit.signature.static
+    ]
+    columns = unit_vectors[list(accepted)].T
+    for start in range(0, len(rows), _BLOCK):
+        similarities = unit_vectors[rows[start : start + _BLOCK]].dot(columns)
+        for row, column in zip(*np.nonzero(similarities >= TWIN_SIMILARITY)):
+            twin, copy = candidates[rows[start + row]], candidates[accepted[column]]
+            calls, mates = set(twin.calls), set(copy.calls)
+            if len(calls & mates) < TWIN_SHARED_CALLS * len(calls | mates):
+                continue  # `value.trim()` and `String.valueOf(value)` embed alike and do different things
+            if edit_distance(twin.skeleton, copy.skeleton, TWIN_FLOW_EDITS) <= TWIN_FLOW_EDITS:
+                yield rows[start + row], accepted[column], float(similarities[row, column])
+
+
+def _intent_lane(
+    candidates: Sequence[Unit],
+    unit_vectors: np.ndarray,
+    intents: Mapping[int, np.ndarray],
+    best: dict[int, _Copy],
+) -> None:
+    """Add the intent lane's copies to `best`, never replacing what a code lane found, then their twins."""
+    names = _NameWords(candidates)
+    found: dict[int, _Copy] = {}
+    for copy_index, api_index, intent in _intent_pairs(candidates, intents):
+        if copy_index in best:
+            continue
+        copy, api = candidates[copy_index], candidates[api_index]
+        signals = {
+            Signal.INTENT: intent,
+            Signal.BODY: float(unit_vectors[copy_index].dot(unit_vectors[api_index])),
+            Signal.NAME: names.similarity(copy_index, api_index),
+            Signal.SIGNATURE: _substitution(copy, api),
+        }
+        verdict = _intent_verdict(copy, api, signals)
+        if verdict is not None and (copy_index not in found or verdict[0] > found[copy_index].score):
+            found[copy_index] = _Copy(verdict[0], api_index, verdict[1], inferred=True)
+    best.update(found)
+    for twin, copy_index, similarity in _twins_of_copies(candidates, unit_vectors, sorted(found), best):
+        source = found[copy_index]
+        twin_unit, api = candidates[twin], candidates[source.api]
+        if (
+            _may_copy(twin_unit, api)
+            and _literal_agreement(twin_unit, api)
+            and _substitution(twin_unit, api) >= MIN_SUBSTITUTION
+        ):
+            if twin not in best or source.score * similarity > best[twin].score:
+                reason = f"the same code as {candidates[copy_index].name}, similarity {similarity:.2f}"
+                best[twin] = _Copy(source.score * similarity, source.api, reason, inferred=True)
+
+
+def reimplementation_classes(
+    candidates: Sequence[Unit], vectors: np.ndarray, intents: Mapping[int, np.ndarray] | None = None
+) -> list[CloneClass]:
     """One class per public method that bodies re-implement: the copies first, the method to call last.
 
-    Candidates come from two lanes: close embedding neighbours, and pairs sharing many uncommon calls;
-    each lane then has its own bar (`_Tier`). Embedding similarity alone never reports anything.
+    Candidates come from three code lanes: the same code renamed, close embedding neighbours, and pairs sharing
+    many uncommon calls, each with its own bar (`_Tier`). A body none of them claims may still be a static
+    helper stating an API's intent (:class:`Signal`), and a body that is such a helper again joins it.
+    Embedding similarity alone never reports anything.
 
     :param candidates: The bodies to compare (:func:`reimplementation_candidates`).
-    :param vectors: Their embeddings, row for row.
+    :param vectors: Their body embeddings, row for row.
+    :param intents: The embeddings of their intent texts (:func:`intent_text`), by candidate index; None or
+        empty runs the code lanes alone.
     :return: The classes, each copy under its best-evidenced API; unranked.
     """
     if len(candidates) < 2:
@@ -284,15 +543,15 @@ def reimplementation_classes(candidates: Sequence[Unit], vectors: np.ndarray) ->
 
     generic = _generic_calls(candidates)
     unit_vectors = normalize_or_copy(vectors)
-    best: dict[int, tuple[float, int, str]] = {}
+    best: dict[int, _Copy] = {}
 
     def offer(copy_index: int, api_index: int, similarity: float, tier: _Tier) -> None:
         if similarity < tier.min_similarity:
             return
         found = _verdict(candidates[copy_index], candidates[api_index], generic, tier)
-        if found is not None and (copy_index not in best or similarity * found[0] > best[copy_index][0]):
+        if found is not None and (copy_index not in best or similarity * found[0] > best[copy_index].score):
             reason = f"{tier.found_by}, similarity {similarity:.2f}; {found[1]}"
-            best[copy_index] = (similarity * found[0], api_index, reason)
+            best[copy_index] = _Copy(similarity * found[0], api_index, reason, inferred=False)
 
     for copy_index, api_index in _twin_pairs(candidates):
         offer(copy_index, api_index, float(unit_vectors[copy_index].dot(unit_vectors[api_index])), _TWINS)
@@ -301,11 +560,22 @@ def reimplementation_classes(candidates: Sequence[Unit], vectors: np.ndarray) ->
         offer(copy_index, api_index, similarity, _NEIGHBOURS)
     for copy_index, api_index in _call_pairs(candidates, generic):
         offer(copy_index, api_index, float(unit_vectors[copy_index].dot(unit_vectors[api_index])), _SHARED_CALLS)
+    if intents:
+        _intent_lane(candidates, unit_vectors, intents, best)
+    return _classes(candidates, best)
+
+
+def _classes(candidates: Sequence[Unit], best: Mapping[int, _Copy]) -> list[CloneClass]:
+    """One class per API and kind of evidence: the copies by location, then the API.
+
+    Copies only intent evidences form their own class beside the code-evidenced copies of the same API, so a
+    class the code lanes report is the same class whatever the intent lane adds.
+    """
     classes = []
-    by_api: dict[int, list[tuple[int, str]]] = defaultdict(list)
-    for copy_index, (_score, api_index, reason) in best.items():
-        by_api[api_index].append((copy_index, reason))
-    for api_index, found in by_api.items():
+    by_api: dict[tuple[int, bool], list[tuple[int, str]]] = defaultdict(list)
+    for copy_index, verdict in best.items():
+        by_api[(verdict.api, verdict.inferred)].append((copy_index, verdict.reason))
+    for (api_index, inferred), found in by_api.items():
         api = candidates[api_index]
         copies = sorted((candidates[index] for index, _ in found), key=lambda unit: (unit.file_path, unit.start_line))
         names = ", ".join(unit.name for unit in copies[:_CALLS_SHOWN]) + (" ..." if len(copies) > _CALLS_SHOWN else "")
@@ -313,5 +583,6 @@ def reimplementation_classes(candidates: Sequence[Unit], vectors: np.ndarray) ->
         notes = [f"{names} {verb} {api.name}; call {api.name} ({api.location})"]
         notes.extend(reason for _, reason in sorted(found)[:_CALLS_SHOWN])
         tokens = min(unit.token_count for unit in (*copies, api))
-        classes.append(CloneClass(CloneKind.REIMPLEMENTS, (*copies, api), tokens, notes=tuple(notes)))
+        members = (*copies, api)
+        classes.append(CloneClass(CloneKind.REIMPLEMENTS, members, tokens, notes=tuple(notes), inferred=inferred))
     return classes

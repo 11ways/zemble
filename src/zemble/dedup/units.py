@@ -708,6 +708,7 @@ class _UnitExtractor:
                     shape=render_stream(stream),
                     forwards_to=hooks.forward_target(member, body, self.source) if hooks is not None else None,
                     implements_contract=hooks is not None and hooks.implements_contract(member, self.source),
+                    signature=hooks.signature(member, self.source) if hooks is not None else None,
                 )
             )
         if self.request.idioms and self.profile.shapes is not None:

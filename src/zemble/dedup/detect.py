@@ -18,7 +18,12 @@ from zemble.dedup.idioms import holed_classes, idiom_classes
 from zemble.dedup.ignore import apply_ignores, find_ignore_files
 from zemble.dedup.languages import profile_for, shape_languages, supported_extensions
 from zemble.dedup.model import CloneClass, CloneKind, DupeReport, Lane, PairReason, Unit
-from zemble.dedup.reimplements import forwarding_classes, reimplementation_candidates, reimplementation_classes
+from zemble.dedup.reimplements import (
+    forwarding_classes,
+    intent_text,
+    reimplementation_candidates,
+    reimplementation_classes,
+)
 from zemble.dedup.structure import MAX_SKELETON_DISTANCE, check_pair
 from zemble.dedup.unitcache import (
     VECTOR_FOLDER_NAME,
@@ -448,7 +453,14 @@ class _BodyVectors:
 def _body_vectors(
     candidates: Sequence[Unit], options: DupeOptions, embedder: Embedder | None, root: Path | None
 ) -> _BodyVectors:
-    """Vectors for every candidate body, read from the root's local mirror and fetched only where it misses.
+    """Vectors for every candidate body's text (:func:`_text_vectors`)."""
+    return _text_vectors([unit.text or "" for unit in candidates], options, embedder, root)
+
+
+def _text_vectors(
+    texts: Sequence[str], options: DupeOptions, embedder: Embedder | None, root: Path | None
+) -> _BodyVectors:
+    """Vectors for every text, read from the root's local mirror and fetched only where it misses.
 
     Buying vectors is a paid seam, so the mirror's misses pass the bill guard, which raises
     ``EmbeddingBudgetExceeded`` on a remote embedder whose bill is over budget.
@@ -464,7 +476,7 @@ def _body_vectors(
 
     started = time.perf_counter()
     embedder = embedder or load_embedder(options.embedder)
-    texts = [unit.text or "" for unit in candidates]
+    texts = list(texts)
     if root is None or isinstance(embedder, CachingEmbedder):
         # The default embedder is local, where the guard is a no-op.
         require_affordable_bill(embedder, texts)
@@ -720,7 +732,7 @@ def rank(classes: Sequence[CloneClass], min_files: int) -> list[CloneClass]:
     :param min_files: Smallest number of distinct files a class may span.
     :return: The surviving classes, best first.
     """
-    ordered = sorted(classes, key=lambda clone: (-clone.score, clone.members[0].location))
+    ordered = sorted(classes, key=lambda clone: (clone.standing, clone.members[0].location))
     kept = _Kept()
     for clone in ordered:
         if clone.files < min_files:
@@ -784,10 +796,17 @@ def _shape_classes(
         candidates = reimplementation_candidates(extraction.shaped)
         found = forwarding_classes(extraction.shaped)
         if len(candidates) >= 2:
-            vectors = _body_vectors(candidates, options, embedder, root)
-            found.extend(reimplementation_classes(candidates, vectors.vectors))
+            intents = {index: text for index, unit in enumerate(candidates) if (text := intent_text(unit))}
+            # One purchase for bodies and intents, so the bill guard judges the run's whole spend at once.
+            texts = [unit.text or "" for unit in candidates] + list(intents.values())
+            vectors = _text_vectors(texts, options, embedder, root)
+            bodies = vectors.vectors[: len(candidates)]
+            found.extend(
+                reimplementation_classes(candidates, bodies, dict(zip(intents, vectors.vectors[len(candidates) :])))
+            )
             notes.append(
-                f"reimplements: compared {len(candidates)} bodies with {vectors.model_id} in {vectors.seconds:.1f}s"
+                f"reimplements: compared {len(candidates)} bodies and {len(intents)} intents with "
+                f"{vectors.model_id} in {vectors.seconds:.1f}s"
             )
         classes.extend(rank(found, options.min_files))
     if CloneKind.VOCABULARY in options.kinds:
