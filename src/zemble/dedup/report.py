@@ -61,11 +61,10 @@ def scan_notes(report: DupeReport) -> list[str]:
 
 def _head_line(index: int, clone: CloneClass, *, with_kind: bool) -> str:
     """Render a clone class's one-line summary."""
-    head = clone.members[0]
     label = f"{clone.kind.value} {clone.lane.value}  " if with_kind else ""
     return (
         f"#{index}  {label}{len(clone.members)} copies x {clone.tokens} tokens (score {clone.score})  "
-        f"root: {head.kind} {head.name}  files: {clone.files}  key: {clone.key}"
+        f"root: {clone.root_label}  files: {clone.files}  key: {clone.key}"
     )
 
 
@@ -182,13 +181,12 @@ def format_baseline_diff(report: DupeReport, baseline: Baseline, *, limit: int =
     if not difference.changed:
         lines.append("  none")
     for index, change in enumerate(difference.changed[:limit], start=1):
-        head = change.now.members[0]
         delta = change.score_delta
         lines.append(
             f"#{index}  {change.now.kind.value} {change.now.lane.value}  "
             f"{change.was.copies} -> {len(change.now.members)} copies, "
             f"score {change.was.score} -> {change.now.score} ({'+' if delta >= 0 else ''}{delta})  "
-            f"root: {head.kind} {head.name}  key: {change.was.key} -> {change.now.key}"
+            f"root: {change.now.root_label}  key: {change.was.key} -> {change.now.key}"
         )
     for title, classes in (("REMAINING (in the baseline, still here)", difference.remaining), ("NEW", difference.new)):
         lines.extend(["", f"== {title} =="])

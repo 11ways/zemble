@@ -7,7 +7,6 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from itertools import zip_longest
 from pathlib import Path
 from typing import TypeVar
 
@@ -24,7 +23,9 @@ from zemble.dedup.reimplements import (
     reimplementation_candidates,
     reimplementation_classes,
     reimplementation_texts,
+    standard_bodies,
 )
+from zemble.dedup.settings import ShapeSettings
 from zemble.dedup.structure import MAX_SKELETON_DISTANCE, check_pair
 from zemble.dedup.unitcache import (
     VECTOR_FOLDER_NAME,
@@ -115,6 +116,10 @@ class _Extraction:
     shaped: list[Unit] = field(default_factory=list)
     #: Idiom and vocabulary sites.
     sites: list[Unit] = field(default_factory=list)
+    #: The root's frozen globs, key arguments and source sets; the defaults when it declares none.
+    settings: ShapeSettings = field(default_factory=ShapeSettings)
+    #: What reading those settings had to say (a broken `home.toml`).
+    notes: list[str] = field(default_factory=list)
 
 
 def _selected_paths(root: Path, paths: Sequence[str]) -> list[Path]:
@@ -196,7 +201,9 @@ def _batches(jobs: list[tuple[str, str]], size: int) -> Iterator[list[tuple[str,
         yield jobs[start : start + size]
 
 
-def _extract_options(options: DupeOptions, *, include_text: bool, shapes: bool = True) -> dict[str, object]:
+def _extract_options(
+    options: DupeOptions, *, include_text: bool, shapes: bool = True, copy_keys: tuple[str, ...] = ()
+) -> dict[str, object]:
     """The keyword arguments every file of a run is extracted with.
 
     The sub-body requests are only named when one is on, so a clone-only run keeps the options (and the
@@ -215,6 +222,8 @@ def _extract_options(options: DupeOptions, *, include_text: bool, shapes: bool =
             "vocabulary": CloneKind.VOCABULARY in options.kinds,
         }
         extract.update({name: True for name, wanted in requests.items() if wanted})
+        if requests["vocabulary"]:
+            extract["copy_keys"] = copy_keys
     return extract
 
 
@@ -250,8 +259,9 @@ def collect_units(root: Path, options: DupeOptions) -> _Extraction:
     :return: The units, the number of files read and the files that would not parse.
     """
     scan = _scan(root, options.paths, options.exclude)
-    extract_options = _extract_options(options, include_text=options.wants_logic)
-    extraction = _Extraction(files=len(scan.jobs))
+    settings, notes = ShapeSettings.load(root)
+    extract_options = _extract_options(options, include_text=options.wants_logic, copy_keys=settings.copy_keys)
+    extraction = _Extraction(files=len(scan.jobs), settings=settings, notes=notes)
     rows: list[FileRow] = []
     for relative, digest, extracted in _run_batches(_extract_full_batch, scan.jobs, extract_options, options.jobs):
         if extracted is None:
@@ -826,26 +836,38 @@ def _unit_paths(extraction: _Extraction) -> list[str]:
 def _shape_classes(
     root: Path, options: DupeOptions, extraction: _Extraction, embedder: Embedder | None
 ) -> tuple[list[CloneClass], list[str]]:
-    """The holed, idiom, re-implementation and vocabulary classes of one extraction, each kind ranked on its own."""
+    """The holed, idiom, re-implementation and vocabulary classes of one extraction, each kind ranked on its own.
+
+    Frozen code (`ShapeSettings.frozen`, schema migrations) takes part in none of them: it repeats its DSL and
+    writes its values out by design, and nothing may call into it.
+    """
     classes: list[CloneClass] = []
-    notes: list[str] = []
+    notes: list[str] = list(extraction.notes)
+    settings = extraction.settings
+    shaped = [unit for unit in extraction.shaped if not settings.is_frozen(unit.file_path)]
+    sites = [unit for unit in extraction.sites if not settings.is_frozen(unit.file_path)]
     if CloneKind.HOLED in options.kinds:
-        classes.extend(rank(holed_classes(extraction.shaped, options.min_tokens), options.min_files))
+        classes.extend(rank(holed_classes(shaped, options.min_tokens), options.min_files))
     if CloneKind.IDIOM in options.kinds:
-        classes.extend(rank(idiom_classes(extraction.sites), options.min_files))
+        classes.extend(rank(idiom_classes(sites), options.min_files))
     if CloneKind.REIMPLEMENTS in options.kinds:
-        candidates = reimplementation_candidates(extraction.shaped)
-        found = forwarding_classes(extraction.shaped)
+        candidates = reimplementation_candidates(shaped)
+        found = forwarding_classes(shaped)
+        standard = standard_bodies(shaped)
         if len(candidates) >= 2:
             # One purchase for bodies and intents, so the bill guard judges the run's whole spend at once.
             intents, texts = reimplementation_texts(candidates)
             vectors = _text_vectors(texts, options, embedder, root)
             bodies = vectors.vectors[: len(candidates)]
-            architecture, problems = _architecture(root)
+            architecture, problems = _architecture(root, settings)
             notes.extend(problems)
             found.extend(
                 reimplementation_classes(
-                    candidates, bodies, dict(zip(intents, vectors.vectors[len(candidates) :])), architecture
+                    candidates,
+                    bodies,
+                    dict(zip(intents, vectors.vectors[len(candidates) :])),
+                    architecture,
+                    standard,
                 )
             )
             notes.append(
@@ -854,20 +876,21 @@ def _shape_classes(
             )
         classes.extend(rank(found, options.min_files))
     if CloneKind.VOCABULARY in options.kinds:
-        flavours = [rank(flavour, options.min_files) for flavour in vocabulary_classes(extraction.sites)]
-        # Each flavour is ranked on its own and they take turns, so a regex is never buried under 400 values.
-        classes.extend(clone for turn in zip_longest(*flavours) for clone in turn if clone is not None)
+        flavours = [rank(flavour, options.min_files) for flavour in vocabulary_classes(sites, settings)]
+        # Each flavour keeps its own cover check; the report then reads one order, by score.
+        merged = [clone for flavour in flavours for clone in flavour]
+        classes.extend(sorted(merged, key=lambda clone: (clone.standing, clone.members[0].location, clone.key)))
     if CloneKind.IDIOM in options.kinds or CloneKind.VOCABULARY in options.kinds:
         notes.append(f"idiom and vocabulary sites cover: {', '.join(shape_languages()) or 'no language'}")
     return classes, notes
 
 
-def _architecture(root: Path) -> tuple[Architecture, list[str]]:
+def _architecture(root: Path, settings: ShapeSettings) -> tuple[Architecture, list[str]]:
     """The declared modules a re-implementation's original is chosen by, or path order plus a note on a broken file."""
     try:
-        return Architecture(HomeConfig.load(root)), []
+        return Architecture(HomeConfig.load(root), settings), []
     except ConfigError as error:
-        return Architecture(), [f"home.toml error, re-implementation originals ranked by path: {error}"]
+        return Architecture(None, settings), [f"home.toml error, re-implementation originals ranked by path: {error}"]
 
 
 def _report(root: Path, options: DupeOptions, files: int, failed: Sequence[str], units: int, bodies: int) -> DupeReport:

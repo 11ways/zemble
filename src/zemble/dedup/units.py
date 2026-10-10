@@ -10,6 +10,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from hashlib import blake2b
 from typing import NamedTuple
 
@@ -17,6 +18,7 @@ from tree_sitter import Node
 
 from zemble.dedup.languages import (
     CONSTANT_HOLE,
+    KeyArguments,
     LanguageProfile,
     SiteKind,
     Visibility,
@@ -369,6 +371,8 @@ class ShapeRequest:
     idioms: bool = False
     #: Constants, literal uses, value sets and regex literals (vocabulary).
     vocabulary: bool = False
+    #: Key-argument patterns (:class:`~zemble.dedup.languages.KeyArguments`) whose strings are no values.
+    copy_keys: tuple[str, ...] = ()
 
     @property
     def any(self) -> bool:
@@ -458,7 +462,9 @@ class _IdiomSites:
             return 0
         total = sum(self._count(child) for child in node.children)
         if node.type in self.hooks.call_kinds:
-            total += 1
+            # AIDEV-NOTE: a static call on a standard-library type (`String.valueOf`, `Boolean.TRUE.equals`) is the
+            # language itself; it never counts toward the calls that make a chain an idiom.
+            total += 0 if self.hooks.standard_receiver(node, self.source) else 1
             self.calls.append(node)
             self.counts[node.id] = total
         return total
@@ -577,6 +583,24 @@ def _pair_call(name: str, arity: int) -> str:
     return f"{name}({', '.join(['@k', *[_ERASED] * (arity - 1)])})"
 
 
+def _constant_names(holed: list[HoledToken], profile: LanguageProfile) -> tuple[str, ...]:
+    """Every constant a body names, as written: its constant holes and the constants it calls on (`SESSIONS.remove`)."""
+    hooks = profile.shapes
+    if hooks is None:
+        return ()
+    return tuple(
+        token.value if token.text == CONSTANT_HOLE else token.text
+        for token in holed
+        if token.text == CONSTANT_HOLE or (token.kind == "identifier" and hooks.is_constant_name(token.text))
+    )
+
+
+@lru_cache(maxsize=8)
+def _key_arguments(patterns: tuple[str, ...]) -> KeyArguments:
+    """One parsed key-argument table per pattern set, shared by every file of a run."""
+    return KeyArguments(patterns)
+
+
 def _vocabulary_sites(facts: list[VocabularyFact], file_path: str) -> list[Unit]:
     """The units of one file's vocabulary facts, each keyed by its kind and value (a set by its sorted values)."""
     units = []
@@ -594,6 +618,7 @@ def _vocabulary_sites(facts: list[VocabularyFact], file_path: str) -> list[Unit]
             visibility=fact.visibility,
             container_visibility=fact.container_visibility,
         )
+        unit = replace(unit, declares=fact.declares, constants=fact.constants)
         units.append(replace(unit, shape=fact.detail) if fact.detail else unit)
     return units
 
@@ -630,7 +655,7 @@ class _UnitExtractor:
         """Extract every unit of the file, starting at its own top-level members."""
         self._visit_members(list(root.named_children), "", Visibility.PUBLIC)
         if self.request.vocabulary and self.profile.shapes is not None:
-            facts = self.profile.shapes.vocabulary(root, self.source)
+            facts = self.profile.shapes.vocabulary(root, self.source, _key_arguments(self.request.copy_keys))
             self.result.sites.extend(_vocabulary_sites(facts, self.file_path))
         return self.result
 
@@ -709,6 +734,8 @@ class _UnitExtractor:
                     forwards_to=hooks.forward_target(member, body, self.source) if hooks is not None else None,
                     implements_contract=hooks is not None and hooks.implements_contract(member, self.source),
                     signature=hooks.signature(member, self.source) if hooks is not None else None,
+                    constants=_constant_names(holed, self.profile),
+                    delegates=hooks is not None and hooks.delegates(member, body, self.source),
                 )
             )
         if self.request.idioms and self.profile.shapes is not None:
@@ -743,6 +770,7 @@ def extract_file(
     shaped: bool = False,
     idioms: bool = False,
     vocabulary: bool = False,
+    copy_keys: tuple[str, ...] = (),
 ) -> FileUnits:
     """Extract every comparable unit from one source file, its language read off the path.
 
@@ -756,6 +784,7 @@ def extract_file(
     :param shaped: Whether to emit every body of `SHAPED_MIN_TOKENS` tokens with its holed shape.
     :param idioms: Whether to emit call-chain and paired-call sites.
     :param vocabulary: Whether to emit constants, literal uses, value sets and regex literals.
+    :param copy_keys: Key-argument patterns whose strings are catalog keys, never vocabulary values.
     :return: The units, in source order.
     :raises ValueError: If no language profile claims the path's extension.
     :raises RuntimeError: If the language's grammar is unavailable on this platform.
@@ -776,7 +805,7 @@ def extract_file(
         windows,
         include_text,
         max_window_statements,
-        ShapeRequest(shaped=shaped, idioms=idioms, vocabulary=vocabulary),
+        ShapeRequest(shaped=shaped, idioms=idioms, vocabulary=vocabulary, copy_keys=tuple(copy_keys)),
     )
     return extractor.run(tree.root_node)
 

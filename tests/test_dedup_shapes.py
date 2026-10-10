@@ -205,11 +205,10 @@ def test_reimplements_original_by_architecture() -> None:
     #    app depends on core, and core is the more core module, so core's method is the one to call.
     assert [member.name for member in by_copy["Mail.tidied"].members] == ["Mail.tidied", "Texts.tidy"], "step 1"
 
-    # 2. `Lower.upper` (base) only matches `Labels.shout` (app), and base must never depend on app: the class
-    #    says so instead of telling base to call app.
-    blocked = by_copy["Lower.upper"].notes[0]
-    assert "but base may not depend on app (forbidden): no original to call" in blocked, "step 2: named"
-    assert "call Labels.shout" not in blocked, "step 2: never advised"
+    # 2. `Lower.upper` (base) only matches `Labels.shout` (app), and base must never depend on app: with no
+    #    original it may call, it is no re-implementation finding at all.
+    assert "Lower.upper" not in by_copy, "step 2: an unreachable original is never reported"
+    assert not any("Labels.shout" in _text(clone) for clone in report.classes), "step 2: never advised"
 
     # 3. Near miss: without a home.toml the modules are unknown, and the path order of before is kept.
     generic = _run_without_architecture("origins")

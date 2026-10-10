@@ -20,8 +20,9 @@ from functools import lru_cache
 
 import numpy as np
 
-from zemble.dedup.languages import Signature, Visibility
+from zemble.dedup.languages import LanguageProfile, Signature, Visibility, profile_for
 from zemble.dedup.model import CloneClass, CloneKind, Unit
+from zemble.dedup.settings import ShapeSettings
 from zemble.dedup.structure import edit_distance
 from zemble.graph.model import is_test_path
 from zemble.home.config import HomeConfig
@@ -158,9 +159,14 @@ class Architecture:
     declaration every body ranks alike, every reach is unknown, and the path alone orders two public bodies.
     """
 
-    def __init__(self, config: HomeConfig | None = None) -> None:
-        """Read modules, order and dependencies from a loaded config; None or a generic one declares nothing."""
+    def __init__(self, config: HomeConfig | None = None, settings: ShapeSettings | None = None) -> None:
+        """Read modules, order and dependencies from a loaded config; None or a generic one declares nothing.
+
+        The source sets come from `settings` (the built-in folds without one): a server-fold API is unreachable
+        from common code whatever the modules say.
+        """
         self.config = config if config is not None and not config.generic else None
+        self.settings = settings or ShapeSettings()
         self._modules: dict[str, str] = {}
         self._reach: dict[tuple[str, str], Reachability] = {}
 
@@ -178,7 +184,9 @@ class Architecture:
         return (self.config.rank(self.module(unit)) if self.config is not None else 0, *_core_rank(unit))
 
     def reach(self, copy: Unit, api: Unit) -> Reachability:
-        """Whether the copy's module may depend on the API's."""
+        """Whether the copy's module may depend on the API's, and its source set read the API's."""
+        if not self.settings.reaches(copy.file_path, api.file_path):
+            return Reachability.UNREACHABLE
         if self.config is None:
             return Reachability.UNKNOWN
         key = (self.module(copy), self.module(api))
@@ -201,6 +209,40 @@ class Architecture:
 def reimplementation_candidates(shaped: Sequence[Unit]) -> list[Unit]:
     """The bodies the embedding comparison reads: big enough to implement something, with their text."""
     return [unit for unit in shaped if unit.text and unit.token_count >= REIMPLEMENT_MIN_TOKENS]
+
+
+@lru_cache(maxsize=None)
+def _standard_shapes(profile: LanguageProfile) -> dict[str, str]:
+    """Holed shape hash -> the standard call one canonical body of a language spells (`StandardLibrary.source`)."""
+    from zemble.dedup.units import extract_file
+
+    if profile.shapes is None or not profile.shapes.standard.source or not profile.extensions:
+        return {}
+    standard = profile.shapes.standard
+    extracted = extract_file(standard.source.encode(), f"StandardHomes{profile.extensions[0]}", shaped=True)
+    shapes = {}
+    for unit in extracted.shaped:
+        key = unit.name.rsplit(".", 1)[-1].rsplit("_", 1)[0]
+        home = standard.homes.get(key)
+        if home is None:  # pragma: no cover - a canonical body without a declared home is a profile bug
+            raise ValueError(f"{profile.name} standard body {unit.name} names no declared home")
+        shapes[unit.shape_hash] = home
+    return shapes
+
+
+def standard_bodies(shaped: Sequence[Unit]) -> list[tuple[Unit, str]]:
+    """Every production body that is, literal values aside, one call of its language's standard library.
+
+    :param shaped: Every shaped body of the run.
+    :return: Each such body with the call that replaces it (`Objects.toString(value, fallback)`).
+    """
+    found = []
+    for unit in shaped:
+        profile = profile_for(unit.file_path)
+        home = _standard_shapes(profile).get(unit.shape_hash) if profile is not None else None
+        if home is not None and not _in_tests(unit) and not unit.forwards_to:
+            found.append((unit, home))
+    return found
 
 
 def forwarding_classes(shaped: Sequence[Unit]) -> list[CloneClass]:
@@ -301,6 +343,17 @@ def _may_copy(copy: Unit, api: Unit, architecture: Architecture) -> bool:
     if _simple(api) in copy.calls or _simple(copy) in api.calls or copy.forwards_to or api.forwards_to:
         return False
     return 1 / MAX_SIZE_RATIO <= copy.token_count / api.token_count <= MAX_SIZE_RATIO
+
+
+def _rebinding(copy: Unit, api: Unit) -> list[str] | None:
+    """The constants the API names and the copy does not (`CONFIG` where the copy binds `MANAGE`), or None.
+
+    Such a pair is one mechanism bound to two capabilities, tiers or registries: calling the API would change what
+    the copy does, so it is a parameter to extract rather than a call to make, and its class is demoted.
+    """
+    mine = {constant.rsplit(".", 1)[-1] for constant in copy.constants}
+    missing = sorted({constant.rsplit(".", 1)[-1] for constant in api.constants} - mine)
+    return missing or None
 
 
 def _verdict(
@@ -470,10 +523,15 @@ def _substitution(copy: Unit, api: Unit) -> float:
         mine.returns and theirs.returns and (theirs.returns in theirs.open_types or mine.returns in mine.open_types)
     ):
         return 0.0
-    needed = _inputs(api, theirs, receiver=not theirs.static)  # calling an instance method takes an instance
+    needed = _inputs(api, theirs, receiver=False)
+    have = set(_inputs(copy, mine, receiver=mine.reads_instance))
+    if not theirs.static:
+        # Calling an instance method takes an instance of its type, and no conversion of an untyped input makes one.
+        owner = _owner(api).rsplit(".", 1)[-1]
+        if owner and owner not in have:
+            return 0.0
     if not needed:
         return 1.0
-    have = set(_inputs(copy, mine, receiver=mine.reads_instance))
     untyped = bool(have & mine.open_types)  # an untyped input (`Object raw`) is converted, whatever the API takes
     return sum(1 for kind in needed if kind in have or kind in theirs.open_types or untyped) / len(needed)
 
@@ -566,10 +624,13 @@ def _twins_of_copies(
 class _Originals:
     """Every accepted verdict per copy; the original is chosen among them by architecture, not by first sight."""
 
-    def __init__(self, candidates: Sequence[Unit], architecture: Architecture) -> None:
-        """Start empty."""
+    def __init__(
+        self, candidates: Sequence[Unit], architecture: Architecture, roots: frozenset[tuple[str, int, str]]
+    ) -> None:
+        """Start empty; `roots` are the standard bodies, preferred over any other original a copy matches."""
         self.candidates = candidates
         self.architecture = architecture
+        self.roots = roots
         self.verdicts: dict[int, list[_Copy]] = defaultdict(list)
 
     def add(self, copy_index: int, verdict: _Copy) -> None:
@@ -577,12 +638,16 @@ class _Originals:
         self.verdicts[copy_index].append(verdict)
 
     def chosen(self) -> dict[int, _Copy]:
-        """Each copy's original: callable from its module, then most core, then best evidenced (first on a tie)."""
+        """Each copy's original: callable, a standard call, bound to the same constants, most core, best evidenced."""
         copies = self.candidates
-        return {
-            index: min(found, key=lambda v: self.architecture.preference(copies[index], copies[v.api], v.score))
-            for index, found in self.verdicts.items()
-        }
+
+        def order(index: int, verdict: _Copy) -> tuple[int, bool, bool, int, float]:
+            copy, api = copies[index], copies[verdict.api]
+            callable_order, core, score = self.architecture.preference(copy, api, verdict.score)
+            standard = _identity(api) in self.roots
+            return callable_order, not standard, _rebinding(copy, api) is not None, core, score
+
+        return {index: min(found, key=lambda v: order(index, v)) for index, found in self.verdicts.items()}
 
 
 def _intent_lane(
@@ -592,10 +657,11 @@ def _intent_lane(
     best: dict[int, _Copy],
     generic: frozenset[str],
     architecture: Architecture,
+    roots: frozenset[tuple[str, int, str]] = frozenset(),
 ) -> None:
     """Add the intent lane's copies to `best`, never replacing what a code lane found, then their twins."""
     names = _NameWords(candidates)
-    originals = _Originals(candidates, architecture)
+    originals = _Originals(candidates, architecture, roots)
     for copy_index, api_index, intent in _intent_pairs(candidates, intents):
         if copy_index in best:
             continue
@@ -657,6 +723,7 @@ def reimplementation_classes(
     vectors: np.ndarray,
     intents: Mapping[int, np.ndarray] | None = None,
     architecture: Architecture | None = None,
+    standard: Sequence[tuple[Unit, str]] = (),
 ) -> list[CloneClass]:
     """One class per public method that bodies re-implement: the copies first, the method to call last.
 
@@ -672,6 +739,8 @@ def reimplementation_classes(
     :param intents: The embeddings of their intent texts (:func:`intent_text`), by candidate index; None or
         empty runs the code lanes alone.
     :param architecture: The workspace's declared modules; None ranks bodies by path alone.
+    :param standard: Bodies that are one standard-library call (:func:`standard_bodies`), with that call: the
+        most core home there is, so they and every copy whose original is one of them point at it instead.
     :return: The classes, each copy under its original; unranked.
     """
     if len(candidates) < 2:
@@ -681,7 +750,8 @@ def reimplementation_classes(
     architecture = architecture or Architecture()
     generic = _generic_calls(candidates)
     unit_vectors = normalize_or_copy(vectors)
-    originals = _Originals(candidates, architecture)
+    replaced = frozenset(_identity(unit) for unit, _ in standard)
+    originals = _Originals(candidates, architecture, replaced)
 
     def offer(copy_index: int, api_index: int, similarity: float, tier: _Tier) -> None:
         if similarity < tier.min_similarity:
@@ -700,38 +770,94 @@ def reimplementation_classes(
         offer(copy_index, api_index, float(unit_vectors[copy_index].dot(unit_vectors[api_index])), _SHARED_CALLS)
     best = originals.chosen()
     if intents:
-        _intent_lane(candidates, unit_vectors, intents, best, generic, architecture)
-    return _classes(candidates, _chase(candidates, best, architecture), architecture)
+        _intent_lane(candidates, unit_vectors, intents, best, generic, architecture, replaced)
+    # A standard body is a root: its own copy verdicts are dropped, so a chase stops at it and hands on to the call.
+    best = {index: verdict for index, verdict in best.items() if _identity(candidates[index]) not in replaced}
+    chased = _chase(candidates, best, architecture)
+    return [*_classes(candidates, chased, architecture, standard), *_standard_classes(candidates, chased, standard)]
 
 
-def _classes(candidates: Sequence[Unit], best: Mapping[int, _Copy], architecture: Architecture) -> list[CloneClass]:
-    """One class per API, kind of evidence and callability: the copies by location, then the API.
+def _identity(unit: Unit) -> tuple[str, int, str]:
+    """Where a body is, which tells it apart from every other body of a run."""
+    return unit.file_path, unit.start_line, unit.name
+
+
+def _classes(
+    candidates: Sequence[Unit],
+    best: Mapping[int, _Copy],
+    architecture: Architecture,
+    standard: Sequence[tuple[Unit, str]],
+) -> list[CloneClass]:
+    """One class per API, kind of evidence: the copies by location, then the API.
 
     Copies only intent evidences form their own class beside the code-evidenced copies of the same API, so a
-    class the code lanes report is the same class whatever the intent lane adds. Copies whose module may not
-    depend on the API's are told so instead of being told to call it.
+    class the code lanes report is the same class whatever the intent lane adds. A copy whose module or source set
+    may not reach the API has no original to call and is not reported; neither is a copy that is itself, or whose
+    API is, a standard-library call (:func:`_standard_classes` reports those).
     """
+    replaced = {_identity(unit) for unit, _ in standard}
     classes = []
     by_api: dict[tuple[int, bool, bool], list[tuple[int, str]]] = defaultdict(list)
     for copy_index, verdict in best.items():
-        blocked = architecture.blocked(candidates[copy_index], candidates[verdict.api])
-        by_api[(verdict.api, verdict.inferred, blocked)].append((copy_index, verdict.reason))
-    for (api_index, inferred, blocked), found in by_api.items():
+        copy, api = candidates[copy_index], candidates[verdict.api]
+        if architecture.blocked(copy, api) or {_identity(copy), _identity(api)} & replaced:
+            continue
+        rebinding = _rebinding(copy, api)
+        reason = verdict.reason
+        if rebinding is not None:
+            reason = f"{reason}; {api.name} binds {', '.join(rebinding)}, which {copy.name} does not"
+        by_api[(verdict.api, verdict.inferred, rebinding is not None)].append((copy_index, reason))
+    for (api_index, inferred, rebound), found in by_api.items():
         api = candidates[api_index]
         copies = sorted((candidates[index] for index, _ in found), key=lambda unit: (unit.file_path, unit.start_line))
-        names = ", ".join(unit.name for unit in copies[:_CALLS_SHOWN]) + (" ..." if len(copies) > _CALLS_SHOWN else "")
-        verb = "re-implements" if len(copies) == 1 else f"({len(copies)} bodies) re-implement"
-        if blocked:
-            modules = ", ".join(sorted({architecture.module(unit) for unit in copies}))
-            reaches = ", ".join(sorted({architecture.reach(unit, api).value for unit in copies}))
+        if rebound:
             head = (
-                f"{names} {verb} {api.name} ({api.location}), but {modules} may not depend on "
-                f"{architecture.module(api)} ({reaches}): no original to call"
+                f"{_listed(copies)} {api.name} ({api.location}) over other constants: one mechanism bound to two "
+                "capabilities or registries; extract the constant as a parameter rather than call it"
             )
         else:
-            head = f"{names} {verb} {api.name}; call {api.name} ({api.location})"
+            head = f"{_listed(copies)} {api.name}; call {api.name} ({api.location})"
         notes = [head, *(reason for _, reason in sorted(found)[:_CALLS_SHOWN])]
         tokens = min(unit.token_count for unit in (*copies, api))
         members = (*copies, api)
-        classes.append(CloneClass(CloneKind.REIMPLEMENTS, members, tokens, notes=tuple(notes), inferred=inferred))
+        classes.append(
+            CloneClass(CloneKind.REIMPLEMENTS, members, tokens, notes=tuple(notes), inferred=inferred, demoted=rebound)
+        )
+    return classes
+
+
+def _listed(copies: Sequence[Unit]) -> str:
+    """The copies a class names, then the verb: `A, B (2 bodies) re-implement`."""
+    names = ", ".join(unit.name for unit in copies[:_CALLS_SHOWN]) + (" ..." if len(copies) > _CALLS_SHOWN else "")
+    return f"{names} {'re-implements' if len(copies) == 1 else f'({len(copies)} bodies) re-implement'}"
+
+
+def _standard_classes(
+    candidates: Sequence[Unit], best: Mapping[int, _Copy], standard: Sequence[tuple[Unit, str]]
+) -> list[CloneClass]:
+    """One class per standard-library call and kind of evidence: the bodies that are it, and the copies of those.
+
+    A body equal to the call is code evidence; a copy reaches the call through the API it copies, with that
+    copy's own evidence (`B.helper is itself Objects.toString(value, fallback)`).
+    """
+    homes = {_identity(unit): home for unit, home in standard}
+    grouped: dict[tuple[str, bool], dict[tuple[str, int, str], tuple[Unit, str]]] = defaultdict(dict)
+    for unit, home in standard:
+        grouped[(home, False)][_identity(unit)] = (unit, f"{unit.name} is {home}, its literal values aside")
+    for copy_index, verdict in best.items():
+        copy, api = candidates[copy_index], candidates[verdict.api]
+        home = homes.get(_identity(api))
+        if home is not None and _identity(copy) not in homes:
+            reason = f"{verdict.reason}; {api.name} is itself {home}"
+            grouped[(home, verdict.inferred)][_identity(copy)] = (copy, reason)
+    classes = []
+    for (home, inferred), found in grouped.items():
+        bodies = sorted(found.values(), key=lambda entry: (entry[0].file_path, entry[0].start_line))
+        copies = [unit for unit, _ in bodies]
+        notes = (
+            f"{_listed(copies)} {home}; call it (the language's standard library)",
+            *(reason for _, reason in bodies[:_CALLS_SHOWN]),
+        )
+        tokens = min(unit.token_count for unit in copies)
+        classes.append(CloneClass(CloneKind.REIMPLEMENTS, tuple(copies), tokens, notes=notes, inferred=inferred))
     return classes

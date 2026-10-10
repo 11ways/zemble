@@ -14,10 +14,12 @@ from tree_sitter import Node
 
 from zemble.dedup.languages.base import (
     Container,
+    KeyArguments,
     LanguageProfile,
     ShapeHooks,
     Signature,
     SiteKind,
+    StandardLibrary,
     Visibility,
     VocabularyFact,
     node_text,
@@ -194,6 +196,8 @@ _ANNOTATIONS = frozenset({"annotation", "marker_annotation"})
 _REGEX_CALLS = frozenset({"compile", "matches", "replaceAll", "replaceFirst", "split"})
 #: Smallest value set a switch, an enum or a constant group declares to count as a vocabulary.
 _MIN_SET = 3
+#: What separates the tokens of one value (`app:instances:`, `instance-devices`).
+_VALUE_TOKENS = re.compile(r"[^A-Za-z0-9]+")
 
 
 def _is_constant_name(text: str) -> bool:
@@ -240,16 +244,55 @@ def _forward_target(member: Node, body: Node, source: bytes) -> str | None:
     return f"{owner}.{node_text(source, name)}"
 
 
+def _delegates(member: Node, body: Node, source: bytes) -> bool:
+    """Whether a constructor's whole body is one `this(...)` or `super(...)`: an overload binding its defaults."""
+    statements = [child for child in body.named_children if "comment" not in child.type]
+    return len(statements) == 1 and statements[0].type == "explicit_constructor_invocation"
+
+
+#: Node kinds a static receiver is spelled with: `String`, `Boolean.TRUE`, `java.util.Objects`.
+_STATIC_RECEIVERS = frozenset({"identifier", "field_access"})
+
+
+def _standard_receiver(call: Node, source: bytes) -> bool:
+    """Whether a `method_invocation` is made on a JDK type or one of its constants, its package optional."""
+    receiver = call.child_by_field_name("object")
+    if receiver is None or receiver.type not in _STATIC_RECEIVERS:
+        return False
+    segments = node_text(source, receiver).replace(" ", "").split(".")
+    if not all(segment.isidentifier() for segment in segments):
+        return False
+    head = next((segment for segment in segments if not segment[:1].islower()), None)
+    return head is not None and head in _STANDARD.types
+
+
+#: Annotations that register a member nowhere: the JDK's own, nullness and contract markers. Any other one on a
+#: member (`@HawkeyeFunction(...)`, `@Subscribe`) hands it to a framework that calls it: a role, not a utility.
+_INERT_ANNOTATIONS = frozenset(
+    {
+        "Deprecated", "SuppressWarnings", "SafeVarargs", "FunctionalInterface", "NonNull", "Nullable", "NotNull",
+        "Nonnull", "CheckReturnValue", "CanIgnoreReturnValue", "Contract", "Pure", "VisibleForTesting", "MustBeClosed",
+        "NonNullApi", "ParametersAreNonnullByDefault", "Unmodifiable", "UnmodifiableView",
+    }
+)  # fmt: skip
+
+
 def _implements_contract(node: Node, source: bytes) -> bool:
-    """Whether a member carries `@Override`."""
+    """Whether a member carries `@Override`, or any annotation a framework registers it by (not `_INERT_ANNOTATIONS`).
+
+    AIDEV-NOTE: fails closed: an annotation zemble does not know is taken to register the member.
+    """
     modifiers = next((child for child in node.children if child.type == "modifiers"), None)
     if modifiers is None:
         return False
-    return any(
-        child.type == "marker_annotation"
-        and node_text(source, child).replace(" ", "") in {"@Override", "@java.lang.Override"}
-        for child in modifiers.named_children
-    )
+    for child in modifiers.named_children:
+        if child.type not in _ANNOTATIONS:
+            continue
+        name = child.child_by_field_name("name")
+        simple = node_text(source, name).rsplit(".", 1)[-1] if name is not None else ""
+        if simple not in _INERT_ANNOTATIONS:
+            return True
+    return False
 
 
 #: A documentation comment's markup the summary drops: delimiters, line stars, block tags that name parameters.
@@ -403,10 +446,24 @@ def _string_value(node: Node, source: bytes) -> str | None:
 class _VocabularyWalk:
     """Collects one file's constants, literal uses, value sets and regex literals."""
 
-    def __init__(self, source: bytes) -> None:
+    def __init__(self, source: bytes, keys: KeyArguments) -> None:
         """Start an empty walk over one file."""
         self.source = source
+        self.keys = keys
         self.facts: list[VocabularyFact] = []
+
+    def _is_key(self, node: Node) -> bool:
+        """Whether a string literal is a key argument of a copy or translation call (`Microcopy.of("x")`)."""
+        arguments = node.parent
+        call = arguments.parent if arguments is not None else None
+        if call is None or arguments.type != "argument_list" or call.type != "method_invocation":
+            return False
+        receiver, name, values = _call_parts(call)
+        if name is None:
+            return False
+        index = next((position for position, value in enumerate(values) if value.id == node.id), -1)
+        written = node_text(self.source, receiver).replace(" ", "") if receiver is not None else ""
+        return index >= 0 and self.keys.matches(written, node_text(self.source, name), index)
 
     def visit(self, node: Node, owner: str, folded: Visibility, member: str | None) -> None:
         """Visit one node inside `owner`, whose visibility is already folded through its enclosing types."""
@@ -464,28 +521,55 @@ class _VocabularyWalk:
             constants.extend(fact for fact in self.facts[before:] if fact.kind is SiteKind.CONSTANT)
 
     def _enum(self, node: Node, body: Node, owner: str, level: Visibility) -> None:
-        """An enum's members, lower-cased, plus every string its constants pass: one value set."""
+        """An enum's members, lower-cased, plus every string its constants pass: one value set.
+
+        A member whose own string spells its name as one token of a longer value (`INSTANCES("app:instances:")`)
+        is named after that value, not a value itself. The constants the members pass are kept, so a set built
+        from another declaration's constants reads as derived from it.
+        """
         values: list[str] = []
+        declares: list[str] = []
+        constants: list[str] = []
         for constant in body.named_children:
             if constant.type != "enum_constant":
                 continue
             name = constant.child_by_field_name("name")
-            if name is not None:
-                values.append(node_text(self.source, name).lower())
             arguments = constant.child_by_field_name("arguments")
+            passed = self._strings(arguments) if arguments is not None else []
+            if name is not None:
+                spelled = node_text(self.source, name)
+                lowered = spelled.lower()
+                if not any(lowered != value and lowered in _VALUE_TOKENS.split(value) for value in passed):
+                    values.append(lowered)
+                    declares.append(f"{owner}.{spelled}")
+            values.extend(passed)
+            declares.extend(f"{owner}.{node_text(self.source, name or constant)}" for _ in passed)
             if arguments is not None:
-                values.extend(self._strings(arguments))
+                constants.extend(self._constants(arguments))
             # A constant's arguments are uses of their values too ("instance-devices" passed to a builder).
             for child in constant.children:
                 self.visit(child, owner, level, f"{owner}.{node_text(self.source, name or constant)}")
         distinct = tuple(dict.fromkeys(values))
         if len(distinct) >= _MIN_SET:
-            self.facts.append(_span_fact(SiteKind.SET, owner, distinct, node, level, level))
+            first = dict(zip(reversed(values), reversed(declares)))
+            fact = _span_fact(SiteKind.SET, owner, distinct, node, level, level)
+            behind = tuple(first[value] for value in distinct)
+            self.facts.append(replace(fact, declares=behind, constants=tuple(dict.fromkeys(constants))))
+
+    def _constants(self, arguments: Node) -> list[str]:
+        """The constant references an enum member passes directly (`InstanceDeviceModel.TYPE_DISK`, `TYPE_DISK`)."""
+        found = []
+        for argument in arguments.named_children:
+            if argument.type in _STATIC_RECEIVERS:
+                written = node_text(self.source, argument).replace(" ", "")
+                if _is_constant_name(written.rsplit(".", 1)[-1]):
+                    found.append(written)
+        return found
 
     def _strings(self, node: Node) -> list[str]:
         """Every plain string literal under a node."""
         if node.type == "string_literal":
-            value = _string_value(node, self.source)
+            value = _string_value(node, self.source) if not self._is_key(node) else None
             return [value] if value is not None else []
         return [value for child in node.named_children for value in self._strings(child)]
 
@@ -517,6 +601,7 @@ class _VocabularyWalk:
             if len(values) < _MIN_SET:
                 continue
             label = f"{owner}.{prefix}_*" if prefix else f"{owner}.*"
+            first = dict(zip(reversed([fact.values[0] for fact in members]), reversed([f.name for f in members])))
             self.facts.append(
                 VocabularyFact(
                     SiteKind.SET,
@@ -526,13 +611,14 @@ class _VocabularyWalk:
                     max(fact.end_line for fact in members),
                     level,
                     level,
+                    declares=tuple(first[value] for value in values),
                 )
             )
 
     def _literal(self, node: Node, member: str) -> None:
         """A string literal used in code."""
         value = _string_value(node, self.source)
-        if value is not None:
+        if value is not None and not self._is_key(node):
             self.facts.append(_span_fact(SiteKind.LITERAL, member, (value,), node))
 
     def _switch(self, node: Node, member: str) -> None:
@@ -577,11 +663,170 @@ def _span_fact(
     )
 
 
-def _vocabulary(root: Node, source: bytes) -> list[VocabularyFact]:
-    """Every constant, literal use, value set and regex literal of one Java file."""
-    walk = _VocabularyWalk(source)
+def _vocabulary(root: Node, source: bytes, keys: KeyArguments) -> list[VocabularyFact]:
+    """Every constant, literal use, value set and regex literal of one Java file; key arguments are no values."""
+    walk = _VocabularyWalk(source, keys)
     walk.visit(root, "", Visibility.PUBLIC, None)
     return walk.facts
+
+
+#: The JDK bodies a helper re-implements: each member's name is its home key plus `_<n>`, one per spelling. The
+#: holed stream erases literal values, so `""` stands for any string fallback and `0`/`100` for any bound.
+_STANDARD_SOURCE = """
+class StandardHomes {
+    Object objectsToString_1(Object v) { return v == null ? "" : String.valueOf(v); }
+    Object objectsToString_2(Object v) { return v != null ? String.valueOf(v) : ""; }
+    Object objectsToString_3(Object v) { return v == null ? "" : v.toString(); }
+    Object objectsToString_4(Object v) { return v != null ? v.toString() : ""; }
+    Object objectsToString_5(Object v) { return v == null ? null : String.valueOf(v); }
+    Object objectsToString_6(Object v) { return v != null ? String.valueOf(v) : null; }
+    Object objectsToString_7(Object v) { return v == null ? null : v.toString(); }
+    Object objectsToString_8(Object v) { return v != null ? v.toString() : null; }
+    Object objectsToString_9(Object v, Object d) { return v == null ? d : String.valueOf(v); }
+    Object objectsToString_10(Object v, Object d) { return v != null ? String.valueOf(v) : d; }
+    Object objectsToString_11(Object v, Object d) { return v == null ? d : v.toString(); }
+    Object objectsToString_12(Object v, Object d) { return v != null ? v.toString() : d; }
+    Object objectsToString_13(Object v) { if (v == null) { return ""; } return String.valueOf(v); }
+    Object objectsToString_14(Object v) { if (v == null) { return ""; } return v.toString(); }
+    Object objectsToString_15(Object v) { if (v == null) return ""; return String.valueOf(v); }
+    Object objectsToString_16(Object v) { if (v == null) return ""; return v.toString(); }
+    Object requireNonNullElse_1(Object v, Object d) { return v != null ? v : d; }
+    Object requireNonNullElse_2(Object v, Object d) { return v == null ? d : v; }
+    Object requireNonNullElse_3(Object v) { return v != null ? v : ""; }
+    Object requireNonNullElse_4(Object v) { return v == null ? "" : v; }
+    Object requireNonNullElse_5(Object v, Object d) { if (v == null) { return d; } return v; }
+    Object requireNonNullElse_6(Object v, Object d) { if (v != null) { return v; } return d; }
+    Object requireNonNullElse_7(Object v) { return v == null ? List.of() : v; }
+    Object requireNonNullElse_8(Object v) { return v == null ? Map.of() : v; }
+    Object requireNonNullElse_9(Object v) { return v != null ? v : List.of(); }
+    Object requireNonNullElse_10(Object v) { return v != null ? v : Map.of(); }
+    Object clamp_1(Object v, Object lo, Object hi) { return Math.max(lo, Math.min(hi, v)); }
+    Object clamp_2(Object v, Object lo, Object hi) { return Math.min(hi, Math.max(lo, v)); }
+    Object clamp_3(Object v, Object lo, Object hi) { return Math.max(lo, Math.min(v, hi)); }
+    Object clamp_4(Object v, Object lo, Object hi) { return Math.min(Math.max(v, lo), hi); }
+    Object clamp_5(Object v, Object lo, Object hi) { return Math.min(Math.max(lo, v), hi); }
+    Object clamp_6(Object v, Object lo, Object hi) { return Math.max(Math.min(v, hi), lo); }
+    Object clamp_7(Object v) { return Math.max(0, Math.min(100, v)); }
+    Object clamp_8(Object v) { return Math.min(100, Math.max(0, v)); }
+    Object clamp_9(Object v) { return Math.max(0, Math.min(v, 100)); }
+    Object clamp_10(Object v) { return Math.min(Math.max(v, 0), 100); }
+    Object clamp_11(Object v) { return Math.min(Math.max(0, v), 100); }
+    Object clamp_12(Object v) { return Math.max(Math.min(v, 100), 0); }
+    Object objectsEquals_1(Object a, Object b) { return a == null ? b == null : a.equals(b); }
+    Object objectsEquals_2(Object a, Object b) { return a == b || (a != null && a.equals(b)); }
+    Object objectsEquals_3(Object a, Object b) { return a == b || a != null && a.equals(b); }
+    Object booleanTrue_1(Object v) { return v != null && v; }
+    Object booleanTrue_2(Object v) { return v == null ? false : v; }
+    Object booleanTrue_3(Object v) { return v != null ? v : false; }
+}
+"""
+
+_STANDARD = StandardLibrary(
+    types=frozenset(
+        {
+            "Arrays",
+            "BigDecimal",
+            "BigInteger",
+            "Boolean",
+            "Byte",
+            "Character",
+            "CharSequence",
+            "Collections",
+            "Collectors",
+            "Comparator",
+            "Double",
+            "Duration",
+            "Files",
+            "Float",
+            "Instant",
+            "Integer",
+            "List",
+            "LocalDate",
+            "LocalDateTime",
+            "Locale",
+            "Long",
+            "Map",
+            "Math",
+            "Objects",
+            "Optional",
+            "Path",
+            "Paths",
+            "Pattern",
+            "Set",
+            "Short",
+            "StandardCharsets",
+            "Stream",
+            "StrictMath",
+            "String",
+            "System",
+            "UUID",
+        }
+    ),  # fmt: skip
+    members=frozenset(
+        {
+            "add",
+            "charAt",
+            "chars",
+            "compareTo",
+            "concat",
+            "contains",
+            "containsKey",
+            "endsWith",
+            "equals",
+            "equalsIgnoreCase",
+            "filter",
+            "format",
+            "get",
+            "getOrDefault",
+            "hashCode",
+            "indexOf",
+            "isBlank",
+            "isEmpty",
+            "isPresent",
+            "join",
+            "lastIndexOf",
+            "length",
+            "map",
+            "matches",
+            "orElse",
+            "put",
+            "remove",
+            "repeat",
+            "replace",
+            "replaceAll",
+            "size",
+            "split",
+            "startsWith",
+            "strip",
+            "stream",
+            "substring",
+            "toList",
+            "toLowerCase",
+            "toString",
+            "toUpperCase",
+            "trim",
+            "valueOf",
+            "intValue",
+            "longValue",
+            "doubleValue",
+            "max",
+            "min",
+            "abs",
+            "parseInt",
+            "parseLong",
+            "of",
+            "ofNullable",
+        }
+    ),  # fmt: skip
+    source=_STANDARD_SOURCE,
+    homes={
+        "objectsToString": "Objects.toString(value, fallback)",
+        "requireNonNullElse": "Objects.requireNonNullElse(value, fallback)",
+        "clamp": "Math.clamp(value, min, max)",
+        "objectsEquals": "Objects.equals(a, b)",
+        "booleanTrue": "Boolean.TRUE.equals(value)",
+    },
+)
 
 
 _SHAPES = ShapeHooks(
@@ -592,13 +837,19 @@ _SHAPES = ShapeHooks(
     vocabulary=_vocabulary,
     implements_contract=_implements_contract,
     signature=_signature,
+    delegates=_delegates,
+    standard_receiver=_standard_receiver,
+    standard=_STANDARD,
     node_kinds=frozenset(
         {
             "annotated_type",
             "annotation",
+            "argument_list",
             "array_type",
             "block_comment",
             "constant_declaration",
+            "explicit_constructor_invocation",
+            "field_access",
             "enum_body_declarations",
             "enum_constant",
             "expression_statement",

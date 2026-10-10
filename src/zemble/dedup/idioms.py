@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
-from zemble.dedup.languages import SiteKind
+from zemble.dedup.languages import SiteKind, profile_for
 from zemble.dedup.model import SPREAD_PER_FILE, CloneClass, CloneKind, Unit
 
 #: A holed class needs tokens x copies of at least this: two copies of 20 tokens, three of 14, five of 8.
@@ -36,8 +36,9 @@ _COMPUTING = frozenset({"?", "==", "!=", "<=", ">=", "&&", "||", "!", "+", "-", 
 _NOT_A_DECISION = frozenset({"return", "throw"})
 #: One token of a rendered shape: a hole, a placeholder, a word, a two-character operator or one character.
 _SHAPE_TOKEN = re.compile(r"<[a-z]+>|\$\d+|\w+|==|!=|<=|>=|&&|\|\||[^\s\w]")
-#: How much of a shape a class note quotes.
+#: How much of a shape a class note quotes, and how much a class root line names it by.
 _SHAPE_CHARS = 160
+_ROOT_CHARS = 60
 #: How many names a note lists before summing up the rest.
 _NAMES_SHOWN = 4
 _IDIOM_KINDS = frozenset({SiteKind.CHAIN.value, SiteKind.WRAPPER.value, SiteKind.PAIR.value})
@@ -48,9 +49,9 @@ def _ordered(members: Iterable[Unit]) -> tuple[Unit, ...]:
     return tuple(sorted(members, key=lambda unit: (unit.file_path, unit.start_line, unit.shape)))
 
 
-def quoted(shape: str) -> str:
+def quoted(shape: str, limit: int = _SHAPE_CHARS) -> str:
     """A shape cut down to what a note line can carry."""
-    return shape if len(shape) <= _SHAPE_CHARS else shape[: _SHAPE_CHARS - 3] + "..."
+    return shape if len(shape) <= limit else shape[: limit - 3] + "..."
 
 
 def _names(units: Sequence[Unit]) -> str:
@@ -72,6 +73,38 @@ def _declares_data(unit: Unit) -> bool:
         return False
     tokens = set(_SHAPE_TOKEN.findall(unit.shape))
     return not tokens & _COMPUTING and not set(unit.skeleton) - _NOT_A_DECISION
+
+
+def _declares_value(unit: Unit) -> bool:
+    """Whether a body takes no input and decides nothing: whatever it calls, it declares the value it returns.
+
+    `return schedulesWhen(List.of(fallback("0 3 * * *")), Role.DATABASES);` and `return find().orderBy(NAME).all();`
+    are each body's own declaration; only a profile that reads signatures can tell, so a body without one never is.
+    """
+    return unit.signature is not None and not unit.signature.parameters and not set(unit.skeleton) - _NOT_A_DECISION
+
+
+def _language_only(unit: Unit) -> bool:
+    """Whether every call a body makes is its language's standard library (`substring`, `lastIndexOf`), or none."""
+    profile = profile_for(unit.file_path)
+    if profile is None or profile.shapes is None:
+        return False
+    return set(unit.calls) <= profile.shapes.standard.members
+
+
+def _values_only(members: Sequence[Unit]) -> bool:
+    """Whether a small holed group is no copy: its bodies differ in their values and share nothing beyond them.
+
+    What the copies share is then a constructor overload binding its defaults (`this(new Service())`), a body
+    declaring its own value through one API, or the language applied to different data (`"prefix" + value`,
+    `path.substring(path.lastIndexOf('/') + 1)` beside `.lastIndexOf('.')`). Copies holding the same values are
+    one helper written twice, whatever they call.
+    """
+    if all(unit.delegates for unit in members):
+        return True
+    if len({(unit.literals, unit.constants) for unit in members}) < 2:
+        return False
+    return all(_declares_value(unit) for unit in members) or all(_language_only(unit) for unit in members)
 
 
 def holed_classes(shaped: Sequence[Unit], min_tokens: int) -> list[CloneClass]:
@@ -98,6 +131,8 @@ def holed_classes(shaped: Sequence[Unit], min_tokens: int) -> list[CloneClass]:
         small = tokens < min_tokens
         if small and (all(_declares_data(unit) for unit in members) or len({unit.file_path for unit in members}) < 2):
             continue  # a small twin inside one file is a family of conveniences (`yes()`/`no()`), not a copy
+        if small and _values_only(members):
+            continue
         if tokens * len(members) < HOLED_MIN_MASS:
             continue
         variants = len({unit.literals for unit in members})
@@ -234,7 +269,9 @@ def idiom_classes(sites: Sequence[Unit]) -> list[CloneClass]:
             continue
         kept.append(idiom)
         tokens = min(unit.token_count for unit in idiom.members)
-        classes.append(CloneClass(CloneKind.IDIOM, _ordered(idiom.members), tokens, notes=_notes(idiom)))
+        kind = Counter(unit.kind for unit in idiom.members).most_common(1)[0][0]
+        root = f"{kind} {quoted(idiom.shape, _ROOT_CHARS)}"
+        classes.append(CloneClass(CloneKind.IDIOM, _ordered(idiom.members), tokens, notes=_notes(idiom), root=root))
     return classes
 
 

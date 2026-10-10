@@ -6,9 +6,10 @@ reporting decision downstream is language-neutral and must stay that way.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from fnmatch import fnmatchcase
 
 from tree_sitter import Node, Parser
 
@@ -83,6 +84,57 @@ class VocabularyFact:
     container_visibility: Visibility = Visibility.UNKNOWN
     #: What a switch dispatches on (`column.name()`); "" for every other fact.
     detail: str = ""
+    #: For a value set: the qualified declaration behind each value (`Owner.TYPE_DISK`, `Kind.DISK`).
+    declares: tuple[str, ...] = ()
+    #: For an enum's value set: the constants its members pass, as written (`InstanceDeviceModel.TYPE_DISK`).
+    constants: tuple[str, ...] = ()
+
+
+class KeyArguments:
+    """Where a call takes a copy or translation key rather than a value: `*Microcopy*.of:0`.
+
+    Each pattern is `<receiver glob>.<method>:<argument index>`; the glob matches the receiver as written (an
+    unqualified call has the receiver ""), so `*Microcopy*.withArg:0` also matches a chain that starts at one.
+    A key is a name in a message catalog, never a value of the code's own vocabulary.
+    """
+
+    def __init__(self, patterns: Sequence[str] = ()) -> None:
+        """Parse the patterns once.
+
+        :raises ValueError: If a pattern is not `<receiver>.<method>:<index>`.
+        """
+        self.patterns = tuple(patterns)
+        self._rules: dict[tuple[str, int], list[str]] = {}
+        for pattern in self.patterns:
+            head, separator, index = pattern.rpartition(":")
+            receiver, dot, method = head.rpartition(".")
+            if not separator or not index.isdigit() or not method or (dot and not receiver):
+                raise ValueError(f"key argument {pattern!r} is not <receiver glob>.<method>:<index>")
+            self._rules.setdefault((method, int(index)), []).append(receiver)
+
+    def matches(self, receiver: str, method: str, index: int) -> bool:
+        """Whether argument `index` of `receiver.method(...)` is a key."""
+        return any(fnmatchcase(receiver, glob) for glob in self._rules.get((method, index), ()))
+
+
+@dataclass(frozen=True, eq=False)
+class StandardLibrary:
+    """What a language ships with: the calls that are the language itself, and the bodies one of them replaces.
+
+    The holed and idiom channels read `types` and `members` to tell a language idiom (`String.valueOf(x)`,
+    `Boolean.TRUE.equals(x)`) from a mechanism; the re-implementation channel reads `source` and `homes` to tell a
+    helper that it is a standard call (`Objects.toString(value, "")`) instead of pointing it at a domain helper.
+    """
+
+    #: Types whose static members (and constants, `Boolean.TRUE`) are the language itself.
+    types: frozenset[str]
+    #: Method names of the core value types (`substring`, `equals`, `get`): instance calls of the language.
+    members: frozenset[str]
+    #: One compilation unit in this language holding one member per canonical body; a member is named
+    #: `<home key>_<n>`, so several spellings of one home share a key.
+    source: str = ""
+    #: Home key -> the call that replaces every body spelled under it (`Objects.toString(value, fallback)`).
+    homes: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,12 +172,18 @@ class ShapeHooks:
     is_constant_name: Callable[[str], bool]
     #: `Receiver.member` when a member's whole body hands its parameters, in order, to that one callable.
     forward_target: Callable[[Node, Node, bytes], str | None]
-    #: Every vocabulary fact of one parsed file.
-    vocabulary: Callable[[Node, bytes], list[VocabularyFact]]
+    #: Every vocabulary fact of one parsed file; a string at a key argument is never a value.
+    vocabulary: Callable[[Node, bytes, KeyArguments], list[VocabularyFact]]
     #: Whether a member implements a declared contract (Java `@Override`): a role, never a utility to call.
     implements_contract: Callable[[Node, bytes], bool]
     #: A member's declared types, staticness and documentation, or None when the profile cannot read them.
     signature: Callable[[Node, bytes], Signature | None]
+    #: Whether a member's whole body hands over to another constructor of its type (`this(...)`, `super(...)`).
+    delegates: Callable[[Node, Node, bytes], bool]
+    #: Whether a call node is made on a standard-library type or constant (`String.valueOf`, `Boolean.TRUE.equals`).
+    standard_receiver: Callable[[Node, bytes], bool]
+    #: What the language ships with.
+    standard: StandardLibrary
     #: Node kinds only these hooks name, for the drift test.
     node_kinds: frozenset[str] = field(default_factory=frozenset)
 

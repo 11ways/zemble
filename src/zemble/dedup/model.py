@@ -157,6 +157,12 @@ class Unit:
     implements_contract: bool = False
     #: Declared types, staticness and documentation, on a shaped body whose profile reads them.
     signature: Signature | None = None
+    #: The constant references a shaped body's holes stand for, or an enum's members pass, as written.
+    constants: tuple[str, ...] = ()
+    #: For a value-set site: the qualified declaration behind each value.
+    declares: tuple[str, ...] = ()
+    #: Whether a shaped body only hands over to another constructor of its type (`this(...)`, `super(...)`).
+    delegates: bool = False
 
     @property
     def location(self) -> str:
@@ -202,11 +208,23 @@ class CloneClass:
     #: Whether the class rests on stated intent alone (names, signatures, documentation) rather than on code:
     #: it ranks after every class of its kind that code evidences.
     inferred: bool = False
+    #: What the class is rooted at when no member names it well (an idiom's shape); None roots it at its first member.
+    root: str | None = None
+    #: Whether the class is a lesser finding of its kind (a copy bound to other constants): it ranks after the rest.
+    demoted: bool = False
 
     @property
-    def standing(self) -> tuple[bool, int]:
-        """The sort key within one kind: code-evidenced classes first, then by score."""
-        return self.inferred, -self.score
+    def root_label(self) -> str:
+        """What a one-line summary names the class by."""
+        if self.root is not None:
+            return self.root
+        head = self.members[0]
+        return f"{head.kind} {head.name}"
+
+    @property
+    def standing(self) -> tuple[int, int]:
+        """The sort key within one kind: code-evidenced classes first, then inferred, then demoted; then by score."""
+        return (2 if self.demoted else 1 if self.inferred else 0), -self.score
 
     @property
     def files(self) -> int:
@@ -295,6 +313,8 @@ class CloneClass:
             "lane": self.lane.value,
             "score": self.score,
             **({"inferred": True} if self.inferred else {}),
+            **({"root": self.root} if self.root is not None else {}),
+            **({"demoted": True} if self.demoted else {}),
             "tokens": self.tokens,
             "copies": len(self.members),
             "files": self.files,

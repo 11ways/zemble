@@ -112,6 +112,8 @@ class HomeConfig:
     tables: tuple[TableSpec, ...] = ()
     skills: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
     rules: tuple[WorkspaceRule, ...] = ()
+    #: The `[dupes]` section as written, each key a list of strings; `zemble.dedup.settings` owns its keys.
+    dupes: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
     #: The file this came from; None means nothing was declared.
     source: Path | None = None
 
@@ -125,6 +127,8 @@ class HomeConfig:
             object.__setattr__(self, "depends_on", {})
         if self.source_set_globs is None:
             object.__setattr__(self, "source_set_globs", {})
+        if self.dupes is None:
+            object.__setattr__(self, "dupes", {})
 
     @property
     def generic(self) -> bool:
@@ -237,6 +241,7 @@ class HomeConfig:
             "tables": [table.to_dict() for table in self.tables],
             "skills": {name: list(values) for name, values in self.skills.items()},
             "rules": [rule.to_dict() for rule in self.rules],
+            "dupes": {name: list(values) for name, values in self.dupes.items()},
         }
 
     @classmethod
@@ -291,8 +296,11 @@ class HomeConfig:
             name: tuple(_strings(value, f"skills.{name}", path)) for name, value in _table(raw, "skills", path).items()
         }
         rules = tuple(_rule(entry, index, path) for index, entry in enumerate(_array(raw, "rules", path)))
+        dupes = {
+            name: tuple(_strings(value, f"dupes.{name}", path)) for name, value in _table(raw, "dupes", path).items()
+        }
         unknown = set(raw) - {
-            "order", "modules", "forbidden", "tables", "skills", "rules", "dependencies", "source_sets"
+            "order", "modules", "forbidden", "tables", "skills", "rules", "dependencies", "source_sets", "dupes"
         }  # fmt: skip
         if unknown:
             raise ConfigError(f"{path}: unknown section(s): {', '.join(sorted(unknown))}")
@@ -309,6 +317,7 @@ class HomeConfig:
             tables=tables,
             skills=skills,
             rules=rules,
+            dupes=dupes,
             source=path,
         )
         _check_names(config, path)

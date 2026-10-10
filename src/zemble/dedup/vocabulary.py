@@ -11,10 +11,11 @@ from __future__ import annotations
 import os
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 from zemble.dedup.languages import SiteKind, Visibility
 from zemble.dedup.model import CloneClass, CloneKind, Unit
+from zemble.dedup.settings import ShapeSettings
 
 #: A value is shared vocabulary once this many constants in at least this many files declare it.
 VALUE_MIN_CONSTANTS = 3
@@ -77,9 +78,24 @@ def _shown(values: Sequence[str]) -> str:
     return head + (f" (+{len(values) - _VALUES_SHOWN} more)" if len(values) > _VALUES_SHOWN else "")
 
 
-def _reachable(constant: Unit, use: Unit) -> bool:
-    """Whether a literal use could have named the constant: it is not private, or it is in the same file."""
-    return constant.visibility is not Visibility.PRIVATE or constant.file_path == use.file_path
+def _reachable(constant: Unit, use: Unit, settings: ShapeSettings) -> bool:
+    """Whether a literal use could have named the constant: visible to it, and in a source set it reads."""
+    visible = constant.visibility is not Visibility.PRIVATE or constant.file_path == use.file_path
+    return visible and settings.reaches(use.file_path, constant.file_path)
+
+
+def _home(
+    candidates: Sequence[Unit],
+    members: Sequence[Unit],
+    settings: ShapeSettings,
+    rank: Callable[[Unit], tuple[object, ...]] | None = None,
+) -> Unit:
+    """The candidate the most members can read (source sets), then the best by `rank` (`_home_rank` by default)."""
+    order = rank or _home_rank
+    return min(
+        candidates,
+        key=lambda home: (sum(not settings.reaches(unit.file_path, home.file_path) for unit in members), order(home)),
+    )
 
 
 def _meaning(unit: Unit) -> str:
@@ -89,7 +105,7 @@ def _meaning(unit: Unit) -> str:
     return "" if simple == spelled or simple.endswith(f"_{spelled}") else simple
 
 
-def _value_class(value: str, decls: list[Unit], uses: list[Unit]) -> CloneClass | None:
+def _value_class(value: str, decls: list[Unit], uses: list[Unit], settings: ShapeSettings) -> CloneClass | None:
     """The class of one declared value, or None when it is neither shared vocabulary nor written out by hand.
 
     A value is shared when enough constants declare it under one meaning: names spelling the value
@@ -102,12 +118,12 @@ def _value_class(value: str, decls: list[Unit], uses: list[Unit]) -> CloneClass 
     agreeing = [unit for unit in decls if _meaning(unit) == meaning]
     shared = count >= VALUE_MIN_CONSTANTS and len({unit.file_path for unit in agreeing}) >= VALUE_MIN_FILES
     compound = _COMPOUND.fullmatch(value) is not None
-    stray = [use for use in uses if any(_reachable(decl, use) for decl in decls)]
+    stray = [use for use in uses if any(_reachable(decl, use, settings) for decl in decls)]
     listed = stray if compound else []
     if not shared and not listed:
         return None
     declarations = agreeing if shared else decls
-    home = min(declarations, key=_home_rank)
+    home = _home(declarations, [*declarations, *listed], settings)
     files = len({unit.file_path for unit in declarations})
     notes = [f'value "{value}": {len(declarations)} constant(s) in {files} file(s), {len(stray)} literal use(s)']
     if shared:
@@ -120,13 +136,17 @@ def _value_class(value: str, decls: list[Unit], uses: list[Unit]) -> CloneClass 
     return CloneClass(CloneKind.VOCABULARY, _ordered([*declarations, *listed]), 1, notes=tuple(notes))
 
 
-def value_classes(constants: Sequence[Unit], literals: Sequence[Unit]) -> list[CloneClass]:
+def value_classes(
+    constants: Sequence[Unit], literals: Sequence[Unit], settings: ShapeSettings | None = None
+) -> list[CloneClass]:
     """One class per value declared by several constants, or written out as a literal where a constant has it.
 
     :param constants: Every constant site.
     :param literals: Every literal-use site.
+    :param settings: The source sets a literal use must be able to read a constant from; the defaults when None.
     :return: The classes, unranked.
     """
+    settings = settings or ShapeSettings()
     declared: dict[str, list[Unit]] = defaultdict(list)
     for unit in constants:
         if unit.literals[0]:
@@ -136,7 +156,7 @@ def value_classes(constants: Sequence[Unit], literals: Sequence[Unit]) -> list[C
         # Only a token (a status word, slug or key) written out is that constant; prose that matches is chance.
         if unit.literals[0] in declared and _TOKEN.fullmatch(unit.literals[0]):
             used[unit.literals[0]].append(unit)
-    found = (_value_class(value, decls, used.get(value, [])) for value, decls in declared.items())
+    found = (_value_class(value, decls, used.get(value, []), settings) for value, decls in declared.items())
     return [clone for clone in found if clone is not None]
 
 
@@ -206,12 +226,38 @@ def _near(left: set[str], right: set[str]) -> int:
     )
 
 
-def set_classes(sets: Sequence[Unit]) -> list[CloneClass]:
+def _derived(sets: Sequence[Unit]) -> set[int]:
+    """The sets built from another scanned set's constants (`DISK(InstanceDeviceModel.TYPE_DISK)`).
+
+    Such an enum re-expresses the declaration it reads, so it is that vocabulary, never a second one. A constant
+    as written resolves to a declaration it is a dotted suffix of; an unqualified one only inside its own file.
+    """
+    holders: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    for index, unit in enumerate(sets):
+        for declared in unit.declares:
+            holders[declared.rsplit(".", 1)[-1]].append((index, declared))
+    derived = set()
+    for index, unit in enumerate(sets):
+        for written in unit.constants:
+            for holder, declared in holders.get(written.rsplit(".", 1)[-1], ()):
+                if holder == index:
+                    continue
+                qualified = "." in written and (declared == written or declared.endswith(f".{written}"))
+                if qualified or ("." not in written and sets[holder].file_path == unit.file_path):
+                    derived.add(index)
+    return derived
+
+
+def set_classes(sets: Sequence[Unit], settings: ShapeSettings | None = None) -> list[CloneClass]:
     """Families of value sets (enums, prefixed constant runs, switch labels) that declare the same values.
 
-    :param sets: Every value-set and switch site.
+    :param sets: Every value-set and switch site; one derived from another (:func:`_derived`) is left out.
+    :param settings: The source sets that decide which member every other one can read; the defaults when None.
     :return: One class per family of two or more parallel sets, unranked.
     """
+    settings = settings or ShapeSettings()
+    derived = _derived(sets)
+    sets = [unit for index, unit in enumerate(sets) if index not in derived]
     values = [set(unit.literals) for unit in sets]
     classes = []
     for indices in _parallel(values).groups():
@@ -219,7 +265,9 @@ def set_classes(sets: Sequence[Unit]) -> list[CloneClass]:
         family = [values[index] for index in indices]
         union = set().union(*family)
         common = set.intersection(*family)
-        home = min(members, key=lambda unit: (*_home_rank(unit)[:2], -len(unit.literals), unit.file_path))
+        home = _home(
+            members, members, settings, lambda unit: (*_home_rank(unit)[:2], -len(unit.literals), unit.file_path)
+        )
         notes = [
             f"{len(members)} value sets declare the same vocabulary; shared by all: {_shown(sorted(common)) or 'none'}",
             f"union: {_shown(sorted(union))}",
@@ -286,17 +334,18 @@ def regex_classes(regexes: Sequence[Unit], constants: Sequence[Unit]) -> list[Cl
     return classes
 
 
-def vocabulary_classes(sites: Sequence[Unit]) -> list[list[CloneClass]]:
+def vocabulary_classes(sites: Sequence[Unit], settings: ShapeSettings | None = None) -> list[list[CloneClass]]:
     """Every vocabulary class of a run, one list per flavour so each is ranked on its own.
 
     :param sites: Every site of the run; idiom sites are ignored.
+    :param settings: The root's source sets; the defaults when None.
     :return: The value, value-set, switch-dispatch and regex classes.
     """
     constants = _of_kind(sites, SiteKind.CONSTANT)
     switches = _of_kind(sites, SiteKind.SWITCH)
     return [
-        value_classes(constants, _of_kind(sites, SiteKind.LITERAL)),
-        set_classes([*_of_kind(sites, SiteKind.SET), *switches]),
+        value_classes(constants, _of_kind(sites, SiteKind.LITERAL), settings),
+        set_classes([*_of_kind(sites, SiteKind.SET), *switches], settings),
         dispatch_classes(switches),
         regex_classes(_of_kind(sites, SiteKind.REGEX), constants),
     ]

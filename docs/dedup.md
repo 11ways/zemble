@@ -160,11 +160,11 @@ Each class is one API and the bodies that redo it, copies first and the API last
   `.zemble/home.toml` through `HomeConfig`: `order` ranks, the dependency graph and `[[forbidden]]` decide
   reach). Preference: reachable (direct or transitive), then reach unknown, then the most core module, then
   the best evidence. Of two public bodies the one in the more core module is the home and never a copy;
-  inside one module, a `common` source set and then the shallower path decide as before. When every API a
-  copy matches lives in a module its module may not depend on (forbidden or unreachable), the class says
-  so (`..., but zenit may not depend on hohenheim (unreachable): no original to call`) instead of advising
-  the call. Without a `home.toml` every body ranks alike and every reach is unknown, which reproduces the
-  path order exactly. An original that is itself a reported copy hands its copies on to its own original
+  inside one module, a `common` source set and then the shallower path decide as before. A copy whose
+  every matched API lives in a module its module may not depend on (forbidden or unreachable), or in a
+  source set its own cannot read (a `server` API for `common` code), has no original to call and is not
+  reported (until 2026-10-10 it was, as `... no original to call`). Without a `home.toml` every body ranks
+  alike and every module reach is unknown, which reproduces the path order exactly. An original that is itself a reported copy hands its copies on to its own original
   (`B.helper is itself a copy of C.core`); a code-evidenced copy only follows code-evidenced links, and no
   link is followed to an original the copy reaches worse.
 - **Signature facts**: the intent lane reads `Signature` (parameter and result types by simple name, open
@@ -180,7 +180,8 @@ Read from the language's vocabulary walk: constants with a plain string value, l
 (an enum's lower-cased members plus the strings its constants pass, a run of constants sharing a name
 prefix such as `STATUS_*`, or a type's unprefixed constants), the string labels of a switch with what it
 dispatches on, and regex literals (the first string argument of `compile`, `matches`, `replaceAll`,
-`replaceFirst`, `split`). Four flavours, each ranked on its own and taking turns in the report:
+`replaceFirst`, `split`). Four flavours, each ranked on its own (its cover check), then printed in one order by
+score:
 
 - **values**: a value declared by 3+ constants in 2+ files under one meaning (names that spell the value,
   `FAILED`/`STATUS_FAILED`, or one repeated name, `STATE_COLUMN`; six constants holding "hohenheim" for six
@@ -195,6 +196,47 @@ dispatches on, and regex literals (the first string argument of `compile`, `matc
 
 Each class carries a suggested home: the existing public declaration in a shared (`common`) source set,
 shallowest first, or the members' deepest common directory.
+
+### False-positive rules (2026-10-10)
+
+A triage of the top 40 production classes per kind on Hohenheim bc4f341d listed the noise below; each class of
+it is now removed by one general rule. Every rule reads a fact declared once: the language's standard library
+(`StandardLibrary` on the profile's `ShapeHooks`: JDK types, core member names, canonical bodies), the workspace's
+frozen globs and copy-key arguments (`zemble.dedup.settings`, keys of a `home.toml` `[dupes]` section, an unknown
+key noted and never applied), and its source sets (`[source_sets]`, the built-in `common`/`server`/`browser`
+folds otherwise).
+
+| Kind | Noise | Rule |
+| --- | --- | --- |
+| all four | migration DSL (`alterTable`, `addColumn`) counted as idioms, holed bodies and literal uses | Frozen code (`[dupes] frozen`, default `*/migration/*`, `*/migrations/*`, `*/db/migrate/*`) takes part in no shape kind: it repeats its DSL and writes values out by design |
+| holed | `this(new InstanceService())` x10 | A body that only hands over to another constructor (`ShapeHooks.delegates`) binds a default |
+| holed | `find().orderBy(A, B).all()`, `schedulesWhen(List.of(fallback("cron")), ROLE)` | Below 30 tokens, copies that take no parameter, decide nothing and differ in their values (literals or constants) each declare their own value |
+| holed | `"lit" + x`, `return "a" + "b"`, `substring(lastIndexOf(c))` | Below 30 tokens, copies whose every call is the standard library (`StandardLibrary.members`) and that differ in their values are the language applied to other data |
+| idiom | `String.valueOf((Object) x)`, `Boolean.TRUE.equals(x)` | A static call on a standard-library type or constant (`ShapeHooks.standard_receiver`) never counts toward the two calls an idiom chains |
+| idiom | roots named after an arbitrary member (`instanceRefusalText`, a migration) | `CloneClass.root`: an idiom is rooted at its site kind and shape (`chain Models.get(InstanceModel.class).find()`), also on the wire (`root`) |
+| vocabulary | `CertCoverage`, `DeviceType`, `DockerReconciler.Bucket`, `ManagedDatabase.Engine`, `InstanceStatus`, `HostStanding` as second vocabularies | An enum whose members pass another scanned set's constants (`DISK(InstanceDeviceModel.TYPE_DISK)`) re-expresses it and joins no family; a dotted reference resolves by suffix, a bare one inside its file |
+| vocabulary | `HohenheimMicrocopy.X.of("cpu_limit")` counted as a literal use | Key arguments of copy and translation calls (`[dupes] copy_keys`, `<receiver glob>.<method>:<index>`, default `*Microcopy*.of:0`, `.literal:0`, `.withArg:0`, `.withFilter:0`, `ResourceBundle.getString:0`, `MessageSource.getMessage:0`) are no values, as uses or as enum values |
+| vocabulary | a `server` home suggested to `common` sites | A literal use is listed only beside a constant its source set can read; the suggested home is the one most members can read (an unclassified fold reaches and is reached) |
+| vocabulary | `INSTANCES("hohenheim:instances:")` matched against the `instances` slug | A member whose own string holds its name as one token of a longer value is named after it and is no value itself |
+| vocabulary | sections not ordered by score | One order by score after each flavour's own cover check |
+| reimplements | pairs differing by one constant (`canManage` CONFIG vs MANAGE, `closeSession` over another registry, a different permission tier) | Demotion: a copy missing a constant its API names (its own constants and the ones it calls on, `SESSIONS.remove`) is one mechanism over two capabilities or registries; the class is `demoted`, says "extract the constant as a parameter" and ranks after every other class; an original that binds the same constants is preferred |
+| reimplements | helpers that are `Objects.toString(v, "")` sent to `IndexedScopes.stringOf`, `ZenitFormsFunctions.inputText` | JDK home table: a body whose holed shape is a canonical body of `StandardLibrary.source` (`Objects.toString`, `Objects.requireNonNullElse`, `Math.clamp`, `Objects.equals`, `Boolean.TRUE.equals`, several spellings each) forms a class `... re-implement Objects.toString(value, fallback); call it`; such a body is a root, never a copy of a domain helper, and the copies of it follow it |
+| reimplements | `NumberFunctions.parseInt`, `MapFunctions.getString`, `StringFunctions.trim` as homes | A member carrying any annotation outside the JDK and nullness set (`@HawkeyeFunction(...)`) is registered by a framework: a role, never an original (fails closed on an unknown annotation) |
+| reimplements | instance methods `ScheduledTask.getSettings` as homes for static helpers | Calling an instance method takes an instance of its type, and converting an untyped input (`Object raw`) never makes one |
+| reimplements | originals in modules the app may not depend on | Not reported (see the original by architecture above); source sets count too |
+
+Measured on Hohenheim bc4f341d (production lane; `reimplements` on a frozen copy of the workspace with that tree,
+focused on `apps/hohenheim`), top 30 read per kind, noise counted by the triage's classes:
+
+| Kind | Classes before -> after | Named noise in the top 30, before -> after | Left in the top 30 |
+| --- | --- | --- | --- |
+| holed | 70 -> 55 | 5 (and 4 declarations) -> 0 | three 39-41 token panel declarations (above the small-body rules) |
+| idiom | 292 -> 264 | 3 -> 0 | column-builder DSL chains, as before |
+| vocabulary | 77 -> 36 | 11 -> 0 | a status family kept by two switches, `credentials`/`HohenheimMicrocopy` name coincidences (borderline) |
+| reimplements | 53 -> 34 | 18 -> 5 | `fingerprint`/`backup`, `close`, two header getters, `CheckedHandOver.list`; 11 demoted classes sit last |
+
+`exact`, `renamed` and `logic` are unchanged: on zenit-cms 1df66bd7 their text report and JSON classes are
+byte-identical before and after (only the logic timing note differs).
 
 ### Measured (2026-10-10)
 
