@@ -14,7 +14,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from zemble.home.gradle import CatalogDeclaration, GradleProject, RefKind, UnresolvedAlias, discover
+from zemble.home.gradle import (
+    CatalogDeclaration,
+    GradleProject,
+    RefKind,
+    UnresolvedAlias,
+    discover,
+    is_test_configuration,
+)
 
 #: Artifact suffixes a workspace publishes one module under, stripped before an artifact
 #: name is read as a module name. The exact module name always wins, so a module that IS
@@ -65,6 +72,11 @@ class DependencyEdge:
     origin: EdgeOrigin
     #: The Gradle configuration a discovered edge was written in, "" for a declared one.
     configuration: str = ""
+
+    @property
+    def test_only(self) -> bool:
+        """Whether only the source module's TESTS may use the target (`testImplementation`)."""
+        return is_test_configuration(self.configuration)
 
     def to_dict(self) -> dict[str, Any]:
         """Render the edge as JSON-ready data."""
@@ -119,6 +131,11 @@ class DependencyGraph:
         A module always reaches itself (DIRECT). A forbidden pair is FORBIDDEN whatever
         the edges say. A module nothing is known about is UNKNOWN, and every other pair
         fails closed to UNREACHABLE rather than being assumed from `order`.
+
+        AIDEV-NOTE: the question is about the source module's PRODUCTION code, so a test-only
+        edge (`testImplementation`) grants nothing - `textum` testing against `zenit` does not
+        let `textum` use `zenit` - and a forbidden edge is never walked through either: the
+        refusal removes it from every path, not only from the pair it names.
         """
         if (source, target) in self.forbidden:
             return Reachability.FORBIDDEN
@@ -126,20 +143,33 @@ class DependencyGraph:
             return Reachability.DIRECT
         if not self.has_edges_from(source):
             return Reachability.UNKNOWN
-        direct = self.targets_of(source)
+        direct = self._usable_targets(source)
         if target in direct:
             return Reachability.DIRECT
         seen = {source, *direct}
         queue = list(direct)
         while queue:
             current = queue.pop(0)
-            for step in self.targets_of(current):
+            for step in self._usable_targets(current):
                 if step == target:
                     return Reachability.TRANSITIVE
                 if step not in seen:
                     seen.add(step)
                     queue.append(step)
         return Reachability.UNREACHABLE
+
+    def _usable_targets(self, module: str) -> tuple[str, ...]:
+        """Return the modules one module's production code may use directly: no test-only, no forbidden edge."""
+        found: list[str] = []
+        for edge in self.edges:
+            if (
+                edge.source == module
+                and not edge.test_only
+                and (module, edge.target) not in self.forbidden
+                and edge.target not in found
+            ):
+                found.append(edge.target)
+        return tuple(found)
 
     def nearest_common_dependency(self, modules: Sequence[str], rank: Callable[[str], int]) -> str | None:
         """Return the DEEPEST module every given module may reach, if there is one.
@@ -356,10 +386,13 @@ def _owner(project: GradleProject, module_of: Callable[[str], str]) -> str:
 
 
 def _deduplicate(edges: Sequence[DependencyEdge]) -> tuple[DependencyEdge, ...]:
-    """Keep one edge per (source, target), the first-seen configuration."""
+    """Keep one edge per (source, target), the first-seen configuration, a production one over a test-only one."""
     seen: dict[tuple[str, str], DependencyEdge] = {}
     for edge in edges:
-        seen.setdefault((edge.source, edge.target), edge)
+        key = (edge.source, edge.target)
+        kept = seen.get(key)
+        if kept is None or (kept.test_only and not edge.test_only):
+            seen[key] = edge
     return tuple(seen.values())
 
 

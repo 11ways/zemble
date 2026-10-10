@@ -18,6 +18,8 @@ from typing import Any
 
 import tomllib
 
+from zemble.graph.model import TEST_PATH_SEGMENTS
+
 #: Settings files that declare a Gradle build and the projects it includes.
 SETTINGS_NAMES = ("settings.gradle", "settings.gradle.kts")
 #: Build files that declare one project's dependencies.
@@ -251,6 +253,17 @@ def is_code_configuration(name: str) -> bool:
     """Whether a Gradle configuration name declares a dependency of the module's code."""
     lowered = name.lower()
     return any(lowered.endswith(base) for base in CODE_CONFIGURATIONS)
+
+
+def is_test_configuration(name: str) -> bool:
+    """Whether a code configuration belongs to a test source set (`testImplementation`, `browserTestApi`).
+
+    The source-set prefix is read against the graph's own test segment names, so one place
+    decides what a test source set is; an unprefixed or non-code configuration is not one.
+    """
+    lowered = name.lower()
+    base = max((base for base in CODE_CONFIGURATIONS if lowered.endswith(base)), key=len, default=None)
+    return base is not None and lowered[: -len(base)] in TEST_PATH_SEGMENTS
 
 
 def discover(
@@ -593,6 +606,7 @@ __all__ = [
     "VersionCatalog",
     "discover",
     "is_code_configuration",
+    "is_test_configuration",
     "normalise_alias",
     "read_catalog",
     "scan_build",

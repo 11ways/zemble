@@ -389,3 +389,124 @@ def test_missing_configuration_cannot_recommend_a_mechanism(tmp_path: Path, cons
     assert answer.mechanisms and answer.candidates, "evidence remains available"
     assert "configuration is missing" in answer.reasons[0]
     assert "UNCERTAIN" in answer.render().split("## Existing mechanisms")[0], "warning is prominent"
+
+
+_LAYERS = """
+    order = ["protoblast", "zenit", "zenit-ai", "zenit-widget", "zenit-flow"]
+
+    [modules.protoblast]
+    globs = ["protoblast/**"]
+    depends_on = []
+
+    [modules.zenit]
+    globs = ["zenit/**"]
+    depends_on = ["protoblast"]
+
+    [modules.zenit-ai]
+    globs = ["zenit-ai/**"]
+    depends_on = ["zenit"]
+
+    [modules.zenit-widget]
+    globs = ["zenit-widget/**"]
+    depends_on = ["zenit"]
+
+    [modules.zenit-flow]
+    globs = ["zenit-flow/**"]
+    depends_on = ["zenit"]
+"""
+
+
+@pytest.fixture
+def layers(tmp_path: Path) -> HomeConfig:
+    """A fully known graph: protoblast <- zenit <- {zenit-ai, zenit-widget, zenit-flow}, the last three siblings."""
+    (tmp_path / ".zemble").mkdir()
+    (tmp_path / ".zemble" / "home.toml").write_text(textwrap.dedent(_LAYERS).strip() + "\n", encoding="utf-8")
+    return HomeConfig.load(tmp_path)
+
+
+def hit_at(path: str, score: float) -> SearchResult:
+    """A search result at an exact path, for hits whose source set matters."""
+    return SearchResult(
+        chunk=Chunk(content="x", file_path=path, start_line=1, end_line=9, language="java"), score=score
+    )
+
+
+def test_the_demand_is_where_the_hits_weigh_not_the_core_biased_candidate(layers: HomeConfig) -> None:
+    """A core module leading the candidates on its proximity bonus does not make a mechanism outside it a copy."""
+    found = [mechanism("zenit-ai", "AiSources", 0.5, ("app-one", "app-two"))]
+
+    # 1. zenit-ai holds most of the relevance; protoblast leads the candidates only on the core bonus.
+    hits = [hit("zenit-ai", "AiSources", 0.5), hit("zenit-ai", "AiSourceRows", 0.4), hit("protoblast", "Holder", 0.45)]
+    answer = decide(layers, "register an ai record source", hits, found)
+    assert answer.candidates[0].module == "protoblast", "step 1: the candidate ranking is core-biased"
+    assert answer.verdict is Verdict.EXTEND_EXISTING, "step 1: the module that wants it already has it"
+    assert answer.extend is not None and answer.extend.label == "AiSources", "step 1: and it is the one to extend"
+
+    # 2. Near miss: when zenit itself carries the weight, the zenit-ai class is a consumer's copy.
+    hits = [hit("zenit", "Sources", 0.9), hit("zenit", "SourceRows", 0.8), hit("zenit-ai", "AiSources", 0.5)]
+    answer = decide(layers, "register an ai record source", hits, found)
+    assert answer.verdict is Verdict.NEW_MECHANISM, "step 2: zenit cannot reach zenit-ai"
+    assert answer.home == "zenit", "step 2: the demand's own module is the home"
+
+
+def test_a_reachable_strong_match_is_extended_before_a_copy_is_claimed(layers: HomeConfig) -> None:
+    """When the best match is out of the demand's reach but another strong one is not, that one is extended."""
+    hits = [hit("zenit", "Grants", 0.9), hit("zenit", "GrantRows", 0.8), hit("zenit-ai", "AiGrants", 0.9)]
+
+    # 1. The best-scored strong match sits in zenit-ai, which zenit cannot use; zenit's own is strong too.
+    found = [
+        mechanism("zenit-ai", "AiGrants", 0.9, ("app-one", "app-two")),
+        mechanism("zenit", "Grants", 0.85, ("a", "b")),
+    ]
+    answer = decide(layers, "grant a record to a user", hits, found)
+    assert answer.verdict is Verdict.EXTEND_EXISTING, "step 1: zenit already has a mechanism it can use"
+    assert answer.extend is not None and answer.extend.label == "Grants", "step 1: the reachable one is named"
+    assert answer.home == "zenit", "step 1: in the demand's module"
+
+    # 2. Near miss: the second strong match is out of reach as well, so the best one is a misplaced copy.
+    found = [
+        mechanism("zenit-ai", "AiGrants", 0.9, ("app-one", "app-two")),
+        mechanism("zenit-flow", "FlowGrants", 0.85, ("a", "b")),
+    ]
+    answer = decide(layers, "grant a record to a user", hits, found)
+    assert answer.verdict is Verdict.NEW_MECHANISM, "step 2: nothing found is usable from zenit"
+    assert answer.home == "zenit" and answer.extend is None, "step 2: the home is the demand's module"
+
+
+def test_test_source_hits_are_not_demand(layers: HomeConfig) -> None:
+    """A module's tests exercising a family do not make that module the one that wants the mechanism."""
+    found = [mechanism("zenit", "FormEndpoint", 0.6, ("app-one", "app-two"))]
+    zenit = [hit("zenit", "FormEndpoint", 0.6), hit("zenit", "FormRoutes", 0.4)]
+
+    # 1. protoblast's hits are all browser tests: the demand is zenit, which has the mechanism.
+    tests = [hit_at(f"protoblast/src/browserTest/java/Form{n}Test.java", 0.5) for n in range(3)]
+    answer = decide(layers, "post a form to a typed handler", [*zenit, *tests], found)
+    assert answer.verdict is Verdict.EXTEND_EXISTING, "step 1: tests are not production demand"
+    assert answer.extend is not None and answer.extend.label == "FormEndpoint", "step 1: zenit's mechanism"
+
+    # 2. Near miss: the same hits in production code make protoblast the demand, and zenit's class a copy.
+    code = [hit_at(f"protoblast/src/main/java/Form{n}.java", 0.5) for n in range(3)]
+    answer = decide(layers, "post a form to a typed handler", [*zenit, *code], found)
+    assert answer.verdict is Verdict.NEW_MECHANISM, "step 2: protoblast cannot reach zenit"
+    assert answer.home == "protoblast", "step 2: the mechanism belongs where it is wanted"
+
+
+def test_a_sibling_that_wants_it_is_found_by_mass_not_by_candidate_rank(layers: HomeConfig) -> None:
+    """The second module that wants a mechanism is read from the hits, not from the core-biased candidates."""
+    found = [mechanism("zenit-widget", "WidgetMigrations", 0.9, ("app-one", "app-two"))]
+    widget = [hit("zenit-widget", "WidgetMigrations", 0.9), hit("zenit-widget", "WidgetSteps", 0.85)]
+
+    # 1. zenit-flow is the second-heaviest module, but zenit outranks it as a candidate on the core bonus.
+    hits = [*widget, hit("zenit-flow", "FlowMigrations", 0.5), hit("zenit", "Migrations", 0.3)]
+    answer = decide(layers, "shared flow and widget migration state", hits, found)
+    assert [candidate.module for candidate in answer.candidates][:2] == ["zenit-widget", "zenit"], (
+        "step 1: zenit-flow is not among the top two candidates"
+    )
+    assert answer.verdict is Verdict.NEW_MECHANISM, "step 1: zenit-flow cannot use the widget's mechanism"
+    assert answer.suggested_home == "zenit", "step 1: the shared substrate is their common dependency"
+
+    # 2. Near miss: the second-heaviest module is zenit, which the widget module already depends on.
+    hits = [*widget, hit("zenit", "Migrations", 0.5), hit("zenit-flow", "FlowMigrations", 0.1)]
+    answer = decide(layers, "shared flow and widget migration state", hits, found)
+    assert answer.verdict is Verdict.EXTEND_EXISTING, "step 2: no sibling among the modules that want it"
+    assert answer.home == "zenit-widget", "step 2: the mechanism is extended where it is"

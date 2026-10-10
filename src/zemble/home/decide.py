@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any
 
 from zemble.home.config import HomeConfig
+from zemble.home.source_sets import SourceSet
 from zemble.home.tables import RowMatch, RowMatchKind, row_match_kind
 from zemble.types import SearchResult
 
@@ -324,6 +325,20 @@ def module_hits_of(config: HomeConfig, hits: Sequence[SearchResult]) -> list[Mod
     return grouped
 
 
+def demand_of(config: HomeConfig, hits: Sequence[SearchResult]) -> list[ModuleHits]:
+    """Group the PRODUCTION hits by module, heaviest first: where the capability is wanted.
+
+    AIDEV-NOTE: this is the demand the verdict's reachability lanes read, and it is not the
+    candidate ranking. A candidate's score answers "where would a new mechanism go" and carries
+    the core-proximity bonus, so it names the core rather than the module that wants this; and
+    a hit in a test source set exercises a mechanism without needing it in production, so a
+    module's browser tests must not make it the demand.
+    """
+    return module_hits_of(
+        config, [hit for hit in hits if config.source_set_of(hit.chunk.file_path) is not SourceSet.TEST]
+    )
+
+
 def mark_strong(
     config: HomeConfig, mechanisms: Sequence[Mechanism], row_matches: Sequence[RowMatch] = ()
 ) -> list[Mechanism]:
@@ -626,7 +641,7 @@ def decide(
             f" their dependency edges are missing: {'; '.join(problem.describe() for problem in shown)}"
             + (f"; and {more} more" if more else "")
         )
-    decided = _verdict(config, candidates, judged, row_matches)
+    decided = _verdict(config, demand_of(config, hits), candidates, judged, row_matches)
     answer = HomeAnswer(
         description=description,
         verdict=decided.verdict,
@@ -662,6 +677,7 @@ class _Decision:
 
 def _verdict(
     config: HomeConfig,
+    wanted: Sequence[ModuleHits],
     candidates: Sequence[Candidate],
     mechanisms: Sequence[Mechanism],
     row_matches: Sequence[RowMatch],
@@ -688,11 +704,12 @@ def _verdict(
     strong = [mechanism for mechanism in mechanisms if mechanism.strong]
     lexical = _lexical_notes(row_matches, mechanisms)
     if strong:
-        best = strong[0]
-        blocked = _blocked_demand(config, best.module, candidates)
+        demand = wanted[0].module if wanted else None
+        best = _usable_match(config, strong, demand)
+        blocked = _blocked_demand(config, best.module, demand)
         if blocked is not None:
             return _misplaced_decision(config, best, blocked, [*reasons, *lexical])
-        sibling = _sibling_of_home(config, best.module, candidates, strong)
+        sibling = _sibling_of_home(config, best.module, wanted, strong)
         if sibling is not None:
             return _sibling_decision(config, best, sibling, [*reasons, *lexical])
         reasons.append(f"{best.label} in {best.module} already covers this ({best.location})")
@@ -745,18 +762,36 @@ def _lexical_notes(row_matches: Sequence[RowMatch], mechanisms: Sequence[Mechani
     return notes
 
 
-def _blocked_demand(config: HomeConfig, home: str, candidates: Sequence[Candidate]) -> str | None:
-    """Return the leading candidate module when it cannot reach the mechanism found for it.
+def _usable_match(config: HomeConfig, strong: Sequence[Mechanism], demand: str | None) -> Mechanism:
+    """Return the best strong match the demand module may use, else the best strong match.
+
+    AIDEV-NOTE: "extend it" has to be advice that compiles for the module that wants it. When
+    the best-scored strong match sits out of the demand's reach but another strong match is
+    reachable, that one is the mechanism to extend; only when NONE is reachable is the best
+    one read as a misplaced copy. Without this, one out-of-reach match within the 15% window
+    turned "the demand already has a mechanism" into "build a new one".
+    """
+    if demand is None or not config.dependencies.known:
+        return strong[0]
+    return next((mechanism for mechanism in strong if config.reachable(demand, mechanism.module).usable), strong[0])
+
+
+def _blocked_demand(config: HomeConfig, home: str, demand: str | None) -> str | None:
+    """Return the demand module when it cannot reach the mechanism found for it.
 
     The demand for a capability sits where the hits are heaviest. When that module cannot
     depend on the module the mechanism lives in, "extend it" is advice that does not
     compile - `AiRecordSources` in `zenit-ai` is the reference case: `zenit` cannot reach
     into `zenit-ai`, so the shared registration belongs in `zenit` and the copy in the
     consumer is not the mechanism.
+
+    AIDEV-NOTE: the demand is the heaviest module of `demand_of`, never the top candidate:
+    reading the core-biased candidate ranking as demand made the most core module that got a
+    hit the "demand" and every mechanism outside it a "consumer's copy" (`ContentStore` in
+    zenit called a copy because protoblast led the candidates).
     """
-    if not config.dependencies.known or not candidates:
+    if not config.dependencies.known or demand is None:
         return None
-    demand = candidates[0].module
     if demand == home or config.reachable(demand, home).usable:
         return None
     return demand
@@ -776,16 +811,18 @@ def _misplaced_decision(config: HomeConfig, best: Mechanism, demand: str, reason
 
 
 def _sibling_of_home(
-    config: HomeConfig, home: str, candidates: Sequence[Candidate], strong: Sequence[Mechanism]
+    config: HomeConfig, home: str, wanted: Sequence[ModuleHits], strong: Sequence[Mechanism]
 ) -> str | None:
-    """Return a co-candidate module that cannot depend on the proposed home, if there is one.
+    """Return a module that wants this and cannot depend on the proposed home, if there is one.
 
     AIDEV-NOTE: siblinghood is only ever claimed from a KNOWN dependency graph. A workspace
     that declares no dependencies and has no build files says nothing about who may use
     whom, and answering "these are siblings" from `order` alone would be exactly the
-    inference `order` is not allowed to carry.
+    inference `order` is not allowed to carry. The modules that want it are the two heaviest
+    in `demand_of`, the same reading of demand `_blocked_demand` uses: the top candidates
+    carry the core-proximity bonus and so name the core, not the demand.
     """
-    others = [candidate.module for candidate in candidates[:2]]
+    others = [entry.module for entry in wanted[:2]]
     others.extend(mechanism.module for mechanism in strong)
     for other in dict.fromkeys(others):
         if _siblings(config, other, home):
@@ -947,6 +984,7 @@ __all__ = [
     "candidates_of",
     "checklist_of",
     "decide",
+    "demand_of",
     "mark_strong",
     "module_hits_of",
     "row_names_mechanism",

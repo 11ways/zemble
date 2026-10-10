@@ -9,7 +9,7 @@ import pytest
 
 from zemble.home.config import ConfigError, HomeConfig
 from zemble.home.deps import DependencyGraph, DependencySource, EdgeOrigin, Reachability
-from zemble.home.gradle import discover, is_code_configuration
+from zemble.home.gradle import discover, is_code_configuration, is_test_configuration
 
 _MODULES = ("protoblast", "zenit", "zenit-flow", "zenit-widget")
 
@@ -227,3 +227,84 @@ def test_a_module_known_to_depend_on_nothing_is_closed_not_unknown(tmp_path: Pat
 
     # 3. A module with neither a build file nor a declaration is still UNKNOWN.
     assert config.reachable("zenit-flow", "zenit") is Reachability.UNKNOWN, "step 3: nothing was said"
+
+
+def test_a_test_only_edge_grants_production_code_nothing(tmp_path: Path) -> None:
+    """A `testImplementation` dependency lets a module's tests use another module, never its code."""
+    builds = {
+        "zenit": "    implementation project(':protoblast')",
+        "zenit-flow": "    testImplementation project(':zenit-widget')\n    implementation project(':zenit')",
+        "zenit-widget": (
+            "    browserTestImplementation project(':protoblast')\n"
+            "    implementation project(':protoblast')\n"
+            "    testImplementation project(':zenit')"
+        ),
+    }
+    config = _workspace(tmp_path, builds=builds)
+    graph = config.dependencies
+
+    # 1. The test-scoped edge is still in the graph, and it says it is test-only.
+    test_edge = next(edge for edge in graph.edges if (edge.source, edge.target) == ("zenit-flow", "zenit-widget"))
+    assert test_edge.test_only, "step 1: testImplementation is a test source set's configuration"
+    assert "zenit-widget" in graph.targets_of("zenit-flow"), "step 1: the edge is reported, not dropped"
+
+    # 2. It grants production reachability to nothing.
+    assert config.reachable("zenit-flow", "zenit-widget") is Reachability.UNREACHABLE, "step 2: tests only"
+    assert config.reachable("zenit-widget", "zenit") is Reachability.UNREACHABLE, "step 2: same for the reverse"
+
+    # 3. Near miss: a production edge in the same build is usable, and so is what it leads to.
+    assert config.reachable("zenit-flow", "zenit") is Reachability.DIRECT, "step 3: implementation is code"
+    assert config.reachable("zenit-flow", "protoblast") is Reachability.TRANSITIVE, "step 3: through zenit"
+
+    # 4. A pair written in a test AND a production configuration keeps the production edge.
+    kept = next(edge for edge in graph.edges if (edge.source, edge.target) == ("zenit-widget", "protoblast"))
+    assert kept.configuration == "implementation", "step 4: the production configuration wins the dedup"
+    assert config.reachable("zenit-widget", "protoblast") is Reachability.DIRECT, "step 4: so it is reachable"
+
+
+@pytest.mark.parametrize(
+    ("configuration", "test_only"),
+    [
+        ("testImplementation", True),
+        ("browserTestImplementation", True),
+        ("testCompileOnly", True),
+        ("testFixturesApi", True),
+        ("implementation", False),
+        ("serverImplementation", False),
+        ("commonCompileOnlyApi", False),
+        ("testSupportCompileOnly", False),
+        ("annotationProcessor", False),
+        ("", False),
+    ],
+)
+def test_a_test_configuration_is_read_from_the_test_source_set_names(configuration: str, test_only: bool) -> None:
+    """The source-set prefix decides, read against the graph's own test segment names."""
+    assert is_test_configuration(configuration) is test_only
+
+
+def test_a_forbidden_edge_is_not_walked_through(tmp_path: Path) -> None:
+    """A refusal removes its edge from every path, not only from the pair it names."""
+    deps = {"zenit-flow": ["zenit-widget"], "zenit-widget": ["zenit"], "zenit": ["protoblast"]}
+    refused = _workspace(
+        tmp_path / "refused",
+        deps=deps,
+        extra="""
+        [[forbidden]]
+        from = "zenit-widget"
+        to = "zenit"
+        why = "the widget layer stays off zenit"
+        """,
+    )
+    allowed = _workspace(tmp_path / "allowed", deps=deps)
+
+    # 1. The refused pair itself.
+    assert refused.reachable("zenit-widget", "zenit") is Reachability.FORBIDDEN, "step 1: the stated refusal"
+
+    # 2. Every path through that edge is gone too.
+    assert refused.reachable("zenit-flow", "zenit") is Reachability.UNREACHABLE, "step 2: not through the refusal"
+    assert refused.reachable("zenit-flow", "protoblast") is Reachability.UNREACHABLE, "step 2: nor beyond it"
+    assert refused.reachable("zenit-flow", "zenit-widget") is Reachability.DIRECT, "step 2: the other edge stands"
+
+    # 3. Near miss: the same edges without the refusal are a transitive path.
+    assert allowed.reachable("zenit-flow", "zenit") is Reachability.TRANSITIVE, "step 3: two hops"
+    assert allowed.reachable("zenit-flow", "protoblast") is Reachability.TRANSITIVE, "step 3: three hops"

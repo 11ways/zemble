@@ -123,12 +123,30 @@ for that hands every answer to whatever sits nearest the core (measured: hit@1 0
 | --- | --- |
 | `EXTEND_EXISTING` | a strong match was found - by consumer spread, by core position or by declaration; it is named, with "wire or extend it; do not duplicate it" |
 | `NEW_MECHANISM` | no strong match, and one candidate leads clearly; its module is the home |
-| `NEW_MECHANISM` (misplaced) | a strong match exists, but the module the demand sits in cannot depend on it while it can depend on the demand's module: what was found is a consumer's copy, and the home is the demand's module |
-| `NEW_MECHANISM` (sibling) | a strong match exists, but a co-candidate module cannot depend on it and it cannot depend on that module either; the home is their `nearest_common_dependency` and `suggested_home` carries it |
+| `NEW_MECHANISM` (misplaced) | strong matches exist, the demand module can use NONE of them, and the best one's module can depend on the demand's module: what was found is a consumer's copy, and the home is the demand's module |
+| `NEW_MECHANISM` (sibling) | a strong match exists, but one of the two modules that want it cannot depend on it and it cannot depend on that module either; the home is their `nearest_common_dependency` and `suggested_home` carries it |
 | `UNCERTAIN` | the top two candidates are within 15% of each other, or nothing matched, or two siblings share nothing to put the mechanism in |
 
 Both lanes ask the same question - can the module that WANTS this reach the module that
 HAS it? - and answer it from the dependency graph rather than from `order`.
+
+"The module that wants it" is read from the hits, never from the candidate ranking
+(`demand_of`): the modules ordered by the relevance mass of their PRODUCTION hits. The
+demand is the heaviest of them, and the sibling lane checks the two heaviest. Three rules
+keep the lanes honest, each measured below:
+
+- **demand is mass, not the top candidate.** A candidate's score answers "where would a
+  new mechanism go" and carries the core-proximity bonus, so the top candidate is usually
+  the most core module that got any hit at all. Read as demand, it made every mechanism
+  outside that module "a consumer's copy" (`ContentStore` in `zenit` called a copy because
+  `protoblast` led the candidates on one hit and the bonus).
+- **a test hit is not demand.** A hit in a test source set (`config.source_set_of` is
+  `TEST`) exercises a family without needing it in production: `hawkeye`'s browser-test
+  templates made `hawkeye` the demand for typed form posting and `FormEndpoint` in `zenit`
+  a copy.
+- **a usable match before a copy.** When the best-scored strong match is out of the
+  demand's reach but another strong match is reachable, that one is extended
+  (`_usable_match`); only when none is reachable is the best one read as misplaced.
 `AiRecordSources` in `zenit-ai` is the misplaced case: `zenit` leads the candidates,
 `zenit` cannot reach into `zenit-ai`, and `zenit-ai` already depends on `zenit`, so the
 shared registration belongs in `zenit` and what `zenit-ai` holds is its own copy.
@@ -299,11 +317,23 @@ correctly absent: those two are siblings, which is exactly the case the verdict 
 
 | Value | Meaning |
 | --- | --- |
-| `DIRECT` | `a` declares or builds against `b` (and every module reaches itself) |
-| `TRANSITIVE` | `b` is reachable through other modules |
+| `DIRECT` | `a` declares or builds its production code against `b` (and every module reaches itself) |
+| `TRANSITIVE` | `b` is reachable through other modules' production edges |
 | `FORBIDDEN` | a `[[forbidden]]` rule refuses the pair; it overrides every edge |
 | `UNREACHABLE` | the graph knows what `a` depends on, and `b` is not in it; "knows" includes a declared empty `depends_on` and a build file that was read and named no workspace module (the root library) |
 | `UNKNOWN` | nothing at all is known about what `a` depends on: no declaration, no build file, or a build file with an unresolved catalog accessor (the missing edge may be the one asked about) |
+
+Reachability is a question about the source module's PRODUCTION code. An edge written in a
+test source set's configuration (`testImplementation`, `browserTestImplementation`,
+`testFixturesApi`: the prefix is one of the graph's own test segment names,
+`is_test_configuration`) stays in the graph with `test_only` set and grants nothing:
+`textum` testing against `zenit` does not let `textum` use `zenit`. A pair written in both
+a test and a production configuration keeps the production edge. A forbidden edge is never
+walked through either, so a refusal removes its edge from every path, not only from the
+pair it names. On the zenit workspace 28 of the 234 edges are test-only: 24 point at
+`zenit-microcopy` or `zenit-auth-test-support`, and the other four are `textum -> zenit`,
+`zenit-3d -> zenit`, `plumage -> protoblast` (still reached through `hawkeye`) and the
+`zenit-cms -> zenit-pages` edge the workspace forbids.
 
 `UNKNOWN` is never permission (`Reachability.usable` is False for it), and it is never
 silently turned into "no" either: once a graph is known, an unknown pair fails closed for
@@ -383,6 +413,52 @@ The CLI exits 1 when nothing matched at all.
 Every query is answered twice: once with the declared-table lane **disabled**, which
 measures what search, the graph and the module order can do alone, and once with it
 enabled.
+
+### With a real dependency graph (2026-10-10, zenit workspace)
+
+Until the settings-plugin catalog was readable the zenit workspace had 0 dependency edges,
+so every graph-gated lane above was silent and the numbers below this section were tuned
+without it. With 234 edges the misplaced lane fired on eight declared rows and verdict
+accuracy fell. Same eval set (73 queries, model2vec, `--repos-file` pointing at the zenit
+workspace); "graph off" is the same tree with an empty `DependencyGraph`:
+
+| Run | hit@1 | hit@3 | home ok | verdict | over-confident (of 12) |
+| --- | --- | --- | --- | --- | --- |
+| graph off (7b0ab5f) | 0.639 | 0.885 | 0.656 | 0.644 | 7 |
+| graph on, 7b0ab5f | 0.656 | 0.852 | 0.689 | 0.575 | 4 |
+| graph on, demand and reachability fixed | 0.656 | 0.852 | 0.705 | 0.671 | 4 |
+
+Both lanes print the same numbers on this workspace: its capability table writes the
+home column without backticks, so no row names a home module and the declared lane is
+inert (an open item, not addressed here).
+
+The causes, all general and each with a positive and a near-miss fixture test:
+
+- the misplaced lane read the TOP CANDIDATE as the demand, and the core-proximity bonus
+  makes that the most core module with any hit (`protoblast` on one hit for object
+  storage, the A2UI adapter and test-restorable registries);
+- it claimed a copy even when another strong match WAS reachable from the demand
+  (`RecordGrantModel` in zenit-auth beside `RecordCapabilityDecision` in zenit);
+- browser-test templates counted as demand (`hawkeye` for typed form posting);
+- the sibling lane read its co-demand from the top two candidates, so seeing a sibling
+  depended on bonuses: `emberglyph`, second by mass for the GPU pipeline, dropped to third
+  candidate once test-only edges stopped counting and the answer became `EXTEND_EXISTING`;
+- reachability walked test-only edges (`textum -> zenit` is `testImplementation`) and
+  through forbidden edges.
+
+Verdicts that changed against 7b0ab5f: test-restorable registries, record-scoped grants,
+return navigation, typed form actions, the A2UI wire adapter, object storage and the
+microcopy catalogs went from a misplaced `NEW_MECHANISM` to `EXTEND_EXISTING` (right
+verdict; object storage and microcopy name `protoblast`, not the declared module); element
+measurement went `UNCERTAIN` -> `NEW_MECHANISM` in hawkeye and the record-source substrate
+`NEW_MECHANISM` -> `EXTEND_EXISTING` `RecordCapabilities` in zenit, both unchanged in
+correctness. Against graph off, the one verdict still lost is raw-value coercion: the only
+strong match is `DateFunctions` in plumage, zenit cannot reach it, and zenit's own
+`SubmittedValueCoercion`/`PrimitiveCoercion` score just outside the 15% window, so the
+answer names zenit as a new mechanism. Gained against graph off: the GPU pipeline and
+speech transcription (siblings, no longer `EXTEND_EXISTING`) and the substrate case.
+
+### Earlier measurements (javaweb tree)
 
 73 queries, 81k chunks, 101k symbols / 923k edges, 0.4 s per answer. Before is the same
 eval set run against the previous release, so the two tables are one measurement apart:
@@ -474,7 +550,7 @@ two vocabularies, which live in their own modules.
 
 | Call | Returns | Semantics |
 | --- | --- | --- |
-| `config.reachable(consumer, home)` | `Reachability` | `DIRECT` / `TRANSITIVE` / `FORBIDDEN` / `UNREACHABLE` / `UNKNOWN`; `Reachability.usable` is True for the first two only |
+| `config.reachable(consumer, home)` | `Reachability` | `DIRECT` / `TRANSITIVE` / `FORBIDDEN` / `UNREACHABLE` / `UNKNOWN` over production edges (test-only and forbidden edges are never walked); `Reachability.usable` is True for the first two only |
 | `config.nearest_common_dependency([a, b, ...])` | `str` or `None` | the DEEPEST module every given module can reach - shared, and not itself reachable from another shared module - excluding the given modules themselves; ties are broken by `order`, most core first; `None` when they share nothing or the graph is empty |
 | `config.common_dependencies([a, b, ...])` | `tuple[str, ...]` | the whole maximal shared set the line above picks from, so a caller can report the tie |
 | `config.source_set_of(path)` | `SourceSet` | `COMMON` / `SERVER` / `BROWSER` / `TEST` / `UNKNOWN` for a workspace-relative path |
