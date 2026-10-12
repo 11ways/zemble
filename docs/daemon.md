@@ -28,9 +28,14 @@ several requests in a row.
 
 Immutable reads have four execution slots and a 32-request waiting room. A request
 carries one optional `deadline_ms` covering preparation, queueing and execution
-(default 25000, maximum 900000). A full queue or expired deadline returns retry
-information (`retry_after_ms`) instead of starting a client-side index. Status
-reports actual active reads, including work whose caller has stopped waiting.
+(maximum 900000, `CONSTRUCTION_WAIT_SECONDS`). `zemble.daemon.client.call` always sends
+one, by default that whole maximum, so a cold request BLOCKS until the shared index or
+graph construction it joined is done instead of answering busy; only a request naming
+no deadline (an older client) gets the 25000 ms legacy default. A full queue or expired
+deadline returns retry information (`retry_after_ms`) instead of starting a client-side
+index. A graph job that outlives its own lifetime (the same 900 s) is reported to every
+joined caller as a failure, not as busy. Status reports actual active reads, including
+work whose caller has stopped waiting.
 
 Cold graph preparation owns no read slot. Callers join one construction job per
 canonical root; their deadlines cannot cancel it or block unrelated warm searches.

@@ -13,6 +13,8 @@ from zemble import cli, mcp
 from zemble.daemon import client, server
 from zemble.daemon.protocol import (
     ACCEPTS_BUSY_FIELD,
+    CONSTRUCTION_WAIT_SECONDS,
+    DEADLINE_FIELD,
     REVISION_FIELD,
     CommandBusy,
     CommandFailed,
@@ -255,6 +257,39 @@ def test_socket_timeout_is_an_availability_error(daemon_mode, monkeypatch):
     monkeypatch.setattr(client, "_connect", lambda *a, **kw: local)
     with peer, pytest.raises(DaemonUnavailable, match="connection lost"):
         client.call("search", auto_start=False, timeout=0.01)
+
+
+@pytest.mark.parametrize("timeout, deadline_ms", [(None, 900000), (CONSTRUCTION_WAIT_SECONDS, 900000), (10.0, 10000)])
+def test_every_request_names_a_deadline_that_waits_out_construction(daemon_mode, monkeypatch, timeout, deadline_ms):
+    """A cold query blocks on the construction it joins; the daemon's legacy 25 s default never applies."""
+    local, peer = socket.socketpair()
+    seen = {}
+
+    def reply():
+        with peer, peer.makefile("rwb") as stream:
+            request = decode(stream.readline())
+            seen.update(request)
+            stream.write(encode({"id": request["id"], "ok": True, "result": {}}))
+            stream.flush()
+
+    thread = threading.Thread(target=reply, daemon=True)
+    thread.start()
+    timeouts = []
+    original = socket.socket.settimeout
+
+    def record(self, value):
+        timeouts.append(value)
+        original(self, value)
+
+    monkeypatch.setattr(client, "_connect", lambda *a, **kw: local)
+    with monkeypatch.context() as patched:
+        patched.setattr(socket.socket, "settimeout", record)
+        assert client.call("graph", {"path": "/"}, auto_start=False, timeout=timeout) == {}
+    thread.join(2)
+    # 1. The deadline travels with the request, capped at the construction bound.
+    assert seen[DEADLINE_FIELD] == deadline_ms, "step 1: the request names its deadline"
+    # 2. The socket outlives that deadline, so even a late busy answer arrives.
+    assert timeouts[-1] is None or timeouts[-1] > deadline_ms / 1000, "step 2: the socket outwaits the daemon"
 
 
 @pytest.mark.parametrize("argv", [["zemble", "--no-daemon"], ["zemble", "mcp", "--no-daemon"]])

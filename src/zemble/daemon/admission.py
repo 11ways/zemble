@@ -7,7 +7,10 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from zemble.daemon.protocol import CommandBusy
+from zemble.daemon.protocol import CONSTRUCTION_WAIT_SECONDS, DEADLINE_FIELD, CommandBusy
+
+#: The deadline of a request that names none: an older client's, whose socket gives up at 30 s.
+LEGACY_DEADLINE_MS = 25000
 
 
 class AdmissionBusy(CommandBusy):
@@ -74,7 +77,8 @@ class ReadAdmission:
 
 def request_deadline(request: dict[str, Any]) -> float:
     """Use one absolute deadline for preparation, queueing and execution."""
-    milliseconds = float(request.get("deadline_ms", 25000))
-    if not 0 < milliseconds <= 900000:
-        raise ValueError("deadline_ms must be in (0, 900000]")
+    milliseconds = float(request.get(DEADLINE_FIELD, LEGACY_DEADLINE_MS))
+    longest = CONSTRUCTION_WAIT_SECONDS * 1000
+    if not 0 < milliseconds <= longest:
+        raise ValueError(f"{DEADLINE_FIELD} must be in (0, {longest:.0f}]")
     return time.monotonic() + milliseconds / 1000

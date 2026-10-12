@@ -13,6 +13,7 @@ from typing import Any
 
 from zemble.daemon.admission import AdmissionBusy
 from zemble.daemon.memory import MIB, MemoryRefused, private_mb
+from zemble.daemon.protocol import CONSTRUCTION_WAIT_SECONDS
 
 TOTAL_MEMORY_ENV = "ZEMBLE_DAEMON_TOTAL_MEMORY_MB"
 GRAPH_MEMORY_ENV = "ZEMBLE_GRAPH_BUILD_MEMORY_MB"
@@ -73,16 +74,25 @@ class GraphJobs:
                 paths.update(str(path) for path in changed_paths)
                 if len(paths) > 4096:
                     self.pending[root] = None
+        await self._join(root, task, deadline)
+
+    @staticmethod
+    async def _join(root: str, task: asyncio.Task[Any], deadline: float) -> None:
+        """Wait for a shared job until this caller's deadline, never cancelling it."""
         try:
-            async with asyncio.timeout_at(deadline):
+            async with asyncio.timeout_at(deadline) as waited:
                 await asyncio.shield(task)
         except TimeoutError as exc:
+            if not waited.expired():
+                # The job itself outlived its lifetime: a failure every joined caller shares, and
+                # "retry" would only start the same construction again.
+                raise RuntimeError(f"graph construction for {root} exceeded {CONSTRUCTION_WAIT_SECONDS:.0f} s") from exc
             raise AdmissionBusy(f"graph construction pending for {root}; inspect status and retry") from exc
 
     async def _build(self, root: str) -> None:
         """Drain a bounded follow-up change set before publishing this job as complete."""
         try:
-            async with asyncio.timeout(900):
+            async with asyncio.timeout(CONSTRUCTION_WAIT_SECONDS):
                 while True:
                     await self._build_once(root)
                     if root not in self.pending:
@@ -90,7 +100,7 @@ class GraphJobs:
                     paths = self.pending.pop(root)
                     self.paths[root] = sorted(paths) if paths is not None else None
         except TimeoutError:
-            self.states[root].update(state="failed", error="graph construction deadline expired")
+            self.states[root].update(state="failed", error="graph construction lifetime expired")
             raise
         finally:
             self.jobs.pop(root, None)

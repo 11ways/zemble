@@ -148,6 +148,25 @@ async def test_graph_waiters_join_and_a_deadline_leaves_construction_observable(
 
 
 @pytest.mark.anyio
+async def test_a_job_outliving_its_lifetime_fails_every_waiter_instead_of_asking_a_retry(tmp_path, monkeypatch):
+    """Busy means "wait longer"; a construction that was stopped is a failure, and retrying restarts it."""
+    from zemble.daemon import graph_jobs
+    from zemble.graph import store
+
+    monkeypatch.setattr(store, "graph_ancestor", lambda root: None)
+    monkeypatch.setattr(graph_jobs, "CONSTRUCTION_WAIT_SECONDS", 0.05)
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+
+    async def build_once(path):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(jobs, "_build_once", build_once)
+    with pytest.raises(RuntimeError, match="exceeded"):
+        await jobs.ensure(str(tmp_path), time.monotonic() + 5)
+    assert jobs.status()["jobs"][0]["state"] == "failed"
+
+
+@pytest.mark.anyio
 async def test_worker_budget_and_parent_limit_are_separate_and_restored(tmp_path, monkeypatch):
     """Aggregate reservation includes the parent's private memory, and teardown restores its old ceiling."""
     from zemble.daemon import graph_jobs

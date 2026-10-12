@@ -18,8 +18,10 @@ from typing import Any
 
 from zemble.daemon.protocol import (
     ACCEPTS_BUSY_FIELD,
+    ANSWER_GRACE_SECONDS,
     CONNECT_TIMEOUT_SECONDS,
-    REQUEST_TIMEOUT_SECONDS,
+    CONSTRUCTION_WAIT_SECONDS,
+    DEADLINE_FIELD,
     REVISION_FIELD,
     START_TIMEOUT_SECONDS,
     CommandBusy,
@@ -212,15 +214,16 @@ def call(
     args: dict[str, Any] | None = None,
     *,
     auto_start: bool = True,
-    timeout: float | None = REQUEST_TIMEOUT_SECONDS,
+    timeout: float | None = CONSTRUCTION_WAIT_SECONDS,
 ) -> Any:
     """Send one command to the daemon and return its result.
 
     :param cmd: Command name, as registered in the server's command table.
     :param args: Command arguments.
     :param auto_start: Whether to spawn a daemon when none is listening.
-    :param timeout: Response deadline (default 30 seconds). None blocks until the daemon answers,
-        which is what a first, index-building request needs.
+    :param timeout: How long the daemon may take, shared index or graph construction included; it
+        travels as the request's deadline. The default waits out a whole construction, so a cold
+        request blocks until it can answer instead of returning busy. None blocks the socket too.
     :return: The command's result.
     :raises DaemonUnavailable: If this process may not use a daemon, or none could be reached.
     :raises CommandRefused: If the daemon deliberately refused the command.
@@ -240,12 +243,21 @@ def call(
         client = _connect()
 
     request_id = next(_request_ids)
+    # AIDEV-NOTE: a request without a deadline gets the daemon's 25 s legacy default, which turned
+    # every cold query into "busy, retry" while one shared construction ran. Construction is joined,
+    # never repeated, so waiting for it costs the daemon nothing; the caller must say how long.
+    wait = CONSTRUCTION_WAIT_SECONDS if timeout is None else min(timeout, CONSTRUCTION_WAIT_SECONDS)
+    request = {
+        "id": request_id,
+        "cmd": cmd,
+        "args": absolutize_path(args or {}),
+        ACCEPTS_BUSY_FIELD: True,
+        DEADLINE_FIELD: wait * 1000,
+    }
     try:
-        client.settimeout(timeout)
+        client.settimeout(None if timeout is None else timeout + min(timeout, ANSWER_GRACE_SECONDS))
         with client, client.makefile("rwb") as stream:
-            stream.write(
-                encode({"id": request_id, "cmd": cmd, "args": absolutize_path(args or {}), ACCEPTS_BUSY_FIELD: True})
-            )
+            stream.write(encode(request))
             stream.flush()
             line = stream.readline()
     except (OSError, TimeoutError) as exc:

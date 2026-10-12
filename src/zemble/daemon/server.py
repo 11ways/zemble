@@ -40,6 +40,7 @@ from zemble.daemon.memory import (
 )
 from zemble.daemon.protocol import (
     ACCEPTS_BUSY_FIELD,
+    CONSTRUCTION_WAIT_SECONDS,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_MAX_INDEXES,
     CommandBusy,
@@ -687,7 +688,9 @@ class Daemon:
             return None
         started = time.monotonic()
         try:
-            await self.graphs.ensure(root, time.monotonic() + 900, refresh=True, changed_paths=changed_paths)
+            await self.graphs.ensure(
+                root, time.monotonic() + CONSTRUCTION_WAIT_SECONDS, refresh=True, changed_paths=changed_paths
+            )
         except Exception:
             logger.error("The symbol graph for %s is now STALE: its refresh failed", root, exc_info=True)
             return None
