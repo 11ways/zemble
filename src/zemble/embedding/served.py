@@ -18,7 +18,7 @@ import numpy as np
 
 from zemble.embedding.base import Embedder, EmbeddingMatrix, declared_dimensions, semantic_weight_bonus
 from zemble.embedding.cache import text_hash, uncovered_texts
-from zemble.embedding.http import EmbeddingRequestError, batched, post_json
+from zemble.embedding.http import EmbeddingRequestError, batched, open_url, post_json
 from zemble.embedding.wire import (
     AUTH_HEADER,
     COVERED_ROUTE,
@@ -70,7 +70,7 @@ class ServerClient:
         url = f"{self.settings.url}{route}"
         request = urllib.request.Request(url, headers=self._headers())  # noqa: S310 - a configured https/http URL
         try:
-            with urllib.request.urlopen(request, timeout=_GET_TIMEOUT_SECONDS) as response:  # noqa: S310
+            with open_url(request, _GET_TIMEOUT_SECONDS) as response:
                 decoded: dict[str, Any] = json.loads(response.read().decode("utf-8"))
                 return decoded
         except urllib.error.HTTPError as exc:

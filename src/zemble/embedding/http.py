@@ -7,6 +7,7 @@ import logging
 import random
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -65,6 +66,38 @@ def _retry_after_seconds(headers: Any) -> float | None:
         return None
 
 
+def _route(url: str, proxies: dict[str, str]) -> str:
+    """Name the proxy ``url`` goes through, without its credentials; empty when it connects directly."""
+    parts = urllib.parse.urlsplit(url)
+    proxy = proxies.get(parts.scheme)
+    if not proxy or urllib.request.proxy_bypass(parts.hostname or ""):
+        return ""
+    scheme, separator, rest = proxy.partition("://")
+    shown = f"{scheme}://{rest.rpartition('@')[2]}" if separator else proxy.rpartition("@")[2]
+    return f" (via proxy {shown})"
+
+
+def open_url(request: urllib.request.Request, timeout: float) -> Any:
+    """Open ``request`` through the proxies the environment names now; a failed connection names its proxy.
+
+    ``urlopen`` freezes the proxies it saw on first use for the life of the process, so it is not used.
+
+    :raises urllib.error.HTTPError: When the server answered with an error status.
+    :raises urllib.error.URLError: When no answer came back.
+    """
+    proxies = urllib.request.ProxyHandler()
+    try:
+        return urllib.request.build_opener(proxies).open(request, timeout=timeout)
+    except urllib.error.HTTPError:
+        raise
+    except urllib.error.URLError as exc:
+        # A refused connection to a dead proxy reads exactly like a dead server.
+        route = _route(request.full_url, proxies.proxies)
+        if not route:
+            raise
+        raise urllib.error.URLError(f"{exc.reason}{route}") from exc
+
+
 def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
     """POST a JSON body and return the decoded JSON response.
 
@@ -85,7 +118,7 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dic
         request = urllib.request.Request(url, data=body, headers=request_headers, method="POST")  # noqa: S310
         retry_after: float | None = None
         try:
-            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:  # noqa: S310
+            with open_url(request, REQUEST_TIMEOUT_SECONDS) as response:
                 decoded: dict[str, Any] = json.loads(response.read().decode("utf-8"))
                 return decoded
         except urllib.error.HTTPError as exc:

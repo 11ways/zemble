@@ -49,6 +49,9 @@ def daemon_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path
     monkeypatch.setenv("ZEMBLE_DAEMON_DIR", str(runtime))
     monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(tmp_path / "cache"))
     monkeypatch.delenv("ZEMBLE_DAEMON", raising=False)
+    # run() drops proxy variables from this process; delete them here so teardown restores them.
+    for name in [name for name in os.environ if name.lower().endswith("_proxy")]:
+        monkeypatch.delenv(name)
     monkeypatch.setattr(client, "_disabled_reason", None)
     yield runtime
     monkeypatch.setattr(client, "_disabled_reason", None)
@@ -130,6 +133,22 @@ def test_protocol_round_trip_over_a_real_socket(no_embedder_load: None) -> None:
         time.sleep(0.02)
     assert not socket_path().exists(), "shutdown removes the socket"
     assert not client.is_running(), "nothing answers after shutdown"
+
+
+def test_daemon_drops_inherited_proxies_but_keeps_the_env_file_one(
+    no_embedder_load: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spawning session's proxy dies before the daemon does, so only the user env file may set one."""
+    env_file = tmp_path / "env"
+    env_file.write_text("HTTPS_PROXY=http://stable-proxy:3128\n", encoding="utf-8")
+    monkeypatch.setenv("ZEMBLE_ENV_FILE", str(env_file))
+    monkeypatch.setenv("HTTPS_PROXY", "http://localhost:8155")
+    monkeypatch.setenv("http_proxy", "http://localhost:8155")
+    monkeypatch.setenv("NO_PROXY", "localhost")
+    with running_server(watch=False, idle_minutes=0):
+        assert os.environ.get("HTTPS_PROXY") == "http://stable-proxy:3128", "the env file's proxy is applied"
+        assert "http_proxy" not in os.environ, "an inherited proxy of any case is dropped"
+        assert "NO_PROXY" not in os.environ, "the inherited bypass list goes with the proxies"
 
 
 def test_several_requests_share_one_connection(no_embedder_load: None) -> None:

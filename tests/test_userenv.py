@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
-from zemble.userenv import ENV_FILE_VAR, load_user_env, parse_env_lines, user_env_path
+from zemble.userenv import ENV_FILE_VAR, drop_proxy_settings, load_user_env, parse_env_lines, user_env_path
 
 
 def test_user_env_file_journey(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,3 +57,16 @@ def test_default_path_follows_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.delenv(ENV_FILE_VAR, raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     assert user_env_path() == tmp_path / "zemble" / "env"
+
+
+def test_drop_proxy_settings_removes_what_urllib_would_use(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every variable urllib reads as a proxy is removed, and nothing else is touched."""
+    for name in [name for name in os.environ if name.lower().endswith("_proxy")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("HTTPS_PROXY", "http://localhost:8155")
+    monkeypatch.setenv("all_proxy", "socks5://localhost:1080")
+    monkeypatch.setenv("No_Proxy", "localhost")
+    monkeypatch.setenv("PROXY_UNRELATED", "kept")
+    assert sorted(drop_proxy_settings()) == ["HTTPS_PROXY", "No_Proxy", "all_proxy"]
+    assert urllib.request.getproxies() == {}, "urllib sees no proxy afterwards"
+    assert os.environ["PROXY_UNRELATED"] == "kept", "a name that merely starts with PROXY stays"

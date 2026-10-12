@@ -49,6 +49,18 @@ def parse_env_lines(lines: list[str]) -> dict[str, str]:
     return values
 
 
+def drop_proxy_settings() -> list[str]:
+    """Remove every proxy variable from ``os.environ`` and return the names removed.
+
+    A proxy variable is any name ending in ``_proxy`` in any case, which is urllib's own rule
+    (``getproxies_environment``), so nothing urllib would route through survives.
+    """
+    names = [name for name in os.environ if name.lower().endswith("_proxy")]
+    for name in names:
+        del os.environ[name]
+    return names
+
+
 def load_user_env(path: Path | None = None) -> dict[str, str]:
     """Apply the env file to ``os.environ`` for keys not already set; return what was applied.
 

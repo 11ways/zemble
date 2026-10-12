@@ -67,7 +67,7 @@ from zemble.refusal import Refused
 from zemble.runtime.identity import identity, status_payload
 from zemble.runtime.memory import release_free_heap
 from zemble.types import ContentType
-from zemble.userenv import load_user_env, user_env_path
+from zemble.userenv import drop_proxy_settings, load_user_env, user_env_path
 from zemble.utils import describe_unresolved_location, format_results, is_git_url
 
 logger = logging.getLogger(__name__)
@@ -1197,9 +1197,16 @@ async def run(max_indexes: int | None = None, idle_minutes: int | None = None, w
     :param watch: Whether to watch loaded roots.
     :raises SocketInUse: If another daemon is already listening on this socket.
     """
+    # AIDEV-NOTE: the daemon outlives the process that spawned it, so a proxy from that
+    # process's environment (an agent session's per-session proxy) dies under it and every
+    # outbound request is refused. Drop inherited proxies before the user env file is read,
+    # so a proxy the daemon really needs is configured there, where it is stable.
+    dropped_proxies = drop_proxy_settings()
     # AIDEV-NOTE: an old MCP client inherits the loaded flag but not settings added since it
     # started. An explicit path bypasses that flag; genuine shell environment overrides still win.
     load_user_env(user_env_path())
+    if dropped_proxies:
+        logger.info("Ignoring inherited proxy settings %s; set a daemon proxy in %s", dropped_proxies, user_env_path())
     # A daemon must never route its own work through a daemon client: that is a deadlock
     # on its own socket, and every shared code path (graph ensure, search) can reach one.
     client.disable_for_this_process("running inside the daemon")

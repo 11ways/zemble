@@ -304,6 +304,14 @@ A socket with a dead owner is detected (connect fails, pidfile pid is gone) and
 removed before a new daemon starts; a pidfile owned by a live process is left alone,
 so a daemon that is still starting is never pulled out from under itself.
 
+The daemon outlives the process that started it, so it does not keep that process's proxy
+settings: at startup it drops every `*_proxy` variable (any case, urllib's own rule) before
+reading the user env file (`~/.config/zemble/env`). An agent session's per-session proxy
+would otherwise die with the session and leave every embedding request refused. A proxy the
+daemon really needs goes in the env file. Every embedding request reads the proxy
+variables at the moment it is made, and a connection that fails through a proxy names that
+proxy in its error, so a dead proxy never reads as a dead server.
+
 ## Fallback rules
 
 Daemon-enabled clients never fall back to a local index. The explicit `--no-daemon`

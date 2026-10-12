@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,7 +16,7 @@ import pytest
 from zemble import ZembleIndex
 from zemble.embedding import http as embedding_http
 from zemble.embedding.cache import CachingEmbedder
-from zemble.embedding.http import EmbeddingRequestError, batched
+from zemble.embedding.http import EmbeddingRequestError, batched, post_json
 from zemble.embedding.openai_compat import OpenAICompatibleEmbedder
 from zemble.embedding.registry import parse_embedder_spec
 from zemble.embedding.voyage import VoyageEmbedder
@@ -172,6 +174,24 @@ def test_gives_up_after_five_tries(provider: FakeProvider, monkeypatch: pytest.M
     with pytest.raises(EmbeddingRequestError, match="gave up after 5 attempts"):
         embedder.embed_documents(["x"])
     assert len(provider.requests) == 5
+
+
+def test_refused_connection_names_the_proxy_it_went_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dead proxy must not read as a dead server: the error names it, without its credentials."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    for name in [name for name in os.environ if name.lower().endswith("_proxy")]:
+        monkeypatch.delenv(name)
+    url = f"http://127.0.0.1:{closed_port}/v1/queries"
+    with pytest.raises(EmbeddingRequestError) as direct:
+        post_json(url, {}, {})
+    assert "via proxy" not in str(direct.value), "a direct connection names no proxy"
+    monkeypatch.setenv("HTTP_PROXY", f"http://user:secret@127.0.0.1:{closed_port}")
+    with pytest.raises(EmbeddingRequestError) as proxied:
+        post_json("http://embed.example/v1/queries", {}, {})
+    assert f"(via proxy http://127.0.0.1:{closed_port})" in str(proxied.value), "the proxy is named"
+    assert "secret" not in str(proxied.value), "proxy credentials never reach the message"
 
 
 def test_4xx_surfaces_the_provider_message(provider: FakeProvider, monkeypatch: pytest.MonkeyPatch) -> None:
