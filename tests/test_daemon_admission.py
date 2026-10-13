@@ -1,6 +1,7 @@
 """Concurrent immutable reads, bounded queueing and detached construction journeys."""
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -148,22 +149,72 @@ async def test_graph_waiters_join_and_a_deadline_leaves_construction_observable(
 
 
 @pytest.mark.anyio
-async def test_a_job_outliving_its_lifetime_fails_every_waiter_instead_of_asking_a_retry(tmp_path, monkeypatch):
-    """Busy means "wait longer"; a construction that was stopped is a failure, and retrying restarts it."""
-    from zemble.daemon import graph_jobs
+async def test_a_published_graph_answers_while_its_refresh_runs_on(tmp_path, monkeypatch):
+    """The first request after a daemon start reads the published graph; it never waits for the refresh."""
     from zemble.graph import store
 
     monkeypatch.setattr(store, "graph_ancestor", lambda root: None)
-    monkeypatch.setattr(graph_jobs, "CONSTRUCTION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(store, "graph_exists", lambda root: True)
     jobs = GraphJobs(asyncio.Lock(), 4096)
+    root = str(tmp_path)
+    finish = asyncio.Event()
 
     async def build_once(path):
-        await asyncio.Event().wait()
+        jobs.states[path]["state"] = "building"
+        await finish.wait()
+        jobs.generations[path] = jobs.generations.get(path, 0) + 1
+        jobs.states[path]["state"] = "ready"
 
     monkeypatch.setattr(jobs, "_build_once", build_once)
-    with pytest.raises(RuntimeError, match="exceeded"):
-        await jobs.ensure(str(tmp_path), time.monotonic() + 5)
-    assert jobs.status()["jobs"][0]["state"] == "failed"
+    await asyncio.wait_for(jobs.ensure(root, time.monotonic() + 0.01), 0.5)
+    assert root in jobs.ready, "the published generation serves at once"
+    await asyncio.sleep(0.05)
+    assert jobs.status()["jobs"][0]["state"] == "building", "the refresh was started, not skipped"
+    assert root in jobs.jobs, "the refresh outlives the caller that started it"
+    finish.set()
+    await jobs.jobs[root]
+    assert jobs.generations[root] == 1, "the refresh still publishes a new generation"
+
+
+@pytest.mark.anyio
+async def test_a_full_construction_queue_still_serves_a_published_graph(tmp_path, monkeypatch):
+    """Only a root with nothing to read is refused when eight constructions are already queued."""
+    from zemble.graph import store
+
+    monkeypatch.setattr(store, "graph_ancestor", lambda root: None)
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+    blocker = asyncio.Event()
+    jobs.jobs = {f"/other/{n}": asyncio.create_task(blocker.wait()) for n in range(8)}
+    monkeypatch.setattr(store, "graph_exists", lambda root: True)
+    await jobs.ensure(str(tmp_path / "published"), time.monotonic() + 1)
+    monkeypatch.setattr(store, "graph_exists", lambda root: False)
+    with pytest.raises(AdmissionBusy, match="queue is full"):
+        await jobs.ensure(str(tmp_path / "unbuilt"), time.monotonic() + 1)
+    blocker.set()
+    await asyncio.gather(*jobs.jobs.values())
+
+
+@pytest.mark.anyio
+async def test_a_legacy_graph_question_is_answered_during_a_slow_refresh(tmp_project, monkeypatch):
+    """The reported failure: after a daemon start, an old client's 25 s deadline met a minutes-long refresh."""
+    from zemble.graph import build_graph
+
+    build_graph(str(tmp_project))
+    instance = server.Daemon(watch=False)
+    started = asyncio.Event()
+
+    async def endless_refresh(root):
+        instance.graphs.states[root]["state"] = "building"
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(instance.graphs, "_build_once", endless_refresh)
+    request = {"cmd": "graph", "args": {"path": str(tmp_project), "command": "definition", "symbol": "authenticate"}}
+    response = await asyncio.wait_for(instance.handle(request), 10)
+    assert response["ok"], response
+    assert "auth.py" in json.dumps(response["result"]), "answered from the published graph"
+    assert started.is_set(), "the refresh is running beside the answer"
+    await instance.graphs.close()
 
 
 @pytest.mark.anyio

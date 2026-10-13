@@ -33,17 +33,26 @@ one, by default that whole maximum, so a cold request BLOCKS until the shared in
 graph construction it joined is done instead of answering busy; only a request naming
 no deadline (an older client) gets the 25000 ms legacy default. A full queue or expired
 deadline returns retry information (`retry_after_ms`) instead of starting a client-side
-index. A graph job that outlives its own lifetime (the same 900 s) is reported to every
-joined caller as a failure, not as busy. Status reports actual active reads, including
-work whose caller has stopped waiting.
+index. Status reports actual active reads, including work whose caller has stopped waiting.
+
+A root whose graph is already published never makes a request wait: the first request
+after a daemon start marks the published graph ready, starts its refresh, and answers from
+the published generation while the refresh runs, exactly as reads do during a watcher
+refresh. Only a root with no readable graph at all (a first build, or a corrupt store being
+rebuilt) has callers wait for construction. On zenit-workspace a refresh after a burst of
+gradle builds (which rewrite the javac facts files) measured 162 s and 478 s, and one in
+the daemon passed 900 s; the first request after a restart used to wait for that.
 
 Cold graph preparation owns no read slot. Callers join one construction job per
 canonical root; their deadlines cannot cancel it or block unrelated warm searches.
-The worker has its own bounded lifetime and private-memory limit, writes through
-the existing graph publication protocol, and is reaped before the job completes.
-Watcher changes arriving during construction coalesce into a bounded follow-up pass.
-`graph_construction.jobs` reports queued/building/ready/failed/cancelled states,
-worker PID, budget, elapsed/build time and peak worker RSS. Stop closes graph jobs
+A construction job has no time limit: one killed at a deadline discarded its work, and
+the next attempt redid the same work and died the same way, so the graph stopped moving
+(it stayed ten hours stale). The worker is bounded by its private-memory limit, writes
+through the existing graph publication protocol, and is reaped before the job completes.
+Watcher changes arriving during construction coalesce into a bounded follow-up pass; the
+watcher waits its refresh out. A full construction queue (eight jobs) refuses only a root
+with nothing to read. `graph_construction.jobs` reports queued/building/ready/failed/cancelled
+states, worker PID, budget, elapsed/build time and peak worker RSS. Stop closes graph jobs
 and drains running reads before exiting.
 
 Repeated identical `home` and graph questions join one read computation and reuse

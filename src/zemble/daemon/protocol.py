@@ -27,7 +27,7 @@ START_TIMEOUT_SECONDS = 10.0
 #: How long a client waits for the socket itself, once it exists.
 CONNECT_TIMEOUT_SECONDS = 5.0
 #: The longest one request waits for shared construction (an index load or a graph job) before the
-#: daemon answers busy. THE bound: a graph job's own lifetime and the largest `deadline_ms` are this.
+#: daemon answers busy; the largest `deadline_ms` is this. The construction itself runs on.
 CONSTRUCTION_WAIT_SECONDS = 900.0
 #: How long past its deadline a client keeps the socket open, so the daemon's answer still arrives.
 ANSWER_GRACE_SECONDS = 5.0

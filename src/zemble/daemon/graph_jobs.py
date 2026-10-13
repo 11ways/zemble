@@ -1,4 +1,4 @@
-"""Single-flight graph construction in a bounded-lifetime process beside the serving index."""
+"""Single-flight graph construction in a memory-bounded process beside the serving index."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from typing import Any
 
 from zemble.daemon.admission import AdmissionBusy
 from zemble.daemon.memory import MIB, MemoryRefused, private_mb
-from zemble.daemon.protocol import CONSTRUCTION_WAIT_SECONDS
 
 TOTAL_MEMORY_ENV = "ZEMBLE_DAEMON_TOTAL_MEMORY_MB"
 GRAPH_MEMORY_ENV = "ZEMBLE_GRAPH_BUILD_MEMORY_MB"
@@ -42,22 +41,55 @@ class GraphJobs:
         self.paths: dict[str, list[str] | None] = {}
         self.pending: dict[str, set[str] | None] = {}
 
-    async def ensure(self, root: str, deadline: float, *, refresh: bool = False, changed_paths: Any = None) -> None:
-        """Join construction without letting a client timeout cancel shared work."""
-        from zemble.graph.store import graph_ancestor, graph_covers
+    async def ensure(
+        self, root: str, deadline: float | None, *, refresh: bool = False, changed_paths: Any = None
+    ) -> None:
+        """Join construction without letting a client timeout cancel shared work.
 
-        root = str(Path(root).resolve())
+        A root that already has a published graph is never waited for: its first request starts
+        the refresh and reads the published generation meanwhile, as every later one does.
+
+        :param deadline: When this caller stops waiting (``time.monotonic()``); None waits it out.
+        """
+        from zemble.graph.store import graph_exists
+
+        if str(Path(root).resolve()) in self.ready and not refresh:
+            return
+        root = await self._graph_root(root)
         if root in self.ready and not refresh:
             return
+        if root not in self.ready and await asyncio.to_thread(graph_exists, root):
+            # AIDEV-NOTE: a refresh of a large, busy workspace (javac facts rewritten by every build)
+            # took 3 to 15+ minutes; making the first request after a daemon start wait for it
+            # turned every graph question into "busy, retry". The published graph answers now.
+            self.ready.add(root)
+        task = self._start(root, refresh=refresh, changed_paths=changed_paths)
+        if task is None or (root in self.ready and not refresh):
+            return
+        await self._join(root, task, deadline)
+
+    @staticmethod
+    async def _graph_root(path: str) -> str:
+        """Resolve a path to the root whose graph answers for it: its own, or a covering ancestor's."""
+        from zemble.graph.store import graph_ancestor, graph_covers
+
+        root = str(Path(path).resolve())
         ancestor = await asyncio.to_thread(graph_ancestor, root)
         if ancestor is not None and await asyncio.to_thread(graph_covers, *ancestor):
             root = ancestor[0]
-        root = str(Path(root).resolve())
-        if root in self.ready and not refresh:
-            return
+        return str(Path(root).resolve())
+
+    def _start(self, root: str, *, refresh: bool, changed_paths: Any) -> asyncio.Task[Any] | None:
+        """Start the root's construction, or fold this change set into the one already running.
+
+        :return: The job to join, or None when the queue is full and a published graph answers.
+        :raises AdmissionBusy: When the queue is full and the caller has nothing to read meanwhile.
+        """
         task = self.jobs.get(root)
         if task is None:
             if sum(not task.done() for task in self.jobs.values()) >= 8:
+                if root in self.ready and not refresh:
+                    return None
                 raise AdmissionBusy("graph construction queue is full")
             self.states[root] = {"root": root, "state": "queued", "queued_at": time.time()}
             # AIDEV-NOTE: refresh replaces a published graph beside its readers, just like
@@ -74,34 +106,31 @@ class GraphJobs:
                 paths.update(str(path) for path in changed_paths)
                 if len(paths) > 4096:
                     self.pending[root] = None
-        await self._join(root, task, deadline)
+        return task
 
     @staticmethod
-    async def _join(root: str, task: asyncio.Task[Any], deadline: float) -> None:
+    async def _join(root: str, task: asyncio.Task[Any], deadline: float | None) -> None:
         """Wait for a shared job until this caller's deadline, never cancelling it."""
         try:
-            async with asyncio.timeout_at(deadline) as waited:
+            async with asyncio.timeout_at(deadline):
                 await asyncio.shield(task)
         except TimeoutError as exc:
-            if not waited.expired():
-                # The job itself outlived its lifetime: a failure every joined caller shares, and
-                # "retry" would only start the same construction again.
-                raise RuntimeError(f"graph construction for {root} exceeded {CONSTRUCTION_WAIT_SECONDS:.0f} s") from exc
             raise AdmissionBusy(f"graph construction pending for {root}; inspect status and retry") from exc
 
     async def _build(self, root: str) -> None:
-        """Drain a bounded follow-up change set before publishing this job as complete."""
+        """Drain a bounded follow-up change set before publishing this job as complete.
+
+        AIDEV-NOTE: no lifetime. A job killed at a deadline discards everything it did, and the
+        next attempt redoes the same work and dies the same way: the graph never moves again.
+        Waiters are bounded by their own deadline, the worker by its private-memory limit.
+        """
         try:
-            async with asyncio.timeout(CONSTRUCTION_WAIT_SECONDS):
-                while True:
-                    await self._build_once(root)
-                    if root not in self.pending:
-                        return
-                    paths = self.pending.pop(root)
-                    self.paths[root] = sorted(paths) if paths is not None else None
-        except TimeoutError:
-            self.states[root].update(state="failed", error="graph construction lifetime expired")
-            raise
+            while True:
+                await self._build_once(root)
+                if root not in self.pending:
+                    return
+                paths = self.pending.pop(root)
+                self.paths[root] = sorted(paths) if paths is not None else None
         finally:
             self.jobs.pop(root, None)
             self.paths.pop(root, None)

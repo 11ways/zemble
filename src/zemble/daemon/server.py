@@ -40,7 +40,6 @@ from zemble.daemon.memory import (
 )
 from zemble.daemon.protocol import (
     ACCEPTS_BUSY_FIELD,
-    CONSTRUCTION_WAIT_SECONDS,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_MAX_INDEXES,
     CommandBusy,
@@ -688,9 +687,9 @@ class Daemon:
             return None
         started = time.monotonic()
         try:
-            await self.graphs.ensure(
-                root, time.monotonic() + CONSTRUCTION_WAIT_SECONDS, refresh=True, changed_paths=changed_paths
-            )
+            # The watcher waits its refresh out: no client is behind it, and a refresh it gave up on
+            # would still run, with this log line claiming it had failed.
+            await self.graphs.ensure(root, None, refresh=True, changed_paths=changed_paths)
         except Exception:
             logger.error("The symbol graph for %s is now STALE: its refresh failed", root, exc_info=True)
             return None
