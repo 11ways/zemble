@@ -19,7 +19,7 @@ from zemble.index.chunk_store import resolve_chunk
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.mcp import create_server, serve
 from zemble.types import Chunk, ContentType, SearchResult
-from zemble.utils import format_results, is_git_url
+from zemble.utils import format_results, is_git_url, relative_scores
 
 
 def _tool_text(result: Any) -> str:
@@ -121,6 +121,7 @@ def test_format_results(max_snippet_lines: int | None, has_content: bool, conten
     results = [SearchResult(chunk=c, score=round(0.1 * (i + 1), 3)) for i, c in enumerate(chunks)]
     out = format_results("foo", results, max_snippet_lines)
     assert out["query"] == "foo"
+    assert [entry["score"] for entry in out["results"]] == [33, 67, 100], "scores read as percent of the best"
     for entry in out["results"]:
         assert "file_path" in entry
         assert "start_line" in entry
@@ -133,6 +134,22 @@ def test_format_results(max_snippet_lines: int | None, has_content: bool, conten
                 assert entry[content_key].count("\n") < max_snippet_lines
         else:
             assert "content" not in entry
+
+
+@pytest.mark.parametrize(
+    ("scores", "expected"),
+    [
+        ([], []),
+        ([0.0186, 0.0164, 0.0001], [100, 88, 1]),
+        ([0.9, -0.2], [100, 1]),
+        ([-1.0, -3.0, -2.0], [100, 1, 50]),
+        ([-2.0, -2.0], [100, 100]),
+    ],
+    ids=["empty", "fused", "negative_under_positive", "all_logits", "all_equal"],
+)
+def test_relative_scores(scores: list[float], expected: list[int]) -> None:
+    """Printed scores are integers from 1 to 100, the best being 100, whatever the raw scale."""
+    assert relative_scores(scores) == expected
 
 
 @pytest.mark.anyio
@@ -297,7 +314,7 @@ async def test_tool_index_failure(cache: IndexCache, tool: str, args: dict[str, 
             "search",
             [SearchResult(chunk=make_chunk("def bar(): pass", "src/bar.py"), score=0.9)],
             None,
-            ["bar", "0.9"],
+            ["bar", '"score": 100'],
             id="search_with_results",
         ),
         pytest.param(
@@ -315,7 +332,7 @@ async def test_tool_index_failure(cache: IndexCache, tool: str, args: dict[str, 
             "find_related",
             [SearchResult(chunk=make_chunk("class Foo: pass", "src/foo.py"), score=0.8)],
             [make_chunk("class Foo: pass", "src/foo.py")],
-            ["src/foo.py:1", "0.8"],
+            ["src/foo.py:1", '"score": 100'],
             id="find_related_with_results",
         ),
         pytest.param(

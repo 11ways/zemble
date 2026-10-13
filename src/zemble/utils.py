@@ -65,6 +65,25 @@ def describe_unresolved_location(index: ZembleIndex, file_path: str, line: int) 
     return f"No indexed file matches {file_path!r}. Did you mean {nearest!r}? {hint}"
 
 
+def relative_scores(scores: list[float]) -> list[int]:
+    """Express scores as integers from 1 to 100, the best one being 100.
+
+    Raw scores live on scales that mean nothing outside one result list (fused reciprocal
+    ranks around 0.016, cosines, reranker logits), so only their ratio to the best is kept.
+    A non-positive score under a positive best reads 1; when no score is positive (a logit
+    reranker), the list is min-max scaled instead, since a ratio has no meaning there.
+    """
+    if not scores:
+        return []
+    best = max(scores)
+    if best > 0:
+        return [min(100, max(1, round(100 * score / best))) for score in scores]
+    spread = best - min(scores)
+    if spread == 0:
+        return [100] * len(scores)
+    return [max(1, round(100 * (score - min(scores)) / spread)) for score in scores]
+
+
 def format_results(query: str, results: list[SearchResult], max_snippet_lines: int | None = None) -> dict[str, Any]:
     """Render results as a flat JSONable object.
 
@@ -73,12 +92,12 @@ def format_results(query: str, results: list[SearchResult], max_snippet_lines: i
     max_snippet_lines=N>0  → first N lines of content.
     """
     formatted = []
-    for r in results:
+    for r, score in zip(results, relative_scores([r.score for r in results]), strict=True):
         entry: dict[str, Any] = {
             "file_path": r.chunk.file_path,
             "start_line": r.chunk.start_line,
             "end_line": r.chunk.end_line,
-            "score": r.score,
+            "score": score,
         }
         if max_snippet_lines is None:
             entry["content"] = r.chunk.content

@@ -46,7 +46,7 @@ def test_embedding_confirmation_requires_no_daemon(monkeypatch: pytest.MonkeyPat
 @pytest.mark.parametrize(
     "argv, expected_in_output",
     [
-        (["zemble", "search", "query text", "/some/path"], ["query text", "0.9"]),
+        (["zemble", "search", "query text", "/some/path"], ["query text", '"score": 100']),
         (["zemble", "search", "nothing", "/some/path", "--top-k", "3"], ["No results found"]),
     ],
 )
@@ -74,7 +74,7 @@ def test_cli_search(
 @pytest.mark.parametrize(
     ("scenario", "expected_stdout", "expected_stderr", "expected_exit_code"),
     [
-        ("with_results", ["src/bar.py", "0.8"], None, None),
+        ("with_results", ["src/bar.py", '"score": 100'], None, None),
         ("no_results", ["No related chunks found"], None, None),
         ("unknown_chunk", [], "No indexed file matches 'elsewhere/bar.py'. Did you mean 'src/bar.py'?", 1),
     ],
