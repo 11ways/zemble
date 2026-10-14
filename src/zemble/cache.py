@@ -157,6 +157,47 @@ def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[Conten
         return False
 
 
+def compatible_cache(
+    path: str,
+    embedder_id: str,
+    content: Sequence[ContentType],
+    capsules: CapsuleOptions | None = None,
+    exclude: Sequence[str] = (),
+) -> Path | None:
+    """Return the stored index path built with these parameters, without checking it for staleness.
+
+    :param path: Source path or git URL the index was built from.
+    :param embedder_id: The normalized spec string of the requested embedder.
+    :param content: The requested content types.
+    :param capsules: The requested context-capsule configuration.
+    :param exclude: Extra gitignore-style patterns the build was told to skip.
+    :return: The index path, or None if none was stored with these parameters.
+    """
+    found = _compatible_metadata(path, embedder_id, content, capsules, exclude)
+    return found[0] if found is not None else None
+
+
+def _compatible_metadata(
+    path: str,
+    embedder_id: str,
+    content: Sequence[ContentType],
+    capsules: CapsuleOptions | None,
+    exclude: Sequence[str],
+) -> tuple[Path, dict] | None:
+    """Return a compatible stored index's path with its metadata, or None."""
+    index_path = find_index_from_cache_folder(path, content, exclude)
+    if not index_path.exists():
+        return None
+    persistence_path = PersistencePath.from_path(index_path)
+    if persistence_path.non_existing():
+        return None
+    with open(persistence_path.metadata, encoding="utf-8") as f:
+        metadata = json.load(f)
+    if not _metadata_matches(metadata, embedder_id, content, CapsuleOptions.resolve(capsules).key):
+        return None
+    return index_path, metadata
+
+
 def get_validated_cache(
     path: str,
     embedder_id: str,
@@ -173,19 +214,10 @@ def get_validated_cache(
     :param exclude: Extra gitignore-style patterns the build was told to skip.
     :return: The reusable index path, or None if it must be rebuilt.
     """
-    index_path = find_index_from_cache_folder(path, content, exclude)
-    if not index_path.exists():
+    found = _compatible_metadata(path, embedder_id, content, capsules, exclude)
+    if found is None:
         return None
-
-    persistence_path = PersistencePath.from_path(index_path)
-    if persistence_path.non_existing():
-        return None
-
-    with open(persistence_path.metadata, encoding="utf-8") as f:
-        metadata = json.load(f)
-    if not _metadata_matches(metadata, embedder_id, content, CapsuleOptions.resolve(capsules).key):
-        return None
-
+    index_path, metadata = found
     if is_git_url(str(path)):
         return index_path
 

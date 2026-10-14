@@ -106,3 +106,17 @@ def format_results(query: str, results: list[SearchResult], max_snippet_lines: i
             entry["content"] = "\n".join(lines[:max_snippet_lines])
         formatted.append(entry)
     return {"query": query, "results": formatted}
+
+
+def format_stats(path: str, index: ZembleIndex) -> dict[str, Any]:
+    """Render what an index holds and which embedder built it, as `stats` and `index` print it."""
+    stats = index.stats
+    return {
+        "path": path,
+        "embedder": stats.embedder,
+        "dimensions": stats.dimensions,
+        "indexed_files": stats.indexed_files,
+        "total_chunks": stats.total_chunks,
+        "content": [content.value for content in index.content],
+        "languages": stats.languages,
+    }

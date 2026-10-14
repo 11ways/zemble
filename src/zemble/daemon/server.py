@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from zemble.cache import (
+    compatible_cache,
     covering_content,
     find_index_from_cache_folder,
     load_manifest_for_incremental,
@@ -52,7 +53,7 @@ from zemble.daemon.protocol import (
     runtime_directory,
     socket_path,
 )
-from zemble.daemon.watch import IgnoreRules, RootWatcher
+from zemble.daemon.watch import RootWatcher, WatchSpec
 from zemble.embedding.base import Embedder
 from zemble.graph.facts import matches_facts_glob
 from zemble.index import ZembleIndex
@@ -67,7 +68,7 @@ from zemble.runtime.identity import identity, status_payload
 from zemble.runtime.memory import release_free_heap
 from zemble.types import ContentType
 from zemble.userenv import drop_proxy_settings, load_user_env, user_env_path
-from zemble.utils import describe_unresolved_location, format_results, is_git_url
+from zemble.utils import describe_unresolved_location, format_results, format_stats, is_git_url
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,8 @@ _GRAPH_EXTENSIONS = frozenset({".java"})
 #: How often the idle check runs.
 _IDLE_CHECK_SECONDS = 30.0
 _QUIET_SECONDS = 2.0
+#: The rebuild answer for a root whose watcher saw a change within the quiet window; the watcher runs it later.
+_STILL_CHANGING = "tree still changing"
 _MAX_CHANGED_PATHS = 4096
 
 
@@ -145,14 +148,36 @@ class ResidentCache(IndexCache):
     async def _build_tracked(
         self, source: str, ref: str | None, embedder: Embedder, cache_key: CacheKey, exclude: Sequence[str] = ()
     ) -> ZembleIndex:
-        """Start collecting changes before entering the construction thread."""
+        """Watch the root before chunking; a watched root with a stored index starts from it, unbuilt.
+
+        AIDEV-NOTE: catching a stored index up before answering made a cold request wait for a scan
+        of every file plus whatever changed while no daemon ran: 58 s on the zenit workspace, past
+        a 60 s caller. The stored generation answers at once; the catch-up is the full rescan the
+        watcher queues once its watches are registered, which waits for this load to finish.
+        """
         self._on_build(cache_key)
+        if self.watch_owned and not is_git_url(source):
+            stored = await asyncio.to_thread(_load_stored, cache_key, embedder, exclude)
+            if stored is not None:
+                return stored
         return await super()._build_tracked(source, ref, embedder, cache_key, exclude)
 
     async def _evict_if_stale(self, cache_key: CacheKey) -> None:
         """Leave freshness to the watcher instead of rebuilding a churning tree from a query."""
         if not self.watch_owned:
             await super()._evict_if_stale(cache_key)
+
+
+def _load_stored(cache_key: CacheKey, embedder: Embedder, exclude: Sequence[str]) -> ZembleIndex | None:
+    """Load a root's compatible stored index as it is, or None when it has none worth loading."""
+    stored = compatible_cache(cache_key[0], embedder.model_id, cache_key[1], exclude=exclude)
+    if stored is None:
+        return None
+    try:
+        return ZembleIndex.load_from_disk(stored, embedder=embedder)
+    except (FileNotFoundError, ValueError) as exc:
+        logger.warning("The stored index of %s is unreadable (%s); building it instead", cache_key[0], exc)
+        return None
 
 
 def _env_int(name: str, default: int) -> int:
@@ -292,6 +317,8 @@ class Daemon:
         self.rebuilding: set[CacheKey] = set()
         self._rebuild_tasks: dict[CacheKey, asyncio.Task[dict[str, Any]]] = {}
         self._rebuild_changes: dict[CacheKey, set[Path] | None] = {}
+        #: What the pass running for a root rescans: its named paths, or None for the whole tree.
+        self._rebuild_scope: dict[CacheKey, Sequence[Path] | None] = {}
         self._rebuild_graph: set[CacheKey] = set()
         self.last_rebuild: dict[CacheKey, dict[str, Any]] = {}
         #: Why a root's last rebuild did not happen, e.g. a refused paid embed. Kept until one succeeds.
@@ -454,9 +481,13 @@ class Daemon:
         root = Path(cache_key[0])
         if not root.is_dir():
             return
-        extensions = set(get_extensions(cache_key[1])) | _GRAPH_EXTENSIONS
-        rules = IgnoreRules(root, extensions, always=lambda path: matches_facts_glob(root, path))
-        watcher = RootWatcher(root, rules, lambda paths: self._on_change(cache_key, paths))
+        extensions = tuple(sorted(set(get_extensions(cache_key[1])) | _GRAPH_EXTENSIONS))
+        watcher = RootWatcher(
+            WatchSpec(root, extensions, facts=True),
+            lambda paths: self._on_change(cache_key, paths),
+            # Edits made before the watches existed were never seen: one full rescan covers them.
+            on_ready=lambda: self._note_change(cache_key, None),
+        )
         self.watchers[cache_key] = watcher
         watcher.start()
         logger.info("watching %s (%d extensions)", root, len(extensions))
@@ -487,6 +518,10 @@ class Daemon:
 
     async def _on_change(self, cache_key: CacheKey, paths: set[Path]) -> None:
         """Handle one coalesced change set for a watched root."""
+        self._note_change(cache_key, paths)
+
+    def _note_change(self, cache_key: CacheKey, paths: set[Path] | None) -> None:
+        """Queue a change set for a resident root's quiet-period rebuild; None means rescan everything."""
         if cache_key not in self.cache._tasks:
             return
         self.pending.add(cache_key)
@@ -502,6 +537,13 @@ class Daemon:
                 delay = self._changed_at[cache_key] + _QUIET_SECONDS - time.monotonic()
                 if delay > 0:
                     await asyncio.sleep(delay)
+                    continue
+                loading = self.cache._tasks[cache_key]
+                if not loading.done():
+                    # A rebuild skips a root whose first load is running and its change set would be
+                    # lost; apply it after that load instead. A failed load evicts the root.
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(loading)
                     continue
                 paths = self._watch_changes.pop(cache_key, set())
                 root = Path(cache_key[0])
@@ -544,6 +586,11 @@ class Daemon:
             task = asyncio.create_task(self._run_rebuild(cache_key, java_changed, changed_paths))
             self._rebuild_tasks[cache_key] = task
             task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        elif changed_paths is None:
+            # Joining a pass over named paths would answer a full rescan with a partial one: it follows
+            # that pass instead. A pass that already rescans everything is simply shared.
+            if self._rebuild_scope.get(cache_key, ()) is not None:
+                _merge_changes(self._rebuild_changes, cache_key, None)
         elif changed_paths:
             _merge_changes(self._rebuild_changes, cache_key, changed_paths)
         try:
@@ -552,6 +599,20 @@ class Daemon:
             if task.cancelled():
                 return {"skipped": "evicted before rebuild"}
             raise
+
+    async def bring_current(self, cache_key: CacheKey) -> dict[str, Any]:
+        """Rescan a resident root's index until a pass runs on a tree at rest, and return that pass's result.
+
+        A pass is skipped while the watcher still sees changes; it is then retried after the quiet
+        window rather than reported, because the caller asked for an index that is current. The
+        symbol graph is not part of it: on the zenit workspace its refresh took 107 s of a 125 s
+        `zemble index`, and `zemble graph build` is the command that asks for it.
+        """
+        while True:
+            result = await self.rebuild(cache_key, java_changed=False, changed_paths=None)
+            if result.get("skipped") != _STILL_CHANGING:
+                return result
+            await asyncio.sleep(_QUIET_SECONDS)
 
     async def _run_rebuild(
         self, cache_key: CacheKey, java_changed: bool, changed_paths: Sequence[Path] | None
@@ -565,8 +626,9 @@ class Daemon:
                     and time.monotonic() < self._changed_at.get(cache_key, 0) + _QUIET_SECONDS
                 ):
                     _merge_changes(self._watch_changes, cache_key, changed_paths)
-                    return {"skipped": "tree still changing"}
+                    return {"skipped": _STILL_CHANGING}
                 self.rebuilding.add(cache_key)
+                self._rebuild_scope[cache_key] = changed_paths
                 try:
                     async with self._load_lock:
                         result = await self._rebuild_once(
@@ -595,6 +657,7 @@ class Daemon:
             if self._rebuild_tasks.get(cache_key) is asyncio.current_task():
                 self._rebuild_tasks.pop(cache_key, None)
                 self._rebuild_changes.pop(cache_key, None)
+                self._rebuild_scope.pop(cache_key, None)
                 self.rebuilding.discard(cache_key)
                 self._rebuild_graph.discard(cache_key)
             if cache_key not in self.cache._tasks:
@@ -973,16 +1036,7 @@ async def _cmd_find_related(daemon: Daemon, args: dict[str, Any]) -> Any:
 async def _cmd_stats(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Report what one index holds."""
     _cache_key, index = await daemon.index_for(args)
-    stats = index.stats
-    return {
-        "path": args.get("path"),
-        "embedder": stats.embedder,
-        "dimensions": stats.dimensions,
-        "indexed_files": stats.indexed_files,
-        "total_chunks": stats.total_chunks,
-        "content": [content.value for content in index.content],
-        "languages": stats.languages,
-    }
+    return format_stats(str(args.get("path")), index)
 
 
 async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
@@ -1100,11 +1154,13 @@ async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
 
 
 async def _cmd_refresh(daemon: Daemon, args: dict[str, Any]) -> Any:
-    """Force a rebuild check for a root, loading it first if it is not resident."""
+    """Load a root, rescan it until a pass finds the tree at rest, and report it; `zemble index` asks this."""
     async with daemon._operation_lock:
         cache_key, _index = await daemon.index_for(args)
     del _index
-    return await daemon.rebuild(cache_key)
+    rebuild = None if is_git_url(cache_key[0]) else await daemon.bring_current(cache_key)
+    _key, index = await daemon.index_for(args)
+    return {**format_stats(str(args.get("path")), index), "root": cache_key[0], "rebuild": rebuild}
 
 
 async def _cmd_evict(daemon: Daemon, args: dict[str, Any]) -> Any:

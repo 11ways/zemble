@@ -77,12 +77,12 @@ one entry in that table. Nothing else has to change: the client is generic.
 | `status` | pid, uptime, RSS, request count, idle time, a `runtime` block (version, source root, revision, start time, `stale`, `note`), and per-index root/content/embedder/chunks/files/last-used/watching/rebuilding/last-rebuild, plus builds in flight and pending reindexes. |
 | `search` | The same payload `zemble search` and the MCP `search` tool print; honours `paths` and `exclude`. |
 | `find_related` | The same payload as `find-related`; a `file_path:line` that names no chunk answers `unresolved_location: true` with an error naming the nearest indexed path or the file's chunk spans. Honours `paths` and `exclude`. |
-| `stats` | What one index holds. |
+| `stats` | What one index holds. A cold root may answer from its stored generation while it is caught up. |
 | `graph` | `command: "ensure"` guarantees a fresh symbol graph; any other name is a provider query answered through `zemble.graph.mcp.answer`. |
 | `explain` | The evidence bundle `zemble explain` and the MCP `explain` tool render, built over the warm index and the daemon's graph; honours `budget`, `top_k`, `content`, `paths` and `exclude`. |
 | `outline` | The outline of a file or a type; an ambiguous or unknown target comes back as an error payload, not a failed command. |
 | `signatures` | A symbol's signature and its exactly resolved call sites, with the same refusal shape. |
-| `refresh` | Force a rebuild check for one root (loads it first if needed). |
+| `refresh` | Load one root, then rescan its index until a pass runs on a tree at rest (a pass the watcher postpones is retried after the quiet window), and answer the `stats` payload plus `root` and that pass's counts in `rebuild`. The symbol graph is left to `graph`. `zemble index` asks this. |
 | `evict` | Drop one root from memory and stop its watcher. |
 | `shutdown` | Stop after answering. |
 
@@ -181,11 +181,31 @@ relative to the repo it named, whichever root actually answers.
 
 ### Watching
 
-Each loaded local root is watched recursively with `watchfiles`. Events are filtered
+Each loaded local root is watched recursively with `watchfiles`, in a
+`zemble.daemon.watch_worker` process of its own. Registering a recursive watch holds
+the GIL for as long as the tree takes to walk: 5.5 s for the 108,817 directories of the
+zenit workspace, and up to 18 s inside a busy daemon, during which the event loop could
+answer nothing and an index load on another thread stalled. The worker writes one JSON
+line per relevant change set, and a `ready` line once every watch exists. Events are filtered
 through the *file walker's own* ignore rules: the same `.gitignore`/`.zembleignore`
 loader, the same default ignored directories, the same extension set (plus `.java`,
 so the symbol graph stays fresh). A watcher that disagreed with the indexer about
-what a source file is would either rebuild on noise or miss edits.
+what a source file is would either rebuild on noise or miss edits. The filter runs in the
+worker after each yield, not as watchfiles' `watch_filter`: watchfiles yields nothing while
+every change is filtered out, so a tree whose ignored files never stop changing (build
+output, the index's own cache) would never have reported ready.
+
+`ready` queues one full rescan of the root. Nothing was watching before that moment - not
+while the daemon was down, not during a cold build, not while the watches were registered -
+and the rescan is what finds those edits. A watcher rebuild that arrives while the root's
+first load or build is still running waits for it instead of being skipped.
+
+A cold request for a root that has a compatible stored index is answered from that index
+as it is, without first bringing it up to date: the up-to-date generation follows from that
+rescan, beside the one being served. On the zenit workspace this took a cold `dupes --kind
+architectural` from 58 s (past the push hook's 60 s limit) to the time of loading the stored
+index. A daemon without watching (`watch=False`) keeps building first, since nothing else
+would ever catch its index up.
 
 Events have a 500 ms debounce, but the callback only records paths and returns.
 Rebuilding waits for two seconds of relevant-event quiet, checked again after waiting
@@ -199,9 +219,9 @@ handed to `build_graph(changed_paths=...)`, where it replaces two walks: the sou
 walk and the `**/build/zemble/*.jsonl` discovery of the graph's facts files. The
 watcher can stand in for the second because its ignore rules always admit a facts
 file by name, whatever `.gitignore` says about the `build/` directory it lives in.
-The full walk is still what a cold build, a restarted daemon's first load and the CLI's
-cache validation use: a walk discovers changes, a watcher reports them, and only a reported
-set may skip the discovery.
+The full walk is still what a cold build, the rescan after `ready` and the CLI's cache
+validation use: a walk discovers changes, a watcher reports them, and only a reported set
+may skip the discovery.
 
 A named path is still judged the way the walk judges one - extension, `.gitignore`,
 readability - so a watcher that over-reports cannot get a file into the index that a

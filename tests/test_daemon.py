@@ -33,11 +33,11 @@ from zemble.daemon.protocol import (
     error_kind,
     socket_path,
 )
-from zemble.daemon.watch import IgnoreRules
+from zemble.daemon.watch import IgnoreRules, RootWatcher, WatchSpec
 from zemble.index.file_walker import walk_files
 from zemble.index.files import get_extensions
 from zemble.index.scope import WORK_LIMIT_ENV, estimate_tree
-from zemble.index_cache import compute_cache_key
+from zemble.index_cache import IndexCache, compute_cache_key
 from zemble.types import ContentType, IndexStats
 
 
@@ -600,6 +600,49 @@ def test_ignore_rules_honour_a_nested_gitignore(tmp_path: Path) -> None:
     assert rules.matches(nested / "shown.py"), "its sibling is still watched"
 
 
+async def _watch_until_ready(root: Path, while_waiting: Any = None) -> tuple[float, float]:
+    """Start a watcher on *root* and return (seconds until ready, longest event-loop stall meanwhile)."""
+    ready = asyncio.Event()
+
+    async def ignore(_paths: set[Path]) -> None:
+        return None
+
+    watcher = RootWatcher(WatchSpec(root, (".py",), facts=True), ignore, on_ready=ready.set)
+    started = last = time.monotonic()
+    stall = 0.0
+    watcher.start()
+    try:
+        while not ready.is_set():
+            assert time.monotonic() - started < 20, "the watcher never reported ready"
+            if while_waiting is not None:
+                while_waiting()
+            await asyncio.sleep(0.02)
+            now = time.monotonic()
+            stall, last = max(stall, now - last), now
+    finally:
+        watcher.stop()
+    return time.monotonic() - started, stall
+
+
+@pytest.mark.anyio
+async def test_starting_a_watcher_on_a_big_tree_never_stalls_the_event_loop(tmp_path: Path) -> None:
+    """Watchfiles holds the GIL while it registers a tree: 5.5 s for the zenit workspace, all of it a frozen daemon."""
+    for top in range(100):
+        for leaf in range(200):
+            (tmp_path / f"d{top}" / f"e{leaf}").mkdir(parents=True)
+    _seconds, stall = await _watch_until_ready(tmp_path)
+    assert stall < 0.25, f"the event loop stalled {stall:.2f} s while 20,000 directories were registered"
+
+
+@pytest.mark.anyio
+async def test_a_watcher_reports_ready_while_ignored_files_churn(tmp_path: Path) -> None:
+    """Readiness cannot wait for quiet: build output may never stop changing."""
+    (tmp_path / "build").mkdir()
+    churn = tmp_path / "build" / "output.log"
+    seconds, _stall = await _watch_until_ready(tmp_path, while_waiting=lambda: churn.write_text(str(time.time())))
+    assert seconds < 10, f"ready took {seconds:.1f} s under churn"
+
+
 def test_autostart_spawns_a_daemon_and_stop_removes_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """A command that needs a daemon starts one; nothing else ever does."""
     monkeypatch.setenv("ZEMBLE_DAEMON_IDLE_MINUTES", "1")
@@ -946,6 +989,95 @@ async def test_a_watched_edit_is_searchable_after_quiet(tmp_project: Path, monke
     assert results and results[0].chunk.file_path == "extra.py", "the edit is searchable"
     assert time.monotonic() - started >= server._QUIET_SECONDS
     daemon.shutdown()
+
+
+@pytest.mark.anyio
+async def test_refresh_answers_only_once_a_cold_root_is_current(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`zemble index` asks `refresh`: unlike a query, it must not answer from the stored generation."""
+    monkeypatch.setattr("zemble.graph.store.graph_present", lambda root: False)
+    earlier = _daemon_with_fake_embedder(watch=True)
+    await earlier.index_for({"path": str(tmp_project)})
+    earlier.shutdown()
+    (tmp_project / "offline.py").write_text("def edited_while_offline():\n    return 3\n", encoding="utf-8")
+
+    daemon = _daemon_with_fake_embedder(watch=True)
+    result = await server._cmd_refresh(daemon, {"path": str(tmp_project)})
+    resident = await daemon.cache.get(str(tmp_project))
+    daemon.shutdown()
+    assert any(hit.chunk.file_path == "offline.py" for hit in resident.search("edited_while_offline")), (
+        "the index refresh reported is already the caught-up one"
+    )
+    assert result["root"] == str(tmp_project) and result["indexed_files"] > 0, "it reports what the index holds"
+    assert "skipped" not in (result["rebuild"] or {}), "the reported pass really ran"
+
+
+@pytest.mark.anyio
+async def test_a_full_rescan_asked_of_a_running_pass_runs_after_it(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Joining a pass that rebuilds a few paths used to drop the full rescan the joiner asked for."""
+    daemon = _daemon_with_fake_embedder(watch=False)
+    cache_key, _index = await daemon.index_for({"path": str(tmp_project)})
+    passes: list[Any] = []
+    release = asyncio.Event()
+
+    async def rebuild_once(key: Any, *, java_changed: bool, changed_paths: Any) -> dict[str, Any]:
+        passes.append(changed_paths)
+        if len(passes) == 1:
+            await release.wait()
+        return {"added": 0, "changed": 0, "removed": 0, "ms": 0, "chunks": 1}
+
+    monkeypatch.setattr(daemon, "_rebuild_once", rebuild_once)
+    named = [tmp_project / "auth.py"]
+    first = asyncio.create_task(daemon.rebuild(cache_key, java_changed=False, changed_paths=named))
+    while not passes:
+        await asyncio.sleep(0)
+    joined = asyncio.create_task(daemon.rebuild(cache_key, java_changed=False, changed_paths=None))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, joined)
+    assert passes == [named, None], "the full rescan ran as a follow-up pass"
+
+
+@pytest.mark.anyio
+async def test_a_cold_watched_root_answers_from_its_stored_index_then_catches_up(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reported timeout: a cold request waited for a catch-up of every file changed while no daemon ran."""
+    monkeypatch.setattr("zemble.graph.store.graph_present", lambda root: False)
+    earlier = _daemon_with_fake_embedder(watch=True)
+    await earlier.index_for({"path": str(tmp_project)})
+    earlier.shutdown()
+    (tmp_project / "offline.py").write_text("def edited_while_offline():\n    return 3\n", encoding="utf-8")
+
+    built: list[str] = []
+    original = IndexCache._build_index
+
+    def recording(self: IndexCache, source: str, *args: Any) -> Any:
+        built.append(source)
+        return original(self, source, *args)
+
+    monkeypatch.setattr(IndexCache, "_build_index", recording)
+    daemon = _daemon_with_fake_embedder(watch=True)
+    cache_key, index = await daemon.index_for({"path": str(tmp_project)})
+    assert not built, "the stored index answered; nothing was built before the answer"
+    assert not any(hit.chunk.file_path == "offline.py" for hit in index.search("edited_while_offline")), (
+        "the answer came from the stored generation"
+    )
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        resident = await daemon.cache.get(str(tmp_project))
+        if any(hit.chunk.file_path == "offline.py" for hit in resident.search("edited_while_offline")):
+            break
+        await asyncio.sleep(0.1)
+    daemon.shutdown()
+    assert any(hit.chunk.file_path == "offline.py" for hit in resident.search("edited_while_offline")), (
+        "the background catch-up found the offline edit and swapped it in"
+    )
+    assert not built, "the catch-up was a rebuild beside the stored generation, not a cold build"
 
 
 @pytest.mark.anyio

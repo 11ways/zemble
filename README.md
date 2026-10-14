@@ -254,6 +254,9 @@ zemble search "authentication flow" ./my-project --exclude "vendor/" "*.min.js"
 # Find code similar to a known location
 zemble find-related src/auth.py 42 ./my-project
 
+# Index a folder now (or bring its index up to date), without searching it
+zemble index ./my-project                 # default: the current directory; --content all for docs and config too
+
 # What does this index hold?
 zemble stats ./my-project
 

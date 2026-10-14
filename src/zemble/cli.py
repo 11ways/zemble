@@ -38,32 +38,21 @@ from zemble.runtime.cli import STATUS_COMMANDS, add_status_parser, run_status
 from zemble.stats import format_savings_report
 from zemble.types import ContentType
 from zemble.userenv import load_user_env
-from zemble.utils import describe_unresolved_location, format_results, is_git_url
+from zemble.utils import describe_unresolved_location, format_results, format_stats, is_git_url
 from zemble.version import __version__
 
-_CLI_DISPATCH_ARGS = frozenset(
-    {
-        "search",
-        "find-related",
-        "install",
-        "uninstall",
-        "savings",
-        "stats",
-        "-h",
-        "--help",
-        "clear",
-        "--version",
-        "-V",
-        "graph",
-        "dupes",
-        *EVIDENCE_COMMANDS,
-        *HOME_COMMANDS,
-        *EMBED_STATUS_COMMANDS,
-        *EMBED_SERVER_COMMANDS,
-        *STATUS_COMMANDS,
-        "daemon",
+
+def _cli_dispatch_args(parser: argparse.ArgumentParser) -> frozenset[str]:
+    """Every first argument that selects the subcommand CLI over the MCP server: the parser's own words.
+
+    Derived rather than listed: a hand-kept list silently sent a newly declared subcommand to the MCP parser.
+    """
+    commands = {
+        name for action in parser._actions if isinstance(action, argparse._SubParsersAction) for name in action.choices
     }
-)
+    return frozenset(commands | set(parser._option_string_actions))
+
+
 _CLEAR_CHOICE = Literal["all", "index", "savings", "orphans", "embeddings"]
 
 #: Subcommands that own their own runner and return an exit code.
@@ -128,21 +117,34 @@ def _run_stats(path: str, content: list[ContentType], embedder: str | None = Non
     if remote is not None:
         print(json.dumps(remote))
         return
-    index = _load_index(path, content, embedder)
-    stats = index.stats
-    print(
-        json.dumps(
-            {
-                "path": path,
-                "embedder": stats.embedder,
-                "dimensions": stats.dimensions,
-                "indexed_files": stats.indexed_files,
-                "total_chunks": stats.total_chunks,
-                "content": [c.value for c in index.content],
-                "languages": stats.languages,
-            }
+    print(json.dumps(format_stats(path, _load_index(path, content, embedder))))
+
+
+def _run_index(path: str, content: list[ContentType], embedder: str | None = None, no_daemon: bool = False) -> None:
+    """Handle the `index` subcommand: build a folder's index, or bring it up to date, then report it.
+
+    Unlike `stats`, it does not return before the index is current: the daemon may answer `stats`
+    from a stored generation it is still catching up in the background.
+
+    :raises SystemExit: With status 1 when the daemon refused or deferred bringing it up to date.
+    """
+    remote = _via_daemon("refresh", {"path": path, "content": [c.value for c in content]}, no_daemon, embedder)
+    if remote is None:
+        # A local build validates the stored index against the tree, or builds it: it is current on return.
+        print(json.dumps(format_stats(path, _load_index(path, content, embedder))))
+        return
+    print(json.dumps(remote))
+    rebuild = remote.get("rebuild") or {}
+    if "refused" in rebuild or "deferred" in rebuild:
+        print(
+            f"{remote.get('root')} is NOT up to date: {rebuild.get('refused') or rebuild.get('deferred')}",
+            file=sys.stderr,
         )
-    )
+        sys.exit(1)
+
+
+#: The commands that load one index and report it, all taking (path, content, embedder, no_daemon).
+_INDEX_REPORTS = {"stats": _run_stats, "index": _run_index}
 
 
 def _filtered(index: ZembleIndex, path: str, paths: Sequence[str], exclude: Sequence[str]) -> ZembleIndex:
@@ -199,7 +201,7 @@ def main() -> None:
     for stream in (sys.stdout, sys.stderr):
         if isinstance(stream, io.TextIOWrapper):
             stream.reconfigure(errors="replace")
-    if len(sys.argv) > 1 and sys.argv[1] in _CLI_DISPATCH_ARGS:
+    if len(sys.argv) > 1 and sys.argv[1] in _cli_dispatch_args(_build_parser()):
         _cli_main()
     else:
         _mcp_main()
@@ -649,6 +651,13 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_confirm_arg(stats_p)
     _add_daemon_arg(stats_p)
 
+    index_p = sub.add_parser("index", help="Build a folder's index, or bring it up to date, and report what it holds.")
+    add_root_arg(index_p, nargs="?", default=".", help="Local path or git URL (default: current directory).")
+    _add_content_args(index_p)
+    _add_embedder_arg(index_p)
+    _add_confirm_arg(index_p)
+    _add_daemon_arg(index_p)
+
     clear_p = declare_no_root(sub.add_parser("clear", help="Clear the index cache."))
     clear_p.add_argument(
         "type",
@@ -774,8 +783,10 @@ def _cli_main() -> None:
             args.paths,
             args.exclude,
         )
-    elif args.command == "stats":
-        _run_stats(args.path, _resolve_content(args.content, args.include_text_files), args.embedder, args.no_daemon)
+    elif args.command in _INDEX_REPORTS:
+        _INDEX_REPORTS[args.command](
+            args.path, _resolve_content(args.content, args.include_text_files), args.embedder, args.no_daemon
+        )
     elif args.command == "find-related":
         _run_find_related(
             args.path,

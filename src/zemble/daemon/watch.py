@@ -8,8 +8,12 @@ edits, and gitignore semantics are not worth a second implementation.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import sys
+import time
 from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from pathspec import GitIgnoreSpec
@@ -31,6 +35,10 @@ logger = logging.getLogger(__name__)
 DEBOUNCE_MS = 500
 #: How often the watcher checks its stop event while idle.
 STEP_MS = 50
+#: The line a watch worker writes once every watch is registered.
+READY_LINE = "ready"
+#: Longest change-set line read from a worker: a branch switch can name every file of a workspace.
+_LINE_LIMIT = 64 * 1024 * 1024
 
 
 class IgnoreRules:
@@ -99,26 +107,61 @@ class IgnoreRules:
         return not ignored
 
 
+@dataclass(frozen=True)
+class WatchSpec:
+    """What one watcher watches: a root, the suffixes that count as source, and whether graph facts files count."""
+
+    root: Path
+    extensions: tuple[str, ...]
+    facts: bool = False
+
+    def rules(self) -> IgnoreRules:
+        """Build the ignore rules this spec describes."""
+        if not self.facts:
+            return IgnoreRules(self.root, self.extensions)
+        from zemble.graph.facts import matches_facts_glob
+
+        root = self.root
+        return IgnoreRules(root, self.extensions, always=lambda path: matches_facts_glob(root, path))
+
+    def to_json(self) -> str:
+        """Serialise the spec for a watch worker's command line."""
+        return json.dumps({"root": str(self.root), "extensions": sorted(self.extensions), "facts": self.facts})
+
+    @classmethod
+    def from_json(cls, text: str) -> WatchSpec:
+        """Read a spec written by :meth:`to_json`."""
+        raw = json.loads(text)
+        return cls(Path(raw["root"]), tuple(raw["extensions"]), bool(raw["facts"]))
+
+
 class RootWatcher:
-    """Watches one indexed root and reports coalesced sets of relevant changed paths."""
+    """Watches one indexed root and reports coalesced sets of relevant changed paths.
+
+    AIDEV-NOTE: the watches live in a `zemble.daemon.watch_worker` process. watchfiles registers a
+    recursive watch while holding the GIL, which on the zenit workspace froze the daemon's event
+    loop and starved every thread (an index load among them) for 5 to 18 s per root.
+    """
 
     def __init__(
         self,
-        root: Path,
-        rules: IgnoreRules,
+        spec: WatchSpec,
         on_change: Callable[[set[Path]], Awaitable[None]],
+        on_ready: Callable[[], None] | None = None,
     ) -> None:
         """Create a watcher.
 
-        :param root: Directory to watch recursively.
-        :param rules: The ignore rules deciding which events matter.
+        :param spec: The root to watch recursively and the rules deciding which events matter.
         :param on_change: Coroutine called with each coalesced set of changed paths.
+        :param on_ready: Called once every watch is registered; edits before that were not seen.
         """
-        self.root = root
-        self.rules = rules
+        self.spec = spec
+        self.root = spec.root
         self._on_change = on_change
-        self._stop = asyncio.Event()
+        self._on_ready = on_ready
+        self._stopping = False
         self._task: asyncio.Task[None] | None = None
+        self._process: asyncio.subprocess.Process | None = None
 
     def start(self) -> None:
         """Start watching in the background."""
@@ -126,38 +169,50 @@ class RootWatcher:
             self._task = asyncio.create_task(self._run(), name=f"zemble-watch:{self.root}")
 
     def stop(self) -> None:
-        """Ask the watcher to stop; the task ends on its next step."""
-        self._stop.set()
+        """Stop the worker and the task reading it."""
+        self._stopping = True
+        if self._process is not None and self._process.returncode is None:
+            self._process.kill()
         if self._task is not None:
             self._task.cancel()
             self._task = None
 
-    def _filter(self, _change: object, path: str) -> bool:
-        """Watchfiles filter: keep only paths the index would have covered."""
-        candidate = Path(path)
-        return self.rules.matches(candidate)
-
     async def _run(self) -> None:
-        """Feed coalesced change sets to the callback until stopped."""
-        from watchfiles import awatch
-
+        """Feed the worker's change sets to the callback until stopped."""
+        started = time.monotonic()
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "zemble.daemon.watch_worker",
+            self.spec.to_json(),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            limit=_LINE_LIMIT,
+        )
+        self._process = process
         try:
-            async for changes in awatch(
-                self.root,
-                watch_filter=self._filter,
-                debounce=DEBOUNCE_MS,
-                step=STEP_MS,
-                stop_event=self._stop,
-                recursive=True,
-            ):
-                paths = {Path(path) for _change, path in changes}
+            assert process.stdout is not None
+            async for raw in process.stdout:
+                line = raw.decode("utf-8").strip()
+                if line == READY_LINE:
+                    logger.info("watches ready under %s in %.1f s", self.root, time.monotonic() - started)
+                    if self._on_ready is not None:
+                        self._on_ready()
+                    continue
+                paths = {Path(path) for path in json.loads(line)}
                 if not paths:
                     continue
                 try:
                     await self._on_change(paths)
                 except Exception:
                     logger.exception("Rebuild after changes under %s failed", self.root)
+            code = await process.wait()
+            if not self._stopping:
+                logger.error("Watcher for %s stopped: its worker exited with %s", self.root, code)
         except asyncio.CancelledError:  # pragma: no cover - normal teardown
             raise
         except Exception:
             logger.exception("Watcher for %s stopped", self.root)
+        finally:
+            if process.returncode is None:
+                process.kill()

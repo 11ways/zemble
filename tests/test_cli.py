@@ -71,6 +71,41 @@ def test_cli_search(
         assert fragment in out
 
 
+def test_every_declared_subcommand_reaches_the_cli_not_the_mcp_server(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`main` picks CLI or MCP server from the first word; a hand-kept list once sent `index` to the MCP parser."""
+    parser = _build_parser()
+    commands = {
+        name for action in parser._actions if isinstance(action, argparse._SubParsersAction) for name in action.choices
+    }
+    assert "index" in commands
+    for command in sorted(commands):
+        monkeypatch.setattr(sys, "argv", ["zemble", command, "--help"])
+        with pytest.raises(SystemExit) as exit_info:
+            main()
+        assert exit_info.value.code == 0, f"{command} --help must exit cleanly"
+        assert f"usage: zemble {command}" in capsys.readouterr().out, f"{command} must reach its own subparser"
+
+
+def test_cli_index_builds_a_folder_and_reports_it_current(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`zemble index` builds a folder with no index, and after an edit reports the index with that edit in it."""
+    fake = FakeEmbedder()
+    monkeypatch.setattr("zemble.cli.resolve_embedder", lambda embedder=None, model_path=None: fake)
+    monkeypatch.setattr("zemble.index.index.resolve_embedder", lambda embedder=None, model_path=None: fake)
+    monkeypatch.setattr(sys, "argv", ["zemble", "index", str(tmp_project), "--no-daemon"])
+    _cli_main()
+    first = json.loads(capsys.readouterr().out)
+    assert first["indexed_files"] > 0 and first["total_chunks"] > 0, "a folder with no index is built"
+
+    (tmp_project / "later.py").write_text("def added_later():\n    return 1\n", encoding="utf-8")
+    _cli_main()
+    second = json.loads(capsys.readouterr().out)
+    assert second["indexed_files"] == first["indexed_files"] + 1, "the second run reports the index with the edit"
+
+
 @pytest.mark.parametrize(
     ("scenario", "expected_stdout", "expected_stderr", "expected_exit_code"),
     [
