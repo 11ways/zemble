@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from functools import cache, cached_property
@@ -22,6 +22,7 @@ from zemble.graph.model import (
     ANONYMOUS_MARKER,
     CALLABLE_KINDS,
     DECLARED_TYPE_KINDS,
+    CallTally,
     Edge,
     EdgeKind,
     EdgeTally,
@@ -50,12 +51,13 @@ if TYPE_CHECKING:  # pragma: no cover
 UNKNOWN_LANGUAGE = "unknown"
 
 #: What one whole-graph `collect` holds in private memory, measured as the `VmData` growth of a fresh process
-#: (javaweb, 122k symbols and 1.26M edges: 209 MiB; zenit, 247k and 2.69M: 321 MiB; zemble, 8.5k and 36k:
+#: (javaweb, 122k symbols and 1.26M edges: 209 MiB; zenit, 247k and 2.69M: 321 MiB as first measured, then
+#: re-measured at 599 MiB before the caller and call aggregates and 642 MiB with them; zemble, 8.5k and 36k:
 #: 22 MiB) and rounded up: the daemon sizes a read by these before starting it, so a miss on the high side
 #: costs an eviction or an in-process answer, and a miss on the low side would kill the read half way.
 READ_BASE_MB = 32.0
 READ_BYTES_PER_SYMBOL = 1536
-READ_BYTES_PER_EDGE = 64
+READ_BYTES_PER_EDGE = 100
 
 
 def read_estimate_mb(counts: RowCounts) -> float:
@@ -85,6 +87,10 @@ _NAME_SPLIT = re.compile(r"[.:/\\#]")
 
 #: Containers whose declared types count as top-level.
 _FILE_LEVEL = frozenset({SymbolKind.MODULE, SymbolKind.PACKAGE})
+
+#: One folded call tally of a callable: (the far end's home, see `HealthFacts.home_of`, resolution, a flag,
+#: a count); the flag is "from test" for a caller and "reads data" (`HealthFacts.reads_data`) for a call.
+HomeRow = tuple[str, Resolution, bool, int]
 
 
 @cache
@@ -132,7 +138,14 @@ class HealthFacts:
     may_override: set[str]
     #: Edges with no destination, by kind and the simple name they wrote.
     unresolved_names: dict[tuple[EdgeKind, str], int]
-    #: Edges leaving production files in the scope; empty without a declared `home.toml`.
+    #: The OVERRIDES, EXTENDS and IMPLEMENTS edges leaving the view's symbols, at any resolution.
+    links: list[Edge] = field(default_factory=list)
+    #: Per production callable, who calls it, as (caller's home, resolution, from test, callers) rows.
+    callers: dict[str, list[HomeRow]] = field(default_factory=dict)
+    #: Per production callable, the calls it writes on a non-type receiver (`CallTally`), as (callee's
+    #: home, resolution, reads data, calls) rows.
+    member_calls: dict[str, list[HomeRow]] = field(default_factory=dict)
+    #: Edges leaving production files in the scope, at any resolution.
     dependencies: list[FileDependency] = field(default_factory=list)
     #: Paths the report is restricted to, relative to `root`; empty means everything.
     paths: tuple[str, ...] = ()
@@ -146,6 +159,7 @@ class HealthFacts:
     #: The history window's commits per production file of the view, when the report measures history.
     history: HistoryFacts | None = None
     _modules: dict[str, str] = field(default_factory=dict)
+    _homes: dict[str, str] = field(default_factory=dict)
 
     def in_scope(self, file_path: str) -> bool:
         """Whether a path is inside one of the requested sub-paths."""
@@ -200,6 +214,56 @@ class HealthFacts:
     def container(self, symbol: Symbol) -> Symbol | None:
         """The symbol's declaring container, when the view holds it."""
         return self.symbols.get(symbol.container_id) if symbol.container_id else None
+
+    def home_of(self, symbol_id: str) -> str:
+        """The id of the outermost type declaration holding a symbol (itself included), else its file.
+
+        An id the view holds no symbol for (a caller outside a sub-directory view) is its own home.
+        """
+        home = self._homes.get(symbol_id)
+        if home is None:
+            symbol = self.symbols.get(symbol_id)
+            outermost = None
+            current = symbol
+            seen: set[str] = set()
+            while current is not None and current.id not in seen:
+                seen.add(current.id)
+                if current.kind in DECLARED_TYPE_KINDS:
+                    outermost = current
+                current = self.container(current)
+            home = outermost.id if outermost else symbol.file_path if symbol else symbol_id
+            self._homes[symbol_id] = home
+        return home
+
+    def reads_data(self, call: CallTally) -> bool:
+        """Whether a call reads an object's data: written on a named receiver, into a getter.
+
+        A getter takes no parameter and its body is boilerplate (`CallableMetrics.is_boilerplate`): the
+        reads Lanza and Marinescu's ATFD counts as attribute accesses. A one-statement callee taking
+        arguments is a command (`registry.register(x)`), not a read. A bare call is never one, nor is a call
+        on a chained receiver (a fluent builder's `.named()` acts on what a call just returned, not on an
+        object the method holds), nor a call into a callee the view holds no measurement for.
+        """
+        metric = self.metrics.get(call.callee_id)
+        callee = self.symbols.get(call.callee_id)
+        if call.bare or call.chained or metric is None or callee is None:
+            return False
+        return callee.arity == 0 and metric.is_boilerplate
+
+    @cached_property
+    def subtypes(self) -> dict[str, list[tuple[Symbol, Resolution]]]:
+        """Per type id, its direct production subtypes in the view over hierarchy edges, each at its strongest edge."""
+        strongest: dict[tuple[str, str], Resolution] = {}
+        for edge in self.links:
+            source = self.symbols.get(edge.src_id)
+            if edge.kind in HIERARCHY_KINDS and edge.dst_id and source is not None and not source.is_test:
+                pair = (edge.dst_id, source.id)
+                current = strongest.get(pair, edge.resolution)
+                strongest[pair] = max(current, edge.resolution, key=lambda level: level.strength)
+        found: dict[str, list[tuple[Symbol, Resolution]]] = defaultdict(list)
+        for (type_id, source_id), resolution in strongest.items():
+            found[type_id].append((self.symbols[source_id], resolution))
+        return dict(found)
 
     def in_contract(self, symbol: Symbol) -> bool:
         """Whether a symbol is a member of an interface, trait, protocol or annotation type."""
@@ -288,7 +352,7 @@ class HealthFacts:
         absolute = os.path.normpath(os.path.join(self.root, file_path))
         return Path(os.path.relpath(absolute, self._config_root)).as_posix()
 
-    def unmentioned(self, candidates: Sequence[Symbol], *, tests: bool) -> list[Symbol]:
+    def unmentioned(self, candidates: Sequence[Symbol], *, tests: bool, own_file: bool = True) -> list[Symbol]:
         """Keep the candidates whose name is written nowhere it could be referenced from, its own span aside.
 
         AIDEV-NOTE: the graph has no edge for a callable used as a VALUE (a dispatch table, `key=f`,
@@ -297,6 +361,7 @@ class HealthFacts:
         every file of the graph. Comments and strings count too, which only ever withholds a finding.
 
         :param tests: Whether a mention in test code counts.
+        :param own_file: Whether a mention in the candidate's own file, outside its own span, counts.
         """
         reach = {symbol.id: self.visibility(symbol) for symbol in candidates}
         wanted = {symbol.name for symbol in candidates if reach[symbol.id] is not Visibility.PRIVATE}
@@ -316,7 +381,7 @@ class HealthFacts:
             own = self.absolute(symbol.file_path)
             level = reach[symbol.id]
             elsewhere = [path for path in found.get(symbol.name, ()) if path != own and _reaches(level, own, path)]
-            if not elsewhere and not _written_outside(own, symbol):
+            if not elsewhere and not (own_file and _written_outside(own, symbol)):
                 kept.append(symbol)
         return kept
 
@@ -362,24 +427,54 @@ def collect(
         inbound=dict(inbound),
         may_override=_may_override(symbols, links),
         unresolved_names=dict(unresolved),
+        links=links,
         paths=scope,
         sources=tuple(provider.source_files()),
     )
+    facts.callers = _by_callable(
+        facts,
+        (
+            (tally.symbol_id, tally.owner_id, tally.resolution, tally.from_test, tally.sources)
+            for tally in provider.caller_tallies([EdgeKind.CALLS])
+        ),
+    )
+    facts.member_calls = _by_callable(
+        facts,
+        (
+            (tally.caller_id, tally.callee_id, tally.resolution, facts.reads_data(tally), tally.calls)
+            for tally in provider.call_tallies()
+        ),
+    )
     facts.population = [(path, metric) for path, metric, is_test in provider.file_measurements() if not is_test]
     facts.files = [(path, metric) for path, metric in facts.population if facts.in_scope(path)]
-    if not config.generic:
-        production = {path for path, _ in facts.files}
-        facts.dependencies = [
-            dependency
-            for dependency in provider.file_dependencies(DEPENDENCY_KINDS)
-            if dependency.source_path in production
-        ]
+    production = {path for path, _ in facts.files}
+    facts.dependencies = [
+        dependency
+        for dependency in provider.file_dependencies(DEPENDENCY_KINDS)
+        if dependency.source_path in production
+    ]
     if copying:
         files = None if changed is None else [path for path in changed.files if facts.in_scope(path)]
         facts.copying = measure_copying(provider, scope, files)
     if history_window is not None:
         facts.history = measure_history(root, [path for path, _ in facts.population], history_window)
     return facts
+
+
+def _by_callable(
+    facts: HealthFacts, tallies: Iterator[tuple[str, str, Resolution, bool, int]]
+) -> dict[str, list[HomeRow]]:
+    """Fold (callable, far end, resolution, flag, count) tallies onto the production callables, far ends as homes.
+
+    AIDEV-NOTE: folded while the provider streams them, so only the per-(callable, container) aggregate is
+    held, never a row per edge; a home is an id or path the symbol table already holds.
+    """
+    folded: dict[str, list[HomeRow]] = defaultdict(list)
+    for own, far, resolution, flag, count in tallies:
+        symbol = facts.symbols.get(own)
+        if symbol is not None and not symbol.is_test and symbol.kind in CALLABLE_KINDS:
+            folded[symbol.id].append((facts.home_of(far), resolution, flag, count))
+    return dict(folded)
 
 
 def _may_override(symbols: dict[str, Symbol], links: Sequence[Edge]) -> set[str]:

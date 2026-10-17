@@ -9,7 +9,7 @@ import pytest
 
 from zemble.graph import cli as graph_cli
 from zemble.graph.cli import ensure_graph
-from zemble.graph.model import Hit
+from zemble.graph.model import EdgeKind, Hit
 from zemble.graph.provider import SqliteGraphProvider, SubtreeGraphProvider, open_provider
 from zemble.graph.store import build_graph, graph_present, resolve_graph_root
 
@@ -126,6 +126,32 @@ def test_a_chain_through_a_sibling_module_reaches_the_sub_directory(graph_cache:
         assert alone.implementations(alone.definition("Base")[0].id) == [], "step 2: no chain without `b`"
     finally:
         alone.close()
+
+
+def test_call_tallies_spell_a_far_end_outside_the_folder_relative_to_it(graph_cache: Path, tmp_path: Path) -> None:
+    """An in-folder callee's caller in a sibling module keeps a `../` id, which no in-folder id can equal."""
+    workspace = tmp_path / "ws"
+    _write(workspace, "a/p/Target.java", "package p;\npublic class Target {\n    public int hit() { return 1; }\n}\n")
+    _write(
+        workspace,
+        "b/q/Caller.java",
+        "package q;\nimport p.Target;\npublic class Caller {\n"
+        "    public int go(Target target) { return target.hit(); }\n}\n",
+    )
+    build_graph(str(workspace))
+    view = open_provider(str(workspace / "a"))
+    other = open_provider(str(workspace / "b"))
+    try:
+        # 1. The callee is rebased, its caller's container is spelled from the folder.
+        rows = [(row.symbol_id, row.owner_id) for row in view.caller_tallies([EdgeKind.CALLS])]
+        assert rows == [("p/Target.java#p.Target.hit()", "../b/q/Caller.java#q.Caller")], rows
+        # 2. From the caller's folder, the callee is the one spelled outside it.
+        calls = [(row.caller_id, row.callee_id, row.bare, row.chained, row.calls) for row in other.call_tallies()]
+        expected = ("q/Caller.java#q.Caller.go(Target)", "../a/p/Target.java#p.Target.hit()", False, False, 1)
+        assert calls == [expected], calls
+    finally:
+        view.close()
+        other.close()
 
 
 def test_a_sub_directory_the_ancestor_does_not_cover_gets_its_own_graph(graph_cache: Path, tmp_path: Path) -> None:

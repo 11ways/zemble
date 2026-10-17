@@ -20,6 +20,8 @@ from zemble.graph.facts import TREE_SITTER_SOURCE
 from zemble.graph.model import (
     NAMED_KINDS,
     TYPE_KINDS,
+    CallerTally,
+    CallTally,
     Edge,
     EdgeKind,
     EdgeTally,
@@ -148,6 +150,14 @@ class GraphProvider(Protocol):
 
     def inbound_tallies(self, kinds: Sequence[EdgeKind] | None = None) -> list[EdgeTally]:
         """Count, per symbol, the distinct symbols reaching it by edge kind, resolution and test-ness."""
+        ...
+
+    def caller_tallies(self, kinds: Sequence[EdgeKind]) -> Iterator[CallerTally]:
+        """Count, per symbol, the distinct symbols reaching it over these kinds, by their container."""
+        ...
+
+    def call_tallies(self) -> Iterator[CallTally]:
+        """Count the calls each symbol writes on a non-type receiver, per callee (see `CallTally`)."""
         ...
 
     def outgoing_edges(self, kinds: Sequence[EdgeKind]) -> list[Edge]:
@@ -574,6 +584,51 @@ class SqliteGraphProvider:
             for row in self.connection.execute(query, kinds_parameters + under_parameters)
         ]
 
+    def caller_tallies(self, kinds: Sequence[EdgeKind], *, prefix: str = "") -> Iterator[CallerTally]:
+        """Count, per symbol under a prefix, the distinct symbols reaching it, by container, resolution and test-ness.
+
+        Aggregated in SQL, one row per (symbol, container) pair rather than per edge; sources are
+        counted wherever they live.
+        """
+        kinds_where, kinds_parameters = _kinds_clause("e.kind", kinds)
+        under, under_parameters = _under("d.text", prefix)
+        query = (
+            "SELECT d.text AS dst_id, COALESCE(s.container_id, r.text) AS owner_id, e.resolution, "
+            "COALESCE(s.is_test, 0) AS from_test, COUNT(DISTINCT e.src) AS sources "
+            "FROM edge_rows e JOIN refs d ON d.key = e.dst JOIN refs r ON r.key = e.src "
+            "LEFT JOIN symbols s ON s.id = r.text "
+            f"WHERE {kinds_where} AND {under} "  # noqa: S608
+            "GROUP BY e.dst, owner_id, e.resolution, from_test"
+        )
+        for row in self.connection.execute(query, kinds_parameters + under_parameters):
+            yield CallerTally(
+                row["dst_id"], row["owner_id"], Resolution(row["resolution"]), bool(row["from_test"]), row["sources"]
+            )
+
+    def call_tallies(self, *, prefix: str = "") -> Iterator[CallTally]:
+        """Count the calls each symbol under a prefix writes on a non-type receiver, per callee, aggregated in SQL.
+
+        A receiver is a type name when the extractor marked it as one: its `receiver_type` is the
+        receiver itself or the receiver's last dotted segment (`Str`, `com.x.Str`). A receiver is chained
+        when it is itself a call's result (its text holds a parenthesis: `builder.add(x).named(y)`).
+        """
+        under, under_parameters = _under("r.text", prefix)
+        query = (
+            "SELECT r.text AS src_id, d.text AS dst_id, e.resolution, e.receiver IS NULL AS bare, "
+            "instr(COALESCE(e.receiver, ''), '(') > 0 AS chained, COUNT(*) AS calls "
+            "FROM edge_rows e JOIN refs r ON r.key = e.src JOIN refs d ON d.key = e.dst "
+            "WHERE e.kind = ? AND COALESCE(e.is_new, 0) = 0 AND NOT (e.receiver_type IS NOT NULL AND "
+            "(e.receiver = e.receiver_type "
+            "OR substr(e.receiver, -length(e.receiver_type) - 1) = '.' || e.receiver_type)) "
+            f"AND {under} "  # noqa: S608
+            "GROUP BY e.src, e.dst, e.resolution, bare, chained"
+        )
+        for row in self.connection.execute(query, (EdgeKind.CALLS.value, *under_parameters)):
+            resolution = Resolution(row["resolution"])
+            yield CallTally(
+                row["src_id"], row["dst_id"], resolution, bool(row["bare"]), bool(row["chained"]), row["calls"]
+            )
+
     def outgoing_edges(self, kinds: Sequence[EdgeKind], *, prefix: str = "") -> list[Edge]:
         """Return every edge of these kinds leaving a symbol under a prefix, at any resolution, resolved or not."""
         kinds_where, kinds_parameters = _kinds_clause("kind", kinds)
@@ -814,6 +869,26 @@ class SubtreeGraphProvider:
             replace(tally, symbol_id=self._strip(tally.symbol_id))
             for tally in self.graph.inbound_tallies(kinds, prefix=self._lead)
         ]
+
+    def caller_tallies(self, kinds: Sequence[EdgeKind]) -> Iterator[CallerTally]:
+        """Count the callers of each in-folder symbol by container, ids rebased (`_view_id`)."""
+        for tally in self.graph.caller_tallies(kinds, prefix=self._lead):
+            yield replace(tally, symbol_id=self._strip(tally.symbol_id), owner_id=self._view_id(tally.owner_id))
+
+    def call_tallies(self) -> Iterator[CallTally]:
+        """Count the calls of each in-folder symbol per callee, ids rebased (`_view_id`)."""
+        for tally in self.graph.call_tallies(prefix=self._lead):
+            yield replace(tally, caller_id=self._strip(tally.caller_id), callee_id=self._view_id(tally.callee_id))
+
+    def _view_id(self, value: str) -> str:
+        """An ancestor id as the view spells it: rebased inside the folder, its path `../`-relative outside it.
+
+        An id outside the folder never collides with a rebased one, as its file path would if left as it is.
+        """
+        if value.startswith(self._lead):
+            return self._strip(value)
+        path, separator, rest = value.partition("#")
+        return posixpath.relpath(path, self.prefix) + separator + rest
 
     def outgoing_edges(self, kinds: Sequence[EdgeKind]) -> list[Edge]:
         """Return the edges leaving in-folder symbols, rebased; a destination outside the folder reads None."""

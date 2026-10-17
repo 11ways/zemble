@@ -61,11 +61,13 @@ reason is printed. It is a report, never a gate. See [docs/dedup.md](docs/dedup.
 
 **Health** (`zemble health`, MCP `health`). A ranked report of code-shape findings (long,
 deep, complex callables; large types and files; single-implementation interfaces,
-single-subclass abstract types, public callables with at most one caller, unreferenced
-private code; edges crossing a `home.toml` forbidden dependency; copied code, pass-through
-methods and vocabularies declared twice, from the `dupes` channels; files whose style reads
-different from the rest of their language or their directory; from the git log, complex files
-that keep changing and files in different modules that change together) plus a score per axis.
+single-subclass abstract types, inheritance chains past five ancestors, public callables only
+their own type calls, unreferenced private code; edges crossing a `home.toml` forbidden
+dependency; directories in a dependency cycle and methods that read another type's data more
+than they use their own; copied code, pass-through methods and vocabularies declared twice, from
+the `dupes` channels; files whose style reads different from the rest of their language or their
+directory; from the git log, complex files that keep changing and files in different modules that
+change together) plus a score per axis.
 `--since main` lists only the findings a branch touches, and a baseline marks them new or
 remaining. Every threshold is absolute and documented, graph findings rest only on edges
 resolved exactly or by unique name, and the score is not a target. It is a report, never a

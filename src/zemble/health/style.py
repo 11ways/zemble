@@ -11,9 +11,10 @@ hundredths of the root of the chi-square `STYLE_CUT_QUANTILE` quantile of their 
 (Wilson-Hilferty), so 100 is the cut whatever the number of dimensions kept.
 
 AIDEV-NOTE: the vector reads the graph's measurements plus one plain read of the file's text (blank
-lines, line length); nothing is parsed again. One-statement callables (`is_boilerplate`) stay out
-of the callable-shape dimensions and the public share, or every data class reads different from
-every logic class. The directory norm uses the LANGUAGE's scale, so both distances are in the same
+lines, line length); nothing is parsed again. One-statement callables (`CallableMetrics.is_boilerplate`)
+stay out of the callable-shape dimensions and the public share, or every data class reads different
+from every logic class: such bodies are shaped by the language and the file's role, not by how its
+author writes logic. The directory norm uses the LANGUAGE's scale, so both distances are in the same
 units: what reads different here, against how much files vary anywhere.
 """
 
@@ -119,7 +120,7 @@ class StyleInput:
     comment_lines: int
     #: Every measured callable, boilerplate included.
     callables: int
-    #: The measured callables that are more than one straight-line statement (see `is_boilerplate`).
+    #: The measured callables that are more than one straight-line statement (`CallableMetrics.is_boilerplate`).
     bodies: tuple[Body, ...]
     top_level_types: int
     #: The shape of every declared method and function name, runtime hooks aside. Type names are left out:
@@ -133,17 +134,6 @@ class StyleInput:
     blank_lines: int
     text_lines: int
     text_chars: int
-
-
-def is_boilerplate(metric: CallableMetrics) -> bool:
-    """Whether a callable is one statement without control flow: an accessor, a delegation, a constant.
-
-    Such bodies are shaped by the language and the file's role (a record's getters), not by how its
-    author writes logic, so they would make every data class read different from every logic class.
-    Nesting rather than complexity decides: a one-line predicate (`return a && b;`) scores a
-    complexity of 1 without breaking the linear flow.
-    """
-    return metric.statements <= 1 and metric.nesting == 0
 
 
 def _over_bodies(read: Callable[[Sequence[Body]], float]) -> Callable[[StyleInput], float | None]:
@@ -447,7 +437,7 @@ def _styles(facts: HealthFacts) -> dict[str, FileStyle]:
         metric = facts.metrics.get(symbol.id) if symbol.kind in CALLABLE_KINDS else None
         if metric is not None:
             measured[symbol.file_path].append((symbol, metric))
-            if is_boilerplate(metric):
+            if metric.is_boilerplate:
                 boilerplate.add(symbol.id)
         if symbol.kind in _NAMED_CALLABLE_KINDS and not facts.is_runtime_hook(symbol):
             callables[symbol.file_path].append(symbol)

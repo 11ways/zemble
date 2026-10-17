@@ -371,7 +371,7 @@ code, but that is backend execution, not a client fallback.
   than a hand-maintained union, so a new refusal type is reported here with no second edit and
   can never reach this handler without the field it reads.
 - **A read the daemon has outgrown is neither.** `health` loads a whole graph's symbols and
-  edge tallies into private memory (measured: 209 MiB on javaweb, 321 MiB on the zenit
+  edge tallies into private memory (measured: 209 MiB on javaweb, 642 MiB on the zenit
   workspace; `zemble.health.collect.read_estimate_mb` sizes it from the row counts, on the high
   side). The daemon admits that read against the lower of its budget and its current
   `RLIMIT_DATA` (lowered to the serving reserve while a graph construction runs), evicting idle

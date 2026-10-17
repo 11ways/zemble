@@ -122,20 +122,20 @@ class Commit:
 def history_checkouts(root: str) -> tuple[tuple[str, str], ...]:
     """The (checkout directory, path prefix) pairs a root's history is read from.
 
-    A root inside a checkout is read from there; a root that is in none (a workspace of sibling
-    repositories) is read from each direct child directory that is a checkout of its own, and a
-    deeper checkout is not looked for. Empty when there is neither.
+    A root inside a checkout is read from there (prefix ""), and so is each direct child directory
+    holding a `.git` entry that is a checkout of its own (a workspace of sibling repositories, with or
+    without a checkout at its top); a deeper checkout is not looked for. A child checkout's files never
+    appear in the enclosing checkout's log (git records a gitlink or nothing for them), so no commit is
+    counted twice. Empty when there is none.
     """
-    if _inside_checkout(root):
-        return ((root, ""),)
+    found = [(root, "")] if _inside_checkout(root) else []
     try:
         children = sorted(entry.name for entry in os.scandir(root) if entry.is_dir(follow_symlinks=False))
     except OSError:
-        return ()
-    found = []
+        return tuple(found)
     for name in children:
         directory = os.path.join(root, name)
-        if os.path.exists(os.path.join(directory, ".git")) and _inside_checkout(directory):
+        if os.path.exists(os.path.join(directory, ".git")) and _checkout_top(directory) == os.path.realpath(directory):
             found.append((directory, f"{name}/"))
     return tuple(found)
 
@@ -146,6 +146,15 @@ def _inside_checkout(directory: str) -> bool:
         return _git(directory, "rev-parse", "--is-inside-work-tree", failure="").strip() == "true"
     except ValueError:
         return False
+
+
+def _checkout_top(directory: str) -> str | None:
+    """The resolved top directory of the work tree a directory is in, or None outside one."""
+    try:
+        top = _git(directory, "rev-parse", "--show-toplevel", failure="").strip()
+    except ValueError:
+        return None
+    return os.path.realpath(top) if top else None
 
 
 def window_commits(checkouts: tuple[tuple[str, str], ...], days: int) -> list[Commit]:

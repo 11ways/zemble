@@ -24,6 +24,7 @@ class Axis(str, Enum):
     SIZE = "size"
     MACHINERY = "machinery"
     LAYERING = "layering"
+    COUPLING = "coupling"
     COPYING = "copying"
     VOCABULARY = "vocabulary"
     CONSISTENCY = "consistency"
@@ -137,9 +138,12 @@ class Signal(str, Enum):
     MANY_TYPES_PER_FILE = "many_types_per_file"
     SINGLE_IMPLEMENTATION_INTERFACE = "single_implementation_interface"
     SINGLE_SUBCLASS_ABSTRACT = "single_subclass_abstract"
+    DEEP_INHERITANCE = "deep_inheritance"
     LONE_PUBLIC_CALLABLE = "lone_public_callable"
     UNREFERENCED_SYMBOL = "unreferenced_symbol"
     FORBIDDEN_CROSSING = "forbidden_crossing"
+    PACKAGE_CYCLE = "package_cycle"
+    FEATURE_ENVY = "feature_envy"
     CLONE_MASS = "clone_mass"
     CLONED_BODY = "cloned_body"
     PASS_THROUGH = "pass_through"
@@ -240,7 +244,7 @@ _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
     ),
     Signal.LARGE_FILE: _syntactic(
         Axis.SIZE,
-        "file longer than the threshold, in lines",
+        "file longer than the threshold, in lines, unless it holds exactly one top-level type (large_type judges that)",
         Unit.LINES,
         1000,
         "Sonar rule S104 (too many lines in a file) default maximum 1000",
@@ -256,7 +260,7 @@ _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
     ),
     Signal.SINGLE_IMPLEMENTATION_INTERFACE: _graph(
         Axis.MACHINERY,
-        "interface, trait or protocol with exactly one production implementor",
+        "interface, trait or protocol with exactly one production implementor, unless that one lives in another module",
         1,
         Comparison.EQUALS,
         Resolution.UNIQUE_NAME,
@@ -265,21 +269,33 @@ _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
     ),
     Signal.SINGLE_SUBCLASS_ABSTRACT: _graph(
         Axis.MACHINERY,
-        "abstract type with exactly one production subtype",
+        "abstract type with exactly one production subtype, unless that one lives in another module",
         1,
         Comparison.EQUALS,
         Resolution.UNIQUE_NAME,
         "speculative generality (Fowler, Refactoring): a hierarchy with one branch",
         "merge the abstract type into its subtype, or name the second subtype it waits for",
     ),
+    Signal.DEEP_INHERITANCE: _graph(
+        Axis.MACHINERY,
+        "class with more ancestors over extends edges than the threshold, counted from the topmost one the graph holds",
+        5,
+        Comparison.ABOVE,
+        Resolution.UNIQUE_NAME,
+        "Sonar rule S110 (inheritance tree depth) default maximum 5",
+        "prefer composition: flatten the hierarchy or delegate",
+    ),
     Signal.LONE_PUBLIC_CALLABLE: _graph(
         Axis.MACHINERY,
-        "public callable with at most one production caller",
-        1,
+        "called public callable whose production callers are all declared in its own outermost type, valued "
+        "by the callers outside it",
+        0,
         Comparison.AT_MOST,
         Resolution.UNIQUE_NAME,
-        "declared here: a public seam nobody else uses is a private helper or dead code",
-        "make it private beside its caller, or delete it",
+        "declared here: a public seam only its own type uses is a private helper; one nothing calls is not "
+        "measured, since a caller outside the workspace and dead code look the same without a declared "
+        "library/application split",
+        "make it private beside its callers",
     ),
     Signal.UNREFERENCED_SYMBOL: _graph(
         Axis.MACHINERY,
@@ -298,6 +314,28 @@ _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
         Resolution.EXACT,
         "the workspace's own [[forbidden]] rules in .zemble/home.toml",
         "move the code or the dependency so the module stops crossing the rule",
+    ),
+    Signal.PACKAGE_CYCLE: _graph(
+        Axis.COUPLING,
+        "directory of production files whose exact dependencies inside its module lead back to it, valued by "
+        "the directories of its cycle",
+        1,
+        Comparison.ABOVE,
+        Resolution.EXACT,
+        "Acyclic Dependencies Principle (Martin, Agile Software Development, 2002); cyclic physical dependencies "
+        "(Lakos, Large-Scale C++ Software Design, 1996); JDepend reports package cycles",
+        "break the cycle: move the shared part below both packages, or invert one dependency with an interface",
+    ),
+    Signal.FEATURE_ENVY: _graph(
+        Axis.COUPLING,
+        "method reading the data of one other type (getter calls on a receiver) more often than it calls its "
+        "own type, valued by those reads (0 when its own type is called as often)",
+        2,
+        Comparison.ABOVE,
+        Resolution.UNIQUE_NAME,
+        "Feature Envy (Lanza and Marinescu, Object-Oriented Metrics in Practice, 2006: ATFD > 2 and LAA < 1/3), "
+        "read off resolved calls into one-statement getters instead of attribute accesses",
+        "move it onto the type it uses, or hand it the data it keeps asking for",
     ),
     Signal.CLONE_MASS: _duplication(
         Axis.COPYING,

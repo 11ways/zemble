@@ -217,6 +217,36 @@ class EdgeTally:
     sources: int
 
 
+@dataclass(frozen=True, slots=True)
+class CallerTally:
+    """How many distinct symbols declared in one container reach one symbol at one resolution."""
+
+    symbol_id: str
+    #: The reaching symbols' container id, or the reaching symbol's own id when it has no container.
+    owner_id: str
+    resolution: Resolution
+    #: Whether the reaching symbols live in a test source set.
+    from_test: bool
+    sources: int
+
+
+@dataclass(frozen=True, slots=True)
+class CallTally:
+    """How many calls one symbol writes on a receiver to one callee at one resolution.
+
+    A call on a receiver written as a type name (`Str.of(...)`, a static call) and a constructor call are
+    never tallied; a bare call (`helper()`, no receiver) is, flagged as such, and so is a call on a chained
+    receiver, the result of another call (`builder.add(x).named(y)`).
+    """
+
+    caller_id: str
+    callee_id: str
+    resolution: Resolution
+    bare: bool
+    chained: bool
+    calls: int
+
+
 @dataclass(frozen=True)
 class FileDependency:
     """Resolved edges of one kind and resolution from one file into declarations of another."""

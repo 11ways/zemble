@@ -7,9 +7,10 @@ at all (an absence it cannot vouch for, a count it cannot finish), so it neither
 
 from __future__ import annotations
 
+import posixpath
 from bisect import bisect_left
-from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -17,6 +18,7 @@ from zemble.dedup.languages import SiteKind, profile_for
 from zemble.dedup.model import CloneKind, Unit
 from zemble.graph.model import (
     CALLABLE_KINDS,
+    DECLARED_TYPE_KINDS,
     TYPE_KINDS,
     EdgeKind,
     FileDependency,
@@ -30,6 +32,7 @@ from zemble.health.copying import CODE_KINDS, CopyingFacts
 from zemble.health.git import merge_ranges
 from zemble.health.history import HOTSPOT_MIN_COMMITS
 from zemble.health.model import Signal
+from zemble.health.structure import ancestor_depths, strongly_connected
 from zemble.health.style import Distance
 from zemble.languages import Visibility
 from zemble.languages.metrics import CallableMetrics
@@ -69,8 +72,20 @@ _RESTRICTED = frozenset({Visibility.PRIVATE, Visibility.PACKAGE})
 _MEMBER_CALLABLE_KINDS = frozenset({SymbolKind.METHOD, SymbolKind.FUNCTION})
 #: The name every language's process entry point goes by.
 _MAIN = "main"
-#: Files a cloned body's detail names before it only counts the rest.
+#: Files a cloned body's detail names before it only counts the rest; directories a cycle's detail names too.
 _FILES_SHOWN = 3
+
+
+def _weakest(resolutions: Iterable[Resolution]) -> Resolution:
+    """The weakest of some resolutions, EXACT for none."""
+    return min(resolutions, key=lambda resolution: resolution.strength, default=Resolution.EXACT)
+
+
+def _floor(signal: Signal) -> Resolution:
+    """A graph signal's floor."""
+    floor = signal.facts.floor
+    assert floor is not None, f"{signal.value} is a graph signal"
+    return floor
 
 
 def _symbol_sample(symbol: Symbol, value: int, resolution: Resolution = Resolution.EXACT, detail: str = "") -> Sample:
@@ -125,9 +140,10 @@ def _large_type(facts: HealthFacts) -> Iterator[Sample]:
 
 
 def _large_file(facts: HealthFacts) -> Iterator[Sample]:
-    """Lines of every measured production file."""
+    """Lines of every measured production file but one holding exactly one top-level type, which `large_type` judges."""
     for path, metric in facts.files:
-        yield Sample(path, 1, max(metric.lines, 1), "", path, metric.lines)
+        if facts.top_level_types[path] != 1:
+            yield Sample(path, 1, max(metric.lines, 1), "", path, metric.lines)
 
 
 def _many_types_per_file(facts: HealthFacts) -> Iterator[Sample]:
@@ -137,11 +153,23 @@ def _many_types_per_file(facts: HealthFacts) -> Iterator[Sample]:
 
 
 def _subtypes(facts: HealthFacts, symbol: Symbol, signal: Signal) -> Sample | None:
-    """A type valued by its production subtypes, or None when a weaker edge might add one."""
-    floor = signal.facts.floor
-    assert floor is not None, f"{signal.value} is a graph signal"
+    """A type valued by its production subtypes, or None when unmeasured.
+
+    Unmeasured: a weaker edge might add a subtype; or the one production subtype lives in another module
+    (an extension point by design) or outside a sub-directory view, where its module cannot be read; or
+    test code subtypes it too (a seam for test doubles, which inlining would remove).
+    """
+    floor = _floor(signal)
     strong, weakest, doubt = facts.reaching(symbol, HIERARCHY_KINDS, floor, tests=False)
-    return None if doubt else _symbol_sample(symbol, strong, weakest)
+    if doubt:
+        return None
+    if strong == 1:
+        seen = [sub for sub, resolution in facts.subtypes.get(symbol.id, ()) if resolution.at_least(floor)]
+        if len(seen) != 1 or facts.module_of(seen[0].file_path) != facts.module_of(symbol.file_path):
+            return None
+        if facts.reaching(symbol, HIERARCHY_KINDS, floor, tests=True)[0] > strong:
+            return None
+    return _symbol_sample(symbol, strong, weakest)
 
 
 def _single_implementation_interface(facts: HealthFacts) -> Iterator[Sample]:
@@ -160,6 +188,33 @@ def _single_subclass_abstract(facts: HealthFacts) -> Iterator[Sample]:
             sample = _subtypes(facts, symbol, Signal.SINGLE_SUBCLASS_ABSTRACT)
             if sample is not None:
                 yield sample
+
+
+def _deep_inheritance(facts: HealthFacts) -> Iterator[Sample]:
+    """Ancestors of every production class on its longest chain of EXTENDS edges the view can see into.
+
+    A supertype the graph does not hold ends the chain uncounted; an interface is not measured.
+    """
+    floor = _floor(Signal.DEEP_INHERITANCE)
+    parents: dict[str, list[str]] = defaultdict(list)
+    strength: dict[tuple[str, str], Resolution] = {}
+    for edge in facts.links:
+        dst = edge.dst_id
+        if edge.kind is not EdgeKind.EXTENDS or dst is None or dst not in facts.symbols or dst == edge.src_id:
+            continue
+        if edge.resolution.at_least(floor):
+            pair = (edge.src_id, dst)
+            if pair not in strength:
+                parents[edge.src_id].append(dst)
+            strength[pair] = max(strength.get(pair, edge.resolution), edge.resolution, key=lambda level: level.strength)
+    depths = ancestor_depths(parents)
+    for symbol in _types(facts):
+        if symbol.kind is not SymbolKind.CLASS:
+            continue
+        depth, chain = depths.get(symbol.id, (0, ()))
+        steps = zip((symbol.id, *chain), chain, strict=False)
+        detail = f"up to {display_name(facts.symbols[chain[-1]])}" if chain else ""
+        yield _symbol_sample(symbol, depth, _weakest(strength[step] for step in steps), detail)
 
 
 def _entry_point(facts: HealthFacts, symbol: Symbol) -> bool:
@@ -190,23 +245,39 @@ def _named_callables(facts: HealthFacts) -> Iterator[Symbol]:
 
 
 def _lone_public_callable(facts: HealthFacts) -> Iterator[Sample]:
-    """Production callers of every public method or function; an uncalled one must also go unmentioned."""
-    floor = Signal.LONE_PUBLIC_CALLABLE.facts.floor
-    assert floor is not None
-    counted: list[tuple[Symbol, int, Resolution]] = []
+    """Production callers outside its own outermost type of every called public method or function.
+
+    A callable no production code calls is not measured: a caller outside the workspace and dead code
+    look the same. One whose name is written in another file is not measured either: the graph has no
+    edge for a reference used as a value (`Type::member`), and making that one private would break it.
+    """
+    floor = _floor(Signal.LONE_PUBLIC_CALLABLE)
+    counted: list[tuple[Symbol, int, int, Resolution]] = []
     for symbol in _named_callables(facts):
-        if facts.visibility(symbol) is not Visibility.PUBLIC:
+        if facts.visibility(symbol) is not Visibility.PUBLIC or facts.in_contract(symbol):
             continue
         strong, weakest, doubt = facts.reaching(symbol, _CALLS, floor, tests=False)
-        if not doubt:
-            counted.append((symbol, strong, weakest))
-    silent = _unmentioned_absences(facts, counted, tests=False)
-    for symbol, strong, weakest in counted:
-        if strong:
-            yield _symbol_sample(symbol, strong, weakest, "one production caller")
+        if doubt or not strong:
+            continue
+        home = facts.home_of(symbol.id)
+        outside = sum(
+            sources
+            for caller, resolution, from_test, sources in facts.callers.get(symbol.id, ())
+            if not from_test and resolution.at_least(floor) and caller != home
+        )
+        counted.append((symbol, strong, outside, weakest))
+    inside = [symbol for symbol, _, outside, _ in counted if not outside]
+    silent = {symbol.id for symbol in facts.unmentioned(inside, tests=False, own_file=False)}
+    for symbol, strong, outside, weakest in counted:
+        if outside:
+            yield _symbol_sample(symbol, outside, weakest)
         elif symbol.id in silent:
-            tested = facts.reaching(symbol, _CALLS, floor, tests=True)[0]
-            yield _symbol_sample(symbol, 0, weakest, "called only from tests" if tested else "never called")
+            home = facts.home_of(symbol.id)
+            owner = facts.symbols.get(home)
+            where = display_name(owner) if owner is not None else PurePosixPath(home).name
+            tested = facts.reaching(symbol, _CALLS, floor, tests=True)[0] > strong
+            detail = f"{strong} caller(s), all in {where}" + ("; tests call it too" if tested else "")
+            yield _symbol_sample(symbol, 0, weakest, detail)
 
 
 def _unreferenced_symbol(facts: HealthFacts) -> Iterator[Sample]:
@@ -284,6 +355,119 @@ def _forbidden_crossing(facts: HealthFacts) -> Iterator[Sample]:
         weakest = min((dependency.resolution for dependency in dependencies), key=lambda level: level.strength)
         detail = rule.describe() if rule is not None else ""
         yield Sample(path, 1, max(lines.get(path, 1), 1), f"-> {target}", f"{path}->{target}", edges, weakest, detail)
+
+
+def _package_cycle(facts: HealthFacts) -> Iterator[Sample]:
+    """Directories of every production directory's dependency cycle inside its own module, 1 when acyclic.
+
+    A node is a (module, directory) pair: an edge between modules is never part of a cycle here, so a
+    by-name edge resolved into the wrong module cannot close one. A directory in a cycle is anchored at the
+    first file of its lightest link into the cycle (the fewest edges into one other directory of it): the
+    cheapest place to cut. The weakest edge reported is the weakest of its links into the cycle.
+    """
+    floor = _floor(Signal.PACKAGE_CYCLE)
+    lines = {path: max(metric.lines, 1) for path, metric in facts.files}
+    members: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for path in lines:
+        members[(facts.module_of(path), posixpath.dirname(path))].append(path)
+    successors: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+    links: dict[tuple[tuple[str, str], tuple[str, str]], tuple[Resolution, int, set[str]]] = {}
+    for dependency in facts.dependencies:
+        if not dependency.resolution.at_least(floor) or dependency.target_path not in lines:
+            continue
+        source = (facts.module_of(dependency.source_path), posixpath.dirname(dependency.source_path))
+        target = (facts.module_of(dependency.target_path), posixpath.dirname(dependency.target_path))
+        if source == target or source[0] != target[0]:
+            continue
+        successors[source].add(target)
+        strongest, edges, files = links.get((source, target), (dependency.resolution, 0, set()))
+        strongest = max(strongest, dependency.resolution, key=lambda level: level.strength)
+        files.add(dependency.source_path)
+        links[(source, target)] = (strongest, edges + dependency.edges, files)
+    for component in strongly_connected(sorted(members), successors):
+        cycle = set(component)
+        for node in component:
+            module, directory = node
+            name = directory or "."
+            inward = [(links[(node, other)], other[1] or ".") for other in successors.get(node, ()) if other in cycle]
+            if not inward:
+                path = min(members[node])
+                yield Sample(path, 1, lines[path], name, f"{module}:{name}", 1)
+                continue
+            (_, edges, files), into = min(inward, key=lambda link: (link[0][1], link[1]))
+            anchor = min(files)
+            others = sorted(other[1] or "." for other in component if other != node)
+            more = f" and {len(others) - _FILES_SHOWN} more" if len(others) > _FILES_SHOWN else ""
+            also = f" and {len(files) - 1} more file(s)" if len(files) > 1 else ""
+            detail = (
+                f"in a cycle with {', '.join(others[:_FILES_SHOWN])}{more}; its lightest link into it: "
+                f"{edges} edge(s) from {PurePosixPath(anchor).name}{also} into {into}"
+            )
+            weakest = _weakest(resolution for (resolution, _, _), _ in inward)
+            yield Sample(anchor, 1, lines[anchor], name, f"{module}:{name}", len(component), weakest, detail)
+
+
+def _feature_envy(facts: HealthFacts) -> Iterator[Sample]:
+    """Getter calls into the most-read other type of every production method that reads it more than its own.
+
+    The other type's calls are the resolved data reads (`HealthFacts.reads_data`: written on a receiver that
+    is no type name, into a getter); its own are every resolved call into its own outermost type or a
+    supertype of it, bare ones included, an inherited member being the type's own. Not measured: a method
+    without a measured body, declared in no type, or whose place a contract or framework fixes (a member of
+    an interface, `_entry_point`: an override, an annotated method), which cannot move. A type the view does
+    not hold is never the envied one.
+    """
+    floor = _floor(Signal.FEATURE_ENVY)
+    above = _supertypes(facts, floor)
+    for symbol in _callables(facts):
+        if symbol.kind is not SymbolKind.METHOD or symbol.id not in facts.metrics or facts.in_contract(symbol):
+            continue
+        if _entry_point(facts, symbol):
+            continue
+        home = facts.home_of(symbol.id)
+        if home not in facts.symbols:
+            continue
+        own_types = {home, *above(home)}
+        own = 0
+        foreign: Counter[str] = Counter()
+        weakest: dict[str, Resolution] = {}
+        for callee, resolution, reads, calls in facts.member_calls.get(symbol.id, ()):
+            if not resolution.at_least(floor):
+                continue
+            if callee in own_types:
+                own += calls
+            elif reads and (target := facts.symbols.get(callee)) is not None and target.kind in DECLARED_TYPE_KINDS:
+                foreign[callee] += calls
+                weakest[callee] = _weakest((weakest.get(callee, resolution), resolution))
+        envied, most = min(foreign.items(), key=lambda item: (-item[1], item[0]), default=("", 0))
+        if most > own:
+            detail = f"{most} getter calls into {display_name(facts.symbols[envied])}, {own} calls into its own type"
+            yield _symbol_sample(symbol, most, weakest[envied], detail)
+        else:
+            yield _symbol_sample(symbol, 0)
+
+
+def _supertypes(facts: HealthFacts, floor: Resolution) -> Callable[[str], set[str]]:
+    """A memoised lookup of every supertype the view holds of a type, over hierarchy edges at `floor` or better."""
+    parents: dict[str, set[str]] = defaultdict(set)
+    for edge in facts.links:
+        if edge.kind in HIERARCHY_KINDS and edge.dst_id in facts.symbols and edge.resolution.at_least(floor):
+            parents[edge.src_id].add(facts.home_of(edge.dst_id))
+    found: dict[str, set[str]] = {}
+
+    def above(type_id: str) -> set[str]:
+        if type_id not in found:
+            seen: set[str] = set()
+            pending = list(parents.get(type_id, ()))
+            while pending:
+                current = pending.pop()
+                if current not in seen and current != type_id:
+                    seen.add(current)
+                    pending.extend(parents.get(current, ()))
+            found[type_id] = seen
+        return found[type_id]
+
+    return above
 
 
 def _place(unit: Unit) -> tuple[str, int, int]:
@@ -512,9 +696,12 @@ PRODUCERS: dict[Signal, Producer] = {
     Signal.MANY_TYPES_PER_FILE: _many_types_per_file,
     Signal.SINGLE_IMPLEMENTATION_INTERFACE: _single_implementation_interface,
     Signal.SINGLE_SUBCLASS_ABSTRACT: _single_subclass_abstract,
+    Signal.DEEP_INHERITANCE: _deep_inheritance,
     Signal.LONE_PUBLIC_CALLABLE: _lone_public_callable,
     Signal.UNREFERENCED_SYMBOL: _unreferenced_symbol,
     Signal.FORBIDDEN_CROSSING: _forbidden_crossing,
+    Signal.PACKAGE_CYCLE: _package_cycle,
+    Signal.FEATURE_ENVY: _feature_envy,
     Signal.CLONE_MASS: _clone_mass,
     Signal.CLONED_BODY: _cloned_body,
     Signal.PASS_THROUGH: _pass_through,

@@ -98,6 +98,26 @@ def test_bulk_readers_agree_with_the_per_symbol_queries(built_graph: SqliteGraph
     dependencies = built_graph.file_dependencies([EdgeKind.CALLS, EdgeKind.IMPORTS, EdgeKind.REFERENCES_TYPE])
     assert dependencies and all(item.source_path != item.target_path for item in dependencies), "5: cross-file only"
 
+    # 6. Callers by container add up to the inbound CALLS tallies: every caller has one container.
+    by_container: dict[tuple[str, Resolution, bool], int] = {}
+    for row in built_graph.caller_tallies([EdgeKind.CALLS]):
+        key = (row.symbol_id, row.resolution, row.from_test)
+        by_container[key] = by_container.get(key, 0) + row.sources
+    assert by_container == {(t.symbol_id, t.resolution, t.from_test): t.sources for t in tallies}, "6: same callers"
+
+    # 7. Call tallies are the resolved calls on a receiver no extractor marked as a type, constructors left out.
+    expected_calls: dict[tuple[str, str, Resolution, bool, bool], int] = {}
+    for edge in built_graph.outgoing_edges([EdgeKind.CALLS]):
+        receiver, typed = edge.receiver, edge.receiver_type
+        on_type = typed is not None and receiver is not None and (receiver == typed or receiver.endswith(f".{typed}"))
+        if edge.dst_id and not edge.is_new and not on_type:
+            key = (edge.src_id, edge.dst_id, edge.resolution, receiver is None, "(" in (receiver or ""))
+            expected_calls[key] = expected_calls.get(key, 0) + 1
+    found_calls = {
+        (t.caller_id, t.callee_id, t.resolution, t.bare, t.chained): t.calls for t in built_graph.call_tallies()
+    }
+    assert found_calls == expected_calls and any(not bare for _, _, _, bare, _ in found_calls), "7: call tallies"
+
 
 def test_call_graph_journey(built_graph: SqliteGraphProvider) -> None:
     """Callers and callees are answered with a reason apiece."""

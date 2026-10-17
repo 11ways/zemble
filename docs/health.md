@@ -41,13 +41,16 @@ graph's own `is_test`) is never measured.
 | `deep_nesting` | size | syntactic | control-flow nesting > 3 | Sonar S134 default maximum 3 |
 | `complex_callable` | size | syntactic | cognitive complexity > 15 | Sonar S3776 default threshold 15 |
 | `large_type` | size | syntactic | type declaration span > 500 lines | PMD ExcessiveClassLength reports at 1000 by default; 500 flags the tail before it gets there |
-| `large_file` | size | syntactic | file lines > 1000 | Sonar S104 default maximum 1000 |
+| `large_file` | size | syntactic | file lines > 1000; a file holding exactly one named top-level type is not measured (`large_type` judges it: the type is the file), files with none or several are | Sonar S104 default maximum 1000 |
 | `many_types_per_file` | size | syntactic | top-level types in one file > 5 | declared here; no common tool default |
-| `single_implementation_interface` | machinery | graph | an interface, trait or protocol with exactly 1 production implementor | speculative generality (Fowler, Refactoring) |
-| `single_subclass_abstract` | machinery | graph | an `abstract` type with exactly 1 production subtype | speculative generality (Fowler, Refactoring) |
-| `lone_public_callable` | machinery | graph | a public method or function with at most 1 production caller | declared here |
+| `single_implementation_interface` | machinery | graph | an interface, trait or protocol with exactly 1 production implementor in its own module (`module_of`); one whose single implementor lives in another module (an extension point by design), or that test code implements too (a seam for test doubles), is not measured, so a measured value of 1 is always a finding | speculative generality (Fowler, Refactoring) |
+| `single_subclass_abstract` | machinery | graph | an `abstract` type with exactly 1 production subtype in its own module (one in another module, or a test subtype beside it: not measured, as above) | speculative generality (Fowler, Refactoring) |
+| `deep_inheritance` | machinery | graph | a class (`class` kind) with more than 5 ancestors on its longest chain of EXTENDS edges at `unique_name` or better, counted from the topmost one the graph holds; interfaces are not measured | Sonar S110 (inheritance tree depth) default maximum 5 |
+| `lone_public_callable` | machinery | graph | a public method or function with at least 1 production caller, all of them declared in its own outermost type (a file-level function's own type is its file); value: callers outside it, finding at 0 | declared here: a seam only its own type uses is a private helper |
 | `unreferenced_symbol` | machinery | graph | a private or package-private method, function or type nothing references | declared here |
 | `forbidden_crossing` | layering | graph | a file with edges into a module its own module may not depend on | the workspace's `[[forbidden]]` rules |
+| `package_cycle` | coupling | graph | a directory of production files in a dependency cycle with other directories of its own module (EXACT edges only); value: directories in the cycle, finding above 1 | Acyclic Dependencies Principle (Martin); cyclic physical dependencies (Lakos); JDepend's package cycles |
+| `feature_envy` | coupling | graph | a method whose getter calls into one other type outnumber its calls into its own type; value: those getter calls (0 when its own type is called as often), finding above 2 | Feature Envy (Lanza and Marinescu, Object-Oriented Metrics in Practice: ATFD > 2, LAA < 1/3), read off calls into one-statement getters |
 | `clone_mass` | copying | duplication | file lines inside exact or renamed clone classes > 50 per mille (5%) | declared here: PMD CPD reports every copy past its token minimum but has no per-file share default |
 | `cloned_body` | copying | duplication | a callable body in an exact or renamed clone class with a copy in another file | membership (Fowler, Refactoring: duplicated code) |
 | `pass_through` | machinery | duplication | a public callable whose whole body hands its parameters, in order, to one other callable | existence: middle man (Fowler, Refactoring) |
@@ -67,6 +70,63 @@ directly inside it (a decorated tool inside its `register_*`, a closure) is subt
 that one is measured on its own. Cognitive complexity follows Sonar and keeps nested
 lambdas and functions in the enclosing callable.
 
+## The machinery and coupling signals over callers and types
+
+Every one reads graph edges in bulk, aggregated in SQL (`GraphProvider.caller_tallies`,
+`call_tallies`, `file_dependencies`, `outgoing_edges`), never a query per symbol and never a row per
+edge: on the zenit workspace (247k symbols, 2.7M edges) the caller aggregate is 232k rows and the
+call aggregate 227k, each folded while it streams onto its callable with every far end reduced to its
+home (the outermost type declaration holding it, `HealthFacts.home_of`; a file-level function's home
+is its file). A sub-directory view spells a far end outside the folder `../`-relative to it, so it can
+never equal an in-folder id.
+
+- `lone_public_callable` measures a public method or function only once something in production
+  calls it, and values it by the callers whose home is not its own: a nested type's callers are the
+  outer type's own (a Java nested class reaches its outer type's private members). The reason names
+  the callers and the type (`2 caller(s), all in Ledger`) and adds `tests call it too` when tests call
+  it as well (package-private, or a test of the type itself, keeps those compiling). A public callable
+  nothing calls is NOT measured: in a library its users outside the workspace call it, and without a
+  declared library/application split that cannot be told apart from dead code (the earlier
+  "at most one caller" rule flagged 5009 of 9018 public callables on the zenit workspace, most of
+  them its API surface).
+- `single_implementation_interface` and `single_subclass_abstract` read who the one subtype is from
+  the hierarchy edges `collect` already loads; when it lives in another module (`module_of`: the
+  declared `home.toml` modules, else the first path segment) the abstraction is an extension point
+  and is left out of the population rather than measured, which keeps the signal's `== 1` honest: a
+  measured 1 is always a finding. A subtype outside a sub-directory view cannot be placed, so such an
+  abstraction is not measured there either. Nor is one that test code subtypes beside its one
+  production subtype: that is a seam for test doubles, which inlining would remove (only where the
+  graph holds that test code).
+- `deep_inheritance` follows EXTENDS edges only (IMPLEMENTS is an interface, not an ancestor),
+  iteratively and with a guard against a cycle in bad data; the reason names the topmost ancestor
+  the graph holds (`up to ASTUnit`). A supertype outside the graph (a library class) is not counted.
+- `package_cycle` nodes are (module, directory) pairs of the scope's production files; an edge is a
+  `file_dependencies` row (IMPORTS, CALLS, REFERENCES_TYPE) resolved EXACT between two such files of
+  the same module, so a by-name edge resolved into the wrong module or package cannot close a cycle.
+  The floor is `exact` rather than `unique_name` because a by-name CALLS edge into a library-like
+  name inflates cycles: on zenit the largest component grows from 59 to 86 directories with by-name
+  calls, and the directories in cycles from 395 to 444. Components come from an iterative Tarjan.
+  Each directory is one sample valued by its component's size; its reason lists up to 3 other
+  directories of the cycle and names its lightest link into it (the fewest edges into one other
+  directory of the cycle, and the file they come from, which also anchors the finding): the cheapest
+  edge to cut. The key is `module:directory`.
+- `feature_envy` approximates Lanza and Marinescu's ATFD (accesses to foreign data, directly or
+  through accessors) with resolved calls (`HealthFacts.reads_data`): a call reads another type's data
+  when it is written on a named receiver (`customer.name()`; not `Str.of(...)`, a type name as the
+  extractor's own `receiver_type` marks it; not a bare call; not a chained receiver such as
+  `builder.add(x).named()`, which acts on what a call just returned) and its callee is a getter: no
+  parameter and a one-statement body without control flow (`CallableMetrics.is_boilerplate`, the rule
+  the consistency axis uses for boilerplate). Its own type's count is every resolved call into its
+  home or a supertype of it, bare calls included. The value is the reads of the most-read other type
+  when they outnumber the own calls, else 0; the reason names that type (`3 getter calls into
+  Customer, 0 calls into its own type`). Only methods with a measured body are measured. Each rule
+  came out of the zenit workspace, measured in that order: every call on a receiver, bare calls
+  skipped (the signal as first designed) gave 5119 findings of 73580 methods, led by migrations'
+  `up` (610 calls into `TableBuilder`) and codecs; leaving out overrides and annotated methods, whose
+  place a contract fixes, counting bare own calls and only one-statement callees: 1116; leaving out
+  chained receivers (fluent builders): 1073; only parameterless getters, so a registration
+  (`registry.register(x)`) is no read: 836 of 28211.
+
 ## The history axis
 
 `zemble.health.history` reads one window of git history (`--history-window DAYS`, default 365)
@@ -78,9 +138,13 @@ git -c core.quotePath=false log --since=<DAYS>.days.ago --no-merges --no-renames
 ```
 
 A root inside a checkout is read from there (`--relative` keeps a sub-directory view's paths
-relative to it). A root in no checkout that holds checkouts directly under it (a workspace of
-sibling repositories, like javaweb with its 28) reads each, side by side, paths prefixed by the
-directory; a deeper checkout is not looked for. A root with neither, a failing git, or a read past
+relative to it), and so is every direct child directory holding a `.git` entry that is a checkout of
+its own (`rev-parse --show-toplevel` is the child itself), side by side, paths prefixed by the
+directory: a workspace of sibling repositories (javaweb with its 28), with or without a checkout at its
+top (the zenit workspace's root is a checkout of changelogs holding its 40 module checkouts). A child
+checkout's files never appear in the enclosing checkout's log (git records a gitlink, or nothing when
+the child is ignored or untracked), so no commit is counted twice. A deeper checkout is not looked
+for. A root with no checkout anywhere there, a failing git, or a read past
 `HISTORY_TIMEOUT_SECONDS` (20 s, every checkout together) leaves both signals out of the run with a
 note, so the axis reads "not measured" and the run still exits 0. In the daemon the read runs in the
 request's worker thread, so it holds that read slot 20 s at most and never the event loop.
@@ -275,13 +339,20 @@ Each graph finding reports the weakest edge supporting it (`exact` for a pure ab
   reached through its scope).
 
 `unreferenced_symbol` also skips a type that is annotated or declares an annotated member.
+`lone_public_callable` also skips a member of an interface, trait or annotation type: it is the
+contract, not a helper. `feature_envy` skips the callables of the first four rules and the members of
+an anonymous class for a different reason, placement rather than reachability: a method a contract
+or a framework places (an override, an annotated method, a migration's `up`) cannot move onto the
+type it envies.
 
 A remaining candidate with no inbound edge is finally checked against the source text,
 because the graph has no edge for a callable used as a VALUE (a dispatch table, `key=f`,
 `Foo::bar`): its simple name must not be written outside its own declaration in its own file
 (private), its directory (package-private) or any file of the graph (anything wider; test
 files count for `unreferenced_symbol` only). A mention in a comment or a string also withholds
-the finding.
+the finding. A `lone_public_callable` candidate (all callers inside its own type) gets the same
+check against every OTHER production file: a `Type::member` reference elsewhere would break if it
+were made private, so a public name written in another file is not measured.
 
 Visibility comes from the written modifiers first (`public`, `pub`, `export`, ...); a member of
 an interface or trait without one is as visible as the interface; Java defaults to
@@ -354,9 +425,12 @@ composite         = sum(weight(axis) * axis score) / sum(weight(axis))   over me
 ```
 
 Weights (`AXIS_WEIGHTS` in `src/zemble/health/score.py`, the one table): size 1, machinery 1,
-layering 2, copying 1, vocabulary 1, consistency 1, history 1 (a forbidden edge breaks a rule the
-workspace wrote down; the rest are general conventions or the code's own peers). A style finding
-weighs 1 (its unit is hundredths of the cut, not lines), and so does a history finding (thousandths).
+layering 2, coupling 1, copying 1, vocabulary 1, consistency 1, history 1 (a forbidden edge breaks a
+rule the workspace wrote down; the rest are general conventions or the code's own peers). A style
+finding weighs 1 (its unit is hundredths of the cut, not lines), and so does a history finding
+(thousandths). The coupling axis's `package_cycle` fraction is the share of the scope's production
+directories that sit in a cycle, and its `feature_envy` fraction the share of the measured methods
+that envy another type.
 The history axis measures only files the window touched, so its `hotspot` fraction is the share of
 the changed production files that are hotspots, and its `boundary_co_change` fraction the share of
 the cross-module pairs that changed together at least 5 times that are coupled past the bar. An axis
@@ -381,7 +455,8 @@ printed in it).
   duplication tier included (it reads the unit index). The history axis runs git in the daemon's
   worker thread for the request, bounded by `HISTORY_TIMEOUT_SECONDS` (20 s). The read holds the
   whole graph's symbols and tallies in private memory (`read_estimate_mb`: 32 MiB plus 1.5 KiB per
-  symbol and 64 B per edge, measured 209 MiB on javaweb and 321 MiB on the zenit workspace), so the
+  symbol and 100 B per edge, measured 209 MiB on javaweb and 642 MiB on the zenit workspace with the
+  caller and call aggregates, 599 MiB without them), so the
   daemon admits it against its memory ceiling first and otherwise answers `outgrown`: the CLI and the
   MCP tool then read the stored graph in their own process and say so (`docs/daemon.md`, fallback rules).
 - A sub-directory of a tree with a graph is answered from that graph: paths relative to the
@@ -401,6 +476,10 @@ In process over an existing graph (graph build excluded; `ZEMBLE_DAEMON=0`), thi
 | monolog | PHP | 0.10 s | 89.2 | 97.5 | 80.9 | not measured |
 | serde | Rust | 0.17 s | 81.6 | 78.3 | 84.9 | not measured |
 | gson | Java | 0.25 s | 80.2 | 88.4 | 72.0 | not measured |
+
+The per-signal counts below predate the precision rules of `lone_public_callable`,
+`single_implementation_interface`, `single_subclass_abstract` and `large_file` and the coupling
+axis; see "Precision rules and the coupling axis" for the current ones.
 
 Findings per signal:
 
@@ -581,14 +660,68 @@ Hand review, top findings:
 | opencode | `core/src/flag/flag.ts` with `opencode/src/effect/runtime-flags.ts` (15 of 48) | real: two flag vocabularies kept in step by hand |
 | opencode | hotspot 2: `sdk/js/src/v2/gen/types.gen.ts` (364 commits, 13625 lines) | generated; a legitimate finding by the policy above (`large_file` reports it too) |
 
+### Precision rules and the coupling axis (2026-10-17)
+
+In process over the existing graphs, this machine under other load (load average 15-19, so walls
+are rough). The zenit workspace (247k symbols, 2.69M edges; its root is a checkout holding 40 module
+checkouts), past/measured before and after:
+
+| Signal | Before | After |
+| --- | --- | --- |
+| `lone_public_callable` | 5009 / 9018 | 1129 / 6438 |
+| `single_implementation_interface` | 327 / 1500 | 189 / 1362 (271 / 1444 with the module rule alone) |
+| `single_subclass_abstract` | 17 / 260 | 11 / 254 |
+| `large_file` | 170 / 8898 | 17 / 277 |
+| `deep_inheritance` | - | 2 / 7169 |
+| `package_cycle` | - | 395 / 939 directories (444 at `unique_name`) |
+| `feature_envy` | - | 836 / 28211 methods |
+| `hotspot` | not measured | 259 / 6556 |
+| `boundary_co_change` | not measured | 0 / 0 (every module is its own checkout) |
+
+Score 93.5 -> 93.1 (coupling 77.5, history 96.0). Wall 32-42 s before and 46-52 s after; peak RSS
+758 MiB before and 850 MiB after; the caller and call aggregates read in 6.5 s and 3.1 s. On a copy of
+zemble (generic config, no history): `lone_public_callable` 277 / 586 -> 72 / 561, `large_file`
+6 / 200 -> 6 / 145, `package_cycle` 16 / 20 (the root package `src/zemble` imports every
+sub-package for its CLI and MCP surfaces, and they import its `types`/`utils`), `feature_envy`
+0 / 649, `deep_inheritance` 0 / 361.
+
+Hand review on zenit:
+
+| Finding | Verdict |
+| --- | --- |
+| `package_cycle` `zenit/common` (59 directories), lightest links of 2 edges: `Zenit.java` imports `api.ZenitRuntime`, and `api/ResponseCarrier.java` reads `Zenit.DRY` | real: the root package and its sub-packages depend on each other |
+| `lone_public_callable` `ArcanaKnowledge.knowledgeRoleAllowed` (2 callers), `WorkProperties.canReadOption` (6 callers) | real: no file outside the type names them |
+| `deep_inheritance` `LiteralDoubleUnit`, `LiteralIntegerUnit`: 6 ancestors up to `ASTUnit` | real by S110's count; an AST hierarchy, deliberate |
+| `feature_envy` `BoardTemplate.Walk.attribute`: 26 token getter calls, 4 own | real: it rebuilds token ranges a `span()` on the token would give |
+| `feature_envy` `ScreenCodec.read`, `AiModule.createDirector`, textum's `*Journeys` | not: a stream decoder, a composition root, and test code the graph does not mark as test (see Known limits) |
+| `single_implementation_interface` `DelegationLookup` | not: a test double implements it, but the graph holds none of hohenheim's `src/browserTest/` files |
+
 ## Known limits
 
-- `lone_public_callable` counts one caller as a finding, as designed: in a Python codebase most
-  module seams have one consumer (247 of 547 measured on zemble), so the machinery axis reads
-  low there without any one finding being wrong. Its findings rank by percentile, so the
-  never-called ones lead.
-- A library's extension points (gson's `FieldNamingStrategy`, `ToNumberStrategy`) are
-  single-implementation interfaces by design: they are implemented by the library's users.
+- `lone_public_callable` cannot judge a public callable nothing in the workspace calls: a library's
+  API and dead code look the same without a declared library/application split, so neither is
+  measured (`unreferenced_symbol` still reports non-public dead code). Its source-text check
+  withholds a candidate whose name is written in any other file, so common names (`get`, `apply`)
+  are under-reported. A caller in test code does not count as outside: the reason says
+  `tests call it too`, where package-private (Java) rather than private keeps them compiling.
+- A library's extension points implemented in the SAME module only by the library's users
+  (gson's `FieldNamingStrategy`, `ToNumberStrategy`) still read as single-implementation
+  interfaces: only an implementor in another module, or a test double, marks the seam.
+- `package_cycle` works on directories, not language packages: a Java package split across source
+  sets (`src/common/java/x` and `src/server/java/x`) is two nodes, and a Python package's
+  `__init__.py` is its directory. A cycle through a directory outside `--paths` is not seen (only
+  scope files' edges are read). One large cycle yields one finding per directory, all at the same
+  value; the reason's lightest link is the place to start (zenit's `zenit/common` cycle of 59).
+- `feature_envy` reads getter-shaped calls (no parameter, one statement, no control flow), which also
+  match the one-statement reads of a stream API: a wire codec reading a `BinaryReader` (`r.u16()`)
+  is reported though moving it would be wrong, and so is a composition root reading a module's
+  getters to wire services (quirkyquarters' `AiModule.createDirector`). It does not see field access
+  (`other.x`), so a method reading public fields directly is never envious, and a sub-directory view
+  never names a type outside it as the envied one. Test code the graph does not mark as test
+  (textum's `src/browserTestCommon/`, which `TEST_PATH_SEGMENTS` does not list) is measured like
+  production: on zenit it fills most of the top 15.
+- `deep_inheritance` counts only ancestors the graph holds: a class whose chain continues into a
+  library is measured from its topmost workspace ancestor, so its true depth is higher.
 - Dynamic dispatch by a computed name (`getattr(self, f"_keyword_{name}")` in `hwk.py`) is
   invisible to both the graph and the source-text check: those 4 `_keyword_*` methods stay
   reported on zemble.
@@ -622,9 +755,10 @@ Hand review, top findings:
 - A sub-directory view compares its files with that sub-directory's files only, since the view
   holds no others; `--paths` and `--since` keep the whole view as the norm.
 - History is per checkout: in a workspace of sibling repositories a cross-repository coupling is
-  invisible (commits never span two histories), and a checkout nested deeper than the root's
-  direct children is not read. History before a rename stays under the old path (`--follow` is
-  per file), so a renamed file starts its churn again.
+  invisible (commits never span two histories), so `boundary_co_change` measures nothing where every
+  module is its own checkout (javaweb, zenit). The root and its direct children are read; a checkout
+  nested deeper (under a plain directory, or inside a child checkout) is not. History before a rename
+  stays under the old path (`--follow` is per file), so a renamed file starts its churn again.
 - `hotspot` reads size as well as complexity, so a data table or stylesheet that keeps growing
   (opencode's `i18n/en.ts`, javaweb's `DevSeed.java`) is a hotspot by size alone, and so is a
   generated file that is regenerated often.

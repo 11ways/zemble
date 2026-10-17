@@ -23,6 +23,7 @@ from zemble.health.answers import COPYING_OPT_IN, HealthRequest, health_payload
 from zemble.health.cli import in_process
 from zemble.health.collect import collect
 from zemble.health.git import changed_lines, history_checkouts
+from zemble.health.history import measure_history
 from zemble.health.model import Axis, Comparison, Signal, Tier
 from zemble.health.score import AXIS_WEIGHTS, SCORE_DISCLAIMER
 from zemble.health.signals import PRODUCERS
@@ -42,16 +43,12 @@ _EXPECTED = {
     f"forbidden_crossing:java:{_CORE}/Leaker.java->app",
     f"single_implementation_interface:java:{_PKG}.core.Greeter",
     f"single_subclass_abstract:java:{_PKG}.core.AbstractStore",
+    f"deep_inheritance:java:{_PKG}.core.Tower.Level7",
     f"unreferenced_symbol:java:{_PKG}.core.Util.deadHelper(int)",
-    f"lone_public_callable:java:{_PKG}.core.Util.neverCalled(int)",
-    f"lone_public_callable:java:{_PKG}.core.Util.calledOnce(int)",
-    f"lone_public_callable:java:{_PKG}.core.Util.tangled(int,int,int,int,int,int)",
-    f"lone_public_callable:java:{_PKG}.core.Leaker.leak()",
-    f"lone_public_callable:java:{_PKG}.app.Launcher.version()",
-    f"lone_public_callable:java:{_PKG}.core.Greeter.greet(String)",
-    f"lone_public_callable:java:{_PKG}.core.Shape.area()",
-    f"lone_public_callable:java:{_PKG}.core.AbstractStore.save()",
-    f"lone_public_callable:java:{_PKG}.core.Facade.compute(int,int)",
+    f"lone_public_callable:java:{_PKG}.core.Ledger.normalize(int)",
+    f"package_cycle:java:core:{_CORE}/north",
+    f"package_cycle:java:core:{_CORE}/south",
+    f"feature_envy:java:{_PKG}.core.Invoice.label()",
 }
 
 #: The duplication tier's findings on the fixture, by key: two copied bodies in two files, one
@@ -68,14 +65,23 @@ _COPYING = {
 #: Shapes the fixture holds on purpose that no signal may report.
 _NEVER = (
     "Shape:",  # two implementors
+    "Plugin",  # one implementor, in another module: an extension point
     "EnglishGreeter.greet",  # overrides, called through the interface only
+    "Greeter.greet",  # a contract member is the contract, not a helper
     "FileStore.save",  # overrides, called through the abstract type only
-    "Launcher.main",  # the entry point
+    "Launcher.main",  # the entry point; its many calls are static ones on a type name
     "Util.frameworkHook",  # annotated: a framework reaches it
     "Util.calledTwice",  # two callers
+    "Util.calledOnce",  # one caller, in another type
+    "Util.neverCalled",  # nothing calls it: an API or dead code, which the graph cannot tell apart
     "Util.hiddenHelper",  # referenced
     "Operator.applyAsInt",  # forwards, but implements a contract (@Override)
     "Calculator.add",  # the forwarders' target, called twice
+    "Customer.",  # called from Invoice, outside its own type
+    "Invoice.replay",  # calls a ledger's logic, not its getters: no envy
+    "Invoice.moves",  # one read, then calls on what each call returned: a chain, not envy
+    "Tower.Level6",  # five ancestors: at the bar, not past it
+    "Clock",  # one production implementor and a test double: a seam
     "pass_through:java:com.example.core.Leaker.leak()",  # forwards no parameter: it names a value
 )
 
@@ -115,8 +121,16 @@ def test_the_fixture_reports_exactly_its_suspects(health_root: Path) -> None:
     crossing = by_key[f"forbidden_crossing:java:{_CORE}/Leaker.java->app"]
     assert crossing["resolution"] == Resolution.EXACT.value and crossing["value"] >= 1, "step 3: exact edges"
     assert "core must not depend on app" in crossing["reason"], "step 3: the rule rides along"
-    lone = by_key[f"lone_public_callable:java:{_PKG}.core.Util.neverCalled(int)"]
-    assert lone["reason"].endswith("(never called)"), f"step 3: the absence says so, got {lone['reason']!r}"
+    lone = by_key[f"lone_public_callable:java:{_PKG}.core.Ledger.normalize(int)"]
+    assert lone["reason"].endswith("(2 caller(s), all in Ledger)"), f"step 3: a nested type is its own, {lone}"
+    envy = by_key[f"feature_envy:java:{_PKG}.core.Invoice.label()"]
+    assert envy["value"] == 3 and "(3 getter calls into Customer, 0 calls into its own type)" in envy["reason"], envy
+    cycle = by_key[f"package_cycle:java:core:{_CORE}/north"]
+    assert cycle["name"] == f"{_CORE}/north" and cycle["value"] == 2, f"step 3: a directory finding, {cycle}"
+    lightest = f"its lightest link into it: 3 edge(s) from North.java into {_CORE}/south)"
+    assert cycle["reason"].endswith(f"(in a cycle with {_CORE}/south; {lightest}"), cycle["reason"]
+    deep = by_key[f"deep_inheritance:java:{_PKG}.core.Tower.Level7"]
+    assert deep["value"] == 6 and deep["reason"].endswith("(up to Level1)"), deep
 
     # 4. Every surface carries the disclaimer next to the score.
     assert f"({SCORE_DISCLAIMER})" in payload["markdown"], "step 4: the score is never a target"
@@ -143,11 +157,23 @@ def test_percentiles_and_score_are_deterministic_and_follow_the_formula(health_r
     )
     assert health["score"] == round(composite, 1), "step 3: the composite is the weighted mean"
 
-    # 4. Hand-computed on the fixture: machinery is single-impl 1/2, single-subclass 1/1, lone 9/11,
-    #    unreferenced 1/3; layering is one forbidden pair of two crossing pairs.
-    machinery = 100 * (1 - (1 / 2 + 1 / 1 + 9 / 11 + 1 / 3) / 4)
+    # 4. Hand-computed on the fixture. Machinery: single-impl 1/2 (Greeter of Greeter and Shape; Plugin's
+    #    one implementor is in `app`, and Clock's test implements it too, so neither is measured),
+    #    single-subclass 1/1, deep inheritance 1/35 classes, lone public 1/14 (the public methods outside a
+    #    contract with a production caller:
+    #    Util.calledOnce, calledTwice, tangled, Leaker.leak, Launcher.version, Calculator.add,
+    #    AbstractStore.save, Customer.name, street, city, moved, South.down, Ledger.record and
+    #    Ledger.normalize), unreferenced 1/3. Layering is one forbidden pair of three crossing pairs.
+    #    Coupling: two cycle directories of five, one envious method of the 26 bodies no contract or
+    #    framework places. Size: large_file measures zoo.py alone, every other file holding exactly one
+    #    top-level type.
+    machinery = 100 * (1 - (1 / 2 + 1 / 1 + 1 / 35 + 1 / 14 + 1 / 3) / 5)
     assert axes["machinery"]["score"] == round(machinery, 1), f"step 4: machinery {axes['machinery']}"
-    assert axes["layering"]["score"] == 50.0, f"step 4: layering {axes['layering']}"
+    assert axes["layering"]["score"] == round(100 * (1 - 1 / 3), 1), f"step 4: layering {axes['layering']}"
+    coupling = 100 * (1 - (2 / 5 + 1 / 26) / 2)
+    assert axes["coupling"]["score"] == round(coupling, 1), f"step 4: coupling {axes['coupling']}"
+    sizes = {item["signal"]: item["measured"] for item in axes["size"]["signals"]}
+    assert sizes["large_file"] == 1, f"step 4: a one-type file is large_type's, {sizes}"
 
     # 5. A percentile is the share of the language's population no more suspect, and ranks first.
     findings = health["findings"]
@@ -332,7 +358,8 @@ def test_a_sub_directory_is_reported_in_its_own_paths(health_root: Path) -> None
 
     # 1. Only in-folder units, spelled relative to the folder.
     paths = {finding["file_path"] for finding in findings}
-    assert paths and all("/" not in path for path in paths), f"step 1: rebased paths, got {sorted(paths)}"
+    assert paths and all(not path.startswith("src/") for path in paths), f"step 1: rebased paths, got {sorted(paths)}"
+    assert {"north/North.java", "Util.java"} <= paths, f"step 1: a sub-package keeps its own segment, {sorted(paths)}"
     assert not graph_present(str(core)), "step 1: no graph of its own"
 
     # 2. Same identities as the root run, minus everything outside the folder; a sub-directory is a
@@ -454,7 +481,8 @@ def test_since_lists_the_changed_spans_and_keeps_the_whole_score(health_root: Pa
     )
     (health_root / _CORE / "Fresh.java").write_text(
         "package com.example.core;\n\npublic class Fresh {\n\n    public static int fresh(int value) {\n"
-        "        return value + 7;\n    }\n}\n",
+        "        return value + 7;\n    }\n\n    public static int twice(int value) {\n"
+        "        return fresh(fresh(value));\n    }\n}\n",
         encoding="utf-8",
     )
     changes = changed_lines(str(health_root), "HEAD")
@@ -466,7 +494,7 @@ def test_since_lists_the_changed_spans_and_keeps_the_whole_score(health_root: Pa
     tangled = f"{_PKG}.core.Util.tangled(int,int,int,int,int,int)"
     expected = {
         f"{signal}:java:{tangled}"
-        for signal in ("long_callable", "complex_callable", "deep_nesting", "many_parameters", "lone_public_callable")
+        for signal in ("long_callable", "complex_callable", "deep_nesting", "many_parameters")
     } | {f"lone_public_callable:java:{_PKG}.core.Fresh.fresh(int)"}
     assert _keys(payload) == expected, f"step 2: got {sorted(_keys(payload) ^ expected)}"
     assert health["since"] == {"ref": "HEAD", "files": 2, "scope_total": len(_EXPECTED) + 1}, health["since"]
@@ -476,7 +504,7 @@ def test_since_lists_the_changed_spans_and_keeps_the_whole_score(health_root: Pa
     whole = _report(health_root, copying=False)["health"]
     assert health["score"] == whole["score"], "step 3: the composite is not recomputed over the delta"
     assert set(health["unscored"]) == {s.value for s in Signal if s.facts.tier is Tier.DUPLICATION}, "step 3"
-    assert "Since HEAD: 6 finding(s)" in payload["markdown"], "step 3: the delta count is printed"
+    assert "Since HEAD: 5 finding(s)" in payload["markdown"], "step 3: the delta count is printed"
 
     # 4. Against the baseline saved at the commit, the delta reads remaining and new.
     marked = _report(health_root, since="HEAD", baseline=str(saved))["health"]
@@ -686,6 +714,54 @@ def test_a_workspace_of_checkouts_reads_each_one(history_root: Path, tmp_path: P
     assert keys == {"hotspot:python:repo/app/hot.py"}, keys
 
 
+def test_a_checkout_holding_checkouts_reads_itself_and_each_child(history_root: Path, tmp_path: Path) -> None:
+    """A root checkout of changelogs whose children are checkouts reads all of them, each commit once."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shutil.move(str(history_root), str(workspace / "repo"))
+    # A checkout two levels down and a plain directory beside the child checkout.
+    deep = workspace / "group" / "deep"
+    deep.mkdir(parents=True)
+    git(deep, "init", "-q")
+    _edit(deep, "lib/deep.py", message="deep")
+    git(workspace, "init", "-q")
+    for index in range(3):
+        # `add -A` records `repo` as a gitlink: its files never enter the root's own log.
+        _edit(workspace, "changelog/notes.py", message=f"notes {index}")
+
+    # 1. The root itself, then each direct child checkout; the deeper one is not looked for.
+    assert history_checkouts(str(workspace)) == ((str(workspace), ""), (str(workspace / "repo"), "repo/")), "step 1"
+
+    # 2. Each file's commits come from its own checkout, counted once.
+    history = measure_history(str(workspace), ["repo/app/hot.py", "changelog/notes.py", "group/deep/lib/deep.py"], 365)
+    assert history.churn("repo/app/hot.py") == 12 and history.churn("changelog/notes.py") == 3, history.commits
+    assert history.churn("group/deep/lib/deep.py") == 0, "step 2: a checkout under a plain directory is not read"
+    assert history.checkout_of("repo/app/hot.py") == "repo/" and history.checkout_of("changelog/notes.py") == ""
+
+    # 3. The report measures the history axis there.
+    keys = _keys(_report(workspace, signals=["hotspot"]))
+    assert keys == {"hotspot:python:repo/app/hot.py"}, keys
+
+
+def test_components_and_ancestor_chains_survive_size_and_cycles() -> None:
+    """Both walks are iterative: a 5000-node chain passes the recursion limit, and a cycle in bad data ends."""
+    from zemble.health.structure import ancestor_depths, strongly_connected
+
+    # 1. A ring of 5000 is one component; a tail hanging off it is one component per node.
+    ring = {index: [(index + 1) % 5000] for index in range(5000)}
+    ring[5000] = [0]
+    components = strongly_connected(range(5001), ring)
+    assert sorted(len(component) for component in components) == [1, 5000], "step 1"
+    assert strongly_connected(["a", "b"], {"a": ["b", "elsewhere"], "b": []}) == [["b"], ["a"]], "step 1: unknowns"
+
+    # 2. A 5000-deep chain counts every ancestor; a two-node cycle stops instead of looping.
+    chain = {index: [index - 1] for index in range(1, 5000)}
+    depths = ancestor_depths(chain)
+    assert depths[4999][0] == 4999 and depths[4999][1][-1] == 0, "step 2: the longest chain, topmost last"
+    cyclic = ancestor_depths({"a": ["b"], "b": ["a"]})
+    assert set(cyclic) == {"a", "b"} and all(depth <= 1 for depth, _ in cyclic.values()), cyclic
+
+
 def test_read_estimate_sizes_a_graph_on_the_high_side(health_root: Path) -> None:
     """The daemon sizes a health read from row counts: above every measured read, growing with the graph."""
     from zemble.graph.model import RowCounts
@@ -701,8 +777,8 @@ def test_read_estimate_sizes_a_graph_on_the_high_side(health_root: Path) -> None
     small = read_estimate_mb(counts)
     javaweb = read_estimate_mb(RowCounts(symbols=122269, edges=1258533, metrics=67762, files=7909))
     zenit = read_estimate_mb(RowCounts(symbols=246682, edges=2694116, metrics=0, files=14593))
-    # Measured VmData growth of a fresh process: javaweb 209 MiB, the zenit workspace 321 MiB.
-    assert small < javaweb < zenit and javaweb > 209 and zenit > 321, (small, javaweb, zenit)
+    # Measured VmData growth of a fresh process: javaweb 209 MiB, the zenit workspace 642 MiB.
+    assert small < javaweb < zenit and javaweb > 209 and zenit > 642, (small, javaweb, zenit)
 
 
 def test_an_outgrown_daemon_answer_is_read_in_process(

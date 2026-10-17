@@ -50,6 +50,15 @@ class CallableMetrics:
     #: Deepest nesting of increment and nesting kinds; 0 for straight-line code.
     nesting: int
 
+    @property
+    def is_boilerplate(self) -> bool:
+        """Whether the body is one statement without control flow: an accessor, a delegation, a constant.
+
+        Nesting rather than complexity decides: a one-line predicate (`return a && b;`) scores a
+        complexity of 1 without breaking the linear flow.
+        """
+        return self.statements <= 1 and self.nesting == 0
+
 
 @dataclass(frozen=True)
 class FileMetrics:
