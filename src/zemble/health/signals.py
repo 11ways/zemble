@@ -7,16 +7,14 @@ at all (an absence it cannot vouch for, a count it cannot finish), so it neither
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from zemble.dedup.languages import SiteKind, profile_for
 from zemble.dedup.model import CloneKind, Unit
 from zemble.graph.model import (
-    ANONYMOUS_MARKER,
     CALLABLE_KINDS,
-    DECLARED_TYPE_KINDS,
     TYPE_KINDS,
     EdgeKind,
     FileDependency,
@@ -25,10 +23,11 @@ from zemble.graph.model import (
     SymbolKind,
 )
 from zemble.graph.provider import display_name
-from zemble.health.collect import HIERARCHY_KINDS, HealthFacts, language_of
+from zemble.health.collect import HIERARCHY_KINDS, HealthFacts, anonymous, language_of, named_type
 from zemble.health.copying import CODE_KINDS, CopyingFacts
 from zemble.health.git import merge_ranges
 from zemble.health.model import Signal
+from zemble.health.style import Distance
 from zemble.languages import Visibility
 from zemble.languages.metrics import CallableMetrics
 
@@ -65,8 +64,6 @@ _ANY_EDGE = frozenset(EdgeKind)
 _RESTRICTED = frozenset({Visibility.PRIVATE, Visibility.PACKAGE})
 #: Callables an outside caller reaches by name: the rest (lambdas, nested helpers) only their scope does.
 _MEMBER_CALLABLE_KINDS = frozenset({SymbolKind.METHOD, SymbolKind.FUNCTION})
-#: Containers whose declared types count as top-level.
-_FILE_LEVEL = frozenset({SymbolKind.MODULE, SymbolKind.PACKAGE})
 #: The name every language's process entry point goes by.
 _MAIN = "main"
 #: Files a cloned body's detail names before it only counts the rest.
@@ -81,11 +78,6 @@ def _symbol_sample(symbol: Symbol, value: int, resolution: Resolution = Resoluti
     )
 
 
-def _anonymous(symbol: Symbol | None) -> bool:
-    """Whether a symbol is an anonymous class, which nothing can name."""
-    return symbol is not None and symbol.name.startswith(ANONYMOUS_MARKER)
-
-
 def _callables(facts: HealthFacts) -> Iterator[Symbol]:
     """Every production callable in the scope."""
     return (symbol for symbol in facts.production if symbol.kind in CALLABLE_KINDS)
@@ -93,7 +85,7 @@ def _callables(facts: HealthFacts) -> Iterator[Symbol]:
 
 def _types(facts: HealthFacts) -> Iterator[Symbol]:
     """Every named production type declaration in the scope."""
-    return (symbol for symbol in facts.production if symbol.kind in DECLARED_TYPE_KINDS and not _anonymous(symbol))
+    return (symbol for symbol in facts.production if named_type(symbol))
 
 
 def _measured(facts: HealthFacts, read: Callable[[Symbol, CallableMetrics], int]) -> Iterator[Sample]:
@@ -105,17 +97,8 @@ def _measured(facts: HealthFacts, read: Callable[[Symbol, CallableMetrics], int]
 
 
 def _long_callable(facts: HealthFacts) -> Iterator[Sample]:
-    """Callable length in lines, less the named callables declared directly inside it.
-
-    A nested function (a decorated tool inside its `register_*`, a closure) is measured on its own,
-    so counting its lines again in the enclosing callable would flag one body twice.
-    """
-    nested: Counter[str] = Counter()
-    for symbol in facts.symbols.values():
-        container = facts.container(symbol)
-        if symbol.kind in CALLABLE_KINDS and container is not None and container.kind in CALLABLE_KINDS:
-            nested[container.id] += symbol.end_line - symbol.start_line + 1
-    return _measured(facts, lambda symbol, metric: max(metric.lines - nested[symbol.id], 0))
+    """Callable length in lines, less the named callables declared directly inside it (`HealthFacts.own_lines`)."""
+    return _measured(facts, facts.own_lines)
 
 
 def _deep_nesting(facts: HealthFacts) -> Iterator[Sample]:
@@ -146,13 +129,8 @@ def _large_file(facts: HealthFacts) -> Iterator[Sample]:
 
 def _many_types_per_file(facts: HealthFacts) -> Iterator[Sample]:
     """Top-level type declarations of every measured production file."""
-    counts: Counter[str] = Counter()
-    for symbol in _types(facts):
-        container = facts.container(symbol)
-        if container is None or container.kind in _FILE_LEVEL:
-            counts[symbol.file_path] += 1
     for path, metric in facts.files:
-        yield Sample(path, 1, max(metric.lines, 1), "", path, counts[path])
+        yield Sample(path, 1, max(metric.lines, 1), "", path, facts.top_level_types[path])
 
 
 def _subtypes(facts: HealthFacts, symbol: Symbol, signal: Signal) -> Sample | None:
@@ -194,7 +172,7 @@ def _entry_point(facts: HealthFacts, symbol: Symbol) -> bool:
         or bool(symbol.annotations)
         or symbol.id in facts.may_override
         or facts.is_runtime_hook(symbol)
-        or _anonymous(facts.container(symbol))
+        or anonymous(facts.container(symbol))
     )
 
 
@@ -429,6 +407,24 @@ def _vocabulary_drift(facts: HealthFacts) -> Iterator[Sample]:
             yield Sample(*_place(site), site.name, f"{site.file_path}:{site.name}", 1)
 
 
+def _style_samples(facts: HealthFacts, distances: dict[str, Distance]) -> Iterator[Sample]:
+    """One sample per file of the scope a style norm judged, valued by its distance in hundredths of the cut."""
+    for path, metric in facts.files:
+        distance = distances.get(path)
+        if distance is not None:
+            yield Sample(path, 1, max(metric.lines, 1), "", path, distance.value, detail=distance.detail)
+
+
+def _style_outlier_repo(facts: HealthFacts) -> Iterator[Sample]:
+    """Every measured file's style distance from its language's files in the view (`zemble.health.style`)."""
+    return _style_samples(facts, facts.style.repo)
+
+
+def _style_outlier_directory(facts: HealthFacts) -> Iterator[Sample]:
+    """Every measured file's style distance from its directory's files, where those are not its whole language."""
+    return _style_samples(facts, facts.style.directory)
+
+
 #: The one producer of every signal; a member without one refuses at import below.
 PRODUCERS: dict[Signal, Producer] = {
     Signal.LONG_CALLABLE: _long_callable,
@@ -447,6 +443,8 @@ PRODUCERS: dict[Signal, Producer] = {
     Signal.CLONED_BODY: _cloned_body,
     Signal.PASS_THROUGH: _pass_through,
     Signal.VOCABULARY_DRIFT: _vocabulary_drift,
+    Signal.STYLE_OUTLIER_REPO: _style_outlier_repo,
+    Signal.STYLE_OUTLIER_DIRECTORY: _style_outlier_directory,
 }
 
 _missing = set(Signal) - set(PRODUCERS)

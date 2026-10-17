@@ -78,8 +78,9 @@ def register_health_tool(server: FastMCP) -> None:
         Size (long, deep, complex callables; large types and files), machinery (single-implementation
         interfaces, single-subclass abstract types, public callables with at most one caller,
         unreferenced private code, pass-through methods), layering (edges crossing a `.zemble/home.toml`
-        forbidden dependency), copying (files and bodies inside exact or renamed clone classes) and
-        vocabulary (values declared in several places). Thresholds are absolute and documented; graph
+        forbidden dependency), copying (files and bodies inside exact or renamed clone classes),
+        vocabulary (values declared in several places) and consistency (files whose style reads different
+        from their language's or their directory's other files). Thresholds are absolute and documented; graph
         findings rest only on edges resolved exactly or by unique name. `since` turns it into a branch
         delta. The score is not a target: address or explain the findings. This is a report, never a gate.
         """

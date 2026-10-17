@@ -19,10 +19,12 @@ from zemble.graph.provider import open_provider
 from zemble.graph.store import graph_db_path, graph_present
 from zemble.health.answers import COPYING_OPT_IN, HealthRequest, health_payload
 from zemble.health.cli import in_process
+from zemble.health.collect import collect
 from zemble.health.git import changed_lines
 from zemble.health.model import Axis, Comparison, Signal, Tier
 from zemble.health.score import AXIS_WEIGHTS, SCORE_DISCLAIMER
 from zemble.health.signals import PRODUCERS
+from zemble.health.style import NameShape, StyleDimension, StyleMeasurement, chi_square_quantile, measure_style
 from zemble.home.config import HomeConfig
 
 _CORE = "src/main/java/com/example/core"
@@ -164,6 +166,131 @@ def test_every_vocabulary_member_has_its_facts_and_its_producer() -> None:
             assert facts.floor is not None and facts.floor.at_least(Resolution.UNIQUE_NAME), signal
         else:
             assert facts.floor is None, f"{signal} rests on no edge"
+    for dimension in StyleDimension:
+        assert callable(dimension.facts.compute) and dimension.facts.description, dimension
+    shapes = [dimension.facts.shape for dimension in StyleDimension if dimension.facts.shape is not None]
+    assert sorted(shapes) == sorted(NameShape), "every name shape has exactly one dimension"
+
+
+def test_name_shapes_and_the_chi_square_cut() -> None:
+    """A name's shape ignores edge underscores and calls one lower-case word nothing; the cut matches chi-square."""
+    shapes = {name: NameShape.of(name) for name in ("_load_file", "loadFile", "LoadFile", "load", "LOAD_ALL", "__x__")}
+    assert shapes == {
+        "_load_file": NameShape.SNAKE,
+        "loadFile": NameShape.CAMEL,
+        "LoadFile": NameShape.PASCAL,
+        "load": None,
+        "LOAD_ALL": None,
+        "__x__": None,
+    }, shapes
+    # Published chi-square 0.99 quantiles: 3 degrees 11.345, 10 degrees 23.209, 14 degrees 29.141.
+    for degrees, published in ((3, 11.345), (10, 23.209), (14, 29.141)):
+        assert abs(chi_square_quantile(degrees, 0.99) - published) / published < 0.01, degrees
+
+
+@pytest.fixture
+def style_root(tmp_path: Path, graph_cache: Path) -> Path:
+    """A private copy of the consistency fixtures, outside any other graph."""
+    graph_cli._refreshed.clear()
+    return Path(shutil.copytree(Path(__file__).parent / "fixtures" / "health_style", tmp_path / "health_style"))
+
+
+_STYLE = ["style_outlier_repo", "style_outlier_directory"]
+
+
+def _style(root: Path) -> StyleMeasurement:
+    """Measure a fixture root's style straight from its graph."""
+    _report(root, signals=_STYLE)
+    provider = open_provider(str(root))
+    try:
+        return measure_style(collect(provider, HomeConfig.load(root)))
+    finally:
+        provider.close()
+
+
+def test_the_one_foreign_file_is_the_one_style_outlier(style_root: Path) -> None:
+    """Seven files in one style and one foreign file: only the foreign one is past the cut, and the reason says why."""
+    payload = _report(style_root / "repo", signals=_STYLE)
+    findings = payload["health"]["findings"]
+
+    # 1. Exactly one finding, the foreign file against its language.
+    assert _keys(payload) == {"style_outlier_repo:python:pkg/foreign.py"}, f"step 1: got {sorted(_keys(payload))}"
+
+    # 2. The reason names what reads different: its long callables and its missing comments.
+    reason = findings[0]["reason"]
+    assert "against 8 python files" in reason, f"step 2: the norm is named, got {reason!r}"
+    assert "longer callables" in reason and "less commented (0% vs" in reason, f"step 2: got {reason!r}"
+
+    # 3. The file with two callables is not measured at all: eight of nine files are.
+    axis = next(axis for axis in payload["health"]["axes"] if axis["axis"] == Axis.CONSISTENCY.value)
+    measured = {item["signal"]: item["measured"] for item in axis["signals"]}
+    assert measured["style_outlier_repo"] == 8, f"step 3: {measured}"
+    style = _style(style_root / "repo")
+    assert "pkg/small.py" not in style.styles and "pkg/foreign.py" in style.styles, "step 3: small.py unmeasured"
+
+    # 4. One directory holds the whole language, so the directory norm adds nothing and measures no file.
+    assert measured["style_outlier_directory"] == 0 and not style.directory, f"step 4: {measured}"
+
+
+def test_style_vectors_are_deterministic_and_constant_dimensions_drop(style_root: Path) -> None:
+    """Two measurements agree exactly, and a dimension no file varies on is left out of the norm."""
+    first, second = _style(style_root / "repo"), _style(style_root / "repo")
+    assert first == second, "step 1: same vectors, norms and distances"
+
+    # 2. Every file declares no type, every name is public and every callable takes two parameters.
+    norm = first.norms["python"]
+    for constant in (StyleDimension.TOP_LEVEL_TYPES, StyleDimension.PUBLIC_SHARE, StyleDimension.PARAMETERS_MEAN):
+        assert constant not in norm.kept, f"step 2: {constant.value} is constant and dropped"
+    assert len(first.standardised["pkg/foreign.py"]) == len(norm.kept), "step 2: vectors span the kept dimensions"
+
+    # 3. The foreign file differs on naming too, past the cap on both shapes.
+    scores = dict(zip(norm.kept, first.standardised["pkg/foreign.py"], strict=True))
+    assert scores[StyleDimension.CAMEL_CASE_NAMES] > 3 and scores[StyleDimension.SNAKE_CASE_NAMES] < -3, scores
+
+
+def test_a_file_foreign_to_its_directory_is_flagged_against_its_directory_only(style_root: Path) -> None:
+    """A house-style file among legacy files reads ordinary for the repo and different for its directory."""
+    payload = _report(style_root / "directory", signals=_STYLE)
+    keys = _keys(payload)
+    newcomer = "legacy/newcomer.py"
+
+    # 1. The newcomer is flagged against its directory and not against its language.
+    assert f"style_outlier_directory:python:{newcomer}" in keys, f"step 1: got {sorted(keys)}"
+    assert f"style_outlier_repo:python:{newcomer}" not in keys, "step 1: ordinary for the repo"
+    finding = next(item for item in payload["health"]["findings"] if item["file_path"] == newcomer)
+    assert "against legacy/ (5 python files)" in finding["reason"], finding["reason"]
+
+    # 2. Its legacy neighbours agree with each other: none is flagged against the directory.
+    assert [key for key in keys if key.startswith("style_outlier_directory:")] == [
+        f"style_outlier_directory:python:{newcomer}"
+    ], f"step 2: got {sorted(keys)}"
+
+    # 3. The house files are flagged by neither signal.
+    assert not [key for key in keys if ":house/" in key], f"step 3: got {sorted(keys)}"
+
+
+def test_since_and_paths_judge_against_the_whole_view(style_root: Path) -> None:
+    """`--since` and `--paths` narrow what is listed, never the files a style is judged against."""
+    root = style_root / "repo"
+    git(root, "init", "-q")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "base")
+    foreign = "style_outlier_repo:python:pkg/foreign.py"
+
+    # 1. A change in a house file lists nothing; the norm and the foreign file's finding still stand.
+    orders = root / "pkg" / "orders.py"
+    orders.write_text(orders.read_text(encoding="utf-8") + "\n# One more remark.\n", encoding="utf-8")
+    delta = _report(root, signals=_STYLE, since="HEAD")["health"]
+    assert delta["findings"] == [] and delta["since"]["scope_total"] == 1, f"step 1: {delta['since']}"
+
+    # 2. Touching the foreign file lists it.
+    path = root / "pkg" / "foreign.py"
+    path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert _keys(_report(root, signals=_STYLE, since="HEAD")) == {foreign}, "step 2"
+
+    # 3. A run over the foreign file alone still compares it with the other seven.
+    alone = _report(root, signals=_STYLE, paths=["pkg/foreign.py"])
+    assert _keys(alone) == {foreign} and "against 8 python files" in alone["health"]["findings"][0]["reason"], "step 3"
 
 
 def test_an_ambiguous_edge_never_supports_a_graph_finding(health_root: Path) -> None:

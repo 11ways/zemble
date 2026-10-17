@@ -20,8 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover
 class Axis(str, Enum):
     """What a group of signals says about the code; one weight each in `zemble.health.score`.
 
-    CONSISTENCY and HISTORY join when a signal measures them; an axis without a signal would only
-    ever read "not measured".
+    HISTORY joins when a signal measures it; an axis without a signal would only ever read "not measured".
     """
 
     SIZE = "size"
@@ -29,6 +28,7 @@ class Axis(str, Enum):
     LAYERING = "layering"
     COPYING = "copying"
     VOCABULARY = "vocabulary"
+    CONSISTENCY = "consistency"
 
 
 class Tier(str, Enum):
@@ -41,6 +41,9 @@ class Tier(str, Enum):
     #: The duplication channels' units and clone classes (`zemble.dedup`): a parse of every file beside the
     #: graph, so a run over a whole workspace measures it only when asked (`zemble.health.copying`).
     DUPLICATION = "duplication"
+    #: The parse judged against its own peers (`zemble.health.style`): a finding can come or go when
+    #: OTHER files change, since the norm it is measured from is theirs.
+    POPULATION = "population"
 
 
 class Unit(str, Enum):
@@ -51,6 +54,8 @@ class Unit(str, Enum):
     LEVEL = "level"
     #: Thousandths of a whole: a share kept integral, as every value is.
     PERMILLE = "permille"
+    #: Hundredths of a reference the signal declares (a distance as a share of its cut): past 100 is beyond it.
+    PERCENT = "percent"
 
     @property
     def weighs_by_value(self) -> bool:
@@ -95,6 +100,10 @@ _BADNESS = {
 _SYMBOLS = {Comparison.ABOVE: ">", Comparison.AT_MOST: "<=", Comparison.EQUALS: "=="}
 
 
+#: The chi-square quantile a style distance is cut at: under a normal assumption this share of files stays inside.
+STYLE_CUT_QUANTILE = 0.99
+
+
 @dataclass(frozen=True, slots=True)
 class SignalFacts:
     """The per-signal facts every consumer reads instead of switching over the signal."""
@@ -133,6 +142,8 @@ class Signal(str, Enum):
     CLONED_BODY = "cloned_body"
     PASS_THROUGH = "pass_through"
     VOCABULARY_DRIFT = "vocabulary_drift"
+    STYLE_OUTLIER_REPO = "style_outlier_repo"
+    STYLE_OUTLIER_DIRECTORY = "style_outlier_directory"
 
     @property
     def facts(self) -> SignalFacts:
@@ -161,6 +172,18 @@ def _graph(
 def _duplication(axis: Axis, description: str, unit: Unit, threshold: int, source: str, advice: str) -> SignalFacts:
     """Facts of a signal read off the duplication channels, past its threshold when above it."""
     return SignalFacts(axis, Tier.DUPLICATION, description, unit, threshold, Comparison.ABOVE, None, source, advice)
+
+
+def _population(description: str, advice: str) -> SignalFacts:
+    """Facts of a style signal: a robust distance in hundredths of its chi-square cut, past it above 100."""
+    source = (
+        "declared here: the squared robust distance (median centre, MAD scale, each dimension on its own) "
+        f"past the chi-square {STYLE_CUT_QUANTILE} quantile of the dimensions kept, so under a normal "
+        f"assumption {1 - STYLE_CUT_QUANTILE:.0%} of files would pass"
+    )
+    return SignalFacts(
+        Axis.CONSISTENCY, Tier.POPULATION, description, Unit.PERCENT, 100, Comparison.ABOVE, None, source, advice
+    )
 
 
 _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
@@ -297,6 +320,14 @@ _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
         "existence: a vocabulary class of `zemble dupes --kind vocabulary`",
         "declare the vocabulary once and derive the other places from it",
     ),
+    Signal.STYLE_OUTLIER_REPO: _population(
+        "file whose style vector lies past the cut from its language's files, in hundredths of the cut",
+        "bring it into the style its language's files share, or say why it reads different",
+    ),
+    Signal.STYLE_OUTLIER_DIRECTORY: _population(
+        "file whose style vector lies past the cut from its directory's files, in hundredths of the cut",
+        "bring it into the style its neighbours share, or say why it reads different",
+    ),
 }
 
 
@@ -358,4 +389,4 @@ class Finding:
         }
 
 
-__all__ = ["Axis", "Comparison", "Finding", "Signal", "SignalFacts", "Tier", "Unit"]
+__all__ = ["Axis", "Comparison", "STYLE_CUT_QUANTILE", "Finding", "Signal", "SignalFacts", "Tier", "Unit"]

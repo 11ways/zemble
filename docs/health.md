@@ -2,10 +2,11 @@
 
 `zemble health [path]` (MCP `health`) is a ranked, reference-free report of code-shape
 findings plus a score. It reads the symbol graph (`docs/graph.md`), for layering the
-workspace's own `.zemble/home.toml` (`docs/home.md`), and for the duplication tier the
-`zemble dupes` channels (`docs/dedup.md`) through their per-root unit index; it never builds a
-search index and never embeds anything. It is a REPORT, never a gate: it exits 0 whenever it
-could answer, however many findings it has.
+workspace's own `.zemble/home.toml` (`docs/home.md`), for the duplication tier the
+`zemble dupes` channels (`docs/dedup.md`) through their per-root unit index, and for the
+consistency axis one plain read of each measured file's text; it never builds a search index
+and never embeds anything. It is a REPORT, never a gate: it exits 0 whenever it could answer,
+however many findings it has.
 
 ```
 zemble health ./my-project                       # top 25 findings, the score and its axes
@@ -49,6 +50,8 @@ graph's own `is_test`) is never measured.
 | `cloned_body` | copying | duplication | a callable body in an exact or renamed clone class with a copy in another file | membership (Fowler, Refactoring: duplicated code) |
 | `pass_through` | machinery | duplication | a public callable whose whole body hands its parameters, in order, to one other callable | existence: middle man (Fowler, Refactoring) |
 | `vocabulary_drift` | vocabulary | duplication | a value or value set declared in more than one place (one per `vocabulary` class) | existence: a `zemble dupes --kind vocabulary` class |
+| `style_outlier_repo` | consistency | population | a file's style vector lies past the cut from its language's files (value: distance in hundredths of the cut, > 100) | declared here: robust distance past the chi-square 0.99 quantile of the kept dimensions (see "The consistency axis") |
+| `style_outlier_directory` | consistency | population | the same against its directory's files, where those are not its whole language | as above |
 
 The tool defaults quoted above are as the step's design states them; they were not re-verified
 against the tools' current releases.
@@ -60,8 +63,91 @@ directly inside it (a decorated tool inside its `register_*`, a closure) is subt
 that one is measured on its own. Cognitive complexity follows Sonar and keeps nested
 lambdas and functions in the enclosing callable.
 
-CONSISTENCY and HISTORY are later axes: they join `Axis` when a signal measures them, so no
-axis exists that could only ever read "not measured".
+HISTORY is a later axis: it joins `Axis` when a signal measures it, so no axis exists that
+could only ever read "not measured".
+
+## The consistency axis
+
+No house style is declared: each file is compared with the other files of its own language
+(`src/zemble/health/style.py`). The `population` tier says what that means for a reader: the
+norm is the peers', so a finding can come or go when OTHER files change.
+
+### The style vector
+
+One vector per production file with at least 3 measured callables (`MIN_CALLABLES`; a smaller
+file is not measured). Its dimensions are the members of `StyleDimension`, each with its
+computation, transform and wording as facts on the member:
+
+| Dimension | Computed as | Scale |
+| --- | --- | --- |
+| `callable_lines_median` | median own lines of the non-boilerplate callables | log |
+| `callable_lines_p90` | nearest-rank 90th percentile of the same | log |
+| `complexity_median` | median cognitive complexity of the same | log |
+| `nesting_max` | deepest nesting of the same | log |
+| `callable_density` | measured callables, boilerplate included, per 100 lines | log |
+| `top_level_types` | named type declarations at file level | log |
+| `comment_density` | lines a comment touches / lines | linear |
+| `parameters_mean` | mean declared parameters of the non-boilerplate callables | log |
+| `blank_line_ratio` | blank text lines / text lines | linear |
+| `line_length_mean` | mean length of the non-blank lines, trailing whitespace stripped | log |
+| `snake_case_names`, `camel_case_names`, `pascal_case_names` | share of the shaped method and function names spelled that way (`NameShape`) | linear |
+| `public_share` | public share of the named types and the non-boilerplate methods and functions | linear |
+
+Everything but the two text dimensions comes from the graph store (callable measurements,
+file comment lines, symbols, visibility); blank lines and line length come from one plain read
+of the file. Nothing is parsed again. `log` is `log1p`: lengths and counts are right-skewed.
+
+Three rules keep the role of a file (a record, a registry) from passing for its style; each
+came out of the hand review below:
+
+- A callable that is one statement without control flow (`statements <= 1` and `nesting == 0`:
+  an accessor, a delegation, a constant) is boilerplate. The callable-shape dimensions and
+  `public_share` read the rest, and a file with fewer than 3 such bodies does not measure the
+  callable-shape dimensions at all. Nesting rather than complexity decides, because a delegation
+  to a same-named method (`size() { return items.size(); }`) scores a recursion increment.
+- Type names are left out of the naming shares (every language here spells them one way, so
+  they only counted types again), and a one-word lower-case name (`run`) fits snake_case and
+  camelCase alike, so it is evidence for neither.
+- A dimension a file gives nothing to measure (no shaped name, too few bodies) is None and
+  differs from any centre by nothing: no evidence is not a difference.
+
+### Standardisation and the threshold
+
+```
+centre(d)    = median over the language's files of transform(x_d)
+scale(d)     = 1.4826 * MAD(d), or 1.2533 * mean absolute deviation from the median when the MAD is 0
+z_d          = (transform(x_d) - centre(d)) / scale(d)          a dimension with scale 0 is dropped
+diff_d       = clip(z_d - c_d, -3, 3)                              c = 0 for the language, the directory's median z
+distance     = sqrt(sum(diff_d^2)) / sqrt(chi2_0.99(k))          k = kept dimensions; reported * 100
+```
+
+- Per language: a language needs 6 measured files (`MIN_LANGUAGE_FILES`) and a dimension needs
+  6 files that measure it; a dimension with zero spread (every file the same) is dropped for
+  that language, and a language with fewer than 2 kept dimensions has no norm.
+- Robust centre and scale (median, MAD with the normal-consistency factor 1.4826; the
+  mean-absolute-deviation fallback of the modified z-score, Iglewicz and Hoaglin) so a few huge
+  files do not define the norm. The diagonal scale only: no covariance is inverted.
+- The clip at 3 scales (`DIFFERENCE_CAP`, Huber's clipping): past 3 a value is plainly unusual on
+  that dimension and more says nothing new. Since 9 is under the cut of 2 or more dimensions,
+  no single measurement makes an outlier: the size signals judge those, and reading different
+  takes several dimensions at once.
+- The cut: under a normal assumption the squared distance of k standardised dimensions is
+  chi-square with k degrees of freedom, so 1% of files would pass its 0.99 quantile
+  (`STYLE_CUT_QUANTILE`, Wilson-Hilferty approximation, within 1% of the tables from 3 degrees
+  up). The value is that distance in hundredths of the cut, so the threshold is 100 whatever k
+  is. Real code is heavier-tailed than normal: the measured shares past the cut are below.
+- The directory norm: the file's parent directory, its sub-directories included; a directory
+  with fewer than 3 measured files of the language (`MIN_DIRECTORY_FILES`) borrows its
+  parent's, up to the root. Its centre is the median z vector of those files, in the LANGUAGE's
+  scale, so both distances share units. A file whose directory norm would be its whole language
+  is not measured by `style_outlier_directory` (it would repeat the repo signal).
+- The reason names the norm and the up to three dimensions differing most (ranked by the
+  unclipped difference; a second or third only when it differs by at least one scale), with the
+  file's value and the norm's median: `against 154 python files: more commented (16% vs 3%);
+  shorter callables (p90) (3 lines vs 26 lines); ...`.
+- Scope: the norm is always every production file of the view, so `--paths` and `--since` list
+  fewer files but judge them against the same peers. A sub-directory view's peers are that
+  sub-directory's files (the view holds no others).
 
 ## The duplication tier
 
@@ -217,11 +303,13 @@ composite         = sum(weight(axis) * axis score) / sum(weight(axis))   over me
 ```
 
 Weights (`AXIS_WEIGHTS` in `src/zemble/health/score.py`, the one table): size 1, machinery 1,
-layering 2, copying 1, vocabulary 1 (a forbidden edge breaks a rule the workspace wrote down;
-the rest are general conventions). An axis with no measured unit (no `home.toml` with
-`[[forbidden]]` rules, the duplication tier not run, or `--signals` leaving it out) is "not
-measured" and takes no part in the composite; it is never 100. The computation is
-deterministic: the same tree gives the same report (no wall time is printed in it).
+layering 2, copying 1, vocabulary 1, consistency 1 (a forbidden edge breaks a rule the workspace
+wrote down; the rest are general conventions or the code's own peers). A style finding weighs 1
+(its unit is hundredths of the cut, not lines). An axis with no measured unit (no `home.toml` with
+`[[forbidden]]` rules, the duplication tier not run, a language below 6 measured files, or
+`--signals` leaving it out) is "not measured" and takes no part in the composite; it is never
+100. The computation is deterministic: the same tree gives the same report (no wall time is
+printed in it).
 
 ## Surfaces
 
@@ -337,6 +425,63 @@ bodies (a contract role, not a middle man): 97 -> 39 on javaweb. The 39 left are
 over one static API (`AuthCookieSupport.issueSessionCookie` -> `SessionCookies.issue`,
 `TypeResolver.getBoxedType` -> `BuiltInTypes.getBoxedType`).
 
+### The consistency axis (2026-10-17)
+
+In process over an existing graph, this machine (walls vary +-15% with other load):
+
+| Repo | Style measurement alone | Whole run without / with the axis | Peak | Score without / with | consistency | `style_outlier_repo` | `style_outlier_directory` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| zemble | 0.04 s (159 files with a vector) | 0.43 / 0.45 s | 80 MB | 84.3 / 86.8 | 91.9 | 11 of 154 (7.1%) | 14 of 154 |
+| javaweb (`--no-copying`) | 0.61 s (3222 files) | 10.7-11.3 / 11.4 s | 400 / 406 MB | 91.7 / 93.0 | 98.3 | 75 of 3208: Java 67 of 3160 (2.1%), JavaScript 8 of 48 | 31 of 3200 |
+
+zemble's Python keeps 11 dimensions (the naming shares are constant: every shaped Python name
+is snake_case); its 5 Java files are under the 6-file minimum. javaweb's Java keeps 10, its
+JavaScript 12; its Python, Groovy, TypeScript, Bash and SCSS files are each under the minimum.
+
+Five systematic false positives were found by hand on the way, each fixed by a general rule (Java
+repo findings on javaweb at each step: 743 -> 489 -> 109 -> 107 -> 67, directory 364 -> 221 ->
+60 -> 51 -> 28; zemble 16 -> 11):
+
+1. Unclipped, one extreme dimension made an outlier alone (a 0%-public file at 6 scales): the
+   clip at 3 scales.
+2. Java's median callable was a 4-line getter, so every class with logic read different from
+   the beans around it ("longer callables, more complex, fewer public"): the boilerplate rule.
+3. `size() { return items.size(); }` scores a cognitive complexity of 1 (the metric counts the
+   same-named call as recursion), so delegations escaped the boilerplate rule: nesting decides.
+4. Accessors are public by role, so `public_share` still split data classes from logic classes:
+   it reads the non-boilerplate declarations only.
+5. In Python, `PascalCase` share only counted types again and one-word names read as "fewer
+   snake_case names": type names are left out and one-word names are evidence for neither.
+
+Top 10 findings read by hand. zemble:
+
+| # | Finding | Verdict |
+| --- | --- | --- |
+| 1-2 | `types.py` (directory and repo): short lines, tiny callables, blank lines | real: a declarative module of dataclasses |
+| 3, 6 | `dedup/languages/__init__.py`: tiny functions, no parameters, no nesting | real: a registry module |
+| 4-5 | `graph/model.py`: more commented, tiny callables | real: a vocabulary module of enums and dataclasses with `#:` field docs |
+| 7, 9 | `benchmarks/plot.py`: short lines, long callables | real: a different author's style (Semble's upstream benchmark scripts) |
+| 8 | `languages/catalog.py`: 0.1 callables per 100 lines, few blank lines | real: a 2914-line declarative table |
+| 10 | `benchmarks/metrics.py` against `benchmarks/`: many small functions | real: upstream code of another shape than its directory |
+
+javaweb:
+
+| # | Finding | Verdict |
+| --- | --- | --- |
+| 1 | directory `hawkeye/.../analysis/AnalysisContext.java`: short lines, no parameters, simple callables | role, not style: a scope-stack state holder among analysis passes (its methods are two statements, so past the boilerplate rule) |
+| 2 | directory `orcono/mockup/lib/mock-data.js`: one-line callables among components | real: a mock-data table |
+| 3 | repo `orcono/mockup/app/search/page.jsx`: PascalCase components, 52-line callables | real: the React mockup among plain JavaScript |
+| 4, 8, 9 | repo `hawkeye/.../compiler/MethodCallTranspiler.java`, `PropertyRefHelper.java`, `TryAsyncTranspiler.java`: package-private, long callables, many parameters | real: the hawkeye compiler package's own style (package-private static helpers); the directory signal does not flag them, they agree with each other |
+| 5 | directory `hawkeye/.../compiler/ReactiveIdRegistry.java`: public, short callables among package-private transpilers | role: the package's one public registry; it does read different, for a reason |
+| 6 | repo `cruiser/.../seed/GeographySeeder.java`: 62-line callables, 71-char lines | real: a data seeder, table-like |
+| 7 | repo `duiventil/.../config/SmtpConfig.java`: one-line bodies, dense | real: a builder written as one-liners with a field-comment table |
+| 10 | directory `emberglyph/.../layout/SizeHints.java`: one-line fluent setters among layout logic | real: the one-liner style, with some role in it |
+
+Generated and vendored files are legitimate findings: they read different by construction, and
+the axis exists to surface such files (upstream Semble code shows up on zemble that way). The
+two role findings above (a state holder, a lone public registry) are the residue the rules do
+not remove; see Known limits.
+
 ## Known limits
 
 - `lone_public_callable` counts one caller as a finding, as designed: in a Python codebase most
@@ -367,3 +512,16 @@ over one static API (`AuthCookieSupport.issueSessionCookie` -> `SessionCookies.i
 - A `--since` run's duplication tier is not scored, and its vocabulary channel still reads every
   file: on javaweb it adds ~35 s to a delta run.
 - A small language population (zemble's one Java module) makes a marginal finding p100.
+- The consistency axis measures structure as much as typography, so a file whose ROLE differs
+  from its neighbours' (a state holder or a value type among logic classes, a public registry
+  among package-private helpers) can still read different once its methods are two statements
+  or more; the boilerplate rule removes only one-statement accessors. Correlated dimensions
+  (median and p90 callable length) count separately on the diagonal metric.
+- Real code is heavier-tailed than the normal assumption behind the cut: 7.1% of zemble's
+  Python files and 2.1% of javaweb's Java files pass a cut that would pass 1% of normal data.
+  A small population (javaweb's 48 JavaScript files of several kinds) passes more (17%).
+- The cognitive complexity metric counts a call to a same-named method on another object
+  (`items.size()` inside `size()`) as recursion; the boilerplate rule reads nesting to stay clear
+  of it. Not fixed here: the measurement is graph-building code.
+- A sub-directory view compares its files with that sub-directory's files only, since the view
+  holds no others; `--paths` and `--since` keep the whole view as the norm.

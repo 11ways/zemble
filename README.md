@@ -63,7 +63,8 @@ reason is printed. It is a report, never a gate. See [docs/dedup.md](docs/dedup.
 deep, complex callables; large types and files; single-implementation interfaces,
 single-subclass abstract types, public callables with at most one caller, unreferenced
 private code; edges crossing a `home.toml` forbidden dependency; copied code, pass-through
-methods and vocabularies declared twice, from the `dupes` channels) plus a score per axis.
+methods and vocabularies declared twice, from the `dupes` channels; files whose style reads
+different from the rest of their language or their directory) plus a score per axis.
 `--since main` lists only the findings a branch touches, and a baseline marks them new or
 remaining. Every threshold is absolute and documented, graph findings rest only on edges
 resolved exactly or by unique name, and the score is not a target. It is a report, never a

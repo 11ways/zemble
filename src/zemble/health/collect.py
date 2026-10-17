@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import os
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from functools import cache, cached_property
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from zemble.graph.model import (
+    ANONYMOUS_MARKER,
     CALLABLE_KINDS,
     DECLARED_TYPE_KINDS,
     Edge,
@@ -38,6 +40,9 @@ from zemble.languages import Visibility, spec_for
 from zemble.languages.metrics import CallableMetrics, FileMetrics
 from zemble.languages.read import visibility_of
 from zemble.languages.visibility import VISIBILITY_WORDS
+
+if TYPE_CHECKING:  # pragma: no cover
+    from zemble.health.style import StyleMeasurement
 
 #: The language every unmeasurable file is reported under.
 UNKNOWN_LANGUAGE = "unknown"
@@ -62,6 +67,9 @@ _CONTRACT_KINDS = frozenset({SymbolKind.INTERFACE, SymbolKind.ANNOTATION})
 
 _NAME_SPLIT = re.compile(r"[.:/\\#]")
 
+#: Containers whose declared types count as top-level.
+_FILE_LEVEL = frozenset({SymbolKind.MODULE, SymbolKind.PACKAGE})
+
 
 @cache
 def language_of(file_path: str) -> str:
@@ -78,6 +86,16 @@ def written_name(text: str) -> str:
     """The simple name an unresolved edge wrote: `java.util.List<String>` reads `List`."""
     head = text.split("<", 1)[0].split("(", 1)[0].split("[", 1)[0]
     return _NAME_SPLIT.split(head)[-1].strip()
+
+
+def anonymous(symbol: Symbol | None) -> bool:
+    """Whether a symbol is an anonymous class, which nothing can name."""
+    return symbol is not None and symbol.name.startswith(ANONYMOUS_MARKER)
+
+
+def named_type(symbol: Symbol) -> bool:
+    """Whether a symbol is a type declaration with a name."""
+    return symbol.kind in DECLARED_TYPE_KINDS and not anonymous(symbol)
 
 
 @dataclass
@@ -106,6 +124,9 @@ class HealthFacts:
     sources: tuple[tuple[str, bool], ...] = ()
     #: The duplication run, when the report measures the duplication tier.
     copying: CopyingFacts | None = None
+    #: (path, metrics) of every measured production file of the view, in the scope or not: the peers a
+    #: file's style is compared with, so `--paths` and `--since` judge against the whole view.
+    population: list[tuple[str, FileMetrics]] = field(default_factory=list)
     _modules: dict[str, str] = field(default_factory=dict)
 
     def in_scope(self, file_path: str) -> bool:
@@ -113,9 +134,50 @@ class HealthFacts:
         return within(file_path, self.paths)
 
     @cached_property
+    def everywhere(self) -> list[Symbol]:
+        """Every non-test symbol of the view, in the scope or not, by file and line."""
+        return [symbol for symbol in self.symbols.values() if not symbol.is_test]
+
+    @cached_property
     def production(self) -> list[Symbol]:
         """Every non-test symbol in the scope, by file and line."""
-        return [symbol for symbol in self.symbols.values() if not symbol.is_test and self.in_scope(symbol.file_path)]
+        return [symbol for symbol in self.everywhere if self.in_scope(symbol.file_path)]
+
+    @cached_property
+    def _nested_lines(self) -> Counter[str]:
+        """Per callable id, the lines of the named callables declared directly inside it."""
+        nested: Counter[str] = Counter()
+        for symbol in self.symbols.values():
+            container = self.container(symbol)
+            if symbol.kind in CALLABLE_KINDS and container is not None and container.kind in CALLABLE_KINDS:
+                nested[container.id] += symbol.end_line - symbol.start_line + 1
+        return nested
+
+    def own_lines(self, symbol: Symbol, metric: CallableMetrics) -> int:
+        """A callable's length in lines, less the named callables declared directly inside it.
+
+        A nested function (a decorated tool inside its `register_*`, a closure) is measured on its own,
+        so counting its lines again in the enclosing callable would count one body twice.
+        """
+        return max(metric.lines - self._nested_lines[symbol.id], 0)
+
+    @cached_property
+    def top_level_types(self) -> Counter[str]:
+        """Named production type declarations at file level, per file of the view."""
+        counts: Counter[str] = Counter()
+        for symbol in self.everywhere:
+            if named_type(symbol):
+                container = self.container(symbol)
+                if container is None or container.kind in _FILE_LEVEL:
+                    counts[symbol.file_path] += 1
+        return counts
+
+    @cached_property
+    def style(self) -> StyleMeasurement:
+        """The consistency axis's measurement of every file of the view, computed once for both its signals."""
+        from zemble.health.style import measure_style  # the style module reads these facts: a cycle at import
+
+        return measure_style(self)
 
     def container(self, symbol: Symbol) -> Symbol | None:
         """The symbol's declaring container, when the view holds it."""
@@ -283,9 +345,8 @@ def collect(
         paths=scope,
         sources=tuple(provider.source_files()),
     )
-    facts.files = [
-        (path, metric) for path, metric, is_test in provider.file_measurements() if not is_test and facts.in_scope(path)
-    ]
+    facts.population = [(path, metric) for path, metric, is_test in provider.file_measurements() if not is_test]
+    facts.files = [(path, metric) for path, metric in facts.population if facts.in_scope(path)]
     if not config.generic:
         production = {path for path, _ in facts.files}
         facts.dependencies = [
@@ -408,7 +469,9 @@ __all__ = [
     "HIERARCHY_KINDS",
     "UNKNOWN_LANGUAGE",
     "HealthFacts",
+    "anonymous",
     "collect",
+    "named_type",
     "language_of",
     "within",
     "written_name",
