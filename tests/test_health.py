@@ -142,8 +142,12 @@ def _report(root: Path, **arguments: Any) -> dict[str, Any]:
 
 
 def _keys(payload: dict[str, Any]) -> set[str]:
-    """Every finding key of a report."""
-    return {finding["key"] for finding in payload["health"]["findings"]}
+    """Every finding key of a report, the ones folded under a group's first member included."""
+    found = set()
+    for finding in payload["health"]["findings"]:
+        found.add(finding["key"])
+        found.update(finding["folded"])
+    return found
 
 
 def test_the_fixture_reports_exactly_its_suspects(health_root: Path) -> None:
@@ -169,6 +173,9 @@ def test_the_fixture_reports_exactly_its_suspects(health_root: Path) -> None:
     assert envy["value"] == 3 and "(3 getter calls into Customer, 0 calls into its own type)" in envy["reason"], envy
     cycle = by_key[f"package_cycle:java:core:{_CORE}/north"]
     assert cycle["name"] == f"{_CORE}/north" and cycle["value"] == 2, f"step 3: a directory finding, {cycle}"
+    assert cycle["folded"] == [f"package_cycle:java:core:{_CORE}/south"], f"step 3: one row per cycle, {cycle}"
+    assert f"package_cycle:java:core:{_CORE}/south" not in by_key, "step 3: the folded member has no row of its own"
+    assert "[+1 more in the same cycle]" in payload["markdown"], "step 3: the text names the folded members"
     lightest = f"its lightest link into it: 3 edge(s) from North.java into {_CORE}/south)"
     assert cycle["reason"].endswith(f"(in a cycle with {_CORE}/south; {lightest}"), cycle["reason"]
     deep = by_key[f"deep_inheritance:java:{_PKG}.core.Tower.Level7"]

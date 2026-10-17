@@ -55,6 +55,8 @@ class Sample:
     detail: str = ""
     #: Other places the same unit lives, as (path, start, end): a vocabulary's other declarations.
     elsewhere: tuple[tuple[str, int, int], ...] = ()
+    #: The whole the unit is one member of, as `Finding.group` carries it, or "".
+    group: str = ""
 
     @property
     def language(self) -> str:
@@ -386,6 +388,7 @@ def _package_cycle(facts: HealthFacts) -> Iterator[Sample]:
         links[(source, target)] = (strongest, edges + dependency.edges, files)
     for component in strongly_connected(sorted(members), successors):
         cycle = set(component)
+        group = f"cycle {component[0][0]}:{min(directory or '.' for _, directory in component)}"
         for node in component:
             module, directory = node
             name = directory or "."
@@ -404,7 +407,9 @@ def _package_cycle(facts: HealthFacts) -> Iterator[Sample]:
                 f"{edges} edge(s) from {PurePosixPath(anchor).name}{also} into {into}"
             )
             weakest = _weakest(resolution for (resolution, _, _), _ in inward)
-            yield Sample(anchor, 1, lines[anchor], name, f"{module}:{name}", len(component), weakest, detail)
+            yield Sample(
+                anchor, 1, lines[anchor], name, f"{module}:{name}", len(component), weakest, detail, group=group
+            )
 
 
 def _feature_envy(facts: HealthFacts) -> Iterator[Sample]:

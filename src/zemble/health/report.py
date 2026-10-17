@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -71,11 +72,12 @@ class HealthReport:
     def to_dict(self, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
         """Render the report as JSON-ready data, the findings capped at `limit`."""
         listed = self.listed
-        shown = listed[:limit]
+        shown = folded(listed)[:limit]
         baseline = self.baseline
         findings = []
-        for finding in shown:
+        for finding, members in shown:
             rendered = finding.to_dict()
+            rendered["folded"] = [member.key for member in members]
             if baseline is not None:
                 rendered["baseline"] = baseline.status(finding)
             findings.append(rendered)
@@ -93,7 +95,7 @@ class HealthReport:
             else {"ref": self.since.ref, "files": len(self.since.files), "scope_total": len(self.findings)},
             "counts": self.counts(),
             "total": len(listed),
-            "truncated": len(shown) < len(listed),
+            "truncated": len(shown) < len(folded(listed)),
             "findings": findings,
             "baseline": None if baseline is None else _baseline_dict(baseline, limit),
             "notes": list(self.notes),
@@ -118,14 +120,14 @@ class HealthReport:
         if self.baseline is not None:
             lines.extend(_baseline_lines(self.baseline, limit))
             return "\n".join(lines).rstrip() + "\n"
-        shown = listed[:limit]
+        shown = folded(listed)[:limit]
         if not shown:
             lines.append("No findings.")
             return "\n".join(lines) + "\n"
-        cut = f", truncated to {len(shown)}" if len(shown) < len(listed) else ""
+        cut = f", truncated to {len(shown)}" if len(shown) < len(folded(listed)) else ""
         lines.append(f"## Findings ({len(listed)} total{cut}; ranked by percentile, then severity)")
         lines.append("")
-        lines.extend(_finding_line(finding) for finding in shown)
+        lines.extend(_finding_line(finding, len(members)) for finding, members in shown)
         return "\n".join(lines) + "\n"
 
 
@@ -178,8 +180,24 @@ def _axis_line(axis: AxisScore, unscored: tuple[Signal, ...]) -> str:
     return f"- {axis.axis.value}: {score:.1f} (weight {axis.weight:g}; past/measured: {measured}{aside})"
 
 
-def _finding_line(finding: Finding) -> str:
-    """`signal  value/threshold  p<percentile>  [resolution]  file:start-end  name  reason`."""
+def folded(findings: Sequence[Finding]) -> list[tuple[Finding, tuple[Finding, ...]]]:
+    """One row per finding, except that the members of a group follow their first-ranked member, folded under it."""
+    rows: list[tuple[Finding, list[Finding]]] = []
+    first: dict[tuple[Signal, str], list[Finding]] = {}
+    for finding in findings:
+        key = (finding.signal, finding.group)
+        if finding.group and key in first:
+            first[key].append(finding)
+            continue
+        members: list[Finding] = []
+        if finding.group:
+            first[key] = members
+        rows.append((finding, members))
+    return [(finding, tuple(members)) for finding, members in rows]
+
+
+def _finding_line(finding: Finding, members: int = 0) -> str:
+    """`signal  value/threshold  p<percentile>  [resolution]  file:start-end  name  reason`, then the folded count."""
     facts = finding.signal.facts
     parts = [finding.signal.value, f"{finding.value}/{facts.threshold}", f"p{finding.percentile:g}"]
     if facts.tier is Tier.GRAPH:
@@ -188,6 +206,8 @@ def _finding_line(finding: Finding) -> str:
     if finding.name:
         parts.append(finding.name)
     parts.append(finding.reason)
+    if members:
+        parts.append(f"[+{members} more in the same {finding.group.split(' ', 1)[0]}]")
     return "  ".join(parts)
 
 
@@ -220,6 +240,7 @@ def _findings(signal: Signal, samples: list[Sample]) -> list[Finding]:
                 reason=reason,
                 key=f"{signal.value}:{sample.language}:{sample.identity}",
                 elsewhere=sample.elsewhere,
+                group=sample.group,
             )
         )
     return found

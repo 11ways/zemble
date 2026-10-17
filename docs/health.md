@@ -115,7 +115,11 @@ never equal an in-folder id.
   Each directory is one sample valued by its component's size; its reason lists up to 3 other
   directories of the cycle and names its lightest link into it (the fewest edges into one other
   directory of the cycle, and the file they come from, which also anchors the finding): the cheapest
-  edge to cut. The key is `module:directory`.
+  edge to cut. The key is `module:directory`. Every member carries the cycle as its `group`
+  (`cycle <module>:<first directory>`), and a report lists one row per group: the first-ranked member,
+  with the others folded under it (`folded` in the JSON, `[+N more in the same cycle]` in the text),
+  since a 59-directory cycle is one thing to act on, and one row per directory filled the whole list.
+  The score still counts every directory, and a baseline keeps every key.
 - `feature_envy` approximates Lanza and Marinescu's ATFD (accesses to foreign data, directly or
   through accessors) with resolved calls (`HealthFacts.reads_data`): a call reads another type's data
   when it is written on a named receiver (`customer.name()`; not `Str.of(...)`, a type name as the

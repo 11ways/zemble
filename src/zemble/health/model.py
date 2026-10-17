@@ -472,6 +472,9 @@ class Finding:
     key: str
     #: Other places the same finding lives (a vocabulary's other declarations), as (path, start, end).
     elsewhere: tuple[tuple[str, int, int], ...] = ()
+    #: The whole this finding is one member of (`cycle <module>:<directory>`), or "": a report lists one
+    #: member per group and folds the rest under it, since a 59-directory cycle is one thing to act on.
+    group: str = ""
 
     def touched(self, changes: ChangedLines) -> bool:
         """Whether the finding's span, or any place it also lives, intersects a changed line."""
@@ -505,6 +508,7 @@ class Finding:
             "reason": self.reason,
             "key": self.key,
             "elsewhere": [f"{path}:{start}-{end}" for path, start, end in self.elsewhere],
+            "group": self.group,
         }
 
 
