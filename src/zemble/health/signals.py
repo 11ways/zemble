@@ -729,19 +729,15 @@ def _undocumented_public(facts: HealthFacts) -> Iterator[Sample]:
             yield replace(_symbol_sample(symbol, symbol.doc_lines), end_line=symbol.start_line)
 
 
-#: Declarations a doc comment is attributed to by the extractors.
-_DOCUMENTED_KINDS = DECLARED_TYPE_KINDS | CALLABLE_KINDS | {SymbolKind.FIELD}
-
-
 def _long_docblock(facts: HealthFacts) -> Iterator[Sample]:
-    """Doc lines of every documented type, callable and field of the scope."""
+    """Doc lines of every documented declaration of the scope (the extractors document types, callables, fields)."""
     for symbol in facts.production:
-        if symbol.doc_lines and symbol.kind in _DOCUMENTED_KINDS:
+        if symbol.doc_lines:
             yield _symbol_sample(symbol, symbol.doc_lines)
 
 
 def _commented_out_code(facts: HealthFacts) -> Iterator[Sample]:
-    """Comment lines outside any docblock that read as code, of every measured production file."""
+    """Lines of comment blocks that are nothing but code (`metrics.disabled_code`), per measured production file."""
     for path, metric in facts.files:
         yield Sample(path, 1, max(metric.lines, 1), "", path, metric.commented_code_lines)
 

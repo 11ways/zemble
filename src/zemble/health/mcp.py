@@ -88,8 +88,10 @@ def register_health_tool(server: FastMCP) -> None:
         unreferenced private code, pass-through methods), layering (edges crossing a `.zemble/home.toml`
         forbidden dependency), copying (files and bodies inside exact or renamed clone classes),
         vocabulary (values declared in several places), consistency (files whose style reads different
-        from their language's or their directory's other files) and history (complex files that keep changing,
-        files in different modules that change together, from the git log). Thresholds are absolute and
+        from their language's or their directory's other files), history (complex files that keep changing,
+        files in different modules that change together, from the git log) and documentation (undocumented
+        public API, overlong docblocks, commented-out code, TODO/FIXME markers). Generated and minified
+        files are measured by no signal. Thresholds are absolute and
         documented; graph findings rest only on edges resolved exactly or by unique name. `since` turns it
         into a branch delta. The score is not a target: address or explain the findings. This is a report,
         never a gate.

@@ -430,7 +430,7 @@ _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
     ),
     Signal.COMMENTED_OUT_CODE: _syntactic(
         Axis.DOCUMENTATION,
-        "file whose comments outside any docblock hold more lines that read as code than the threshold",
+        "file whose comment blocks that are nothing but code hold more lines than the threshold",
         Unit.COUNT,
         2,
         "Sonar rule S125 (sections of code should not be commented out), read by a line heuristic instead "

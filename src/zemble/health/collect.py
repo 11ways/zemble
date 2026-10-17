@@ -94,8 +94,8 @@ HomeRow = tuple[str, Resolution, bool, int]
 
 #: A file with a line longer than this, in bytes, is minified or generated data, not code anyone writes: a
 #: minified bundle (`dc-runtime.js` in a docs mockup gave javaweb two findings nobody could act on) puts a whole
-#: program on a few lines, while hand-written code stays under 200 (ruff's and Checkstyle's limits are 120 and
-#: 80 to 150; zemble's own longest measured line is far below this).
+#: program on a few lines, while formatters wrap hand-written code at 80 to 120 columns; zemble's longest
+#: production line is 330 bytes (a line of agent-instruction text in a string), a third of this.
 MINIFIED_LINE_BYTES = 1000
 #: File-name endings a minifier writes.
 MINIFIED_SUFFIXES = (".min.js", ".min.css", ".min.mjs")

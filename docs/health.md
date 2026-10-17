@@ -5,7 +5,8 @@ findings plus a score. It reads the symbol graph (`docs/graph.md`), for layering
 workspace's own `.zemble/home.toml` (`docs/home.md`), for the duplication tier the
 `zemble dupes` channels (`docs/dedup.md`) through their per-root unit index, for the
 consistency axis one plain read of each measured file's text, and for the history axis one
-`git log` per checkout; it never builds a search index and never embeds anything. It is a
+`git log` per checkout; the documentation axis reads the comment facts the graph stores
+(format 11). It never builds a search index and never embeds anything. It is a
 REPORT, never a gate: it exits 0 whenever it could answer, however many findings it has.
 
 ```
@@ -32,7 +33,8 @@ Each signal is one member of `Signal` in `src/zemble/health/model.py`; its axis,
 threshold, comparison, resolution floor, source and advice are facts on the member
 (`SignalFacts`), and `src/zemble/health/signals.py` refuses to import without a producer for
 every member. Test code is excluded from every signal: a unit in a test source set (the
-graph's own `is_test`) is never measured.
+graph's own `is_test`) is never measured. So is a generated or minified file (see "Generated and
+minified files").
 
 | Signal | Axis | Tier | Finding when | Threshold source |
 | --- | --- | --- | --- | --- |
@@ -59,6 +61,10 @@ graph's own `is_test`) is never measured.
 | `style_outlier_directory` | consistency | population | the same against its directory's files, where those are not its whole language | as above |
 | `hotspot` | history | history | a file past `complex_callable` or `large_file` with at least 5 commits in the window, whose churn ranks in its checkout's top decile (value: thousandths of the checkout's changed files that changed strictly less often, > 900) | hotspots, change frequency x complexity (Tornhill, Your Code as a Crime Scene; CodeScene); the 5-commit floor is code-maat's `min-revs` default |
 | `boundary_co_change` | history | history | two files in different modules whose commit sets overlap with a Jaccard > 300 per mille over at least 5 shared commits (one finding per pair) | temporal coupling (Tornhill); code-maat's `min-coupling` 30% and `min-shared-revs` 5 defaults, changesets over 30 files left out (`max-changeset-size`) |
+| `undocumented_public` | documentation | syntactic | a public named type, or a public method or function, with no doc comment and no docstring (value: its doc lines, at most 0) | Sonar S1176 (public API should be documented); Checkstyle MissingJavadocType and MissingJavadocMethod at their default public scope |
+| `long_docblock` | documentation | syntactic | a type's, callable's or field's doc comment plus docstring > 20 lines | declared here: the workspace convention is a one-sentence summary plus the gotchas; no common tool default |
+| `commented_out_code` | documentation | syntactic | a file whose comment blocks that are nothing but code hold > 2 lines | Sonar S125 (sections of code should not be commented out), read by a line heuristic, not a re-parse; 2 lines tolerate one snippet |
+| `stale_marker` | documentation | syntactic | a file whose comments hold an upper-case `TODO`, `FIXME`, `XXX` or `HACK` as a whole word (value: those lines, > 0) | Sonar S1135 (TODO tags) and S1134 (FIXME tags) |
 
 The tool defaults quoted above are as the step's design states them; they were not re-verified
 against the tools' current releases.
@@ -126,6 +132,62 @@ never equal an in-folder id.
   place a contract fixes, counting bare own calls and only one-statement callees: 1116; leaving out
   chained receivers (fluent builders): 1073; only parameterless getters, so a registration
   (`registry.register(x)`) is no read: 836 of 28211.
+
+## The documentation axis
+
+Four signals about comments, each read off the graph's format-11 facts (`docs/graph.md`), so
+the axis costs no extra pass at report time.
+
+**A declaration's doc** (`Symbol.doc_lines`, `metrics.doc_comment`) is the run of comments
+directly above it: its preceding siblings, each ending on the line above the next (above the
+wrapper the spec wraps it in, such as a decorator or an `export`), passing over annotation
+siblings (Rust's `#[derive]` lines), plus a Python body's leading string
+(`ComplexitySpec.docstring_kinds`). A javadoc and a `//` run count alike: the question is "is
+there a doc", not "is it javadoc". A comment that trails code on its first line ends the run, a
+blank line ends it, and a run whose every line reads as code is disabled code, not a doc. Both
+extractors set it on types, callables and fields.
+
+**`undocumented_public`** measures every named type, method and function that a reader of the
+public API meets: the declaration and every type around it are PUBLIC (`HealthFacts.visibility`;
+UNKNOWN is never measured, as Checkstyle reads the surrounding scope). Not measured, each for a
+reason: constructors (the type says what they build), overrides and possible overrides
+(`may_override`: the supertype documents the contract), runtime hooks (`__repr__`), `main`,
+members of anonymous types, declarations inside a callable, and one-statement bodies
+(`style.is_boilerplate`: a getter says what its name says). The finding spans the declaration's
+first line only, where the doc goes, so a `--since` run lists it when the declaration is new or
+re-declared, not on every edit inside it. The advice is the workspace convention: a
+one-sentence docblock, then only the gotchas.
+
+**`commented_out_code`** counts, per file, the lines of comment blocks that are nothing but
+code (`metrics.disabled_code`). A block is a run of comments on adjacent lines that each start
+their own line; a trailing comment annotates its line and never counts. A line reads as code
+(`metrics.reads_as_code`) when, its comment markers stripped, it ends the way only code ends
+(`;`, `{`, `}`, `),`), is a whole call (`a.b(c)`, no space before the parenthesis) or an
+assignment of one token or call (for languages without semicolons), or opens a keyword block with
+a colon and holds one of `(=[.`; it never does when it starts with a doc tag (`@return`), is a
+JSON example, holds a URL or a `{@link}`, or holds four prose words in a row. A block is
+skipped whole when it mixes prose with code (an explanation with its example), when it is written
+with a doc opener (`/**`, `///`, `//!`, `/*!`), when it sits right below a block whose last line
+ends in a colon ("do it like this:"), or when the extractor attributed it as a declaration's doc.
+The signal is per file and each file weighs 1 in the score: weighed by its lines, a file under
+the bar would weigh 0 and the fraction would say how concentrated the disabled code is, not how
+widespread.
+
+**`stale_marker`** counts the comment lines holding `TODO`, `FIXME`, `XXX` or `HACK` as an
+upper-case whole word (lower case is prose: "a hack"). `AIDEV-NOTE:` is not a marker: it
+documents a surprise, it does not defer work.
+
+### Generated and minified files
+
+`collect.unmeasured` takes a file out of every signal of every tier (its file measurements, its
+symbols, its duplication units and clone memberships, its history) when a comment in its first
+30 lines carries a generator's header (`@generated`, `DO NOT EDIT`, `generated by`,
+`automatically generated`, `autogenerated`, `Code generated`, case-insensitive), when a line is
+longer than 1000 bytes (`MINIFIED_LINE_BYTES`: minifiers put a program on a few lines, formatters
+wrap hand-written code at 80 to 120 columns, and zemble's longest production line is 330 bytes),
+or when its name ends in `.min.js`, `.min.css` or `.min.mjs`. The report carries one note, `N
+generated or minified file(s) not measured: <up to 5 paths>`. The reason: a minified
+`dc-runtime.js` in a javaweb docs mockup gave two findings nobody could act on.
 
 ## The history axis
 
@@ -425,12 +487,14 @@ composite         = sum(weight(axis) * axis score) / sum(weight(axis))   over me
 ```
 
 Weights (`AXIS_WEIGHTS` in `src/zemble/health/score.py`, the one table): size 1, machinery 1,
-layering 2, coupling 1, copying 1, vocabulary 1, consistency 1, history 1 (a forbidden edge breaks a
-rule the workspace wrote down; the rest are general conventions or the code's own peers). A style
-finding weighs 1 (its unit is hundredths of the cut, not lines), and so does a history finding
-(thousandths). The coupling axis's `package_cycle` fraction is the share of the scope's production
-directories that sit in a cycle, and its `feature_envy` fraction the share of the measured methods
-that envy another type.
+layering 2, coupling 1, copying 1, vocabulary 1, consistency 1, history 1, documentation 1 (a
+forbidden edge breaks a rule the workspace wrote down; the rest are general conventions or the
+code's own peers). A style finding weighs 1 (its unit is hundredths of the cut, not lines), and so
+does a history finding (thousandths). The coupling axis's `package_cycle` fraction is the share of
+the scope's production directories that sit in a cycle, and its `feature_envy` fraction the share of
+the measured methods that envy another type. Of the documentation signals only `long_docblock`
+weighs its lines: its fraction is the share of all doc lines that sit in overlong docblocks; the
+others weigh 1 per declaration or file.
 The history axis measures only files the window touched, so its `hotspot` fraction is the share of
 the changed production files that are hotspots, and its `boundary_co_change` fraction the share of
 the cross-module pairs that changed together at least 5 times that are coupled past the bar. An axis
@@ -696,6 +760,20 @@ Hand review on zenit:
 | `feature_envy` `ScreenCodec.read`, `AiModule.createDirector`, textum's `*Journeys` | not: a stream decoder, a composition root, and test code the graph does not mark as test (see Known limits) |
 | `single_implementation_interface` `DelegationLookup` | not: a test double implements it, but the graph holds none of hohenheim's `src/browserTest/` files |
 
+### The documentation axis (2026-10-17)
+
+zemble (a clone of this branch, graph format 11, `--no-daemon`): documentation 99.7, composite
+90.9. `undocumented_public` 7 of 1329 measured declarations, `long_docblock` 0 of 3761 documented
+ones (the longest production doc is 20 lines, at the bar; 79 are over 10), `commented_out_code`
+0 of 199 files, `stale_marker` 1 of 199 files, no file generated or minified. Hand review: the 7
+are 7 public classes with no docstring (`benchmarks/data.py` `Target`, `RepoSpec`, `Task`;
+`index/dense.py` `SelectableBasicBackend`; `index/files.py` `FileStatus`; `stats.py`
+`BucketStats`, `SavingsSummary`), all real; the marker is `# TODO: make this configurable` in
+`chunking/chunking.py`, real. The extraction cost of the format-11 facts: 1079 files (zemble's
+`src` and `tests`, gson, serde, express) take 5.55 s of CPU against 5.15 s before (best of 3: 8%
+more). A generated file now leaves every tier, so opencode's `types.gen.ts` hotspot above goes
+away if the file carries a generator's header (not re-checked here).
+
 ## Known limits
 
 - `lone_public_callable` cannot judge a public callable nothing in the workspace calls: a library's
@@ -767,3 +845,21 @@ Hand review on zenit:
 - Knowledge distribution (a file with one author, Tornhill's knowledge silos) is not a signal:
   every javaweb checkout but three and zemble have one author in the window, so it would flag
   every active file there and could not be checked by hand.
+- `commented_out_code` is a heuristic, not Sonar S125's re-parse. Measured by listing every line
+  it counts: none in zemble's own `src`, `benchmarks` and `javac-facts`, the 3 planted lines in
+  `tests/fixtures`, and 24 lines over 924 files of express, gin, gson, monolog and serde
+  (`~/.cache/zemble-bench`), of which 16 are disabled code (67%); the other 8 are code-shaped
+  notes that explain code (`// app.get(setting)` above the branch that handles that call, 4),
+  sentences that end in code (`// Equivalent to Integer.parseInt(...);`, 2) and a JSON example
+  written as an assignment (2). Over those five repositories no production file passes the bar
+  of 2 lines; the two files that do are tests, both true. Before the block rule the same scan
+  counted 1130 lines, nearly all examples inside doc comments. Recall is lower: a disabled block
+  under a prose header (`/* legacy tests`), or one holding a line no rule reads as code (a string
+  continuation `"/:id",`, a `...` placeholder), is not counted.
+- `undocumented_public` treats every member of a type that may override (any type with a
+  supertype the view cannot see into) as an override, so such members are never measured: the
+  same fail-closed rule the absence signals use.
+- Docstrings are read for Python and Starlark only (`docstring_kinds`); Julia's and Elixir's
+  doc strings and attributes, written above or around the declaration as code, are not.
+- A doc comment separated from its declaration by a blank line is no doc, as godoc reads it;
+  javadoc would still attach it, so such a Java docblock is reported undocumented.
