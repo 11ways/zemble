@@ -107,6 +107,58 @@ class CallRule:
 
 
 @dataclass(frozen=True)
+class ComplexitySpec:
+    """The node kinds cognitive complexity, nesting depth and comment lines are read from.
+
+    The increments follow Sonar's cognitive complexity rules; :mod:`zemble.languages.metrics`
+    applies them. A grammar that spells control flow as ordinary calls (a lisp, Elixir) can
+    only name what its node kinds show, so its numbers undercount.
+    """
+
+    #: Kinds that add 1 plus the current nesting level and open a level: if, switch, loops, catch, ternary.
+    increment_kinds: frozenset[str] = frozenset()
+    #: Kinds that add 1 without nesting: an else or elif clause the grammar makes a node, goto.
+    flat_increment_kinds: frozenset[str] = frozenset()
+    #: Kinds that open a nesting level without an increment: lambdas, closures, nested functions.
+    nesting_kinds: frozenset[str] = frozenset()
+    #: Binary expression kinds; one counts when its operator is boolean and differs from its parent's.
+    boolean_expression_kinds: frozenset[str] = frozenset()
+    #: Operator token texts that are boolean (`&&`, `||`, `and`, `or`).
+    boolean_operators: frozenset[str] = frozenset()
+    #: Field holding a binary expression's operator; without it the first boolean token between the operands is read.
+    operator_field: str = "operator"
+    #: Kinds that are comments.
+    comment_kinds: frozenset[str] = frozenset()
+    #: (jump kind, label kind): a break or continue adds 1 flat when it names a label of that kind.
+    labelled_jumps: tuple[tuple[str, str], ...] = ()
+    #: Keyword written directly inside an increment node before its else branch, as a bare
+    #: token or a named leaf, for grammars with no else node; the branch adds 1 flat and an
+    #: increment node there is an else-if.
+    else_token: str | None = None
+    #: Field of an increment node visited at the outer nesting level (Sonar nests only the branches).
+    condition_field: str | None = "condition"
+    #: Whether a call to the enclosing callable's own name adds 1.
+    recursion: bool = True
+    #: Single-child wrapper kinds looked through when reading a boolean parent or an else branch
+    #: (Solidity wraps every expression and statement in one).
+    transparent_kinds: frozenset[str] = frozenset()
+
+    def node_kinds(self) -> frozenset[str]:
+        """Every grammar node kind the spec names."""
+        kinds = set(
+            self.increment_kinds
+            | self.flat_increment_kinds
+            | self.nesting_kinds
+            | self.boolean_expression_kinds
+            | self.comment_kinds
+            | self.transparent_kinds
+        )
+        for jump, label in self.labelled_jumps:
+            kinds.update((jump, label))
+        return frozenset(kinds)
+
+
+@dataclass(frozen=True)
 class LanguageSpec:
     """Everything the generic readers need to know about one grammar."""
 
@@ -170,6 +222,12 @@ class LanguageSpec:
     package_separator: str = "."
     #: Leaf texts after which an identifier is a member name, never a renamed local.
     member_separators: frozenset[str] = frozenset({".", "->", "::"})
+    #: How cognitive complexity and comments are read, or None when nothing is measured.
+    complexity: ComplexitySpec | None = None
+
+    def has_callable_bodies(self) -> bool:
+        """Whether the spec declares callables with bodies, the ones worth comparing and measuring."""
+        return any(rule.role is Role.CALLABLE and rule.body is not None for rule in self.rules)
 
     def node_kinds(self) -> frozenset[str]:
         """Every grammar node kind the spec names, including those inside paths."""
@@ -199,6 +257,8 @@ class LanguageSpec:
             self.self_parameters & _NODE_LIKE,
         ):
             kinds.update(group)
+        if self.complexity is not None:
+            kinds.update(self.complexity.node_kinds())
         return frozenset(kinds)
 
 
@@ -257,4 +317,4 @@ def _path_kinds(path: str | None) -> set[str]:
     return kinds
 
 
-__all__ = ["CallRule", "LanguageSpec", "Role", "Rule"]
+__all__ = ["CallRule", "ComplexitySpec", "LanguageSpec", "Role", "Rule"]

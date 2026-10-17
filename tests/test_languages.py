@@ -8,7 +8,7 @@ from semble_grammars import available_languages, get_language, get_parser
 from zemble.graph.model import EdgeKind, SymbolKind
 from zemble.graph.store import GRAPH_LANGUAGES, extractor_for
 from zemble.index.files import detect_language, get_extensions
-from zemble.languages.catalog import SPECS, family_of, spec_for
+from zemble.languages.catalog import JAVA_COMPLEXITY, SPECS, complexity_for, family_of, spec_for
 from zemble.languages.paths import resolve, resolve_all, text
 from zemble.languages.read import split_qualified, type_name
 from zemble.types import ContentType
@@ -47,6 +47,22 @@ def test_every_bundled_code_grammar_is_read() -> None:
     assert set(unread) <= HAND_WRITTEN, f"bundled code grammars without a reader: {unread}"
     assert set(GRAPH_LANGUAGES) >= set(SPECS), "the graph reads every spec"
     assert "java" in GRAPH_LANGUAGES and "hwk" in GRAPH_LANGUAGES, "and keeps its hand-written lanes"
+
+
+def test_every_grammar_with_callable_bodies_is_measured() -> None:
+    """Drift guard: a code grammar declaring callables with bodies names its complexity kinds."""
+    code = _code_languages()
+    unmeasured = sorted(
+        language
+        for language, spec in SPECS.items()
+        if language in code and spec.has_callable_bodies() and spec.complexity is None
+    )
+    assert not unmeasured, f"code grammars with callable bodies but no ComplexitySpec: {unmeasured}"
+    grammar = get_language("java")
+    missing = [kind for kind in sorted(JAVA_COMPLEXITY.node_kinds()) if grammar.id_for_node_kind(kind, True) is None]
+    assert not missing, f"JAVA_COMPLEXITY names node kinds the Java grammar does not have: {missing}"
+    assert complexity_for("java") is JAVA_COMPLEXITY, "Java is measured without a spec"
+    assert complexity_for("hwk") is None and complexity_for(None) is None, "templates are not measured"
 
 
 def test_families_group_interoperating_languages() -> None:

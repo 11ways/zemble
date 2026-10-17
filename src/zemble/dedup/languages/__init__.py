@@ -28,15 +28,9 @@ from zemble.dedup.languages.java import JAVA
 from zemble.dedup.languages.zig import ZIG
 from zemble.index.files import extensions_for_language
 from zemble.languages.catalog import SPECS
-from zemble.languages.spec import LanguageSpec, Role
 from zemble.types import ContentType
 
 _HAND_WRITTEN: tuple[LanguageProfile, ...] = (JAVA, ZIG)
-
-
-def _comparable(spec: LanguageSpec) -> bool:
-    """Whether a spec declares callables with bodies: without them there is nothing to compare."""
-    return any(rule.role is Role.CALLABLE and rule.body is not None for rule in spec.rules)
 
 
 _ALL: tuple[LanguageProfile, ...] = (
@@ -45,7 +39,7 @@ _ALL: tuple[LanguageProfile, ...] = (
         profile_from_spec(spec, tuple(extensions_for_language(language, (ContentType.CODE,))))
         for language, spec in SPECS.items()
         if language not in {profile.name for profile in _HAND_WRITTEN}
-        and _comparable(spec)
+        and spec.has_callable_bodies()
         and extensions_for_language(language, (ContentType.CODE,))
     ),
 )

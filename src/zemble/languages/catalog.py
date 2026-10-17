@@ -8,12 +8,13 @@ is listed, including the ones with nothing to declare (a stylesheet, a Dockerfil
 
 from __future__ import annotations
 
+from dataclasses import replace
 from fnmatch import fnmatch
 from pathlib import PurePosixPath
 
 from zemble.graph.model import SymbolKind
 from zemble.index.files import detect_language
-from zemble.languages.spec import CallRule, LanguageSpec, Role, Rule
+from zemble.languages.spec import CallRule, ComplexitySpec, LanguageSpec, Role, Rule
 from zemble.languages.visibility import Visibility
 
 _CLASS = SymbolKind.CLASS
@@ -61,6 +62,237 @@ _C_LIKE_MODIFIERS = frozenset(
         "get",
         "set",
     }
+)
+
+# ---- cognitive complexity -------------------------------------------------------------
+
+_C_BOOLEANS = frozenset({"&&", "||"})
+
+#: Java has no spec (its graph and duplication lanes are hand-written), so its complexity
+#: kinds live here on their own; `complexity_for("java")` answers with them.
+JAVA_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {
+            "if_statement",
+            "switch_expression",
+            "for_statement",
+            "enhanced_for_statement",
+            "while_statement",
+            "do_statement",
+            "catch_clause",
+            "ternary_expression",
+        }
+    ),
+    nesting_kinds=frozenset({"lambda_expression"}),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=_C_BOOLEANS,
+    comment_kinds=frozenset({"line_comment", "block_comment"}),
+    labelled_jumps=(("break_statement", "identifier"), ("continue_statement", "identifier")),
+    else_token="else",
+)
+
+_JS_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {
+            "if_statement",
+            "switch_statement",
+            "for_statement",
+            "for_in_statement",
+            "while_statement",
+            "do_statement",
+            "catch_clause",
+            "ternary_expression",
+        }
+    ),
+    flat_increment_kinds=frozenset({"else_clause"}),
+    nesting_kinds=frozenset(
+        {
+            "arrow_function",
+            "function_expression",
+            "function_declaration",
+            "generator_function",
+            "generator_function_declaration",
+        }
+    ),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=_C_BOOLEANS,
+    comment_kinds=frozenset({"comment", "html_comment"}),
+    labelled_jumps=(("break_statement", "statement_identifier"), ("continue_statement", "statement_identifier")),
+)
+
+_PYTHON_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {
+            "if_statement",
+            "for_statement",
+            "while_statement",
+            "except_clause",
+            "conditional_expression",
+            "match_statement",
+        }
+    ),
+    flat_increment_kinds=frozenset({"elif_clause", "else_clause"}),
+    nesting_kinds=frozenset({"lambda", "function_definition"}),
+    boolean_expression_kinds=frozenset({"boolean_operator"}),
+    boolean_operators=frozenset({"and", "or"}),
+    comment_kinds=frozenset({"comment"}),
+)
+
+_GO_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {"if_statement", "for_statement", "expression_switch_statement", "type_switch_statement", "select_statement"}
+    ),
+    flat_increment_kinds=frozenset({"goto_statement"}),
+    nesting_kinds=frozenset({"func_literal"}),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=_C_BOOLEANS,
+    comment_kinds=frozenset({"comment"}),
+    labelled_jumps=(("break_statement", "label_name"), ("continue_statement", "label_name")),
+    else_token="else",
+)
+
+_RUST_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {"if_expression", "match_expression", "for_expression", "while_expression", "loop_expression"}
+    ),
+    flat_increment_kinds=frozenset({"else_clause"}),
+    nesting_kinds=frozenset({"closure_expression", "function_item"}),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=_C_BOOLEANS,
+    comment_kinds=frozenset({"line_comment", "block_comment"}),
+    labelled_jumps=(("break_expression", "label"), ("continue_expression", "label")),
+)
+
+_C_INCREMENTS = frozenset(
+    {
+        "if_statement",
+        "switch_statement",
+        "for_statement",
+        "while_statement",
+        "do_statement",
+        "conditional_expression",
+        "seh_except_clause",
+    }
+)
+
+_C_COMPLEXITY = ComplexitySpec(
+    increment_kinds=_C_INCREMENTS,
+    flat_increment_kinds=frozenset({"else_clause", "goto_statement"}),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=_C_BOOLEANS,
+    comment_kinds=frozenset({"comment"}),
+)
+
+_CPP_COMPLEXITY = ComplexitySpec(
+    increment_kinds=_C_INCREMENTS | {"for_range_loop", "catch_clause"},
+    flat_increment_kinds=frozenset({"else_clause", "goto_statement"}),
+    nesting_kinds=frozenset({"lambda_expression"}),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=_C_BOOLEANS,
+    comment_kinds=frozenset({"comment"}),
+)
+
+_CSHARP_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {
+            "if_statement",
+            "switch_statement",
+            "switch_expression",
+            "for_statement",
+            "foreach_statement",
+            "while_statement",
+            "do_statement",
+            "catch_clause",
+            "conditional_expression",
+        }
+    ),
+    flat_increment_kinds=frozenset({"goto_statement"}),
+    nesting_kinds=frozenset({"lambda_expression", "anonymous_method_expression", "local_function_statement"}),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=_C_BOOLEANS,
+    comment_kinds=frozenset({"comment"}),
+    else_token="else",
+)
+
+_RUBY_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {
+            "if",
+            "unless",
+            "while",
+            "until",
+            "for",
+            "case",
+            "case_match",
+            "conditional",
+            "rescue",
+            "if_modifier",
+            "unless_modifier",
+            "while_modifier",
+            "until_modifier",
+            "rescue_modifier",
+        }
+    ),
+    flat_increment_kinds=frozenset({"elsif", "else"}),
+    # A lambda's body is itself a `block` or `do_block`, so naming `lambda` would nest twice.
+    nesting_kinds=frozenset({"block", "do_block"}),
+    boolean_expression_kinds=frozenset({"binary"}),
+    boolean_operators=frozenset({"&&", "||", "and", "or"}),
+    comment_kinds=frozenset({"comment"}),
+)
+
+_PHP_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {
+            "if_statement",
+            "switch_statement",
+            "match_expression",
+            "for_statement",
+            "foreach_statement",
+            "while_statement",
+            "do_statement",
+            "catch_clause",
+            "conditional_expression",
+        }
+    ),
+    flat_increment_kinds=frozenset({"else_if_clause", "else_clause", "goto_statement"}),
+    nesting_kinds=frozenset({"anonymous_function", "arrow_function"}),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=frozenset({"&&", "||", "and", "or"}),
+    comment_kinds=frozenset({"comment"}),
+)
+
+_KOTLIN_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {"if_expression", "when_expression", "for_statement", "while_statement", "do_while_statement", "catch_block"}
+    ),
+    nesting_kinds=frozenset({"lambda_literal", "anonymous_function", "function_declaration"}),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=_C_BOOLEANS,
+    comment_kinds=frozenset({"line_comment", "block_comment"}),
+    else_token="else",
+)
+
+_ZIG_COMPLEXITY = ComplexitySpec(
+    increment_kinds=frozenset(
+        {
+            "if_statement",
+            "if_expression",
+            "if_type_expression",
+            "for_statement",
+            "for_expression",
+            "while_statement",
+            "while_expression",
+            "switch_expression",
+            "catch_expression",
+        }
+    ),
+    flat_increment_kinds=frozenset({"else_clause"}),
+    boolean_expression_kinds=frozenset({"binary_expression"}),
+    boolean_operators=frozenset({"and", "or"}),
+    comment_kinds=frozenset({"comment"}),
+    labelled_jumps=(("break_expression", "break_label"), ("continue_expression", "break_label")),
+    else_token="else",
 )
 
 _JS_BINDINGS = (
@@ -144,6 +376,7 @@ _JS_BUILTINS = frozenset(
 JAVASCRIPT = LanguageSpec(
     language="javascript",
     family="js",
+    complexity=_JS_COMPLEXITY,
     rules=_JS_RULES,
     calls=_JS_CALLS,
     wrappers={"export_statement": "declaration"},
@@ -219,6 +452,7 @@ _TS_BINDINGS = (
 TYPESCRIPT = LanguageSpec(
     language="typescript",
     family="js",
+    complexity=_JS_COMPLEXITY,
     rules=_TS_RULES,
     calls=_JS_CALLS,
     wrappers={"export_statement": "declaration", "ambient_declaration": "@*"},
@@ -238,6 +472,7 @@ TYPESCRIPT = LanguageSpec(
 TSX = LanguageSpec(
     language="tsx",
     family="js",
+    complexity=_JS_COMPLEXITY,
     rules=_TS_RULES,
     calls=_JS_CALLS,
     wrappers=TYPESCRIPT.wrappers,
@@ -257,6 +492,7 @@ TSX = LanguageSpec(
 PYTHON = LanguageSpec(
     language="python",
     family="python",
+    complexity=_PYTHON_COMPLEXITY,
     rules=(
         Rule(("class_definition",), Role.TYPE, _CLASS, supertypes=("superclasses",)),
         Rule(("function_definition",), Role.CALLABLE, params="parameters", return_type="return_type"),
@@ -339,6 +575,8 @@ PYTHON = LanguageSpec(
 STARLARK = LanguageSpec(
     language="starlark",
     family="starlark",
+    # Python's shapes without `try`, which Starlark does not have.
+    complexity=replace(_PYTHON_COMPLEXITY, increment_kinds=_PYTHON_COMPLEXITY.increment_kinds - {"except_clause"}),
     rules=(
         Rule(("function_definition",), Role.CALLABLE, params="parameters"),
         Rule(
@@ -375,6 +613,7 @@ STARLARK = LanguageSpec(
 GO = LanguageSpec(
     language="go",
     family="go",
+    complexity=_GO_COMPLEXITY,
     rules=(
         Rule(("package_clause",), Role.PACKAGE, name="@package_identifier", body=None),
         Rule(("import_spec",), Role.IMPORT, name="path", body=None),
@@ -443,6 +682,7 @@ GO = LanguageSpec(
 RUST = LanguageSpec(
     language="rust",
     family="rust",
+    complexity=_RUST_COMPLEXITY,
     rules=(
         Rule(("use_declaration",), Role.IMPORT, name="argument", body=None),
         Rule(("mod_item",), Role.MODULE),
@@ -580,6 +820,7 @@ _C_BUILTINS = frozenset(
 C = LanguageSpec(
     language="c",
     family="c",
+    complexity=_C_COMPLEXITY,
     rules=_C_RULES,
     calls=(CallRule(("call_expression",), callee="function", arguments="arguments"),),
     member_access={"field_expression": ("argument", "field")},
@@ -594,6 +835,7 @@ C = LanguageSpec(
 CPP = LanguageSpec(
     language="cpp",
     family="c",
+    complexity=_CPP_COMPLEXITY,
     rules=(
         Rule(("preproc_include",), Role.IMPORT, name="path", body=None),
         Rule(("preproc_def",), Role.FIELD, body=None, scope="top"),
@@ -665,6 +907,7 @@ CPP = LanguageSpec(
 CSHARP = LanguageSpec(
     language="csharp",
     family="csharp",
+    complexity=_CSHARP_COMPLEXITY,
     rules=(
         Rule(("using_directive",), Role.IMPORT, name="@qualified_name|@identifier", body=None),
         Rule(("file_scoped_namespace_declaration",), Role.PACKAGE, body=None),
@@ -741,6 +984,7 @@ CSHARP = LanguageSpec(
 RUBY = LanguageSpec(
     language="ruby",
     family="ruby",
+    complexity=_RUBY_COMPLEXITY,
     rules=(
         Rule(("module",), Role.MODULE),
         Rule(("class",), Role.TYPE, _CLASS, supertypes=("superclass",)),
@@ -794,6 +1038,7 @@ RUBY = LanguageSpec(
 PHP = LanguageSpec(
     language="php",
     family="php",
+    complexity=_PHP_COMPLEXITY,
     rules=(
         Rule(("namespace_definition",), Role.MODULE, require=("body", "compound_statement")),
         Rule(("namespace_definition",), Role.PACKAGE, body=None),
@@ -847,6 +1092,7 @@ PHP = LanguageSpec(
 KOTLIN = LanguageSpec(
     language="kotlin",
     family="jvm",
+    complexity=_KOTLIN_COMPLEXITY,
     rules=(
         Rule(("package_header",), Role.PACKAGE, name="@qualified_identifier|@identifier", body=None),
         Rule(("import",), Role.IMPORT, name="@qualified_identifier|@identifier", body=None),
@@ -944,6 +1190,27 @@ KOTLIN = LanguageSpec(
 SWIFT = LanguageSpec(
     language="swift",
     family="swift",
+    # A labelled jump is the same `control_transfer_statement` as a `return`, so none counts.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {
+                "if_statement",
+                "guard_statement",
+                "switch_statement",
+                "for_statement",
+                "while_statement",
+                "repeat_while_statement",
+                "catch_block",
+                "ternary_expression",
+            }
+        ),
+        nesting_kinds=frozenset({"lambda_literal", "function_declaration"}),
+        boolean_expression_kinds=frozenset({"conjunction_expression", "disjunction_expression"}),
+        boolean_operators=_C_BOOLEANS,
+        operator_field="op",
+        comment_kinds=frozenset({"comment", "multiline_comment"}),
+        else_token="else",
+    ),
     rules=(
         Rule(("import_declaration",), Role.IMPORT, name="@identifier", body=None),
         Rule(("class_declaration",), Role.EXTENSION, owner="name", keywords=frozenset({"extension"})),
@@ -1011,6 +1278,23 @@ SWIFT = LanguageSpec(
 SCALA = LanguageSpec(
     language="scala",
     family="jvm",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {
+                "if_expression",
+                "match_expression",
+                "for_expression",
+                "while_expression",
+                "do_while_expression",
+                "catch_clause",
+            }
+        ),
+        nesting_kinds=frozenset({"lambda_expression", "function_definition"}),
+        boolean_expression_kinds=frozenset({"infix_expression"}),
+        boolean_operators=_C_BOOLEANS,
+        comment_kinds=frozenset({"comment", "block_comment"}),
+        else_token="else",
+    ),
     rules=(
         Rule(("package_clause",), Role.PACKAGE, body=None),
         Rule(("import_declaration",), Role.IMPORT, name=".", body=None),
@@ -1078,6 +1362,30 @@ SCALA = LanguageSpec(
 DART = LanguageSpec(
     language="dart",
     family="dart",
+    # A catch body is a sibling of its `catch_clause`, so what it holds is not nested.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {
+                "if_statement",
+                "if_element",
+                "switch_statement",
+                "switch_expression",
+                "for_statement",
+                "for_element",
+                "while_statement",
+                "do_statement",
+                "catch_clause",
+                "conditional_expression",
+            }
+        ),
+        nesting_kinds=frozenset({"function_expression", "local_function_declaration"}),
+        boolean_expression_kinds=frozenset({"logical_and_expression", "logical_or_expression"}),
+        boolean_operators=_C_BOOLEANS,
+        comment_kinds=frozenset({"comment", "documentation_comment"}),
+        labelled_jumps=(("break_statement", "identifier"), ("continue_statement", "identifier")),
+        else_token="else",
+        condition_field=None,
+    ),
     rules=(
         Rule(("import_or_export",), Role.IMPORT, name="**uri", body=None),
         Rule(("class_definition",), Role.TYPE, _CLASS, supertypes=("superclass", "interfaces", "@mixins")),
@@ -1176,6 +1484,14 @@ DART = LanguageSpec(
 LUA = LanguageSpec(
     language="lua",
     family="lua",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"if_statement", "for_statement", "while_statement", "repeat_statement"}),
+        flat_increment_kinds=frozenset({"elseif_statement", "else_statement", "goto_statement"}),
+        nesting_kinds=frozenset({"function_definition", "function_declaration"}),
+        boolean_expression_kinds=frozenset({"binary_expression"}),
+        boolean_operators=frozenset({"and", "or"}),
+        comment_kinds=frozenset({"comment"}),
+    ),
     rules=(
         Rule(("function_declaration",), Role.CALLABLE, params="parameters"),
         Rule(
@@ -1213,6 +1529,7 @@ LUA = LanguageSpec(
 ZIG = LanguageSpec(
     language="zig",
     family="zig",
+    complexity=_ZIG_COMPLEXITY,
     rules=(
         Rule(
             ("variable_declaration",),
@@ -1330,6 +1647,15 @@ _ELIXIR_SYNTAX = frozenset(
 ELIXIR = LanguageSpec(
     language="elixir",
     family="elixir",
+    # `if`, `case`, `cond`, `with` and `try` are ordinary `call` nodes no kind tells apart.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"rescue_block", "catch_block"}),
+        flat_increment_kinds=frozenset({"else_block"}),
+        nesting_kinds=frozenset({"anonymous_function"}),
+        boolean_expression_kinds=frozenset({"binary_operator"}),
+        boolean_operators=frozenset({"&&", "||", "and", "or"}),
+        comment_kinds=frozenset({"comment"}),
+    ),
     rules=(
         Rule(
             ("call",),
@@ -1368,6 +1694,13 @@ ELIXIR = LanguageSpec(
 ERLANG = LanguageSpec(
     language="erlang",
     family="erlang",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"if_expr", "case_expr", "receive_expr", "catch_clause"}),
+        nesting_kinds=frozenset({"anonymous_fun"}),
+        boolean_expression_kinds=frozenset({"binary_op_expr"}),
+        boolean_operators=frozenset({"andalso", "orelse", "and", "or"}),
+        comment_kinds=frozenset({"comment"}),
+    ),
     rules=(
         Rule(("module_attribute",), Role.PACKAGE, body=None),
         Rule(("record_decl",), Role.TYPE, _RECORD, body="."),
@@ -1385,6 +1718,15 @@ ERLANG = LanguageSpec(
 HASKELL = LanguageSpec(
     language="haskell",
     family="haskell",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"conditional", "case", "multi_way_if", "lambda_case", "lambda_cases"}),
+        nesting_kinds=frozenset({"lambda"}),
+        boolean_expression_kinds=frozenset({"infix"}),
+        boolean_operators=frozenset({"&&", "||"}),
+        comment_kinds=frozenset({"comment", "haddock"}),
+        else_token="else",
+        condition_field="if",
+    ),
     rules=(
         Rule(("header",), Role.PACKAGE, name="module", body=None),
         Rule(("import",), Role.IMPORT, name="module", body=None),
@@ -1409,6 +1751,24 @@ HASKELL = LanguageSpec(
 OCAML = LanguageSpec(
     language="ocaml",
     family="ocaml",
+    complexity=ComplexitySpec(
+        # `function` is a pattern match, so it counts like a switch.
+        increment_kinds=frozenset(
+            {
+                "if_expression",
+                "for_expression",
+                "while_expression",
+                "match_expression",
+                "try_expression",
+                "function_expression",
+            }
+        ),
+        flat_increment_kinds=frozenset({"else_clause"}),
+        nesting_kinds=frozenset({"fun_expression"}),
+        boolean_expression_kinds=frozenset({"infix_expression"}),
+        boolean_operators=frozenset({"&&", "||", "&", "or"}),
+        comment_kinds=frozenset({"comment"}),
+    ),
     rules=(
         Rule(("open_module",), Role.IMPORT, name="@module_path", body=None),
         Rule(("module_binding",), Role.MODULE, name="@module_name"),
@@ -1431,6 +1791,16 @@ OCAML = LanguageSpec(
 JULIA = LanguageSpec(
     language="julia",
     family="julia",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {"if_statement", "for_statement", "while_statement", "catch_clause", "ternary_expression"}
+        ),
+        flat_increment_kinds=frozenset({"elseif_clause", "else_clause"}),
+        nesting_kinds=frozenset({"arrow_function_expression", "do_clause", "function_definition"}),
+        boolean_expression_kinds=frozenset({"binary_expression"}),
+        boolean_operators=_C_BOOLEANS,
+        comment_kinds=frozenset({"line_comment", "block_comment"}),
+    ),
     rules=(
         Rule(("using_statement", "import_statement"), Role.IMPORT, name="#0", body=None),
         Rule(("module_definition",), Role.MODULE, body="@block"),
@@ -1472,6 +1842,15 @@ JULIA = LanguageSpec(
 R = LanguageSpec(
     language="r",
     family="r",
+    # `switch()` and `tryCatch()` are ordinary calls.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"if_statement", "for_statement", "while_statement", "repeat_statement"}),
+        nesting_kinds=frozenset({"function_definition"}),
+        boolean_expression_kinds=frozenset({"binary_operator"}),
+        boolean_operators=frozenset({"&&", "||", "&", "|"}),
+        comment_kinds=frozenset({"comment"}),
+        else_token="else",
+    ),
     rules=(
         Rule(
             ("call",),
@@ -1501,6 +1880,32 @@ R = LanguageSpec(
 PERL = LanguageSpec(
     language="perl",
     family="perl",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {
+                "if_statement",
+                "unless_statement",
+                "while_statement",
+                "until_statement",
+                "for_statement_1",
+                "for_statement_2",
+                "ternary_expression",
+                "if_simple_statement",
+                "unless_simple_statement",
+                "while_simple_statement",
+                "until_simple_statement",
+                "for_simple_statement",
+                "when_simple_statement",
+            }
+        ),
+        flat_increment_kinds=frozenset({"elsif_clause", "else_clause", "goto_expression"}),
+        nesting_kinds=frozenset({"anonymous_function", "function_definition"}),
+        # The grammar reads `$a and $b` as a unary expression with an `and` operator.
+        boolean_expression_kinds=frozenset({"binary_expression", "unary_expression"}),
+        boolean_operators=frozenset({"&&", "||", "and", "or"}),
+        comment_kinds=frozenset({"comments"}),
+        labelled_jumps=(("loop_control_statement", "identifier"),),
+    ),
     rules=(
         Rule(("package_statement",), Role.PACKAGE, name="@package_name", body=None),
         Rule(("use_no_statement",), Role.IMPORT, name="package_name|@package_name", body=None),
@@ -1532,6 +1937,24 @@ PERL = LanguageSpec(
 BASH = LanguageSpec(
     language="bash",
     family="bash",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {
+                "if_statement",
+                "for_statement",
+                "c_style_for_statement",
+                "while_statement",
+                "case_statement",
+                "ternary_expression",
+            }
+        ),
+        flat_increment_kinds=frozenset({"elif_clause", "else_clause"}),
+        nesting_kinds=frozenset({"function_definition"}),
+        # A `list` is `cmd && cmd`, with no operator field.
+        boolean_expression_kinds=frozenset({"binary_expression", "list"}),
+        boolean_operators=frozenset({"&&", "||", "-a", "-o"}),
+        comment_kinds=frozenset({"comment"}),
+    ),
     rules=(
         Rule(("command",), Role.IMPORT, name="argument", body=None, when=("name", frozenset({"source", "."}))),
         Rule(("function_definition",), Role.CALLABLE),
@@ -1549,6 +1972,24 @@ BASH = LanguageSpec(
 POWERSHELL = LanguageSpec(
     language="powershell",
     family="powershell",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {
+                "if_statement",
+                "for_statement",
+                "foreach_statement",
+                "while_statement",
+                "do_statement",
+                "switch_statement",
+                "catch_clause",
+            }
+        ),
+        flat_increment_kinds=frozenset({"elseif_clause", "else_clause"}),
+        nesting_kinds=frozenset({"script_block_expression", "function_statement"}),
+        boolean_expression_kinds=frozenset({"logical_expression"}),
+        boolean_operators=frozenset({"-and", "-or"}),
+        comment_kinds=frozenset({"comment"}),
+    ),
     rules=(
         Rule(("class_statement",), Role.TYPE, _CLASS, name="@simple_name", body="."),
         Rule(("enum_statement",), Role.TYPE, _ENUM, name="@simple_name", body="."),
@@ -1577,9 +2018,32 @@ POWERSHELL = LanguageSpec(
     name_equal_to_type_is_constructor=True,
 )
 
+#: Solidity wraps every expression in one of these, holding a single child.
+_SOLIDITY_WRAPPERS = frozenset({"expression"})
+
 SOLIDITY = LanguageSpec(
     language="solidity",
     family="solidity",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {
+                "if_statement",
+                "for_statement",
+                "while_statement",
+                "do_while_statement",
+                "catch_clause",
+                "ternary_expression",
+                "yul_if_statement",
+                "yul_for_statement",
+                "yul_switch_statement",
+            }
+        ),
+        boolean_expression_kinds=frozenset({"binary_expression"}),
+        boolean_operators=_C_BOOLEANS,
+        comment_kinds=frozenset({"comment"}),
+        else_token="else",
+        transparent_kinds=_SOLIDITY_WRAPPERS | {"statement"},
+    ),
     rules=(
         Rule(("import_directive",), Role.IMPORT, name="source", body=None),
         Rule(
@@ -1613,7 +2077,7 @@ SOLIDITY = LanguageSpec(
     member_access={"member_expression": ("object", "property")},
     self_names=frozenset({"this", "super"}),
     parameter_kinds=frozenset({"parameter", "event_parameter", "error_parameter"}),
-    transparent_kinds=frozenset({"expression"}),
+    transparent_kinds=_SOLIDITY_WRAPPERS,
     type_ref_kinds=frozenset({"user_defined_type"}),
     builtin_types=frozenset(
         {
@@ -1641,6 +2105,16 @@ SOLIDITY = LanguageSpec(
 GROOVY = LanguageSpec(
     language="groovy",
     family="jvm",
+    # Every block is a `closure` and a catch is a bare token, so lambdas and catches do not count.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {"if_statement", "switch_statement", "for_loop", "for_in_loop", "while_loop", "do_while_loop", "ternary_op"}
+        ),
+        boolean_expression_kinds=frozenset({"binary_op"}),
+        boolean_operators=_C_BOOLEANS,
+        comment_kinds=frozenset({"comment"}),
+        else_token="else",
+    ),
     rules=(
         Rule(("groovy_package",), Role.PACKAGE, name="@qualified_name", body=None),
         Rule(("groovy_import",), Role.IMPORT, name="import", body=None),
@@ -1668,6 +2142,14 @@ GROOVY = LanguageSpec(
 OBJC = LanguageSpec(
     language="objc",
     family="c",
+    complexity=ComplexitySpec(
+        increment_kinds=_C_INCREMENTS - {"seh_except_clause"} | {"catch_clause"},
+        flat_increment_kinds=frozenset({"else_clause", "goto_statement"}),
+        nesting_kinds=frozenset({"block_literal"}),
+        boolean_expression_kinds=frozenset({"binary_expression"}),
+        boolean_operators=_C_BOOLEANS,
+        comment_kinds=frozenset({"comment"}),
+    ),
     rules=(
         Rule(("preproc_include", "module_import"), Role.IMPORT, name="path|#0", body=None),
         Rule(
@@ -1779,6 +2261,8 @@ _LISP_SPECIAL = frozenset(
 CLOJURE = LanguageSpec(
     language="clojure",
     family="clojure",
+    # Control flow is plain lists; only `#()` nesting, comments and recursion are readable.
+    complexity=ComplexitySpec(nesting_kinds=frozenset({"anon_fn_lit"}), comment_kinds=frozenset({"comment"})),
     rules=(
         Rule(("list_lit",), Role.PACKAGE, name="#1/name", body=None, when=("#0/name", frozenset({"ns"}))),
         Rule(
@@ -1857,6 +2341,9 @@ _SCHEME_RULES = (
 SCHEME = LanguageSpec(
     language="scheme",
     family="scheme",
+    # Control flow is plain lists, and the body is the whole `define` form whose header names
+    # the callable, so recursion would count every definition once.
+    complexity=ComplexitySpec(comment_kinds=frozenset({"comment", "block_comment"}), recursion=False),
     rules=_SCHEME_RULES,
     calls=(CallRule(("list",), callee="#0", arguments=".", arguments_offset=1),),
     block_kinds=frozenset(),
@@ -1867,6 +2354,8 @@ SCHEME = LanguageSpec(
 RACKET = LanguageSpec(
     language="racket",
     family="scheme",
+    # As Scheme: plain lists, and a body that includes the header.
+    complexity=ComplexitySpec(comment_kinds=frozenset({"comment", "block_comment", "sexp_comment"}), recursion=False),
     rules=_SCHEME_RULES,
     calls=(CallRule(("list",), callee="#0", arguments=".", arguments_offset=1),),
     block_kinds=frozenset(),
@@ -1877,6 +2366,14 @@ RACKET = LanguageSpec(
 NIX = LanguageSpec(
     language="nix",
     family="nix",
+    # A curried `a: b: ...` function is deliberately not a nesting kind: one level per argument.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"if_expression"}),
+        boolean_expression_kinds=frozenset({"binary_expression"}),
+        boolean_operators=_C_BOOLEANS,
+        comment_kinds=frozenset({"comment"}),
+        else_token="else",
+    ),
     rules=(
         Rule(
             ("binding",),
@@ -1899,6 +2396,26 @@ NIX = LanguageSpec(
 FORTRAN = LanguageSpec(
     language="fortran",
     family="fortran",
+    # `cycle`, `exit` and `go to` are generic keyword statements, so jumps are not counted.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset(
+            {
+                "if_statement",
+                "arithmetic_if_statement",
+                "do_loop",
+                "forall_statement",
+                "where_statement",
+                "select_case_statement",
+                "select_type_statement",
+                "select_rank_statement",
+            }
+        ),
+        flat_increment_kinds=frozenset({"elseif_clause", "else_clause", "elsewhere_clause"}),
+        boolean_expression_kinds=frozenset({"logical_expression"}),
+        boolean_operators=frozenset({".and.", ".or.", ".AND.", ".OR."}),
+        comment_kinds=frozenset({"comment"}),
+        condition_field=None,
+    ),
     rules=(
         Rule(("use_statement",), Role.IMPORT, name="@module_name", body=None),
         Rule(("module",), Role.MODULE, name="@module_statement/@name", body="."),
@@ -1940,6 +2457,14 @@ FORTRAN = LanguageSpec(
 SQL = LanguageSpec(
     language="sql",
     family="sql",
+    # Procedural bodies (PL/pgSQL, quoted bodies) do not parse; only CASE and AND/OR runs count.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"case"}),
+        boolean_expression_kinds=frozenset({"binary_expression"}),
+        boolean_operators=frozenset({"AND", "OR", "and", "or"}),
+        comment_kinds=frozenset({"comment", "marginalia"}),
+        condition_field=None,
+    ),
     rules=(
         Rule(
             ("create_function",),
@@ -1966,6 +2491,13 @@ SQL = LanguageSpec(
 CMAKE = LanguageSpec(
     language="cmake",
     family="cmake",
+    # AND/OR are plain arguments and `break()` an ordinary command, so neither counts.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"if_condition", "foreach_loop", "while_loop"}),
+        flat_increment_kinds=frozenset({"elseif_command", "else_command"}),
+        comment_kinds=frozenset({"line_comment", "bracket_comment"}),
+        condition_field=None,
+    ),
     rules=(
         Rule(
             ("function_def",),
@@ -2047,6 +2579,14 @@ HCL = LanguageSpec(
 TYPST = LanguageSpec(
     language="typst",
     family="typst",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"branch", "for", "while"}),
+        nesting_kinds=frozenset({"lambda"}),
+        boolean_expression_kinds=frozenset({"and", "or"}),
+        boolean_operators=frozenset({"and", "or"}),
+        comment_kinds=frozenset({"comment"}),
+        else_token="else",
+    ),
     rules=(
         Rule(
             ("let",),
@@ -2068,6 +2608,14 @@ TYPST = LanguageSpec(
 VIM = LanguageSpec(
     language="vim",
     family="vim",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"if_statement", "for_loop", "while_loop", "catch_statement", "ternary_expression"}),
+        flat_increment_kinds=frozenset({"elseif_statement", "else_statement"}),
+        nesting_kinds=frozenset({"lambda_expression"}),
+        boolean_expression_kinds=frozenset({"binary_operation"}),
+        boolean_operators=_C_BOOLEANS,
+        comment_kinds=frozenset({"comment", "line_continuation_comment"}),
+    ),
     rules=(
         Rule(
             ("function_definition",),
@@ -2089,6 +2637,13 @@ VIM = LanguageSpec(
 WAT = LanguageSpec(
     language="wat",
     family="wat",
+    # The folded `if_block` keeps its `else` token inside it; `op_select` is the ternary.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"if_block", "block_if", "expr1_loop", "block_loop", "op_select"}),
+        comment_kinds=frozenset({"comment_line", "comment_block"}),
+        else_token="else",
+        condition_field=None,
+    ),
     rules=(
         Rule(("module",), Role.MODULE, name="identifier", default_name="module", body="."),
         Rule(("module_field_func",), Role.CALLABLE, name="identifier", params="@func_type_params", body="@instr_list"),
@@ -2115,6 +2670,12 @@ WAT = LanguageSpec(
 MAKE = LanguageSpec(
     language="make",
     family="make",
+    # `$(if ...)`, `$(and ...)` and `$(or ...)` are function calls no kind tells apart.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"conditional"}),
+        flat_increment_kinds=frozenset({"elsif_directive", "else_directive"}),
+        comment_kinds=frozenset({"comment"}),
+    ),
     rules=(
         Rule(("rule",), Role.CALLABLE, name="@targets/@word", params=None, body="@recipe"),
         Rule(("variable_assignment",), Role.FIELD, body=None, scope="top"),
@@ -2135,6 +2696,13 @@ CSS = LanguageSpec(language="css", family="css")
 SCSS = LanguageSpec(
     language="scss",
     family="css",
+    # `and`/`or` in a condition do not parse in this grammar, so no boolean kinds are named.
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"if_statement", "each_statement", "for_statement", "while_statement"}),
+        flat_increment_kinds=frozenset({"else_if_clause", "else_clause"}),
+        comment_kinds=frozenset({"comment", "single_line_comment"}),
+        condition_field=None,
+    ),
     rules=(
         Rule(("use_statement", "import_statement", "forward_statement"), Role.IMPORT, name="@string_value", body=None),
         Rule(
@@ -2163,6 +2731,14 @@ SCSS = LanguageSpec(
 JSONNET = LanguageSpec(
     language="jsonnet",
     family="jsonnet",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"conditional"}),
+        nesting_kinds=frozenset({"anonymous_function"}),
+        boolean_expression_kinds=frozenset({"binary"}),
+        boolean_operators=_C_BOOLEANS,
+        comment_kinds=frozenset({"comment"}),
+        else_token="else",
+    ),
     rules=(
         Rule(("bind",), Role.CALLABLE, name="function", params="params", body="body", require=("function", "id")),
         Rule(("bind",), Role.FIELD, name="@id|#0", body="#-1"),
@@ -2178,6 +2754,11 @@ JSONNET = LanguageSpec(
 JUST = LanguageSpec(
     language="just",
     family="just",
+    complexity=ComplexitySpec(
+        increment_kinds=frozenset({"if_expression"}),
+        flat_increment_kinds=frozenset({"else_if_clause", "else_clause"}),
+        comment_kinds=frozenset({"comment"}),
+    ),
     rules=(
         Rule(
             ("recipe",),
@@ -2297,6 +2878,18 @@ def spec_for(language: str | None) -> LanguageSpec | None:
     return SPECS.get(language)
 
 
+def complexity_for(language: str | None) -> ComplexitySpec | None:
+    """How a language's callables are measured, or None when they are not.
+
+    Java answers from :data:`JAVA_COMPLEXITY`; Hawkeye templates are not measured, since a
+    template has no callable bodies of its own.
+    """
+    if language == "java":
+        return JAVA_COMPLEXITY
+    spec = spec_for(language)
+    return spec.complexity if spec is not None else None
+
+
 def is_test_file(relative_path: str) -> bool:
     """Whether a file's NAME marks it as a test source in its language (`test_x.py`, `x_test.go`)."""
     name = relative_path.rsplit("/", 1)[-1]
@@ -2310,4 +2903,4 @@ def family_of(language: str | None) -> str | None:
     return spec.family if spec is not None else language
 
 
-__all__ = ["SPECS", "family_of", "is_test_file", "spec_for"]
+__all__ = ["JAVA_COMPLEXITY", "SPECS", "complexity_for", "family_of", "is_test_file", "spec_for"]
