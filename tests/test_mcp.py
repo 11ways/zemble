@@ -640,6 +640,7 @@ def _every_tool_call(root: str, dupes_root: str) -> list[tuple[str, dict[str, An
         ("explain", {"query": "circle area", "repo": root, "budget": 400}),
         ("home", {"description": "compute the area of a shape", "repo": root}),
         ("health", {"repo": root}),
+        ("health", {"repo": root, "since": "HEAD", "copying": True, "baseline": True}),
         ("dupes", {"repo": dupes_root, "kind": "exact"}),
         ("dupes", {"repo": dupes_root, "kind": "exact", "format": "json"}),
     ]

@@ -14,7 +14,7 @@ from typing import Any
 
 from zemble.graph.cli import ensure_graph
 from zemble.graph.provider import open_provider
-from zemble.health.answers import health_payload, parse_signals
+from zemble.health.answers import HealthRequest, health_payload, parse_signals
 from zemble.health.model import Signal
 from zemble.health.report import DEFAULT_LIMIT
 from zemble.home.config import ConfigError, HomeConfig
@@ -47,6 +47,26 @@ def add_health_parser(sub: argparse._SubParsersAction) -> None:
         metavar="PATH",
         help="Restrict the report to these paths, relative to the directory (or absolute).",
     )
+    parser.add_argument(
+        "--since",
+        default=None,
+        metavar="REF",
+        help="List only the findings touching a line changed since this git ref (working tree and untracked "
+        "files included); the score stays the whole scope's.",
+    )
+    parser.add_argument(
+        "--copying",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Measure the duplication tier (clone_mass, cloned_body, pass_through, vocabulary_drift); "
+        "default: on with --since, --paths or a sub-directory, off over a whole tree (it parses every file).",
+    )
+    parser.add_argument(
+        "--baseline", default=None, metavar="FILE", help="Report resolved/remaining/new against a saved baseline."
+    )
+    parser.add_argument(
+        "--save-baseline", default=None, metavar="FILE", help="Write this run's finding keys as a baseline."
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable output.")
     _add_daemon_arg(parser)
 
@@ -55,13 +75,22 @@ def run_health(args: argparse.Namespace) -> int:
     """Print one health report, from the warm daemon where there is one; 0 whenever it answered."""
     from zemble.cli import _via_daemon
 
-    signals = args.signals.split(",") if args.signals else None
+    path = os.path.abspath(args.path)
+    request = HealthRequest(
+        signals=tuple(args.signals.split(",")) if args.signals else None,
+        paths=tuple(args.paths or ()),
+        limit=args.limit,
+        since=args.since,
+        copying=args.copying,
+        # The daemon refuses relative paths, and runs in another directory.
+        baseline=os.path.abspath(args.baseline) if args.baseline else None,
+        save_baseline=os.path.abspath(args.save_baseline) if args.save_baseline else None,
+    )
     try:
-        parse_signals(signals)
-        request = _daemon_args(args, signals)
-        payload = _via_daemon(args.command, request, args.no_daemon, None)
+        parse_signals(request.signals)
+        payload = _via_daemon(args.command, request.to_args(path), args.no_daemon, None)
         if payload is None:
-            payload = in_process(request["path"], signals, request["paths"], args.limit)
+            payload = in_process(path, request)
     except (ConfigError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return EXIT_ERROR
@@ -72,24 +101,20 @@ def run_health(args: argparse.Namespace) -> int:
     return 0
 
 
-def _daemon_args(args: argparse.Namespace, signals: list[str] | None) -> dict[str, Any]:
-    """Shape the subcommand as daemon command arguments; the daemon refuses relative paths."""
-    return {"path": os.path.abspath(args.path), "signals": signals, "paths": args.paths or [], "limit": args.limit}
-
-
-def in_process(path: str, signals: list[str] | None, paths: list[str], limit: int) -> dict[str, Any]:
-    """Answer in this process, building or refreshing the graph first.
+def in_process(path: str, request: HealthRequest) -> dict[str, Any]:
+    """Answer one request in this process, building or refreshing the graph first.
 
     The graph is the requested directory's own, or an ancestor's view of it; the config is the
     nearest ancestor's `home.toml`, as `home` reads it.
 
     :raises ConfigError: If that `home.toml` is malformed.
+    :raises ValueError: If `health_payload` refuses the request.
     """
     config = HomeConfig.load(resolve_home_root(path))
     ensure_graph(path)
     provider = open_provider(path)
     try:
-        return health_payload(provider, config, signals=signals, paths=paths, limit=limit)
+        return health_payload(provider, config, request)
     finally:
         provider.close()
 

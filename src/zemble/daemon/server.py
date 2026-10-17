@@ -1154,20 +1154,18 @@ async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
 
 
 async def _cmd_health(daemon: Daemon, args: dict[str, Any]) -> Any:
-    """Report code-shape findings over the daemon's graph and the nearest declared workspace config."""
-    from zemble.health.answers import health_payload
-    from zemble.health.report import DEFAULT_LIMIT
+    """Report code-shape findings over the daemon's graph and the nearest declared workspace config.
+
+    The duplication tier reads the per-root unit index (`zemble.dedup.unitcache`), never the search index.
+    """
+    from zemble.health.answers import HealthRequest, health_payload
     from zemble.home.config import HomeConfig
     from zemble.workspace import resolve_home_root
 
     root = _root_of(args)
     config = await asyncio.to_thread(HomeConfig.load, resolve_home_root(root))
-    signals = args.get("signals")
-    paths = args.get("paths") or []
-    limit = int(args.get("limit", DEFAULT_LIMIT))
-    return await daemon.with_graph(
-        root, lambda graph: health_payload(graph, config, signals=signals, paths=paths, limit=limit)
-    )
+    request = HealthRequest.from_args(args)
+    return await daemon.with_graph(root, lambda graph: health_payload(graph, config, request))
 
 
 async def _cmd_refresh(daemon: Daemon, args: dict[str, Any]) -> Any:

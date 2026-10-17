@@ -1,5 +1,6 @@
 import hashlib
 import os
+import subprocess
 import textwrap
 from collections.abc import Iterator
 from pathlib import Path
@@ -39,6 +40,24 @@ def make_chunk(content: str, file_path: str = "src/module.py") -> Chunk:
         end_line=content.count("\n") + 1,
         language="python",
     )
+
+
+#: A committer identity, so a scripted repository commits on a machine with no git config.
+GIT_ENV = {
+    **os.environ,
+    "GIT_AUTHOR_NAME": "test",
+    "GIT_AUTHOR_EMAIL": "t@t.com",
+    "GIT_COMMITTER_NAME": "test",
+    "GIT_COMMITTER_EMAIL": "t@t.com",
+}
+
+
+def git(repo: Path, *arguments: str) -> str:
+    """Run one git command inside a scripted repository and return its stdout."""
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *arguments], check=True, capture_output=True, text=True, env=GIT_ENV
+    )
+    return completed.stdout
 
 
 @pytest.fixture(autouse=True)

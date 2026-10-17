@@ -29,6 +29,8 @@ from zemble.graph.model import (
     SymbolKind,
 )
 from zemble.graph.provider import AnyProvider
+from zemble.health.copying import CopyingFacts, measure_copying
+from zemble.health.git import ChangedLines
 from zemble.health.model import Comparison, Signal
 from zemble.home.config import HomeConfig
 from zemble.index.files import detect_language
@@ -67,6 +69,11 @@ def language_of(file_path: str) -> str:
     return detect_language(PurePosixPath(file_path)) or UNKNOWN_LANGUAGE
 
 
+def within(file_path: str, paths: Sequence[str]) -> bool:
+    """Whether a path is one of `paths` or lies under one; no paths means everything."""
+    return not paths or any(file_path == path or file_path.startswith(f"{path}/") for path in paths)
+
+
 def written_name(text: str) -> str:
     """The simple name an unresolved edge wrote: `java.util.List<String>` reads `List`."""
     head = text.split("<", 1)[0].split("(", 1)[0].split("[", 1)[0]
@@ -97,11 +104,13 @@ class HealthFacts:
     paths: tuple[str, ...] = ()
     #: Every file of the graph, test code included, as (absolute path, is test): where a name may be written.
     sources: tuple[tuple[str, bool], ...] = ()
+    #: The duplication run, when the report measures the duplication tier.
+    copying: CopyingFacts | None = None
     _modules: dict[str, str] = field(default_factory=dict)
 
     def in_scope(self, file_path: str) -> bool:
         """Whether a path is inside one of the requested sub-paths."""
-        return not self.paths or any(file_path == path or file_path.startswith(f"{path}/") for path in self.paths)
+        return within(file_path, self.paths)
 
     @cached_property
     def production(self) -> list[Symbol]:
@@ -111,6 +120,24 @@ class HealthFacts:
     def container(self, symbol: Symbol) -> Symbol | None:
         """The symbol's declaring container, when the view holds it."""
         return self.symbols.get(symbol.container_id) if symbol.container_id else None
+
+    def in_contract(self, symbol: Symbol) -> bool:
+        """Whether a symbol is a member of an interface, trait, protocol or annotation type."""
+        container = self.container(symbol)
+        return container is not None and container.kind in _CONTRACT_KINDS
+
+    def overridden(self, symbol: Symbol) -> bool:
+        """Whether anything overrides a callable, by an edge at any resolution: a weak edge still means it may."""
+        return any(tally.kind is EdgeKind.OVERRIDES for tally in self.inbound.get(symbol.id, ()))
+
+    @cached_property
+    def callables_by_file(self) -> dict[str, list[Symbol]]:
+        """Every production callable in the scope, by file."""
+        found: dict[str, list[Symbol]] = defaultdict(list)
+        for symbol in self.production:
+            if symbol.kind in CALLABLE_KINDS:
+                found[symbol.file_path].append(symbol)
+        return dict(found)
 
     def visibility(self, symbol: Symbol) -> Visibility:
         """How far a symbol reaches; UNKNOWN for a language no rule places.
@@ -123,7 +150,7 @@ class HealthFacts:
         for word, level in VISIBILITY_WORDS:
             if word in written:
                 return level
-        if container is not None and container.kind in _CONTRACT_KINDS:
+        if container is not None and self.in_contract(symbol):
             return self.visibility(container)
         language = language_of(symbol.file_path)
         if language == "java":
@@ -218,12 +245,21 @@ class HealthFacts:
         return os.path.normpath(os.path.join(self.root, file_path))
 
 
-def collect(provider: AnyProvider, config: HomeConfig, paths: Sequence[str] = ()) -> HealthFacts:
+def collect(
+    provider: AnyProvider,
+    config: HomeConfig,
+    paths: Sequence[str] = (),
+    *,
+    copying: bool = False,
+    changed: ChangedLines | None = None,
+) -> HealthFacts:
     """Read every fact the signals need from an open provider and the workspace config.
 
     :param provider: The graph answering for the requested directory (its own, or an ancestor's view).
     :param config: The `home.toml` of the nearest ancestor declaring one, or the generic config.
     :param paths: Sub-paths to restrict the report to, relative to the directory or absolute.
+    :param copying: Whether to run the duplication channels (`zemble.health.copying`).
+    :param changed: The lines a `--since` run reports on; the duplication run then compares only their files.
     """
     root = os.path.realpath(provider.path)
     scope = tuple(relative for path in paths if (relative := _relative(root, path)))
@@ -257,6 +293,9 @@ def collect(provider: AnyProvider, config: HomeConfig, paths: Sequence[str] = ()
             for dependency in provider.file_dependencies(DEPENDENCY_KINDS)
             if dependency.source_path in production
         ]
+    if copying:
+        files = None if changed is None else [path for path in changed.files if facts.in_scope(path)]
+        facts.copying = measure_copying(provider, scope, files)
     return facts
 
 
@@ -371,5 +410,6 @@ __all__ = [
     "HealthFacts",
     "collect",
     "language_of",
+    "within",
     "written_name",
 ]

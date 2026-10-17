@@ -62,10 +62,12 @@ reason is printed. It is a report, never a gate. See [docs/dedup.md](docs/dedup.
 **Health** (`zemble health`, MCP `health`). A ranked report of code-shape findings (long,
 deep, complex callables; large types and files; single-implementation interfaces,
 single-subclass abstract types, public callables with at most one caller, unreferenced
-private code; edges crossing a `home.toml` forbidden dependency) plus a score per axis. Every
-threshold is absolute and documented, graph findings rest only on edges resolved exactly or by
-unique name, and the score is not a target. It is a report, never a gate. See
-[docs/health.md](docs/health.md).
+private code; edges crossing a `home.toml` forbidden dependency; copied code, pass-through
+methods and vocabularies declared twice, from the `dupes` channels) plus a score per axis.
+`--since main` lists only the findings a branch touches, and a baseline marks them new or
+remaining. Every threshold is absolute and documented, graph findings rest only on edges
+resolved exactly or by unique name, and the score is not a target. It is a report, never a
+gate. See [docs/health.md](docs/health.md).
 
 **Home** (`zemble home`, MCP `home`). "Does this feature already exist, and which module
 should it live in?" Answered from the existing mechanisms search and the graph find,
@@ -296,6 +298,7 @@ zemble signatures ./my-project PageWindow.of
 zemble dupes ./my-project --kind exact,renamed --limit 20
 zemble home ./my-project "cache a computed thumbnail on disk"
 zemble health ./my-project --limit 20
+zemble health ./my-project --since main --baseline health.baseline.json
 ```
 
 The daemon manages itself, but it can be driven by hand:

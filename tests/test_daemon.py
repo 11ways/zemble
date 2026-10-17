@@ -775,9 +775,13 @@ def test_health_answers_over_a_real_socket(tmp_path: Path, no_embedder_load: Non
         crossings = [finding["key"] for finding in only["health"]["findings"]]
         assert crossings == ["forbidden_crossing:java:src/main/java/com/example/core/Leaker.java->app"], "2"
 
-        # 3. No index was loaded for it: health reads the graph alone.
+        # 3. The duplication tier answers over the socket too, reading the unit index, not a search index.
+        copied = client.call("health", {"path": root, "copying": True, "signals": ["cloned_body"]}, timeout=120)
+        assert copied["health"]["counts"] == {"cloned_body": 2}, f"3: {copied['health']['counts']}"
+
+        # 4. No index was loaded for it: health reads the graph and the unit index alone.
         status = client.call("status", timeout=30)
-        assert status["indexes"] == [], f"3: no index, got {status['indexes']}"
+        assert status["indexes"] == [], f"4: no index, got {status['indexes']}"
 
 
 def test_cli_search_reports_unavailable_without_loading_an_index(

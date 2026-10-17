@@ -41,6 +41,15 @@ class SiteKind(str, Enum):
     #: A regular expression literal.
     REGEX = "regex"
 
+    @property
+    def declares(self) -> bool:
+        """Whether a site of this kind is a place a value or value set is written down, not a use or a call shape."""
+        return self in _DECLARING
+
+
+#: The site kinds a vocabulary is declared at; a kind missing here never counts as one (fails closed).
+_DECLARING = frozenset({SiteKind.CONSTANT, SiteKind.SET, SiteKind.SWITCH, SiteKind.REGEX})
+
 
 #: Literal node-kind words -> the typed hole a holed stream writes, first match wins; anything else is `<lit>`.
 _HOLE_WORDS: tuple[tuple[str, str], ...] = (

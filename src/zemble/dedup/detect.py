@@ -86,6 +86,10 @@ class DupeOptions:
     #: Whether `<root>/.zemble/dupes.ignore` is honoured.
     use_ignore_file: bool = True
     jobs: int | None = None
+    #: Whether the report hands back shaped bodies and the sites the idiom or vocabulary kinds read
+    #: (`DupeReport.shaped`, `DupeReport.sites`), frozen code left out; a focused run keeps only the focus files'
+    #: shaped bodies. Asking for them extracts shaped bodies.
+    keep_units: bool = False
 
     @property
     def wants_logic(self) -> bool:
@@ -217,7 +221,7 @@ def _extract_options(
     }
     if shapes:
         requests = {
-            "shaped": CloneKind.HOLED in options.kinds or CloneKind.REIMPLEMENTS in options.kinds,
+            "shaped": options.keep_units or CloneKind.HOLED in options.kinds or CloneKind.REIMPLEMENTS in options.kinds,
             "idioms": CloneKind.IDIOM in options.kinds,
             "vocabulary": CloneKind.VOCABULARY in options.kinds,
         }
@@ -821,7 +825,20 @@ def _whole_run(root: Path, options: DupeOptions, embedder: Embedder | None) -> _
     shaped, notes = _shape_classes(root, options, extraction, embedder)
     classes.extend(shaped)
     report.notes.extend(notes)
+    _hand_back(report, options, extraction)
     return _Found(report, classes, _unit_paths(extraction))
+
+
+def _unfrozen(units: Iterable[Unit], settings: ShapeSettings) -> list[Unit]:
+    """The units outside frozen code (`ShapeSettings.frozen`, schema migrations)."""
+    return [unit for unit in units if not settings.is_frozen(unit.file_path)]
+
+
+def _hand_back(report: DupeReport, options: DupeOptions, extraction: _Extraction) -> None:
+    """Put the extraction's shaped bodies and sites on the report when the run asked for them."""
+    if options.keep_units:
+        report.shaped = _unfrozen(extraction.shaped, extraction.settings)
+        report.sites = _unfrozen(extraction.sites, extraction.settings)
 
 
 def _unit_paths(extraction: _Extraction) -> list[str]:
@@ -844,8 +861,8 @@ def _shape_classes(
     classes: list[CloneClass] = []
     notes: list[str] = list(extraction.notes)
     settings = extraction.settings
-    shaped = [unit for unit in extraction.shaped if not settings.is_frozen(unit.file_path)]
-    sites = [unit for unit in extraction.sites if not settings.is_frozen(unit.file_path)]
+    shaped = _unfrozen(extraction.shaped, settings)
+    sites = _unfrozen(extraction.sites, settings)
     if CloneKind.HOLED in options.kinds:
         classes.extend(rank(holed_classes(shaped, options.min_tokens), options.min_files))
     if CloneKind.IDIOM in options.kinds:
@@ -975,27 +992,46 @@ def _focused_run(root: Path, options: DupeOptions, embedder: Embedder | None) ->
     """Report the classes with a member under the focus paths; the answer for those classes is the whole run's.
 
     The clone kinds read every other scanned file from the unit index; the sub-body and vocabulary kinds keep no
-    index, so their classes are a whole run's, filtered to the ones touching the focus.
+    index, so their classes are a whole run's, filtered to the ones touching the focus. Kept units are the focus
+    files' shaped bodies and the whole run's sites (a vocabulary is compared over the whole tree).
     """
     scan = _scan(root, options.paths, options.exclude)
     focus = _focus_files(root, options.focus, scan)
     clone_kinds = any(kind.facts.indexed_focus for kind in options.kinds)
     found = _focused_clone_run(root, options, embedder, scan, focus) if clone_kinds else None
     shape_kinds = tuple(kind for kind in options.kinds if not kind.facts.indexed_focus)
-    if not shape_kinds:
-        assert found is not None
-        return found
-    whole = replace(options, kinds=shape_kinds, focus=(), windows=False)
-    extraction = collect_units(root, whole)
-    classes, notes = _shape_classes(root, whole, extraction, embedder)
-    if found is None:
-        bodies = sum(unit.is_body for unit in extraction.units)
-        report = _report(root, options, extraction.files, extraction.failed, len(extraction.units), bodies)
-        found = _Found(report, [], [])
-    found.classes.extend(clone for clone in classes if _touches(clone, focus))
-    found.report.notes.extend(notes)
-    found.unit_paths.extend(_unit_paths(extraction))
+    sites: list[Unit] = []
+    settings: ShapeSettings | None = None
+    if shape_kinds:
+        whole = replace(options, kinds=shape_kinds, focus=(), windows=False, keep_units=False)
+        extraction = collect_units(root, whole)
+        classes, notes = _shape_classes(root, whole, extraction, embedder)
+        if found is None:
+            bodies = sum(unit.is_body for unit in extraction.units)
+            report = _report(root, options, extraction.files, extraction.failed, len(extraction.units), bodies)
+            found = _Found(report, [], [])
+        found.classes.extend(clone for clone in classes if _touches(clone, focus))
+        found.report.notes.extend(notes)
+        found.unit_paths.extend(_unit_paths(extraction))
+        sites, settings = extraction.sites, extraction.settings
+    assert found is not None, "a run asks for at least one kind"
+    if options.keep_units:
+        settings = settings or ShapeSettings.load(root)[0]
+        found.report.shaped = _unfrozen(_focus_shaped(options, scan, focus), settings)
+        found.report.sites = _unfrozen(sites, settings)
     return found
+
+
+def _focus_shaped(options: DupeOptions, scan: _Scan, focus: set[str]) -> list[Unit]:
+    """The shaped bodies of the focus files alone: a focused run never parses the rest for them."""
+    jobs = [job for job in scan.jobs if job[1] in focus]
+    extract = _extract_options(replace(options, kinds=(), keep_units=True), include_text=False)
+    return [
+        unit
+        for *_, extracted in _run_batches(_extract_full_batch, jobs, extract, options.jobs)
+        if extracted is not None
+        for unit in extracted.shaped
+    ]
 
 
 def _focused_clone_run(

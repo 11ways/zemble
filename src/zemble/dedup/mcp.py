@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import Field
 
+from zemble.baseline import load_for_diff
 from zemble.dedup.baseline import BASELINE_RELATIVE_PATH, load_baseline, save_baseline
 from zemble.dedup.detect import DupeOptions, find_duplication
 from zemble.dedup.languages import supported_extensions, supported_languages
@@ -70,13 +71,7 @@ def _run(
     baseline = None
     notes: list[str] = []
     if against_baseline:
-        try:
-            baseline = load_baseline(baseline_path)
-        except ValueError as error:
-            if baseline_path.is_file():
-                notes.append(f"baseline: {error}")
-            else:
-                notes.append(f"baseline: none at {BASELINE_RELATIVE_PATH}; pass save_baseline=true to write one")
+        baseline, notes = load_for_diff(baseline_path, BASELINE_RELATIVE_PATH, load_baseline)
     if write_baseline:
         save_baseline(baseline_path, report)
         notes.append(f"baseline: wrote {len(report.classes)} class key(s) to {BASELINE_RELATIVE_PATH}")

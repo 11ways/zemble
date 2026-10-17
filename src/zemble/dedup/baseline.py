@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from zemble.baseline import load_document, save_document
 from zemble.dedup.model import CloneClass, DupeReport
 
 #: Bumped when the saved shape changes in a way a reader has to know about. Version 2: class
@@ -108,11 +108,7 @@ def baseline_payload(report: DupeReport) -> dict[str, Any]:
 
 def save_baseline(path: str | Path, report: DupeReport) -> Path:
     """Write a report's class keys to a baseline file, creating parent directories."""
-    target = Path(path)
-    if target.parent and not target.parent.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(baseline_payload(report), indent=2) + "\n", encoding="utf-8")
-    return target
+    return save_document(path, baseline_payload(report))
 
 
 def load_baseline(path: str | Path) -> Baseline:
@@ -122,15 +118,7 @@ def load_baseline(path: str | Path) -> Baseline:
     :return: The baseline.
     :raises ValueError: If the file is not a baseline document this version understands.
     """
-    source = Path(path)
-    try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-    except OSError as error:
-        raise ValueError(f"Cannot read baseline {source}: {error}") from None
-    except json.JSONDecodeError as error:
-        raise ValueError(f"Baseline {source} is not valid JSON: {error}") from None
-    if not isinstance(payload, dict) or payload.get("version") != BASELINE_VERSION:
-        raise ValueError(f"Baseline {source} is not a version {BASELINE_VERSION} document")
+    payload = load_document(path, BASELINE_VERSION)
     entries = []
     for item in payload.get("classes", []):
         entries.append(

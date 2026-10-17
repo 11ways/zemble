@@ -9,21 +9,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zemble.graph.model import Resolution
+
+if TYPE_CHECKING:  # pragma: no cover
+    from zemble.health.git import ChangedLines
 
 
 class Axis(str, Enum):
     """What a group of signals says about the code; one weight each in `zemble.health.score`.
 
-    COPYING, VOCABULARY, CONSISTENCY and HISTORY join when a signal measures them; an axis
-    without a signal would only ever read "not measured".
+    CONSISTENCY and HISTORY join when a signal measures them; an axis without a signal would only
+    ever read "not measured".
     """
 
     SIZE = "size"
     MACHINERY = "machinery"
     LAYERING = "layering"
+    COPYING = "copying"
+    VOCABULARY = "vocabulary"
 
 
 class Tier(str, Enum):
@@ -33,6 +38,9 @@ class Tier(str, Enum):
     SYNTACTIC = "syntactic"
     #: Graph edges: only as good as their resolution, so each such signal names a floor.
     GRAPH = "graph"
+    #: The duplication channels' units and clone classes (`zemble.dedup`): a parse of every file beside the
+    #: graph, so a run over a whole workspace measures it only when asked (`zemble.health.copying`).
+    DUPLICATION = "duplication"
 
 
 class Unit(str, Enum):
@@ -41,6 +49,8 @@ class Unit(str, Enum):
     LINES = "lines"
     COUNT = "count"
     LEVEL = "level"
+    #: Thousandths of a whole: a share kept integral, as every value is.
+    PERMILLE = "permille"
 
     @property
     def weighs_by_value(self) -> bool:
@@ -119,6 +129,10 @@ class Signal(str, Enum):
     LONE_PUBLIC_CALLABLE = "lone_public_callable"
     UNREFERENCED_SYMBOL = "unreferenced_symbol"
     FORBIDDEN_CROSSING = "forbidden_crossing"
+    CLONE_MASS = "clone_mass"
+    CLONED_BODY = "cloned_body"
+    PASS_THROUGH = "pass_through"
+    VOCABULARY_DRIFT = "vocabulary_drift"
 
     @property
     def facts(self) -> SignalFacts:
@@ -142,6 +156,11 @@ def _graph(
 ) -> SignalFacts:
     """Facts of a signal that rests on graph edges, each counted only at `floor` or better."""
     return SignalFacts(axis, Tier.GRAPH, description, Unit.COUNT, threshold, comparison, floor, source, advice)
+
+
+def _duplication(axis: Axis, description: str, unit: Unit, threshold: int, source: str, advice: str) -> SignalFacts:
+    """Facts of a signal read off the duplication channels, past its threshold when above it."""
+    return SignalFacts(axis, Tier.DUPLICATION, description, unit, threshold, Comparison.ABOVE, None, source, advice)
 
 
 _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
@@ -246,6 +265,38 @@ _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
         "the workspace's own [[forbidden]] rules in .zemble/home.toml",
         "move the code or the dependency so the module stops crossing the rule",
     ),
+    Signal.CLONE_MASS: _duplication(
+        Axis.COPYING,
+        "file whose lines inside exact or renamed clone classes exceed the threshold, in thousandths",
+        Unit.PERMILLE,
+        50,
+        "declared here: PMD CPD reports every copy past its token minimum but has no per-file share default",
+        "extract the copied code into one shared home",
+    ),
+    Signal.CLONED_BODY: _duplication(
+        Axis.COPYING,
+        "callable body that is an exact or renamed copy of a body in another file, counted in other files",
+        Unit.COUNT,
+        0,
+        "membership: any copy in another file (Fowler, Refactoring: duplicated code)",
+        "keep one copy and call it from the other places",
+    ),
+    Signal.PASS_THROUGH: _duplication(
+        Axis.MACHINERY,
+        "public callable whose whole body hands its parameters, in order, to one other callable",
+        Unit.COUNT,
+        0,
+        "existence: middle man (Fowler, Refactoring); contract implementations and constructor overloads excepted",
+        "call the target directly and delete the pass-through",
+    ),
+    Signal.VOCABULARY_DRIFT: _duplication(
+        Axis.VOCABULARY,
+        "value or value set declared in more than one place, counted in places",
+        Unit.COUNT,
+        1,
+        "existence: a vocabulary class of `zemble dupes --kind vocabulary`",
+        "declare the vocabulary once and derive the other places from it",
+    ),
 }
 
 
@@ -269,6 +320,15 @@ class Finding:
     reason: str
     #: Path-free where the unit has a qualified name, never a line number, so a baseline survives moves.
     key: str
+    #: Other places the same finding lives (a vocabulary's other declarations), as (path, start, end).
+    elsewhere: tuple[tuple[str, int, int], ...] = ()
+
+    def touched(self, changes: ChangedLines) -> bool:
+        """Whether the finding's span, or any place it also lives, intersects a changed line."""
+        return any(
+            changes.touches(path, start, end)
+            for path, start, end in ((self.file_path, self.start_line, self.end_line), *self.elsewhere)
+        )
 
     @property
     def threshold(self) -> int:
@@ -294,6 +354,7 @@ class Finding:
             "resolution": self.resolution.value,
             "reason": self.reason,
             "key": self.key,
+            "elsewhere": [f"{path}:{start}-{end}" for path, start, end in self.elsewhere],
         }
 
 

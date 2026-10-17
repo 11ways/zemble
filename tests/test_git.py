@@ -1,4 +1,3 @@
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -6,27 +5,20 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import git
 from zemble import ZembleIndex
-
-_GIT_ENV = {
-    **os.environ,
-    "GIT_AUTHOR_NAME": "test",
-    "GIT_AUTHOR_EMAIL": "t@t.com",
-    "GIT_COMMITTER_NAME": "test",
-    "GIT_COMMITTER_EMAIL": "t@t.com",
-}
 
 
 def _make_git_repo(path: Path) -> None:
-    """Initialise a bare git repo at path; author identity comes from _GIT_ENV."""
+    """Initialise a git repo at path; author identity comes from GIT_ENV."""
     subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
 
 
 def _commit_file(repo: Path, name: str, content: str, message: str = "add file") -> None:
     """Write a file, stage it, and commit it inside repo."""
     (repo / name).write_text(content)
-    subprocess.run(["git", "-C", str(repo), "add", name], check=True, capture_output=True, env=_GIT_ENV)
-    subprocess.run(["git", "-C", str(repo), "commit", "-m", message], check=True, capture_output=True, env=_GIT_ENV)
+    git(repo, "add", name)
+    git(repo, "commit", "-m", message)
 
 
 @pytest.fixture

@@ -390,6 +390,10 @@ class DupeReport:
     #: Cross-module verdicts keyed by class key (`zemble.dedup.homes.HomeVerdict`); typed loosely
     #: because importing homes here would be a cycle.
     homes: dict[str, Any] = field(default_factory=dict)
+    #: Shaped bodies and idiom or vocabulary sites, only when the run asked for them (`DupeOptions.keep_units`);
+    #: never on the wire.
+    shaped: list[Unit] = field(default_factory=list)
+    sites: list[Unit] = field(default_factory=list)
 
     def of_kind(self, kind: CloneKind) -> list[CloneClass]:
         """Return this report's classes of one kind, already ranked."""

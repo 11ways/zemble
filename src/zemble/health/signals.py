@@ -11,6 +11,8 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
+from zemble.dedup.languages import SiteKind, profile_for
+from zemble.dedup.model import CloneKind, Unit
 from zemble.graph.model import (
     ANONYMOUS_MARKER,
     CALLABLE_KINDS,
@@ -24,6 +26,8 @@ from zemble.graph.model import (
 )
 from zemble.graph.provider import display_name
 from zemble.health.collect import HIERARCHY_KINDS, HealthFacts, language_of
+from zemble.health.copying import CODE_KINDS, CopyingFacts
+from zemble.health.git import merge_ranges
 from zemble.health.model import Signal
 from zemble.languages import Visibility
 from zemble.languages.metrics import CallableMetrics
@@ -44,6 +48,8 @@ class Sample:
     resolution: Resolution = Resolution.EXACT
     #: What this unit adds to the signal's advice, or "".
     detail: str = ""
+    #: Other places the same unit lives, as (path, start, end): a vocabulary's other declarations.
+    elsewhere: tuple[tuple[str, int, int], ...] = ()
 
     @property
     def language(self) -> str:
@@ -63,6 +69,8 @@ _MEMBER_CALLABLE_KINDS = frozenset({SymbolKind.METHOD, SymbolKind.FUNCTION})
 _FILE_LEVEL = frozenset({SymbolKind.MODULE, SymbolKind.PACKAGE})
 #: The name every language's process entry point goes by.
 _MAIN = "main"
+#: Files a cloned body's detail names before it only counts the rest.
+_FILES_SHOWN = 3
 
 
 def _symbol_sample(symbol: Symbol, value: int, resolution: Resolution = Resolution.EXACT, detail: str = "") -> Sample:
@@ -297,6 +305,130 @@ def _forbidden_crossing(facts: HealthFacts) -> Iterator[Sample]:
         yield Sample(path, 1, max(lines.get(path, 1), 1), f"-> {target}", f"{path}->{target}", edges, weakest, detail)
 
 
+def _place(unit: Unit) -> tuple[str, int, int]:
+    """Where a duplication unit lives."""
+    return unit.file_path, unit.start_line, unit.end_line
+
+
+def _callable_of(facts: HealthFacts, unit: Unit) -> Symbol | None:
+    """The production callable a duplication body is: same file and simple name, the widest line overlap."""
+    simple = unit.name.rsplit(".", 1)[-1]
+    best, overlap = None, 0
+    for symbol in facts.callables_by_file.get(unit.file_path, ()):
+        shared = min(symbol.end_line, unit.end_line) - max(symbol.start_line, unit.start_line) + 1
+        if symbol.name == simple and shared > overlap:
+            best, overlap = symbol, shared
+    return best
+
+
+def _bodies(facts: HealthFacts) -> Iterator[tuple[Unit, Symbol]]:
+    """Every production shaped body the duplication run judged, once per graph callable it is; unmatched ones never."""
+    copying = facts.copying
+    if copying is None:
+        return
+    seen: set[str] = set()
+    for unit in copying.shaped:
+        if facts.in_scope(unit.file_path) and copying.judged(unit.file_path):
+            symbol = _callable_of(facts, unit)
+            if symbol is not None and symbol.id not in seen:
+                seen.add(symbol.id)
+                yield unit, symbol
+
+
+def _clone_mass(facts: HealthFacts) -> Iterator[Sample]:
+    """Thousandths of every judged production file's lines that sit inside an exact or renamed clone class."""
+    copying = facts.copying
+    if copying is None:
+        return
+    spans: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for clone in copying.classes:
+        if clone.kind in CODE_KINDS:
+            for member in clone.members:
+                spans[member.file_path].append((member.start_line, member.end_line))
+    for path, metric in facts.files:
+        if profile_for(path) is None or not copying.judged(path):
+            continue
+        cloned = sum(end - start + 1 for start, end in merge_ranges(spans.get(path, [])))
+        total = max(metric.lines, 1)
+        yield Sample(path, 1, total, "", path, cloned * 1000 // total, detail=f"{cloned} of {metric.lines} lines")
+
+
+def _copies_elsewhere(copying: CopyingFacts) -> dict[tuple[str, int, int], set[str]]:
+    """Per body member of an exact or renamed clone class, the other files holding a copy of it."""
+    others: dict[tuple[str, int, int], set[str]] = defaultdict(set)
+    for clone in copying.classes:
+        if clone.kind not in CODE_KINDS:
+            continue
+        files = {member.file_path for member in clone.members}
+        for member in clone.members:
+            if member.is_body:
+                others[_place(member)] |= files - {member.file_path}
+    return others
+
+
+def _cloned_body(facts: HealthFacts) -> Iterator[Sample]:
+    """Other files holding an exact or renamed copy of every judged production body of clone size."""
+    copying = facts.copying
+    if copying is None:
+        return
+    others = _copies_elsewhere(copying)
+    for unit, symbol in _bodies(facts):
+        if unit.token_count < copying.min_tokens:
+            continue
+        elsewhere = sorted(others.get(_place(unit), ()))
+        more = f" and {len(elsewhere) - _FILES_SHOWN} more" if len(elsewhere) > _FILES_SHOWN else ""
+        detail = f"copies in {', '.join(elsewhere[:_FILES_SHOWN])}{more}" if elsewhere else ""
+        yield _symbol_sample(symbol, len(elsewhere), detail=detail)
+
+
+def _pass_through(facts: HealthFacts) -> Iterator[Sample]:
+    """Whether every judged public production body with parameters, outside any type contract, only forwards.
+
+    A body taking no parameter passes nothing through: it names a value (`return Set.of();`, a hook's
+    default). A body that is part of a contract (declared on an interface, annotated as implementing one,
+    overriding or overridden) is a role, and a constructor handing over to another is an overload; none is
+    measured. Neither is a body in a language whose profile cannot read forwarding (no shape hooks).
+    """
+    for unit, symbol in _bodies(facts):
+        profile = profile_for(unit.file_path)
+        if profile is None or profile.shapes is None or not symbol.arity:
+            continue
+        if unit.visibility is not Visibility.PUBLIC or unit.implements_contract or unit.delegates:
+            continue
+        if facts.in_contract(symbol) or symbol.id in facts.may_override or facts.overridden(symbol):
+            continue
+        forwards = unit.forwards_to is not None
+        yield _symbol_sample(symbol, int(forwards), detail=f"forwards to {unit.forwards_to}" if forwards else "")
+
+
+def _vocabulary_drift(facts: HealthFacts) -> Iterator[Sample]:
+    """Places of every vocabulary class with a judged member, and 1 for every other judged declaration site.
+
+    A class is anchored at its first judged member and carries every other place it is declared in.
+    """
+    copying = facts.copying
+    if copying is None:
+        return
+
+    def judged(unit: Unit) -> bool:
+        return facts.in_scope(unit.file_path) and copying.judged(unit.file_path)
+
+    classed: set[tuple[str, int, int]] = set()
+    for clone in copying.classes:
+        if clone.kind is not CloneKind.VOCABULARY:
+            continue
+        classed.update(_place(member) for member in clone.members)
+        anchor = next((member for member in clone.members if judged(member)), None)
+        if anchor is not None:
+            elsewhere = tuple(_place(member) for member in clone.members if member is not anchor)
+            detail = clone.notes[0] if clone.notes else ""
+            places = len(clone.members)
+            yield Sample(*_place(anchor), anchor.name, clone.key, places, detail=detail, elsewhere=elsewhere)
+    for site in copying.sites:
+        if SiteKind(site.kind).declares and judged(site) and _place(site) not in classed:
+            yield Sample(*_place(site), site.name, f"{site.file_path}:{site.name}", 1)
+
+
 #: The one producer of every signal; a member without one refuses at import below.
 PRODUCERS: dict[Signal, Producer] = {
     Signal.LONG_CALLABLE: _long_callable,
@@ -311,6 +443,10 @@ PRODUCERS: dict[Signal, Producer] = {
     Signal.LONE_PUBLIC_CALLABLE: _lone_public_callable,
     Signal.UNREFERENCED_SYMBOL: _unreferenced_symbol,
     Signal.FORBIDDEN_CROSSING: _forbidden_crossing,
+    Signal.CLONE_MASS: _clone_mass,
+    Signal.CLONED_BODY: _cloned_body,
+    Signal.PASS_THROUGH: _pass_through,
+    Signal.VOCABULARY_DRIFT: _vocabulary_drift,
 }
 
 _missing = set(Signal) - set(PRODUCERS)
