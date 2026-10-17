@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import PurePosixPath
 
-# Directory segments that mark a file as belonging to a test source set. Matched
-# case-insensitively against every directory segment of the file's relative path,
-# so both `src/test/java/...` (Maven) and `src/browserTest/java/...` (Gradle
-# source sets, as used across the javaweb workspace) are recognised.
-TEST_PATH_SEGMENTS: frozenset[str] = frozenset({"test", "tests", "browsertest", "integrationtest", "testfixtures"})
+#: Directory segments that are a test source set as a whole, matched case-insensitively.
+TEST_PATH_SEGMENTS: frozenset[str] = frozenset({"test", "tests", "integrationtest"})
+#: Camel-case words that make a longer source-set name a test one (`browserTestCommon`, `testFixtures`,
+#: `artifactContractTest`); a lowercase run like `testdata` is one word and is not split.
+_TEST_WORDS: frozenset[str] = frozenset({"test", "tests"})
+_CAMEL_WORD = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+
+
+def is_test_segment(name: str) -> bool:
+    """Whether one directory or source-set name marks test code: a listed segment, or a camel word `test`."""
+    return name.lower() in TEST_PATH_SEGMENTS or any(word.lower() in _TEST_WORDS for word in _CAMEL_WORD.findall(name))
+
+
 #: How an anonymous class's name begins (`$anon@<line>`); nothing can name one, so nothing references it.
 ANONYMOUS_MARKER = "$anon@"
 
@@ -102,7 +111,7 @@ _RESOLUTION_STRENGTH: dict[Resolution, int] = {
 def is_test_path(relative_path: str) -> bool:
     """Return True if a workspace-relative path lives under a test source set."""
     parts = PurePosixPath(relative_path).parts
-    return any(part.lower() in TEST_PATH_SEGMENTS for part in parts[:-1])
+    return any(is_test_segment(part) for part in parts[:-1])
 
 
 def make_symbol_id(relative_path: str, qualified_name: str, disambiguator: str | None = None) -> str:

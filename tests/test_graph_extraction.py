@@ -190,8 +190,12 @@ def test_callable_measurement_journey(graph_fixture_root: Path) -> None:
         ("src/test/java/com/example/core/CircleTest.java", True),
         ("src/browserTest/java/com/example/core/PaletteBrowserCheck.java", True),
         ("src/integrationTest/java/com/example/Foo.java", True),
+        ("textum/src/browserTestCommon/java/com/example/Journeys.java", True),
+        ("src/artifactContractTest/java/com/example/Foo.java", True),
+        ("src/testSupport/java/com/example/Foo.java", True),
         ("src/main/java/com/example/core/Circle.java", False),
         ("src/main/java/com/example/testing/Contest.java", False),
+        ("src/main/java/com/example/testdata/Latest.java", False),
     ],
 )
 def test_test_source_set_detection(path: str, expected: bool) -> None:
