@@ -108,7 +108,7 @@ class CallRule:
 
 @dataclass(frozen=True)
 class ComplexitySpec:
-    """The node kinds cognitive complexity, nesting depth and comment lines are read from.
+    """The node kinds cognitive complexity, nesting depth, comments and docstrings are read from.
 
     The increments follow Sonar's cognitive complexity rules; :mod:`zemble.languages.metrics`
     applies them. A grammar that spells control flow as ordinary calls (a lisp, Elixir) can
@@ -142,6 +142,8 @@ class ComplexitySpec:
     #: Single-child wrapper kinds looked through when reading a boolean parent or an else branch
     #: (Solidity wraps every expression and statement in one).
     transparent_kinds: frozenset[str] = frozenset()
+    #: String kinds a body's first statement is, or only holds, when it is the declaration's docstring (Python).
+    docstring_kinds: frozenset[str] = frozenset()
 
     def node_kinds(self) -> frozenset[str]:
         """Every grammar node kind the spec names."""
@@ -152,6 +154,7 @@ class ComplexitySpec:
             | self.boolean_expression_kinds
             | self.comment_kinds
             | self.transparent_kinds
+            | self.docstring_kinds
         )
         for jump, label in self.labelled_jumps:
             kinds.update((jump, label))

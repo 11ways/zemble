@@ -115,6 +115,7 @@ def symbol_from_row(row: sqlite3.Row) -> Symbol:
         is_test=bool(row["is_test"]),
         param_types=orjson.loads(row["param_types"]),
         annotation_args=orjson.loads(row["annotation_args"] or "{}"),
+        doc_lines=row["doc_lines"] or 0,
     )
 
 

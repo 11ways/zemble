@@ -1,4 +1,4 @@
-"""Per-callable code measurements read off any grammar's parse tree through a :class:`ComplexitySpec`.
+"""Per-callable and per-file code measurements read off any grammar's parse tree through a :class:`ComplexitySpec`.
 
 Cognitive complexity follows Sonar's rules: structures that break the linear flow add 1 plus
 the nesting level they sit at, else and else-if branches add 1 flat, a run of one boolean
@@ -6,14 +6,19 @@ operator adds 1, a labelled jump adds 1 and so does a call to the callable itsel
 one of its own receivers: `items.size()` inside `size()` calls another object's method). Nested
 lambdas and functions open a nesting level and their contents count toward the enclosing
 callable, as Sonar counts them.
+
+A declaration's doc comment is the run of comments directly above it (`doc_comment`); the file
+pass reads every comment once more for the lines that read as code, the unfinished-work markers
+and a generator's header (`measure_file`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+import re
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, fields
 from functools import cache
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from tree_sitter import Language, Node, Query, QueryCursor, Tree
 
@@ -62,12 +67,40 @@ class CallableMetrics:
 
 @dataclass(frozen=True)
 class FileMetrics:
-    """What one whole source file measures."""
+    """What one whole source file measures; every field is one column of the graph's `files` table."""
 
     #: Source lines in the file; a final line without a newline counts.
     lines: int
     #: Distinct lines a comment touches.
     comment_lines: int
+    #: Comment lines outside any doc comment that read as code (`reads_as_code`).
+    commented_code_lines: int = 0
+    #: Comment lines holding an unfinished-work marker (`MARKER`).
+    marker_lines: int = 0
+    #: Bytes of the longest line.
+    longest_line: int = 0
+    #: Whether a comment in the first `GENERATED_HEAD_LINES` lines carries a generator's header (`GENERATED`).
+    generated: bool = False
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> FileMetrics:
+        """Rebuild the measurements from a row carrying every `FILE_METRIC_COLUMNS` column."""
+        values = {column: row[column] for column in FILE_METRIC_COLUMNS}
+        values["generated"] = bool(values["generated"])
+        return cls(**values)
+
+
+#: The `files` columns the measurements are stored in, named after the fields: one home for both.
+FILE_METRIC_COLUMNS: tuple[str, ...] = tuple(item.name for item in fields(FileMetrics))
+
+
+class DocComment(NamedTuple):
+    """The documentation a declaration carries."""
+
+    #: Lines of the comments directly above it plus its docstring's.
+    lines: int
+    #: The 0-based rows of those comments, which the file pass never reads as commented-out code.
+    rows: frozenset[int]
 
 
 class _Walker:
@@ -297,40 +330,197 @@ def _comment_query(language: Language, kinds: frozenset[str]) -> Query:
     return Query(language, "[" + " ".join(f"({kind})" for kind in sorted(kinds)) + "] @comment")
 
 
-def comment_lines(tree: Tree, spec: ComplexitySpec) -> int:
-    """Count the distinct source lines a comment touches in a whole file, trailing comments included.
+def _comments(tree: Tree, spec: ComplexitySpec) -> list[Node]:
+    """Every comment node of a file, found by a tree-sitter query.
 
-    The comments are found by a tree-sitter query, which runs in C: a Python walk over every
-    node of every file was a fifth of a whole graph extraction. A query matches named nodes
-    only, so every comment kind must be a named node, which `tests/test_languages.py` holds.
+    The query runs in C: a Python walk over every node of every file was a fifth of a whole graph
+    extraction. A query matches named nodes only, so every comment kind must be a named node,
+    which `tests/test_languages.py` holds.
     """
+    return QueryCursor(_comment_query(tree.language, spec.comment_kinds)).captures(tree.root_node).get("comment", [])
+
+
+def _last_row(node: Node) -> int:
+    """The last row a node's text is on; a line comment that swallows its newline ends at column 0 of the next."""
+    last = node.end_point[0]
+    return last - 1 if node.end_point[1] == 0 and last > node.start_point[0] else last
+
+
+def comment_lines(tree: Tree, spec: ComplexitySpec) -> int:
+    """Count the distinct source lines a comment touches in a whole file, trailing comments included."""
     lines: set[int] = set()
-    captures = QueryCursor(_comment_query(tree.language, spec.comment_kinds)).captures(tree.root_node)
-    for node in captures.get("comment", ()):
-        last = node.end_point[0]
-        if node.end_point[1] == 0 and last > node.start_point[0]:
-            # A line comment that swallows its newline ends at column 0 of the next line.
-            last -= 1
-        lines.update(range(node.start_point[0], last + 1))
+    for node in _comments(tree, spec):
+        lines.update(range(node.start_point[0], _last_row(node) + 1))
     return len(lines)
 
 
-def measure_file(tree: Tree, source: bytes, spec: ComplexitySpec) -> FileMetrics:
-    """Measure a whole parsed file: its line count and its comment lines.
+def doc_comment(
+    declaration: Node,
+    spec: ComplexitySpec,
+    *,
+    body: Node | None = None,
+    attached_kinds: frozenset[str] = frozenset(),
+) -> DocComment:
+    """Measure the comments written directly above a declaration, and its docstring.
+
+    The comments are the declaration's preceding siblings, each ending on the line above the next;
+    one that shares its first line with code before it trails that code and ends the run. A
+    declaration that opens its parent (Python's first member opens the class block, which the
+    grammar places after the comments) is looked through to the parent's siblings, and the
+    attached kinds (Rust's `#[attr]` lines) are passed over without counting. A comment whose every
+    line reads as code (`reads_as_code`) is disabled code, not documentation, and ends the run.
+
+    @param declaration the declaration node, or the wrapper the spec wraps it in.
+    @param body the body whose first statement may be a docstring (`ComplexitySpec.docstring_kinds`).
+    @param attached_kinds sibling kinds that belong to the declaration (`LanguageSpec.annotation_kinds`).
+    """
+    rows: set[int] = set()
+    node, top = declaration, declaration.start_point[0]
+    while True:
+        previous = node.prev_named_sibling
+        if previous is None:
+            parent = node.parent
+            if parent is None or parent.start_byte != node.start_byte:
+                break
+            node = parent
+            continue
+        if _last_row(previous) < top - 1:
+            break
+        if previous.type in spec.comment_kinds:
+            before = previous.prev_sibling
+            trails = before is not None and before.type not in spec.comment_kinds
+            if trails and _last_row(before) == previous.start_point[0]:
+                break
+            if _commented_out(previous):
+                break
+            rows.update(range(previous.start_point[0], _last_row(previous) + 1))
+        elif previous.type not in attached_kinds:
+            break
+        node, top = previous, previous.start_point[0]
+    return DocComment(len(rows) + _docstring_lines(body, spec), frozenset(rows))
+
+
+def _docstring_lines(body: Node | None, spec: ComplexitySpec) -> int:
+    """Lines of a body's docstring: its first statement when that is, or only holds, a string."""
+    if body is None or not spec.docstring_kinds:
+        return 0
+    first = next((child for child in body.named_children if child.type not in spec.comment_kinds), None)
+    if first is None:
+        return 0
+    inner = first.named_children
+    if first.type not in spec.docstring_kinds and not (len(inner) == 1 and inner[0].type in spec.docstring_kinds):
+        return 0
+    return first.end_point[0] - first.start_point[0] + 1
+
+
+#: Unfinished-work markers (Sonar S1134, S1135) as whole upper-case words: lower case is prose ("a hack").
+MARKER = re.compile(r"\b(?:TODO|FIXME|XXX|HACK)\b")
+#: What a generator writes into the header of a file it produced (`protoc`, `go generate`, Phabricator's tag).
+GENERATED = re.compile(
+    r"@generated|do not edit|generated by|automatically generated|autogenerated|code generated", re.IGNORECASE
+)
+#: How many leading lines a generator's header is looked for in.
+GENERATED_HEAD_LINES = 30
+
+#: Comment openers of every measured grammar (`//`, `/*`, `*`, `#`, `;`, `%`, `--`, `!`, `<!--`, `{-`, `(*`).
+_OPENER = re.compile(r"^(?:<!--|\{-|\(\*|[/*#;%!-])+")
+#: Comment closers (`*/`, `-->`, `-}`, `*)`).
+_CLOSER = re.compile(r"(?:\*+/|-->|-\}|\*\))$")
+#: Line endings only code writes: a statement end, a block opener or closer, an argument run on.
+_CODE_ENDINGS = (";", "{", "}", "),")
+#: Keywords that open a block written with a trailing colon (Python, and a C `case`'s label).
+_BLOCK_KEYWORDS = frozenset({"if", "elif", "else", "for", "while", "def", "class", "try", "except", "with", "case"})
+#: Characters a keyword line ending in a colon must hold to read as code, not as a prose heading ("for example:").
+_CODE_CHARACTERS = frozenset("(=[.")
+#: A word of prose: letters, an apostrophe, and at most one trailing punctuation mark.
+_PROSE_WORD = re.compile(r"[A-Za-z']+[,.;:!?]?")
+#: Consecutive prose words that make a line a sentence however it ends.
+_PROSE_RUN = 4
+
+
+def _uncommented(comment_line: str) -> str:
+    """One line of a comment with its comment markers and surrounding blanks stripped."""
+    return _CLOSER.sub("", _OPENER.sub("", comment_line.strip())).strip()
+
+
+def _commented_out(comment: Node) -> bool:
+    """Whether every line of a comment that says anything reads as code: disabled code is no documentation."""
+    said = [line for line in (comment.text or b"").decode("utf-8", "replace").split("\n") if _uncommented(line)]
+    return bool(said) and all(reads_as_code(line) for line in said)
+
+
+def reads_as_code(comment_line: str) -> bool:
+    """Whether one line of a comment reads as commented-out code, after its comment markers are stripped.
+
+    A heuristic in place of Sonar S125's re-parse: the line must end the way only code ends (`;`, `{`,
+    `}`, `),`), or open a keyword block with a colon and hold one of `(=[.`; it must not hold a URL,
+    a javadoc inline tag (`{@link X}`) or a run of `_PROSE_RUN` prose words.
+    """
+    line = _uncommented(comment_line)
+    if not line or "://" in line or "{@" in line:
+        return False
+    words = line.split()
+    run = 0
+    for word in words:
+        run = run + 1 if _PROSE_WORD.fullmatch(word) else 0
+        if run >= _PROSE_RUN:
+            return False
+    if line.endswith(_CODE_ENDINGS):
+        return True
+    keyword = re.split(r"[\s(]", line, maxsplit=1)[0]
+    return (
+        line.endswith(":")
+        and keyword in _BLOCK_KEYWORDS
+        and len(line) > len(keyword)
+        and line[len(keyword)] in " ("
+        and any(character in _CODE_CHARACTERS for character in line)
+    )
+
+
+def measure_file(
+    tree: Tree, source: bytes, spec: ComplexitySpec, doc_rows: frozenset[int] = frozenset()
+) -> FileMetrics:
+    """Measure a whole parsed file: its lines, its comments and what they hold.
 
     Lines are counted from the bytes, since a grammar's root node may stop short of trailing blank lines.
+
+    @param doc_rows the 0-based rows of every doc comment the extractor attributed (`doc_comment`), never
+        read as commented-out code: an example in a docblock is documentation.
     """
     lines = source.count(b"\n") + (1 if source and not source.endswith(b"\n") else 0)
-    return FileMetrics(lines, comment_lines(tree, spec))
+    touched: set[int] = set()
+    code: set[int] = set()
+    markers: set[int] = set()
+    generated = False
+    for node in _comments(tree, spec):
+        first, last = node.start_point[0], _last_row(node)
+        touched.update(range(first, last + 1))
+        text = source[node.start_byte : node.end_byte].decode("utf-8", "replace")
+        for row, line in enumerate(text.split("\n")[: last - first + 1], start=first):
+            if MARKER.search(line):
+                markers.add(row)
+            if row < GENERATED_HEAD_LINES and not generated and GENERATED.search(line):
+                generated = True
+            if row not in doc_rows and reads_as_code(line):
+                code.add(row)
+    longest = max((len(line) for line in source.split(b"\n")), default=0)
+    return FileMetrics(lines, len(touched), len(code), len(markers), longest, generated)
 
 
 __all__ = [
+    "FILE_METRIC_COLUMNS",
+    "GENERATED",
+    "GENERATED_HEAD_LINES",
+    "MARKER",
     "CallReader",
     "CallableMetrics",
     "Called",
+    "DocComment",
     "FileMetrics",
     "comment_lines",
+    "doc_comment",
     "measure_callable",
     "measure_file",
     "own_receivers",
+    "reads_as_code",
 ]

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from zemble.graph.model import CALLABLE_KINDS, EdgeKind, Resolution
 from zemble.graph.provider import GraphProvider, SqliteGraphProvider
-from zemble.languages.metrics import CallableMetrics, FileMetrics
+from zemble.languages.metrics import CallableMetrics
 
 
 def _by_name(hits) -> set[str]:
@@ -53,7 +53,8 @@ def test_measurement_journey(built_graph: SqliteGraphProvider) -> None:
     # 2. One file: every callable of Circle (two constructors, area, two scales, label) and its line count.
     in_file = built_graph.metrics_in_file(circle_file)
     assert len(in_file) == 6 and in_file[area.id] == built_graph.metrics(area.id), "step 2: the file's callables"
-    assert built_graph.file_metrics(circle_file) == FileMetrics(lines=33, comment_lines=0), "step 2: the file"
+    measured = built_graph.file_metrics(circle_file)
+    assert measured is not None and (measured.lines, measured.comment_lines) == (33, 0), "step 2: the file"
     assert built_graph.file_metrics("no/such/File.java") is None, "step 2: an unknown file has none"
 
     # 3. The bulk reader yields every measured callable once, symbols included, in file and line order.

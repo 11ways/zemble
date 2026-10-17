@@ -173,15 +173,21 @@ def test_callable_measurement_journey(graph_fixture_root: Path) -> None:
         SymbolKind.METHOD,
         SymbolKind.CONSTRUCTOR,
     }, "step 2: only callables are measured"
-    lines = (graph_fixture_root / f"{MAIN}/core/Traversal.java").read_text(encoding="utf-8").count("\n")
-    assert traversal.file_metrics == FileMetrics(lines=lines, comment_lines=0), "step 2: the file is measured too"
+    text = (graph_fixture_root / f"{MAIN}/core/Traversal.java").read_bytes()
+    longest = max(len(line) for line in text.split(b"\n"))
+    assert traversal.file_metrics == FileMetrics(lines=text.count(b"\n"), comment_lines=0, longest_line=longest), (
+        "step 2: the file is measured too"
+    )
 
     # 3. Recursion is read through the same call reading that emits CALLS edges.
     source = b"class A {\n  // counts down\n  int f(int n) {\n    if (n < 1) return 0;\n    return f(n - 1);\n  }\n}"
     recursive = extract_java_file(source, "src/main/java/A.java")
     (method,) = [symbol for symbol in recursive.symbols if symbol.name == "f"]
     assert recursive.metrics[method.id].complexity == 2, "step 3: if +1, the call to itself +1"
-    assert recursive.file_metrics == FileMetrics(lines=7, comment_lines=1), "step 3: a last line without newline counts"
+    assert recursive.file_metrics == FileMetrics(lines=7, comment_lines=1, longest_line=24), (
+        "step 3: a last line without newline counts"
+    )
+    assert method.doc_lines == 1, "step 3: the comment directly above is its doc"
 
 
 @pytest.mark.parametrize(

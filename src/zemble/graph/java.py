@@ -16,7 +16,15 @@ from tree_sitter import Node, Parser
 
 from zemble.graph.model import ANONYMOUS_MARKER, Edge, EdgeKind, Symbol, SymbolKind, is_test_path, make_symbol_id
 from zemble.languages.catalog import JAVA_BLOCK_KINDS, JAVA_COMPLEXITY
-from zemble.languages.metrics import CallableMetrics, Called, FileMetrics, measure_callable, measure_file, own_receivers
+from zemble.languages.metrics import (
+    CallableMetrics,
+    Called,
+    FileMetrics,
+    doc_comment,
+    measure_callable,
+    measure_file,
+    own_receivers,
+)
 
 logger = getLogger(__name__)
 
@@ -96,7 +104,7 @@ def extract_java_file(source: bytes, relative_path: str) -> FileExtraction:
     tree = parser.parse(source)
     extractor = _JavaExtractor(source, relative_path)
     extractor.run(tree.root_node)
-    extractor.result.file_metrics = measure_file(tree, source, JAVA_COMPLEXITY)
+    extractor.result.file_metrics = measure_file(tree, source, JAVA_COMPLEXITY, frozenset(extractor.doc_rows))
     return extractor.result
 
 
@@ -135,6 +143,8 @@ class _JavaExtractor:
         # Type variables in scope (class/method type parameters). They name no workspace
         # symbol, so references to them are dropped rather than left permanently unresolved.
         self._type_vars: set[str] = set()
+        #: The rows of every doc comment attributed to a declaration, which the file pass never reads as code.
+        self.doc_rows: set[int] = set()
 
     # ---- helpers -------------------------------------------------------
 
@@ -157,6 +167,12 @@ class _JavaExtractor:
     def _line(node: Node) -> int:
         """Return the 1-indexed start line of a node."""
         return node.start_point[0] + 1
+
+    def _doc(self, node: Node) -> int:
+        """Lines of the comments directly above a declaration (annotations sit inside it), remembering their rows."""
+        found = doc_comment(node, JAVA_COMPLEXITY)
+        self.doc_rows.update(found.rows)
+        return found.lines
 
     def _modifiers_of(self, node: Node) -> tuple[list[str], list[str]]:
         """Return (keyword modifiers, annotation simple names) of a declaration."""
@@ -383,6 +399,7 @@ class _JavaExtractor:
                 annotation_args=self._annotation_args_of(node),
                 signature=self._type_signature(node, kind, name),
                 is_test=self.is_test,
+                doc_lines=self._doc(node),
             )
         )
         self._emit_annotations(node, symbol.id)
@@ -504,6 +521,7 @@ class _JavaExtractor:
         self._emit_type_refs(type_node, owner.id)
         erased = self._erase(type_node)
         modifiers, annotations = self._modifiers_of(node)
+        doc_lines = self._doc(node)
         declared: dict[str, str] = {}
         for declarator in node.named_children:
             if declarator.type != "variable_declarator":
@@ -528,6 +546,7 @@ class _JavaExtractor:
                     annotation_args=self._annotation_args_of(node),
                     signature=f"{self.text(type_node) if type_node else '?'} {name}",
                     is_test=self.is_test,
+                    doc_lines=doc_lines,
                 )
             )
             self._emit_annotations(node, symbol.id)
@@ -604,6 +623,7 @@ class _JavaExtractor:
                 annotation_args=self._annotation_args_of(node),
                 signature=self._callable_signature(node, name, parameters, return_node),
                 is_test=self.is_test,
+                doc_lines=self._doc(node),
                 param_types=param_types,
             )
         )

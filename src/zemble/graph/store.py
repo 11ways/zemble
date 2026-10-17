@@ -17,7 +17,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import astuple, dataclass, field
 from functools import partial
 from pathlib import Path
 
@@ -54,6 +54,7 @@ from zemble.graph.resolve import Resolver
 from zemble.index.file_walker import ignored_prefix, walk_files
 from zemble.index.files import detect_language, get_extensions
 from zemble.languages.catalog import SPECS
+from zemble.languages.metrics import FILE_METRIC_COLUMNS
 from zemble.openfiles import held_open
 from zemble.parallel import pool_context, pooled
 from zemble.types import ContentType
@@ -61,7 +62,7 @@ from zemble.types import ContentType
 logger = logging.getLogger(__name__)
 DEFAULT_WORKERS = min(10, os.cpu_count() or 2)
 
-GRAPH_FORMAT_VERSION = 10
+GRAPH_FORMAT_VERSION = 11
 #: The file naming the current graph version (first line) and the one it replaced (second).
 GRAPH_POINTER_NAME = "graph.current"
 #: The file whose OS lock is held by the one process allowed to write a workspace's graph.
@@ -127,17 +128,20 @@ _BATCH_FILES = 100
 _SCRATCH_NAME = "graph-scratch.building-{pid}"
 _MAX_FILE_BYTES = 2_000_000
 
-_SCHEMA = """
+#: The `files` columns holding a file's measurements, one per `FileMetrics` field.
+_FILE_METRIC_DECLARATIONS = ", ".join(f"{column} INTEGER" for column in FILE_METRIC_COLUMNS)
+
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER, package TEXT, imports TEXT,
-    lines INTEGER, comment_lines INTEGER
+    {_FILE_METRIC_DECLARATIONS}
 );
 CREATE TABLE IF NOT EXISTS symbols (
     id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT,
     start_line INTEGER, end_line INTEGER, container_id TEXT, modifiers TEXT,
     annotations TEXT, signature TEXT, is_test INTEGER, param_types TEXT,
-    annotation_args TEXT
+    annotation_args TEXT, doc_lines INTEGER
 );
 CREATE TABLE IF NOT EXISTS symbol_metrics (
     symbol_id TEXT PRIMARY KEY, lines INTEGER, statements INTEGER, complexity INTEGER, nesting INTEGER
@@ -816,43 +820,56 @@ def _migrate(connection: sqlite3.Connection) -> None:
     symbol_columns = {row["name"] for row in connection.execute("PRAGMA table_info(symbols)")}
     if "annotation_args" not in symbol_columns:
         connection.execute("ALTER TABLE symbols ADD COLUMN annotation_args TEXT")
+    if "doc_lines" not in symbol_columns:
+        connection.execute("ALTER TABLE symbols ADD COLUMN doc_lines INTEGER")
     _add_measurements(connection)
-    _remeasure_recursion(connection)
+    _remeasure(connection)
     _backfill_declaration_keys(connection)
 
 
 def _add_measurements(connection: sqlite3.Connection) -> None:
-    """Give a format-8 store the measurement columns and mark every file changed.
+    """Give an older store every measurement column it lacks; a format-8 store has none and re-extracts every file.
 
     Measurements are read off the parse tree, so they cannot be backfilled from stored rows;
     clearing the stamps makes the next build re-extract every file in place and measure it.
+    A store that has some of the columns is re-extracted by `_remeasure`, keyed on its format.
     """
     file_columns = {row["name"] for row in connection.execute("PRAGMA table_info(files)")}
-    if "lines" in file_columns:
+    missing = [column for column in FILE_METRIC_COLUMNS if column not in file_columns]
+    if not missing:
         return
-    logger.info("graph: adding code measurements; every file is re-extracted (format %d)", GRAPH_FORMAT_VERSION)
-    connection.execute("ALTER TABLE files ADD COLUMN lines INTEGER")
-    connection.execute("ALTER TABLE files ADD COLUMN comment_lines INTEGER")
-    connection.execute("UPDATE files SET mtime_ns = NULL")
+    for column in missing:
+        connection.execute(f"ALTER TABLE files ADD COLUMN {column} INTEGER")  # noqa: S608 - a field name
+    if "lines" not in file_columns:
+        logger.info("graph: adding code measurements; every file is re-extracted (format %d)", GRAPH_FORMAT_VERSION)
+        connection.execute("UPDATE files SET mtime_ns = NULL")
     connection.commit()
 
 
-#: The first format whose complexity counts recursion only on the callable's own receivers.
-_RECEIVER_AWARE_RECURSION = 10
+#: Each fact read off the parse tree whose meaning changed after a store could hold it, by the first format
+#: that reads it the current way: a store of an older format re-extracts every file once.
+_MEASURED_SINCE: dict[str, int] = {
+    "recursion counted by receiver": 10,
+    "doc comments, commented-out code, markers and generated headers": 11,
+}
 
 
-def _remeasure_recursion(connection: sqlite3.Connection) -> None:
-    """Mark every file of a store measured before receiver-aware recursion changed, as `_add_measurements` does.
+def _remeasure(connection: sqlite3.Connection) -> None:
+    """Mark every file of a store older than a fact's first format changed, as `_add_measurements` does.
 
     The stored format is raised here, not only by the build's meta write, so a store that is
     opened and closed again (`zemble graph compact`) is not marked changed a second time.
     """
     row = connection.execute("SELECT value FROM meta WHERE key = 'format_version'").fetchone()
-    if row is None or int(row[0]) >= _RECEIVER_AWARE_RECURSION:
+    if row is None:
         return
-    logger.info("graph: recounting recursion by receiver; every file is re-extracted (format %d)", GRAPH_FORMAT_VERSION)
+    stored = int(row[0])
+    newer = [fact for fact, since in _MEASURED_SINCE.items() if stored < since]
+    if not newer:
+        return
+    logger.info("graph: measuring %s; every file is re-extracted (format %d)", "; ".join(newer), GRAPH_FORMAT_VERSION)
     connection.execute("UPDATE files SET mtime_ns = NULL")
-    connection.execute("UPDATE meta SET value = ? WHERE key = 'format_version'", (str(_RECEIVER_AWARE_RECURSION),))
+    connection.execute("UPDATE meta SET value = ? WHERE key = 'format_version'", (str(max(_MEASURED_SINCE.values())),))
     connection.commit()
 
 
@@ -1095,6 +1112,7 @@ def _symbol_row(symbol: Symbol) -> tuple:
         int(symbol.is_test),
         json.dumps(symbol.param_types),
         json.dumps(symbol.annotation_args),
+        symbol.doc_lines,
     )
 
 
@@ -1694,8 +1712,7 @@ def _insert_extractions(
                         "static_wildcards": extraction.imports.static_wildcards,
                     }
                 ),
-                measured.lines if measured is not None else None,
-                measured.comment_lines if measured is not None else None,
+                *(astuple(measured) if measured is not None else (None,) * len(FILE_METRIC_COLUMNS)),
             )
         )
         symbol_rows.extend(_symbol_row(symbol) for symbol in extraction.symbols)
@@ -1704,11 +1721,11 @@ def _insert_extractions(
             for symbol_id, metric in extraction.metrics.items()
         )
     connection.executemany(
-        "INSERT OR REPLACE INTO files (path, mtime_ns, size, package, imports, lines, comment_lines) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT OR REPLACE INTO files (path, mtime_ns, size, package, imports, {', '.join(FILE_METRIC_COLUMNS)}) "  # noqa: S608
+        f"VALUES ({', '.join('?' * (5 + len(FILE_METRIC_COLUMNS)))})",
         file_rows,
     )
-    connection.executemany("INSERT OR REPLACE INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", symbol_rows)
+    connection.executemany("INSERT OR REPLACE INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", symbol_rows)
     connection.executemany(
         "INSERT OR REPLACE INTO symbol_metrics (symbol_id, lines, statements, complexity, nesting) VALUES (?,?,?,?,?)",
         metric_rows,

@@ -146,6 +146,9 @@ class Symbol:
     # annotation - `@HawkeyeFunction(namespace = "String", name = "presence")` - be resolved
     # against the name a caller in another language writes.
     annotation_args: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Lines of the doc comment directly above the declaration plus its docstring; 0 for none
+    # (`zemble.languages.metrics.doc_comment`). Types, callables and fields only.
+    doc_lines: int = 0
 
     @property
     def arity(self) -> int:

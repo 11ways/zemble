@@ -140,6 +140,7 @@ _PYTHON_COMPLEXITY = ComplexitySpec(
     boolean_expression_kinds=frozenset({"boolean_operator"}),
     boolean_operators=frozenset({"and", "or"}),
     comment_kinds=frozenset({"comment"}),
+    docstring_kinds=frozenset({"string"}),
 )
 
 _GO_COMPLEXITY = ComplexitySpec(

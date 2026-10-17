@@ -38,7 +38,9 @@ Beyond the obvious fields (`file_path`, `start_line`, `end_line`,
 `container_id`, `modifiers`, `annotations`) a symbol carries `annotation_args` -
 the **string-literal** arguments of each of its annotations, keyed by annotation
 simple name and then by element name, with the single unnamed argument keyed
-`value` - and `is_test`, which is
+`value` - `doc_lines`, the lines of the doc comment written directly above the
+declaration plus its docstring (types, callables and fields; see Format version 11
+below), and `is_test`, which is
 true when any **directory** segment of its path is `test`, `tests`,
 `browserTest`, `integrationTest` or `testFixtures`, matched case insensitively.
 That covers both the Maven layout and the Gradle source sets used across the
@@ -276,7 +278,8 @@ no search index present (`zemble/graph/store.py`). The folder holds versions,
 `graph-<n>.sqlite`, and a pointer, `graph.current`, naming the current version on
 its first line and the one it replaced on its second. Tables:
 `symbols`, `edges` (each carrying the `source` that produced it; see below), `files` (path,
-mtime, size, package, imports, and the file's `lines` and `comment_lines`, NULL for a
+mtime, size, package, imports, and the file's `FileMetrics`: `lines`, `comment_lines`,
+`commented_code_lines`, `marker_lines`, `longest_line` and `generated`, NULL for a
 language that is not measured), `symbol_metrics` (lines, statements, cognitive complexity
 and nesting of every callable with a body, keyed by symbol id; see
 `zemble/languages/metrics.py`), `decl_keys` (the Hawkeye registration keys a symbol
@@ -313,6 +316,17 @@ not counted; in the generic grammars every self spelling, `super` included where
 it, folds into `this`, so `super.f()` inside `f` still counts there (Java tells them apart).
 On javaweb 3330 of 67762 callables went down (3099 by 1, the largest by 17), none went up,
 and the rebuilt graph has the same 122269 symbols and 1258533 edges.
+Format version 11 adds the comment facts `zemble health`'s documentation axis reads: a
+symbol's `doc_lines` (`metrics.doc_comment`: the comments that are the declaration's
+preceding siblings, each ending on the line above the next, an annotation sibling passed
+over, a comment that trails code or reads entirely as code ending the run; plus a Python
+body's leading string, named by `ComplexitySpec.docstring_kinds`) and, per file, the
+comment lines outside any doc comment that read as code, the lines carrying an
+unfinished-work marker, the longest line in bytes and whether a comment in the first 30
+lines carries a generator's header. The `files` columns are named after the `FileMetrics`
+fields, one home for the schema, the writer and the reader. Every fact whose meaning
+arrived after a store could hold it names its first format in `store._MEASURED_SINCE`; a
+store older than any of them clears its stamps once and is raised to the newest.
 
 ### Durability
 

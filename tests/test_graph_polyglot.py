@@ -8,7 +8,7 @@ from zemble.evidence.outline import outline
 from zemble.graph.model import Resolution, SymbolKind
 from zemble.graph.provider import SqliteGraphProvider
 from zemble.graph.store import build_graph
-from zemble.languages.metrics import CallableMetrics, FileMetrics
+from zemble.languages.metrics import CallableMetrics
 
 POLYGLOT = Path(__file__).parent / "fixtures" / "polyglot"
 
@@ -123,4 +123,7 @@ def test_python_measurements(polyglot_graph: SqliteGraphProvider) -> None:
     largest = _one(graph, "largest", ".py")
     # for +1, if +2 (nesting 1), its `or` +1; three statements, one in the loop, one under the if.
     assert graph.metrics(largest.id) == CallableMetrics(lines=5, statements=5, complexity=4, nesting=2)
-    assert graph.file_metrics("app/shapes.py") == FileMetrics(lines=35, comment_lines=0), "a docstring is no comment"
+    measured = graph.file_metrics("app/shapes.py")
+    assert measured is not None and (measured.lines, measured.comment_lines) == (35, 0), "a docstring is no comment"
+    shape = next(symbol for symbol in graph.definition("Shape") if symbol.file_path == "app/shapes.py")
+    assert (shape.doc_lines, largest.doc_lines) == (1, 0), "a docstring is the doc of its class"

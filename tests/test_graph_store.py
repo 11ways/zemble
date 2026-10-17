@@ -230,18 +230,26 @@ def test_a_format_8_store_measures_every_file_on_its_next_build(
     assert build_graph(path).extracted_files == 0, "step 2: a migrated store is current"
 
 
-def test_a_format_9_store_recounts_recursion_on_its_next_build(
-    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
+@pytest.mark.parametrize("stored", ["9", "10"])
+def test_an_older_format_store_remeasures_on_its_next_build(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path, stored: str
 ) -> None:
-    """A store measured before receiver-aware recursion re-extracts every file once, even from a change set."""
+    """A store measured before a fact it now holds (10: recursion, 11: comments) re-extracts every file once."""
     workspace = _copy_workspace(graph_fixture_root, tmp_path / "ws")
     path = str(workspace)
     built = build_graph(path)
     db = graph_db_path(path)
     assert db is not None
     legacy = sqlite3.connect(db)
-    legacy.execute("UPDATE meta SET value = '9' WHERE key = 'format_version'")
+    legacy.execute("UPDATE meta SET value = ? WHERE key = 'format_version'", (stored,))
     legacy.execute("UPDATE symbol_metrics SET complexity = complexity + 1")
+    if stored == "10":
+        # A format-10 store has neither the comment facts nor the doc lines.
+        legacy.executescript(
+            "ALTER TABLE files DROP COLUMN commented_code_lines; ALTER TABLE files DROP COLUMN marker_lines; "
+            "ALTER TABLE files DROP COLUMN longest_line; ALTER TABLE files DROP COLUMN generated; "
+            "ALTER TABLE symbols DROP COLUMN doc_lines;"
+        )
     legacy.commit()
     legacy.close()
 
@@ -261,7 +269,10 @@ def test_a_format_9_store_recounts_recursion_on_its_next_build(
     connection = connect(path)
     stale = connection.execute("SELECT COUNT(*) FROM symbol_metrics WHERE complexity > 0").fetchone()[0]
     fresh = sum(1 for _ in connection.execute("SELECT 1 FROM symbol_metrics"))
+    undocumented = connection.execute("SELECT COUNT(*) FROM symbols WHERE doc_lines IS NULL").fetchone()[0]
+    unmeasured = connection.execute("SELECT COUNT(*) FROM files WHERE longest_line IS NULL").fetchone()[0]
     connection.close()
+    assert (undocumented, unmeasured) == (0, 0), "step 2: every symbol and file carries the format-11 facts"
     assert fresh == built.measured_callables, "step 2: and every callable is measured"
     assert stale < fresh, "step 2: the planted stale complexities are gone"
 

@@ -21,7 +21,7 @@ from tree_sitter import Node, Parser
 from zemble.graph.java import FileExtraction
 from zemble.graph.model import DECLARED_TYPE_KINDS, Edge, EdgeKind, Symbol, SymbolKind, is_test_path, make_symbol_id
 from zemble.languages.catalog import is_test_file, spec_for
-from zemble.languages.metrics import Called, measure_callable, measure_file, own_receivers
+from zemble.languages.metrics import Called, doc_comment, measure_callable, measure_file, own_receivers
 from zemble.languages.paths import resolve, text
 from zemble.languages.read import (
     NAME_KINDS,
@@ -98,7 +98,7 @@ def extract_generic_file(source: bytes, relative_path: str, language: str) -> Fi
     extractor = _GenericExtractor(spec, source, relative_path)
     extractor.run(tree.root_node)
     if spec.complexity is not None:
-        extractor.result.file_metrics = measure_file(tree, source, spec.complexity)
+        extractor.result.file_metrics = measure_file(tree, source, spec.complexity, frozenset(extractor.doc_rows))
     return extractor.result
 
 
@@ -117,6 +117,8 @@ class _GenericExtractor:
         #: Bodies reached through a sibling step, which the enclosing walk must not visit again.
         self._consumed: set[int] = set()
         self.module: Symbol | None = None
+        #: The rows of every doc comment attributed to a declaration, which the file pass never reads as code.
+        self.doc_rows: set[int] = set()
 
     # ---- helpers -------------------------------------------------------
 
@@ -136,6 +138,17 @@ class _GenericExtractor:
         self._ids.add(symbol.id)
         self.result.symbols.append(symbol)
         return symbol
+
+    def _doc(self, declared: Declared, body: Node | None = None) -> int:
+        """Lines of a declaration's doc comment and docstring, remembering the comment rows."""
+        complexity = self.spec.complexity
+        if complexity is None:
+            return 0
+        found = doc_comment(
+            declared.wrapper or declared.node, complexity, body=body, attached_kinds=self.spec.annotation_kinds
+        )
+        self.doc_rows.update(found.rows)
+        return found.lines
 
     def _add_edge(self, src_id: str, dst_name: str, kind: EdgeKind, line: int, **kwargs: object) -> None:
         """Append an unresolved edge."""
@@ -305,6 +318,7 @@ class _GenericExtractor:
                 annotations=annotations_of(self.spec, declared, self.source),
                 signature=self._type_signature(declared, body, kind),
                 is_test=self.is_test,
+                doc_lines=self._doc(declared, body),
             )
         )
         self._declared_types[qualified] = symbol
@@ -401,6 +415,7 @@ class _GenericExtractor:
                 annotations=annotations_of(self.spec, declared, self.source),
                 signature=signature_of(declared, body, self.source, self.spec.annotation_kinds) or name,
                 is_test=self.is_test,
+                doc_lines=self._doc(declared, body),
                 param_types=param_types,
             )
         )
@@ -441,6 +456,7 @@ class _GenericExtractor:
         """Record every name a field declaration declares, then walk its initialisers."""
         node = declared.node
         name_nodes = names_of(self.spec, declared, self.source)
+        doc_lines = self._doc(declared)
         modifiers = modifiers_of(self.spec, declared, self.source)
         annotations = annotations_of(self.spec, declared, self.source)
         declared_names: set[Node] = set()
@@ -467,6 +483,7 @@ class _GenericExtractor:
                     annotations=annotations,
                     signature=self._text(node).split("=", 1)[0].strip().rstrip(";:")[:_MAX_FIELD_SIGNATURE] or name,
                     is_test=self.is_test,
+                    doc_lines=doc_lines,
                 )
             )
             first = first or symbol

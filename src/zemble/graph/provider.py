@@ -33,7 +33,7 @@ from zemble.graph.model import (
     is_test_path,
 )
 from zemble.graph.store import connect, edge_from_row, resolve_graph_root, symbol_from_row
-from zemble.languages.metrics import CallableMetrics, FileMetrics
+from zemble.languages.metrics import FILE_METRIC_COLUMNS, CallableMetrics, FileMetrics
 
 _HIERARCHY_KINDS = (EdgeKind.EXTENDS.value, EdgeKind.IMPLEMENTS.value)
 
@@ -217,6 +217,9 @@ def _metrics_from_row(row: sqlite3.Row) -> CallableMetrics:
     """Rebuild one callable's measurements from a row carrying the `symbol_metrics` columns."""
     return CallableMetrics(row["lines"], row["statements"], row["complexity"], row["nesting"])
 
+
+#: The `files` columns `FileMetrics.from_row` reads.
+_FILE_METRICS = ", ".join(FILE_METRIC_COLUMNS)
 
 #: Whether a `files f` row is test code: any symbol it declares is (the extractors' own verdict).
 _FILE_IS_TEST = "(SELECT MAX(s.is_test) FROM symbols s WHERE s.file_path = f.path)"
@@ -517,11 +520,12 @@ class SqliteGraphProvider:
         return {row["symbol_id"]: _metrics_from_row(row) for row in rows}
 
     def file_metrics(self, file_path: str) -> FileMetrics | None:
-        """Return a file's line and comment-line counts, or None when its language is not measured."""
+        """Return a file's measurements, or None when its language is not measured."""
         row = self.connection.execute(
-            "SELECT lines, comment_lines FROM files WHERE path = ? AND lines IS NOT NULL", (file_path,)
+            f"SELECT {_FILE_METRICS} FROM files WHERE path = ? AND lines IS NOT NULL",  # noqa: S608
+            (file_path,),
         ).fetchone()
-        return FileMetrics(row["lines"], row["comment_lines"]) if row is not None else None
+        return FileMetrics.from_row(row) if row is not None else None
 
     def all_metrics(self, *, prefix: str = "") -> Iterator[tuple[Symbol, CallableMetrics]]:
         """Yield every measured callable with its measurements, by file and line, optionally under a path prefix."""
@@ -550,13 +554,13 @@ class SqliteGraphProvider:
         """
         where, parameters = _under("f.path", prefix)
         query = (
-            "SELECT f.path, f.lines, f.comment_lines, "
+            f"SELECT f.path, {_FILE_METRICS}, "  # noqa: S608
             f"{_FILE_IS_TEST} AS is_test "
             f"FROM files f WHERE f.lines IS NOT NULL AND {where} ORDER BY f.path"  # noqa: S608
         )
         for row in self.connection.execute(query, parameters):
             path = row["path"]
-            yield path, FileMetrics(row["lines"], row["comment_lines"]), _file_is_test(row)
+            yield path, FileMetrics.from_row(row), _file_is_test(row)
 
     def inbound_tallies(self, kinds: Sequence[EdgeKind] | None = None, *, prefix: str = "") -> list[EdgeTally]:
         """Count, per symbol under a prefix, the distinct symbols reaching it by kind, resolution and test-ness.
