@@ -279,7 +279,7 @@ no search index present (`zemble/graph/store.py`). The folder holds versions,
 its first line and the one it replaced on its second. Tables:
 `symbols`, `edges` (each carrying the `source` that produced it; see below), `files` (path,
 mtime, size, package, imports, and the file's `FileMetrics`: `lines`, `comment_lines`,
-`commented_code_lines`, `marker_lines`, `longest_line` and `generated`, NULL for a
+`commented_code_lines`, `marker_lines` and `longest_line`, NULL for a
 language that is not measured), `symbol_metrics` (lines, statements, cognitive complexity
 and nesting of every callable with a body, keyed by symbol id; see
 `zemble/languages/metrics.py`), `decl_keys` (the Hawkeye registration keys a symbol

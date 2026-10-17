@@ -6,7 +6,7 @@ workspace's own `.zemble/home.toml` (`docs/home.md`), for the duplication tier t
 `zemble dupes` channels (`docs/dedup.md`) through their per-root unit index, for the
 consistency axis one plain read of each measured file's text, and for the history axis one
 `git log` per checkout; the documentation axis reads the comment facts the graph stores
-(format 12). It never builds a search index and never embeds anything. It is a
+(format 13). It never builds a search index and never embeds anything. It is a
 REPORT, never a gate: it exits 0 whenever it could answer, however many findings it has.
 
 ```
@@ -95,14 +95,17 @@ never equal an in-folder id.
   declared library/application split that cannot be told apart from dead code (the earlier
   "at most one caller" rule flagged 5009 of 9018 public callables on the zenit workspace, most of
   them its API surface).
-- `single_implementation_interface` and `single_subclass_abstract` read who the one subtype is from
-  the hierarchy edges `collect` already loads; when it lives in another module (`module_of`: the
-  declared `home.toml` modules, else the first path segment) the abstraction is an extension point
-  and is left out of the population rather than measured, which keeps the signal's `== 1` honest: a
-  measured 1 is always a finding. A subtype outside a sub-directory view cannot be placed, so such an
-  abstraction is not measured there either. Nor is one that test code subtypes beside its one
-  production subtype: that is a seam for test doubles, which inlining would remove (only where the
-  graph holds that test code).
+- `single_implementation_interface` and `single_subclass_abstract` count an abstraction's CONCRETE
+  descendants over the hierarchy edges `collect` already loads (`signals._descendants`): an interface
+  or abstract type below it passes its own implementors up, so an interface whose one direct subtype
+  is a sub-interface with two implementors has two (zenit's `SiteAuthProviderType`, implemented
+  through `SiteAuthProviderTypeHandler`, was a finding before this). When the one descendant lives in
+  another module (`module_of`: the declared `home.toml` modules, else the first path segment) the
+  abstraction is an extension point and is left out of the population rather than measured, which
+  keeps the signal's `== 1` honest: a measured 1 is always a finding. A subtype outside a
+  sub-directory view cannot be placed, so such an abstraction is not measured there either. Nor is
+  one that test code subtypes anywhere on the way beside its production descendants: that is a seam
+  for test doubles, which inlining would remove (only where the graph holds that test code).
 - `deep_inheritance` follows EXTENDS edges only (IMPLEMENTS is an interface, not an ancestor),
   iteratively and with a guard against a cycle in bad data; the reason names the topmost ancestor
   the graph holds (`up to ASTUnit`). A supertype outside the graph (a library class) is not counted.
@@ -154,9 +157,11 @@ extractors set it on types, callables and fields.
 **`undocumented_public`** measures every named type, method and function that a reader of the
 public API meets: the declaration and every type around it are PUBLIC (`HealthFacts.visibility`;
 UNKNOWN is never measured, as Checkstyle reads the surrounding scope). Not measured, each for a
-reason: constructors (the type says what they build), overrides and possible overrides
-(`may_override`: the supertype documents the contract), runtime hooks (`__repr__`), `main`,
-members of anonymous types, declarations inside a callable, and one-statement bodies
+reason: constructors (the type says what they build), every entry point of `_entry_point`
+(overrides and possible overrides, whose supertype documents the contract; annotated callables,
+whose registration documents them, as a `@HawkeyeFunction` carries its arguments' descriptions;
+runtime hooks such as `__repr__`; `main`), members of anonymous types, declarations inside a
+callable, and one-statement bodies
 (`CallableMetrics.is_boilerplate`: a getter says what its name says). The finding spans the declaration's
 first line only, where the doc goes, so a `--since` run lists it when the declaration is new or
 re-declared, not on every edit inside it. The advice is the workspace convention: a
@@ -178,19 +183,25 @@ the bar would weigh 0 and the fraction would say how concentrated the disabled c
 widespread.
 
 **`stale_marker`** counts the comment lines holding `TODO`, `FIXME`, `XXX` or `HACK` as an
-upper-case whole word (lower case is prose: "a hack"). `AIDEV-NOTE:` is not a marker: it
-documents a surprise, it does not defer work.
+upper-case whole word (lower case is prose: "a hack"; `AIDEV-TODO:` holds one). `AIDEV-NOTE:` is
+not a marker: it documents a surprise, it does not defer work. The graph keeps the count only, so
+a file past the bar is anchored on its first marker line read off the file at report time, the
+other lines named in the reason; a file that moved since the graph read it keeps its whole span.
 
 ### Generated and minified files
 
 `collect.unmeasured` takes a file out of every signal of every tier (its file measurements, its
-symbols, its duplication units and clone memberships, its history) when a comment in its first
-30 lines carries a generator's header (`@generated`, `DO NOT EDIT`, `automatically generated`,
-`autogenerated`, `Code generated`, case-insensitive; a bare "generated by" is not one, since a
-scaffold's `@author Generated by zenit-dev new-app` names where a hand-maintained file started), when a line is
+symbols, its duplication units and clone memberships, its history) when its first 30 lines carry a
+generator's header (`collect.generated_header`: `@generated`, `DO NOT EDIT`, `automatically
+generated`, `autogenerated`, case-insensitive; read at report time, not stored, so the rule moves
+without a graph rebuild; a bare "generated by" is not one, since a scaffold's `@author Generated by
+zenit-dev new-app` names where a hand-maintained file started, nor is "code generated", which a
+javadoc's `{@code generated_by}` spells), when a line is
 longer than 1000 bytes (`MINIFIED_LINE_BYTES`: minifiers put a program on a few lines, formatters
 wrap hand-written code at 80 to 120 columns, and zemble's longest production line is 330 bytes),
-or when its name ends in `.min.js`, `.min.css` or `.min.mjs`. The report carries one note, `N
+or when its name ends in `.min.js`, `.min.css` or `.min.mjs`, or is a vendored build-tool wrapper
+(`VENDORED_NAMES`: `gradlew`, `gradlew.bat`, `mvnw`, `mvnw.cmd`; the batch wrapper's labels read as
+undocumented public functions). The report carries one note, `N
 generated or minified file(s) not measured: <up to 5 paths>`. The reason: a minified
 `dc-runtime.js` in a javaweb docs mockup gave two findings nobody could act on.
 

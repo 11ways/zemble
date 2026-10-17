@@ -247,7 +247,7 @@ def test_an_older_format_store_remeasures_on_its_next_build(
         # A format-10 store has neither the comment facts nor the doc lines.
         legacy.executescript(
             "ALTER TABLE files DROP COLUMN commented_code_lines; ALTER TABLE files DROP COLUMN marker_lines; "
-            "ALTER TABLE files DROP COLUMN longest_line; ALTER TABLE files DROP COLUMN generated; "
+            "ALTER TABLE files DROP COLUMN longest_line; "
             "ALTER TABLE symbols DROP COLUMN doc_lines;"
         )
     legacy.commit()

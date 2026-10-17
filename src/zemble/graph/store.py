@@ -62,7 +62,7 @@ from zemble.types import ContentType
 logger = logging.getLogger(__name__)
 DEFAULT_WORKERS = min(10, os.cpu_count() or 2)
 
-GRAPH_FORMAT_VERSION = 12
+GRAPH_FORMAT_VERSION = 13
 #: The file naming the current graph version (first line) and the one it replaced (second).
 GRAPH_POINTER_NAME = "graph.current"
 #: The file whose OS lock is held by the one process allowed to write a workspace's graph.
@@ -850,8 +850,7 @@ def _add_measurements(connection: sqlite3.Connection) -> None:
 #: that reads it the current way: a store of an older format re-extracts every file once.
 _MEASURED_SINCE: dict[str, int] = {
     "recursion counted by receiver": 10,
-    "doc comments, commented-out code, markers and generated headers": 11,
-    "a generator's header is more than a scaffold's author line": 12,
+    "doc comments, commented-out code and markers": 11,
 }
 
 
@@ -870,7 +869,7 @@ def _remeasure(connection: sqlite3.Connection) -> None:
         return
     logger.info("graph: measuring %s; every file is re-extracted (format %d)", "; ".join(newer), GRAPH_FORMAT_VERSION)
     connection.execute("UPDATE files SET mtime_ns = NULL")
-    connection.execute("UPDATE meta SET value = ? WHERE key = 'format_version'", (str(max(_MEASURED_SINCE.values())),))
+    connection.execute("UPDATE meta SET value = ? WHERE key = 'format_version'", (str(GRAPH_FORMAT_VERSION),))
     connection.commit()
 
 

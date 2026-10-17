@@ -35,7 +35,7 @@ from zemble.health.model import Signal
 from zemble.health.structure import ancestor_depths, strongly_connected
 from zemble.health.style import Distance
 from zemble.languages import Visibility
-from zemble.languages.metrics import CallableMetrics
+from zemble.languages.metrics import MARKER, CallableMetrics
 
 
 @dataclass(frozen=True)
@@ -154,24 +154,48 @@ def _many_types_per_file(facts: HealthFacts) -> Iterator[Sample]:
         yield Sample(path, 1, max(metric.lines, 1), "", path, facts.top_level_types[path])
 
 
-def _subtypes(facts: HealthFacts, symbol: Symbol, signal: Signal) -> Sample | None:
-    """A type valued by its production subtypes, or None when unmeasured.
+def _descendants(facts: HealthFacts, symbol: Symbol, floor: Resolution) -> tuple[list[Symbol], Resolution, bool]:
+    """The concrete production descendants of an abstraction, the weakest edge on the way, and any doubt.
 
-    Unmeasured: a weaker edge might add a subtype; or the one production subtype lives in another module
-    (an extension point by design) or outside a sub-directory view, where its module cannot be read; or
-    test code subtypes it too (a seam for test doubles, which inlining would remove).
+    An interface or abstract type below the abstraction passes its own implementors up: an interface whose
+    one direct subtype is a sub-interface with two implementors has two, not one. Doubt is a weaker edge
+    at any abstraction on the way, or a test subtype of one (a seam for test doubles, which inlining would
+    remove).
     """
-    floor = _floor(signal)
-    strong, weakest, doubt = facts.reaching(symbol, HIERARCHY_KINDS, floor, tests=False)
+    concrete: list[Symbol] = []
+    weakest = Resolution.EXACT
+    doubt = False
+    seen: set[str] = set()
+    pending = [symbol]
+    while pending:
+        current = pending.pop()
+        strong, _, weak = facts.reaching(current, HIERARCHY_KINDS, floor, tests=False)
+        if weak or facts.reaching(current, HIERARCHY_KINDS, floor, tests=True)[0] > strong:
+            doubt = True
+        for sub, resolution in facts.subtypes.get(current.id, ()):
+            if sub.id in seen or not resolution.at_least(floor):
+                continue
+            seen.add(sub.id)
+            weakest = min(weakest, resolution, key=lambda level: level.strength)
+            if sub.kind is SymbolKind.INTERFACE or "abstract" in sub.modifiers:
+                pending.append(sub)
+            else:
+                concrete.append(sub)
+    return concrete, weakest, doubt
+
+
+def _subtypes(facts: HealthFacts, symbol: Symbol, signal: Signal) -> Sample | None:
+    """A type valued by its concrete production descendants (`_descendants`), or None when unmeasured.
+
+    Unmeasured: a weaker edge or a test subtype casts doubt; or the one descendant lives in another module
+    (an extension point by design) or outside a sub-directory view, where its module cannot be read.
+    """
+    concrete, weakest, doubt = _descendants(facts, symbol, _floor(signal))
     if doubt:
         return None
-    if strong == 1:
-        seen = [sub for sub, resolution in facts.subtypes.get(symbol.id, ()) if resolution.at_least(floor)]
-        if len(seen) != 1 or facts.module_of(seen[0].file_path) != facts.module_of(symbol.file_path):
-            return None
-        if facts.reaching(symbol, HIERARCHY_KINDS, floor, tests=True)[0] > strong:
-            return None
-    return _symbol_sample(symbol, strong, weakest)
+    if len(concrete) == 1 and facts.module_of(concrete[0].file_path) != facts.module_of(symbol.file_path):
+        return None
+    return _symbol_sample(symbol, len(concrete), weakest)
 
 
 def _single_implementation_interface(facts: HealthFacts) -> Iterator[Sample]:
@@ -704,18 +728,17 @@ def _api_declaration(facts: HealthFacts, symbol: Symbol) -> bool:
     """Whether a reader of the public API needs this declaration's doc, which `_undocumented_public` measures.
 
     A named type or a method or function declared in a type or file counts. Not a constructor (its
-    type says what it builds), an override (the supertype documents the contract), a runtime hook
-    (the language documents `__repr__`), `main`, a member of an anonymous type, or a one-statement
-    body (`CallableMetrics.is_boilerplate`: an accessor says what its name says).
+    type says what it builds), an entry point (`_entry_point`: an override's supertype documents the
+    contract, an annotation's registration does, `__repr__` the language, `main` the launcher), a
+    member of an anonymous type, or a one-statement body (`CallableMetrics.is_boilerplate`: an accessor
+    says what its name says).
     """
     container = facts.container(symbol)
     if container is not None and container.kind in CALLABLE_KINDS:
         return False
     if named_type(symbol):
         return _public_api(facts, symbol)
-    if symbol.kind not in _MEMBER_CALLABLE_KINDS or symbol.name == _MAIN or anonymous(container):
-        return False
-    if symbol.id in facts.may_override or facts.is_runtime_hook(symbol):
+    if symbol.kind not in _MEMBER_CALLABLE_KINDS or _entry_point(facts, symbol):
         return False
     metric = facts.metrics.get(symbol.id)
     if metric is not None and metric.is_boilerplate:
@@ -748,9 +771,32 @@ def _commented_out_code(facts: HealthFacts) -> Iterator[Sample]:
 
 
 def _stale_marker(facts: HealthFacts) -> Iterator[Sample]:
-    """Comment lines holding an unfinished-work marker, of every measured production file."""
+    """Comment lines holding an unfinished-work marker, of every measured production file.
+
+    A file past the bar is anchored on its first marker line, read off the file now (the graph keeps the
+    count only), with the other lines in the detail; one that moved since the graph read it keeps the whole
+    file as its span.
+    """
     for path, metric in facts.files:
-        yield Sample(path, 1, max(metric.lines, 1), "", path, metric.marker_lines)
+        if not metric.marker_lines:
+            yield Sample(path, 1, max(metric.lines, 1), "", path, 0)
+            continue
+        rows = _marker_rows(facts.absolute(path))
+        if not rows:
+            yield Sample(path, 1, max(metric.lines, 1), "", path, metric.marker_lines)
+            continue
+        more = f" and {len(rows) - _FILES_SHOWN} more" if len(rows) > _FILES_SHOWN else ""
+        detail = "line " + ", ".join(map(str, rows[:_FILES_SHOWN])) + more
+        yield Sample(path, rows[0], rows[0], "", path, metric.marker_lines, detail=detail)
+
+
+def _marker_rows(absolute: str) -> list[int]:
+    """The 1-based lines of a file holding a marker (`MARKER`), in order; empty when it cannot be read."""
+    try:
+        with open(absolute, encoding="utf-8", errors="replace") as handle:
+            return [number for number, line in enumerate(handle, start=1) if MARKER.search(line)]
+    except OSError:
+        return []
 
 
 #: The one producer of every signal; a member without one refuses at import below.
