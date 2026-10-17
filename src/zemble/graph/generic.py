@@ -21,6 +21,7 @@ from tree_sitter import Node, Parser
 from zemble.graph.java import FileExtraction
 from zemble.graph.model import DECLARED_TYPE_KINDS, Edge, EdgeKind, Symbol, SymbolKind, is_test_path, make_symbol_id
 from zemble.languages.catalog import is_test_file, spec_for
+from zemble.languages.metrics import measure_callable, measure_file
 from zemble.languages.paths import resolve, text
 from zemble.languages.read import (
     NAME_KINDS,
@@ -95,6 +96,8 @@ def extract_generic_file(source: bytes, relative_path: str, language: str) -> Fi
     tree = parser.parse(source)
     extractor = _GenericExtractor(spec, source, relative_path)
     extractor.run(tree.root_node)
+    if spec.complexity is not None:
+        extractor.result.file_metrics = measure_file(tree, source, spec.complexity)
     return extractor.result
 
 
@@ -407,6 +410,15 @@ class _GenericExtractor:
         inner = _Owner(id=symbol.id, qualified=qualified, name=name, is_callable=True)
         if body is None:
             return []
+        if self.spec.complexity is not None:
+            self.result.metrics[symbol.id] = measure_callable(
+                body,
+                self.spec.complexity,
+                name,
+                self.source,
+                block_kinds=self.spec.block_kinds,
+                call_names=self._call_names,
+            )
         if body.parent is not node and body is not node:
             self._consumed.add(body.id)
         if body is node:
@@ -565,6 +577,11 @@ class _GenericExtractor:
             receiver_type=call.receiver_type,
             is_new=call.is_new,
         )
+
+    def _call_names(self, node: Node, source: bytes) -> list[str]:
+        """The name one node calls, read by the same call rules that emit CALLS edges."""
+        call = call_at(self.spec, node, source)
+        return [call.name] if call is not None else []
 
 
 _ROLE_HANDLERS = {

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from zemble.graph.java import extract_java_file
 from zemble.graph.store import build_graph, connect
 
 CIRCLE = "src/main/java/com/example/core/Circle.java"
@@ -56,6 +57,17 @@ def either_batching(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
     return request.param
 
 
+#: The derived tables a refresh must leave exactly as a full rebuild writes them; the files
+#: table only by its measurements, since its stamps differ between the two trees.
+_TABLES = {
+    "symbols": "SELECT * FROM symbols",
+    "edges": "SELECT * FROM edges",
+    "decl_keys": "SELECT * FROM decl_keys",
+    "symbol_metrics": "SELECT * FROM symbol_metrics",
+    "files": "SELECT path, lines, comment_lines FROM files",
+}
+
+
 def _tables(root: Path) -> dict[str, Counter]:
     """Return the graph's derived tables as multisets, which is what identity means here.
 
@@ -64,10 +76,17 @@ def _tables(root: Path) -> dict[str, Counter]:
     """
     connection = connect(str(root))
     try:
-        return {
-            table: Counter(tuple(row) for row in connection.execute(f"SELECT * FROM {table}"))  # noqa: S608
-            for table in ("symbols", "edges", "decl_keys")
-        }
+        return {table: Counter(tuple(row) for row in connection.execute(query)) for table, query in _TABLES.items()}
+    finally:
+        connection.close()
+
+
+def _measured(root: Path, relative: str) -> dict[str, tuple]:
+    """The measurement rows a graph holds for one file's callables, by symbol id."""
+    connection = connect(str(root))
+    try:
+        rows = connection.execute("SELECT * FROM symbol_metrics WHERE symbol_id LIKE ?", (f"{relative}#%",)).fetchall()
+        return {row["symbol_id"]: tuple(row) for row in rows}
     finally:
         connection.close()
 
@@ -109,6 +128,9 @@ def test_java_edit_journey_matches_a_full_rebuild(
     circle.write_text(circle.read_text(encoding="utf-8").replace("scale", "resize"), encoding="utf-8")
     build_graph(str(workspace))
     _assert_matches_full_rebuild(workspace, scratch, "step 1 rename")
+    resized = _measured(workspace, CIRCLE)
+    assert any(".resize(" in symbol_id for symbol_id in resized), "step 1: the renamed method is measured"
+    assert not any(".scale(" in symbol_id for symbol_id in resized), "step 1: the old name's rows are replaced"
 
     # 2. Moving a class to another package: every importer's scope answer changes.
     helpers = (workspace / HELPERS).read_text(encoding="utf-8")
@@ -122,6 +144,7 @@ def test_java_edit_journey_matches_a_full_rebuild(
     (workspace / TRAVERSAL).unlink()
     build_graph(str(workspace), changed_paths=[workspace / TRAVERSAL])
     _assert_matches_full_rebuild(workspace, scratch, "step 3 delete")
+    assert _measured(workspace, TRAVERSAL) == {}, "step 3: a deleted file's measurements go with it"
 
     # 4. A new file appears, and only the watcher's word says so.
     caller = _write(
@@ -262,6 +285,21 @@ def test_a_facts_file_mapped_in_two_rounds_is_read_again(
     _write(workspace, second, "\n".join(json.dumps(line) for line in second_lines()) + "\n")
     build_graph(str(workspace))
     _assert_matches_full_rebuild(workspace, scratch, "step 1 two facts files")
+    connection = connect(str(workspace))
+    sources = {
+        row["source"] for row in connection.execute("SELECT source FROM edges WHERE file_path = ?", (FUNCTIONS,))
+    }
+    connection.close()
+    assert "zemble-javac-facts" in sources, "step 1: the facts own the Java source's edges"
+    extracted = extract_java_file((workspace / FUNCTIONS).read_bytes(), FUNCTIONS).metrics
+    assert (
+        _measured(workspace, FUNCTIONS)
+        == {
+            symbol_id: (symbol_id, metric.lines, metric.statements, metric.complexity, metric.nesting)
+            for symbol_id, metric in extracted.items()
+        }
+        != {}
+    ), "step 1: facts replace edges, never the tree-sitter measurements"
 
     # 2. The Java source changes and the first facts file starts covering the markdown template.
     refills: list[str] = []

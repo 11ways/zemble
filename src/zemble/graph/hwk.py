@@ -21,7 +21,8 @@ def extract_hwk_file(source: bytes, relative_path: str) -> FileExtraction:
 
     :param source: Raw file bytes.
     :param relative_path: Path relative to the indexed root, posix style.
-    :return: The file's symbols and edges; a template has no package and no imports.
+    :return: The file's symbols and edges; a template has no package, no imports and no
+        measurements, since it declares no callable bodies (`complexity_for("hwk")` is None).
     """
     return _Builder(scan(source.decode("utf-8", "replace")), relative_path).run()
 

@@ -6,6 +6,7 @@ import pytest
 
 from zemble.graph.java import extract_java_file
 from zemble.graph.model import EdgeKind, SymbolKind, is_test_path
+from zemble.languages.metrics import CallableMetrics, FileMetrics
 
 
 def _extract(root: Path, relative: str):
@@ -151,6 +152,36 @@ def test_reference_capture_journey(graph_fixture_root: Path) -> None:
     # 5. Comments and string literals never produce references.
     shape = _extract(graph_fixture_root, f"{MAIN}/core/Shape.java")
     assert not [edge for edge in shape.edges if edge.dst_name == "shape "], "step 5: string content is not a reference"
+
+
+def test_callable_measurement_journey(graph_fixture_root: Path) -> None:
+    """Every Java callable with a body is measured with the extractor's own call reader, and so is the file."""
+    traversal = _extract(graph_fixture_root, f"{MAIN}/core/Traversal.java")
+    by_name = {symbol.name: symbol for symbol in traversal.symbols}
+
+    # 1. Hand-counted: a for loop over one statement, and a try whose catch is the only branch.
+    assert traversal.metrics[by_name["sumAreas"].id] == CallableMetrics(
+        lines=7, statements=4, complexity=1, nesting=1
+    ), "step 1: for +1; three statements in the body and one in the loop"
+    assert traversal.metrics[by_name["guarded"].id] == CallableMetrics(
+        lines=7, statements=3, complexity=1, nesting=1
+    ), "step 1: try adds nothing, catch +1"
+
+    # 2. A bodiless interface method is not measured, and neither is anything but a callable.
+    assert by_name["apply"].id not in traversal.metrics, "step 2: an abstract method has no body to measure"
+    assert {symbol.kind for symbol in traversal.symbols if symbol.id in traversal.metrics} <= {
+        SymbolKind.METHOD,
+        SymbolKind.CONSTRUCTOR,
+    }, "step 2: only callables are measured"
+    lines = (graph_fixture_root / f"{MAIN}/core/Traversal.java").read_text(encoding="utf-8").count("\n")
+    assert traversal.file_metrics == FileMetrics(lines=lines, comment_lines=0), "step 2: the file is measured too"
+
+    # 3. Recursion is read through the same call reading that emits CALLS edges.
+    source = b"class A {\n  // counts down\n  int f(int n) {\n    if (n < 1) return 0;\n    return f(n - 1);\n  }\n}"
+    recursive = extract_java_file(source, "src/main/java/A.java")
+    (method,) = [symbol for symbol in recursive.symbols if symbol.name == "f"]
+    assert recursive.metrics[method.id].complexity == 2, "step 3: if +1, the call to itself +1"
+    assert recursive.file_metrics == FileMetrics(lines=7, comment_lines=1), "step 3: a last line without newline counts"
 
 
 @pytest.mark.parametrize(

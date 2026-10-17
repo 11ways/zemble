@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from zemble.graph.model import EdgeKind, Resolution
+from zemble.graph.model import CALLABLE_KINDS, EdgeKind, Resolution
 from zemble.graph.provider import GraphProvider, SqliteGraphProvider
+from zemble.languages.metrics import CallableMetrics, FileMetrics
 
 
 def _by_name(hits) -> set[str]:
@@ -36,6 +37,30 @@ def test_definition_journey(built_graph: SqliteGraphProvider) -> None:
 
     # 5. A name nobody declares returns nothing rather than guessing.
     assert built_graph.definition("NoSuchThing") == [], "step 5: unknown names return nothing"
+
+
+def test_measurement_journey(built_graph: SqliteGraphProvider) -> None:
+    """Measurements are read back per callable, per file and for the whole graph."""
+    circle_file = "src/main/java/com/example/core/Circle.java"
+    (area,) = [symbol for symbol in built_graph.definition("Circle.area") if symbol.file_path == circle_file]
+
+    # 1. One callable: a one-statement body over three lines, no branches.
+    assert built_graph.metrics(area.id) == CallableMetrics(lines=3, statements=1, complexity=0, nesting=0)
+    assert built_graph.metrics(built_graph.definition("com.example.core.Circle")[0].id) is None, (
+        "step 1: a type is not measured"
+    )
+
+    # 2. One file: every callable of Circle (two constructors, area, two scales, label) and its line count.
+    in_file = built_graph.metrics_in_file(circle_file)
+    assert len(in_file) == 6 and in_file[area.id] == built_graph.metrics(area.id), "step 2: the file's callables"
+    assert built_graph.file_metrics(circle_file) == FileMetrics(lines=33, comment_lines=0), "step 2: the file"
+    assert built_graph.file_metrics("no/such/File.java") is None, "step 2: an unknown file has none"
+
+    # 3. The bulk reader yields every measured callable once, symbols included, in file and line order.
+    every = list(built_graph.all_metrics())
+    assert len(every) == built_graph.connection.execute("SELECT COUNT(*) FROM symbol_metrics").fetchone()[0]
+    assert all(symbol.kind in CALLABLE_KINDS for symbol, _ in every), "step 3: only callables are measured"
+    assert every == sorted(every, key=lambda pair: (pair[0].file_path, pair[0].start_line, pair[0].id))
 
 
 def test_call_graph_journey(built_graph: SqliteGraphProvider) -> None:

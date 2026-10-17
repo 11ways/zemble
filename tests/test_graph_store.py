@@ -70,6 +70,8 @@ def test_build_journey(graph_fixture_root: Path, graph_cache: Path) -> None:
 
     # 5. The counts did not drift.
     assert (again.symbols, again.edges) == (stats.symbols, stats.edges), "step 5: a no-op build changes no counts"
+    assert again.measured_callables == stats.measured_callables > 0, "step 5: the measured callables are reported"
+    assert stats.to_dict()["measured_callables"] == stats.measured_callables, "step 5: and printed by --stats"
 
 
 def test_incremental_journey(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path) -> None:
@@ -197,6 +199,35 @@ def test_change_set_refresh_journey(graph_fixture_root: Path, graph_cache: Path,
     ).fetchone()
     connection.close()
     assert remaining is None, "step 4: and so did its symbols"
+
+
+def test_a_format_8_store_measures_every_file_on_its_next_build(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
+) -> None:
+    """A store from before measurements gets its columns and re-extracts every file, even from a change set."""
+    workspace = _copy_workspace(graph_fixture_root, tmp_path / "ws")
+    path = str(workspace)
+    built = build_graph(path)
+    db = graph_db_path(path)
+    assert db is not None
+    legacy = sqlite3.connect(db)
+    legacy.executescript(
+        "DROP TABLE symbol_metrics; ALTER TABLE files DROP COLUMN lines; ALTER TABLE files DROP COLUMN comment_lines;"
+    )
+    legacy.close()
+
+    # 1. A watcher's build naming one file still re-extracts all of them, since none was measured.
+    circle = workspace / "src/main/java/com/example/core/Circle.java"
+    migrated = build_graph(path, changed_paths=[circle])
+    assert migrated.extracted_files == built.extracted_files, "step 1: every file is extracted again"
+    assert migrated.measured_callables == built.measured_callables, "step 1: and measured as a fresh build would"
+    connection = connect(path)
+    unmeasured = connection.execute("SELECT COUNT(*) FROM files WHERE lines IS NULL").fetchone()[0]
+    connection.close()
+    assert unmeasured == 0, "step 1: every Java file has its line counts"
+
+    # 2. After that the stamps are real again, so a walk finds nothing to do.
+    assert build_graph(path).extracted_files == 0, "step 2: a migrated store is current"
 
 
 def test_torn_store_journey(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path, caplog) -> None:

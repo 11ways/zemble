@@ -83,6 +83,17 @@ def test_a_sub_directory_is_answered_from_its_ancestors_graph(
                     expected = [_hit_key(hit) for hit in getattr(alone, query)(symbol.id)]
                     actual = [_hit_key(hit) for hit in getattr(view, query)(symbol.id)]
                     assert actual == expected, f"step 3: {query}({symbol.id}) is unchanged"
+
+        # 4. Measurements read through the view equal the sub-directory graph's, ids and paths rebased.
+        measured = list(alone.all_metrics())
+        assert measured, "step 4: the folder has measured callables"
+        assert list(view.all_metrics()) == measured, "step 4: the bulk reader keeps only the folder, rebased"
+        for symbol, metric in measured:
+            assert view.metrics(symbol.id) == metric, f"step 4: metrics({symbol.id}) is unchanged"
+        files = [row["path"] for row in alone.connection.execute("SELECT path FROM files")]
+        for path in files:
+            assert view.metrics_in_file(path) == alone.metrics_in_file(path), f"step 4: {path} callables"
+            assert view.file_metrics(path) == alone.file_metrics(path) is not None, f"step 4: {path} lines"
     finally:
         alone.close()
         view.close()

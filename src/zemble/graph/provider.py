@@ -17,6 +17,7 @@ from typing import Protocol, runtime_checkable
 from zemble.graph.facts import TREE_SITTER_SOURCE
 from zemble.graph.model import NAMED_KINDS, TYPE_KINDS, Edge, EdgeKind, Hit, Resolution, Symbol
 from zemble.graph.store import connect, edge_from_row, resolve_graph_root, symbol_from_row
+from zemble.languages.metrics import CallableMetrics, FileMetrics
 
 _HIERARCHY_KINDS = (EdgeKind.EXTENDS.value, EdgeKind.IMPLEMENTS.value)
 
@@ -107,6 +108,22 @@ class GraphProvider(Protocol):
         """Walk outward from a symbol in both directions."""
         ...
 
+    def metrics(self, symbol_id: str) -> CallableMetrics | None:
+        """Return a callable's measurements, or None when it has none (no body, unmeasured language)."""
+        ...
+
+    def metrics_in_file(self, file_path: str) -> dict[str, CallableMetrics]:
+        """Return the measurements of every measured callable in one file, keyed by symbol id."""
+        ...
+
+    def file_metrics(self, file_path: str) -> FileMetrics | None:
+        """Return a file's line and comment-line counts, or None when its language is not measured."""
+        ...
+
+    def all_metrics(self) -> Iterator[tuple[Symbol, CallableMetrics]]:
+        """Yield every measured callable with its measurements, by file and line."""
+        ...
+
 
 def display_name(symbol: Symbol) -> str:
     """Return a short human label: `Type` for types, `Type.member` for members."""
@@ -135,6 +152,14 @@ def _reason(symbol: Symbol, edge: Edge, depth: int = 1, *, outgoing: bool = Fals
         phrase = f"{phrase} via {edge.origin_ref}"
     depth_note = f", depth {depth}" if depth > 1 else ""
     return f"{verb} {display_name(symbol)} (line {edge.line}, {phrase}{depth_note})"
+
+
+_METRICS_SELECT = "SELECT symbol_id, lines, statements, complexity, nesting FROM symbol_metrics"
+
+
+def _metrics_from_row(row: sqlite3.Row) -> CallableMetrics:
+    """Rebuild one callable's measurements from a row carrying the `symbol_metrics` columns."""
+    return CallableMetrics(row["lines"], row["statements"], row["complexity"], row["nesting"])
 
 
 class SqliteGraphProvider:
@@ -392,6 +417,42 @@ class SqliteGraphProvider:
         """Order hits by file then line so output is stable."""
         return sorted(hits, key=lambda hit: (hit.symbol.file_path, hit.line, hit.symbol.id))
 
+    # ---- measurements -----------------------------------------------------
+
+    def metrics(self, symbol_id: str) -> CallableMetrics | None:
+        """Return a callable's measurements, or None when it has none (no body, unmeasured language)."""
+        row = self.connection.execute(f"{_METRICS_SELECT} WHERE symbol_id = ?", (symbol_id,)).fetchone()  # noqa: S608
+        return _metrics_from_row(row) if row is not None else None
+
+    def metrics_in_file(self, file_path: str) -> dict[str, CallableMetrics]:
+        """Return the measurements of every measured callable in one file, keyed by symbol id."""
+        rows = self.connection.execute(
+            f"{_METRICS_SELECT} WHERE symbol_id IN (SELECT id FROM symbols WHERE file_path = ?)",  # noqa: S608
+            (file_path,),
+        )
+        return {row["symbol_id"]: _metrics_from_row(row) for row in rows}
+
+    def file_metrics(self, file_path: str) -> FileMetrics | None:
+        """Return a file's line and comment-line counts, or None when its language is not measured."""
+        row = self.connection.execute(
+            "SELECT lines, comment_lines FROM files WHERE path = ? AND lines IS NOT NULL", (file_path,)
+        ).fetchone()
+        return FileMetrics(row["lines"], row["comment_lines"]) if row is not None else None
+
+    def all_metrics(self, *, prefix: str = "") -> Iterator[tuple[Symbol, CallableMetrics]]:
+        """Yield every measured callable with its measurements, by file and line, optionally under a path prefix."""
+        query = (
+            "SELECT s.*, m.lines, m.statements, m.complexity, m.nesting "
+            "FROM symbol_metrics m JOIN symbols s ON s.id = m.symbol_id"
+        )
+        parameters: tuple[str, ...] = ()
+        if prefix:
+            # Every path under `prefix` sorts between it and the same text with its last character bumped.
+            query += " WHERE s.file_path >= ? AND s.file_path < ?"
+            parameters = (prefix, prefix[:-1] + chr(ord(prefix[-1]) + 1))
+        for row in self.connection.execute(f"{query} ORDER BY s.file_path, s.start_line, s.id", parameters):
+            yield symbol_from_row(row), _metrics_from_row(row)
+
     # ---- coverage --------------------------------------------------------
 
     def meta(self) -> dict[str, str]:
@@ -532,6 +593,28 @@ class SubtreeGraphProvider:
     ) -> list[Hit]:
         """Walk through the ancestor, applying the result cap to in-folder symbols during traversal."""
         return self._hits(self.graph.neighbors(self._inbound(symbol_id), hops, kinds, limit=limit, prefix=self._lead))
+
+    def metrics(self, symbol_id: str) -> CallableMetrics | None:
+        """Return an in-folder callable's measurements by its view id."""
+        return self.graph.metrics(self._inbound(symbol_id))
+
+    def metrics_in_file(self, file_path: str) -> dict[str, CallableMetrics]:
+        """Return the measurements of every measured callable in one file under the sub-directory, by view id."""
+        return {
+            self._strip(symbol_id): metric
+            for symbol_id, metric in self.graph.metrics_in_file(self._lead + file_path).items()
+        }
+
+    def file_metrics(self, file_path: str) -> FileMetrics | None:
+        """Return the line and comment-line counts of a file under the sub-directory."""
+        return self.graph.file_metrics(self._lead + file_path)
+
+    def all_metrics(self) -> Iterator[tuple[Symbol, CallableMetrics]]:
+        """Yield every measured in-folder callable, rebased, with its measurements."""
+        for symbol, metric in self.graph.all_metrics(prefix=self._lead):
+            rebased = self._rebased(symbol)
+            if rebased is not None:
+                yield rebased, metric
 
     def meta(self) -> dict[str, str]:
         """Return the ancestor graph's stored metadata."""

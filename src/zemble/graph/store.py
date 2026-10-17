@@ -61,7 +61,7 @@ from zemble.types import ContentType
 logger = logging.getLogger(__name__)
 DEFAULT_WORKERS = min(10, os.cpu_count() or 2)
 
-GRAPH_FORMAT_VERSION = 8
+GRAPH_FORMAT_VERSION = 9
 #: The file naming the current graph version (first line) and the one it replaced (second).
 GRAPH_POINTER_NAME = "graph.current"
 #: The file whose OS lock is held by the one process allowed to write a workspace's graph.
@@ -130,13 +130,17 @@ _MAX_FILE_BYTES = 2_000_000
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS files (
-    path TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER, package TEXT, imports TEXT
+    path TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER, package TEXT, imports TEXT,
+    lines INTEGER, comment_lines INTEGER
 );
 CREATE TABLE IF NOT EXISTS symbols (
     id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT,
     start_line INTEGER, end_line INTEGER, container_id TEXT, modifiers TEXT,
     annotations TEXT, signature TEXT, is_test INTEGER, param_types TEXT,
     annotation_args TEXT
+);
+CREATE TABLE IF NOT EXISTS symbol_metrics (
+    symbol_id TEXT PRIMARY KEY, lines INTEGER, statements INTEGER, complexity INTEGER, nesting INTEGER
 );
 CREATE TABLE IF NOT EXISTS refs (key INTEGER PRIMARY KEY, text TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS edge_rows (
@@ -189,6 +193,8 @@ class GraphStats:
     reresolved_files: int = 0
     skipped_by_language: dict[str, int] = field(default_factory=dict)
     symbols: int = 0
+    #: Callables the graph holds measurements for: every callable symbol with a body in a measured language.
+    measured_callables: int = 0
     edges: int = 0
     resolution_counts: dict[str, int] = field(default_factory=dict)
     facts: dict[str, object] = field(default_factory=dict)
@@ -209,6 +215,7 @@ class GraphStats:
             "reresolved_files": self.reresolved_files,
             "skipped_by_language": self.skipped_by_language,
             "symbols": self.symbols,
+            "measured_callables": self.measured_callables,
             "edges": self.edges,
             "resolution_counts": self.resolution_counts,
             "facts": self.facts,
@@ -809,7 +816,24 @@ def _migrate(connection: sqlite3.Connection) -> None:
     symbol_columns = {row["name"] for row in connection.execute("PRAGMA table_info(symbols)")}
     if "annotation_args" not in symbol_columns:
         connection.execute("ALTER TABLE symbols ADD COLUMN annotation_args TEXT")
+    _add_measurements(connection)
     _backfill_declaration_keys(connection)
+
+
+def _add_measurements(connection: sqlite3.Connection) -> None:
+    """Give a format-8 store the measurement columns and mark every file changed.
+
+    Measurements are read off the parse tree, so they cannot be backfilled from stored rows;
+    clearing the stamps makes the next build re-extract every file in place and measure it.
+    """
+    file_columns = {row["name"] for row in connection.execute("PRAGMA table_info(files)")}
+    if "lines" in file_columns:
+        return
+    logger.info("graph: adding code measurements; every file is re-extracted (format %d)", GRAPH_FORMAT_VERSION)
+    connection.execute("ALTER TABLE files ADD COLUMN lines INTEGER")
+    connection.execute("ALTER TABLE files ADD COLUMN comment_lines INTEGER")
+    connection.execute("UPDATE files SET mtime_ns = NULL")
+    connection.commit()
 
 
 def _count_candidates(connection: sqlite3.Connection, edge_columns: set[str]) -> None:
@@ -1222,6 +1246,10 @@ def _scan_changed(root: Path, changed: Iterable[Path], stored: dict[str, tuple[i
     for relative, stamp in stored.items():
         if relative in named:
             continue
+        if stamp[0] is None:
+            # A stamp a migration cleared (`_add_measurements`): the file is looked at like a named one.
+            named[relative] = root / relative
+            continue
         scan.jobs.append((str(root / relative), relative))
         scan.stamps[relative] = stamp
 
@@ -1446,6 +1474,7 @@ def _run_build(
     _write_meta(connection, root)
     _write_coverage(connection, stats.skipped_by_language)
     stats.symbols = connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    stats.measured_callables = connection.execute("SELECT COUNT(*) FROM symbol_metrics").fetchone()[0]
     stats.edges = connection.execute("SELECT COUNT(*) FROM edge_rows").fetchone()[0]
     stats.resolution_counts = {
         row["resolution"]: row["n"]
@@ -1582,6 +1611,12 @@ def _delete_files(connection: sqlite3.Connection, paths: Sequence[str]) -> None:
     """Drop every row belonging to the given files."""
     for chunk in _chunks(paths):
         placeholders = ",".join("?" * len(chunk))
+        # Measurements are keyed by symbol, so they go before the symbols that name their file.
+        connection.execute(
+            f"DELETE FROM symbol_metrics WHERE symbol_id IN "  # noqa: S608
+            f"(SELECT id FROM symbols WHERE file_path IN ({placeholders}))",
+            chunk,
+        )
         for table in ("symbols", "decl_keys"):
             connection.execute(f"DELETE FROM {table} WHERE file_path IN ({placeholders})", chunk)  # noqa: S608
         _delete_edges(connection, chunk)
@@ -1618,11 +1653,13 @@ def _declaration_rows(symbols: Iterable[Symbol]) -> list[tuple[str, str, str, st
 def _insert_extractions(
     connection: sqlite3.Connection, extractions: Iterable[FileExtraction], stamps: dict[str, tuple[int, int]]
 ) -> None:
-    """Insert the symbols and file records of freshly extracted files."""
+    """Insert the symbols, measurements and file records of freshly extracted files."""
     file_rows = []
     symbol_rows = []
+    metric_rows = []
     for extraction in extractions:
         mtime_ns, size = stamps.get(extraction.file_path, (0, 0))
+        measured = extraction.file_metrics
         file_rows.append(
             (
                 extraction.file_path,
@@ -1637,11 +1674,25 @@ def _insert_extractions(
                         "static_wildcards": extraction.imports.static_wildcards,
                     }
                 ),
+                measured.lines if measured is not None else None,
+                measured.comment_lines if measured is not None else None,
             )
         )
         symbol_rows.extend(_symbol_row(symbol) for symbol in extraction.symbols)
-    connection.executemany("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?)", file_rows)
+        metric_rows.extend(
+            (symbol_id, metric.lines, metric.statements, metric.complexity, metric.nesting)
+            for symbol_id, metric in extraction.metrics.items()
+        )
+    connection.executemany(
+        "INSERT OR REPLACE INTO files (path, mtime_ns, size, package, imports, lines, comment_lines) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        file_rows,
+    )
     connection.executemany("INSERT OR REPLACE INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", symbol_rows)
+    connection.executemany(
+        "INSERT OR REPLACE INTO symbol_metrics (symbol_id, lines, statements, complexity, nesting) VALUES (?,?,?,?,?)",
+        metric_rows,
+    )
     connection.executemany(
         "INSERT INTO decl_keys (symbol_id, key, value, file_path) VALUES (?,?,?,?)",
         _declaration_rows(symbol for extraction in extractions for symbol in extraction.symbols),

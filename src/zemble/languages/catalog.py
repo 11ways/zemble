@@ -91,6 +91,10 @@ JAVA_COMPLEXITY = ComplexitySpec(
     else_token="else",
 )
 
+#: Java's statement block kinds, the home both the graph's measurements and the duplication
+#: profile read, since Java has no spec to carry them.
+JAVA_BLOCK_KINDS = frozenset({"block", "constructor_body", "switch_block_statement_group"})
+
 _JS_COMPLEXITY = ComplexitySpec(
     increment_kinds=frozenset(
         {
@@ -2903,4 +2907,4 @@ def family_of(language: str | None) -> str | None:
     return spec.family if spec is not None else language
 
 
-__all__ = ["JAVA_COMPLEXITY", "SPECS", "complexity_for", "family_of", "is_test_file", "spec_for"]
+__all__ = ["JAVA_BLOCK_KINDS", "JAVA_COMPLEXITY", "SPECS", "complexity_for", "family_of", "is_test_file", "spec_for"]

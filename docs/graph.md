@@ -276,7 +276,10 @@ no search index present (`zemble/graph/store.py`). The folder holds versions,
 `graph-<n>.sqlite`, and a pointer, `graph.current`, naming the current version on
 its first line and the one it replaced on its second. Tables:
 `symbols`, `edges` (each carrying the `source` that produced it; see below), `files` (path,
-mtime, size, package, imports), `decl_keys` (the Hawkeye registration keys a symbol
+mtime, size, package, imports, and the file's `lines` and `comment_lines`, NULL for a
+language that is not measured), `symbol_metrics` (lines, statements, cognitive complexity
+and nesting of every callable with a body, keyed by symbol id; see
+`zemble/languages/metrics.py`), `decl_keys` (the Hawkeye registration keys a symbol
 declares - element tag, template tag, template id, function name and namespaced
 function key), `facts_symbols` (the `symbol` facts of every facts file, so mapping
 one file can reach the others without parsing them), `facts_status` (one row per
@@ -294,7 +297,12 @@ when a store is compacted. A column a graph
 built by an older zemble lacks is added on the next open and `decl_keys` is filled
 in one pass over the symbol table, so a version-4 graph is migrated rather than
 rebuilt; a graph is derived data either way. A format-7 graph is converted on its next
-writable open (20 s and 48 MiB for the 2.1 GB one) and compacted by that build.
+writable open (20 s and 48 MiB for the 2.1 GB one) and compacted by that build. Format
+version 9 adds the measurements: they are read off the parse tree, so they cannot be
+backfilled, and the migration clears every stored stamp instead; the next build, a
+watcher's change set included, re-extracts every file in place. Measurements are written
+and removed with their file's symbols, and the facts overlay never touches them: a fact
+replaces an edge, never a symbol, so a covered file keeps its tree-sitter measurements.
 
 ### Durability
 
@@ -475,8 +483,8 @@ Every narrowing above is a chance to leave a stale edge behind, and none of them
 visible in a count, so `tests/test_graph_incremental.py` applies a sequence of edits
 - a rename, a move between packages, a deletion, a new caller, a template touch, a
 template edit, a facts file appearing, changing and vanishing - and after each one
-compares the whole `symbols`, `edges` and `decl_keys` tables against a from-scratch
-build of the very same tree.
+compares the whole `symbols`, `edges`, `decl_keys` and `symbol_metrics` tables, and every
+file's measurements, against a from-scratch build of the very same tree.
 
 That found one real defect, which is fixed: a file the facts covered had its
 extracted edges REPLACED in the table, so when its facts later vanished there was

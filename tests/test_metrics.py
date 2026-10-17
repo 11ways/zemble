@@ -90,7 +90,8 @@ def _measure(path: Path, profile: LanguageProfile) -> tuple[int, dict[str, Calla
     source = path.read_bytes()
     parser = profile.parser()
     assert parser is not None
-    root = parser.parse(source).root_node
+    tree = parser.parse(source)
+    root = tree.root_node
     spec = complexity_for(profile.name)
     assert spec is not None, f"{profile.name} is measured"
     measured: dict[str, CallableMetrics] = {}
@@ -105,7 +106,7 @@ def _measure(path: Path, profile: LanguageProfile) -> tuple[int, dict[str, Calla
         measured[name] = measure_callable(
             body, spec, name, source, block_kinds=profile.block_kinds, call_names=profile.call_names
         )
-    return comment_lines(root, spec), measured
+    return comment_lines(tree, spec), measured
 
 
 def _fixture(language: str) -> tuple[int, dict[str, CallableMetrics]]:

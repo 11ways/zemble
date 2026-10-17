@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cache
 
-from tree_sitter import Node
+from tree_sitter import Language, Node, Query, QueryCursor, Tree
 
 from zemble.languages.spec import ComplexitySpec
 
@@ -32,6 +33,16 @@ class CallableMetrics:
     complexity: int
     #: Deepest nesting of increment and nesting kinds; 0 for straight-line code.
     nesting: int
+
+
+@dataclass(frozen=True)
+class FileMetrics:
+    """What one whole source file measures."""
+
+    #: Source lines in the file; a final line without a newline counts.
+    lines: int
+    #: Distinct lines a comment touches.
+    comment_lines: int
 
 
 class _Walker:
@@ -56,6 +67,15 @@ class _Walker:
         self.nesting = 0
         #: Ids of increment nodes that continue an else branch: the else already counted them.
         self.chained: set[int] = set()
+        #: Kinds `_visit` must see; any other node only passes its level on to its children.
+        self.counted = (
+            spec.increment_kinds
+            | spec.flat_increment_kinds
+            | spec.nesting_kinds
+            | spec.boolean_expression_kinds
+            | frozenset(self.labels)
+            | block_kinds
+        )
 
     def _text(self, node: Node) -> str:
         return self.source[node.start_byte : node.end_byte].decode("utf-8", "replace")
@@ -117,9 +137,9 @@ class _Walker:
     def _content(self, node: Node) -> list[Node]:
         return [child for child in node.named_children if child.type not in self.spec.comment_kinds]
 
-    def _own_increment(self, node: Node, level: int, *, root: bool) -> bool:
+    def _own_increment(self, node: Node, kind: str, level: int, *, root: bool) -> bool:
         """Add the node's own increment and answer whether it opens a nesting level."""
-        spec, kind = self.spec, node.type
+        spec = self.spec
         if kind in spec.increment_kinds:
             if node.id in self.chained:
                 return False
@@ -162,19 +182,30 @@ class _Walker:
         generated chain would push past Python's recursion limit.
         """
         stack: list[tuple[Node, int, bool]] = [(body, 0, True)]
+        counted = self.counted
+        # Without recursion to read, a node of no counted kind adds nothing: a fast path that
+        # skips most of a tree. Its level was already recorded when its opener was visited.
+        every = self.own_name is not None and self.call_names is not None
         while stack:
             node, level, root = stack.pop()
+            if not every and not root and node.type not in counted:
+                stack.extend([(child, level, False) for child in reversed(node.named_children)])
+                continue
             stack.extend(reversed(self._visit(node, level, root=root)))
 
     def _visit(self, node: Node, level: int, *, root: bool) -> list[tuple[Node, int, bool]]:
         """Measure one node and answer its children with the level each is visited at."""
-        spec = self.spec
-        if node.type in self.block_kinds:
+        spec, kind = self.spec, node.type
+        if kind in self.block_kinds:
             self.statements += len(self._content(node))
-        opens = self._own_increment(node, level, root=root)
+        opens = self._own_increment(node, kind, level, root=root)
         inner = level + 1 if opens else level
-        self.nesting = max(self.nesting, inner)
-        is_increment = node.type in spec.increment_kinds
+        if inner > self.nesting:
+            self.nesting = inner
+        is_increment = kind in spec.increment_kinds
+        if not is_increment and not (opens and spec.condition_field is not None):
+            # No else token to look for and no condition to keep outside: the common, fast case.
+            return [(child, inner, False) for child in node.named_children]
         after_else = False
         children: list[tuple[Node, int, bool]] = []
         for index, child in enumerate(node.children):
@@ -205,32 +236,53 @@ def measure_callable(
 ) -> CallableMetrics:
     """Measure one callable body.
 
+    A body whose text never spells its own name cannot call itself, so its walk skips reading
+    calls altogether: every call reader answers names read off the source text.
+
     @param own_name the callable's simple name, for recursion; None counts no recursion.
     @param block_kinds the language's statement block kinds (`LanguageSpec.block_kinds`, or a
         hand-written profile's), so statements are counted where duplication windows are cut.
     @param call_names the language's call reader; without it recursion is not counted.
     """
+    if own_name is not None and source.find(own_name.encode(), body.start_byte, body.end_byte) < 0:
+        own_name = None
     walker = _Walker(spec, source, block_kinds, own_name, call_names)
     walker.walk(body)
     lines = body.end_point[0] - body.start_point[0] + 1
     return CallableMetrics(lines, walker.statements, walker.complexity, walker.nesting)
 
 
-def comment_lines(root: Node, spec: ComplexitySpec) -> int:
-    """Count the distinct source lines a comment touches in a whole file, trailing comments included."""
+@cache
+def _comment_query(language: Language, kinds: frozenset[str]) -> Query:
+    """The query capturing every comment node of a grammar, compiled once per grammar."""
+    return Query(language, "[" + " ".join(f"({kind})" for kind in sorted(kinds)) + "] @comment")
+
+
+def comment_lines(tree: Tree, spec: ComplexitySpec) -> int:
+    """Count the distinct source lines a comment touches in a whole file, trailing comments included.
+
+    The comments are found by a tree-sitter query, which runs in C: a Python walk over every
+    node of every file was a fifth of a whole graph extraction. A query matches named nodes
+    only, so every comment kind must be a named node, which `tests/test_languages.py` holds.
+    """
     lines: set[int] = set()
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        if node.type in spec.comment_kinds:
-            last = node.end_point[0]
-            if node.end_point[1] == 0 and last > node.start_point[0]:
-                # A line comment that swallows its newline ends at column 0 of the next line.
-                last -= 1
-            lines.update(range(node.start_point[0], last + 1))
-            continue
-        stack.extend(node.children)
+    captures = QueryCursor(_comment_query(tree.language, spec.comment_kinds)).captures(tree.root_node)
+    for node in captures.get("comment", ()):
+        last = node.end_point[0]
+        if node.end_point[1] == 0 and last > node.start_point[0]:
+            # A line comment that swallows its newline ends at column 0 of the next line.
+            last -= 1
+        lines.update(range(node.start_point[0], last + 1))
     return len(lines)
 
 
-__all__ = ["CallNames", "CallableMetrics", "comment_lines", "measure_callable"]
+def measure_file(tree: Tree, source: bytes, spec: ComplexitySpec) -> FileMetrics:
+    """Measure a whole parsed file: its line count and its comment lines.
+
+    Lines are counted from the bytes, since a grammar's root node may stop short of trailing blank lines.
+    """
+    lines = source.count(b"\n") + (1 if source and not source.endswith(b"\n") else 0)
+    return FileMetrics(lines, comment_lines(tree, spec))
+
+
+__all__ = ["CallNames", "CallableMetrics", "FileMetrics", "comment_lines", "measure_callable", "measure_file"]

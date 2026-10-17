@@ -25,6 +25,7 @@ from zemble.dedup.languages.base import (
     node_text,
 )
 from zemble.graph.java import java_parser
+from zemble.languages.catalog import JAVA_BLOCK_KINDS
 
 _CALLABLE_KINDS = {
     "method_declaration": "method",
@@ -874,7 +875,7 @@ JAVA = LanguageProfile(
     extensions=(".java",),
     parser=java_parser,
     member_kinds=_MEMBER_KINDS,
-    block_kinds=frozenset({"block", "constructor_body", "switch_block_statement_group"}),
+    block_kinds=JAVA_BLOCK_KINDS,
     control_keywords=_CONTROL_KEYWORDS,
     literal_kinds=_LITERAL_TYPES,
     declared_name_fields=_NAME_FIELD_DECLARATIONS | _TYPE_DECLARATIONS,

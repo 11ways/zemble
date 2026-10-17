@@ -8,6 +8,7 @@ from zemble.evidence.outline import outline
 from zemble.graph.model import Resolution, SymbolKind
 from zemble.graph.provider import SqliteGraphProvider
 from zemble.graph.store import build_graph
+from zemble.languages.metrics import CallableMetrics, FileMetrics
 
 POLYGLOT = Path(__file__).parent / "fixtures" / "polyglot"
 
@@ -114,3 +115,12 @@ def test_outline_and_coverage(polyglot_graph: SqliteGraphProvider) -> None:
     rust = outline(graph, "app/shapes.rs").render()
     assert "interface pub trait Shape" in rust and "method fn area(&self) -> f64" in rust, "step 3: Rust"
     assert "languages" in graph.coverage_note(), "step 4: the coverage note counts languages"
+
+
+def test_python_measurements(polyglot_graph: SqliteGraphProvider) -> None:
+    """A Python function is measured through its spec, recursion reader and statement blocks included."""
+    graph = polyglot_graph
+    largest = _one(graph, "largest", ".py")
+    # for +1, if +2 (nesting 1), its `or` +1; three statements, one in the loop, one under the if.
+    assert graph.metrics(largest.id) == CallableMetrics(lines=5, statements=5, complexity=4, nesting=2)
+    assert graph.file_metrics("app/shapes.py") == FileMetrics(lines=35, comment_lines=0), "a docstring is no comment"

@@ -8,7 +8,7 @@ from semble_grammars import available_languages, get_language, get_parser
 from zemble.graph.model import EdgeKind, SymbolKind
 from zemble.graph.store import GRAPH_LANGUAGES, extractor_for
 from zemble.index.files import detect_language, get_extensions
-from zemble.languages.catalog import JAVA_COMPLEXITY, SPECS, complexity_for, family_of, spec_for
+from zemble.languages.catalog import JAVA_BLOCK_KINDS, JAVA_COMPLEXITY, SPECS, complexity_for, family_of, spec_for
 from zemble.languages.paths import resolve, resolve_all, text
 from zemble.languages.read import split_qualified, type_name
 from zemble.types import ContentType
@@ -63,6 +63,22 @@ def test_every_grammar_with_callable_bodies_is_measured() -> None:
     assert not missing, f"JAVA_COMPLEXITY names node kinds the Java grammar does not have: {missing}"
     assert complexity_for("java") is JAVA_COMPLEXITY, "Java is measured without a spec"
     assert complexity_for("hwk") is None and complexity_for(None) is None, "templates are not measured"
+
+
+def test_comment_and_java_block_kinds_are_named_grammar_nodes() -> None:
+    """Drift guard: the comment query matches named nodes only, and Java's block kinds have no spec to check them."""
+    measured = {language: spec.complexity for language, spec in SPECS.items() if spec.complexity is not None}
+    measured["java"] = JAVA_COMPLEXITY
+    unnamed = sorted(
+        (language, kind)
+        for language, complexity in measured.items()
+        for kind in complexity.comment_kinds
+        if get_language(language).id_for_node_kind(kind, True) is None
+    )
+    assert not unnamed, f"comment kinds that are no named node, which the comment query cannot match: {unnamed}"
+    grammar = get_language("java")
+    missing = [kind for kind in sorted(JAVA_BLOCK_KINDS) if grammar.id_for_node_kind(kind, True) is None]
+    assert not missing, f"JAVA_BLOCK_KINDS names node kinds the Java grammar does not have: {missing}"
 
 
 def test_families_group_interoperating_languages() -> None:
