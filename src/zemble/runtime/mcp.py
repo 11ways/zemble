@@ -15,6 +15,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ContentBlock
 
+from zemble.nib.parts import nib_text_only
 from zemble.runtime.identity import identity, stale_note, status_payload
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ class StaleAwareFastMCP(FastMCP):
 
 def register_status_tool(server: FastMCP) -> None:
     """Register the runtime-identity tool on a FastMCP server."""
+    nib_text_only(server, "status")
 
     @server.tool(structured_output=False)
     async def status() -> dict[str, Any]:

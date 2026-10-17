@@ -391,6 +391,8 @@ the server asks the warm daemon first so several agent sessions share one copy o
 index in RAM. `zemble mcp` is an explicit spelling of the same stdio server.
 Use `zemble mcp --no-daemon` only when intentionally allowing the MCP process to own
 local indexes. Daemon-enabled MCP startup loads neither an index nor an embedder.
+`zemble nib-provider` runs the same server for [nib](docs/nib-provider.md), which hosts zemble's
+tools and prints the code they point at from the live file.
 
 | Tool | Answers |
 | --- | --- |

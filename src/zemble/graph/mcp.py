@@ -11,6 +11,7 @@ from zemble.graph.cli import PROVIDER_METHODS, ensure_graph, select_symbol
 from zemble.graph.model import EdgeKind, Hit, Symbol
 from zemble.graph.provider import AnyProvider, display_name, open_provider
 from zemble.mcp_repo import resolve_repo, with_default_note
+from zemble.nib.parts import Part, location_part, nib_answer, text_part
 
 if TYPE_CHECKING:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP
@@ -123,6 +124,48 @@ def answer(
         provider.close()
 
 
+def _line_part(root: str, entry: dict[str, Any]) -> Part | None:
+    """Locate the one line a symbol or hit points at, when it has a file and a line."""
+    if not entry.get("file_path") or not entry.get("line"):
+        return None
+    return location_part(root, entry["file_path"], entry["line"], entry["line"])
+
+
+def graph_parts(root: str, payload: Any) -> list[Part] | None:
+    """Lay out a graph answer for nib: the queried symbol, then each hit's prose and its one line.
+
+    Only the line is located, never a guessed span: the payload names no signature's end.
+    An error payload is text only.
+    """
+    if not isinstance(payload, dict) or "results" not in payload:
+        return None
+    parts: list[Part] = []
+
+    def add(prose: str, entry: dict[str, Any]) -> None:
+        parts.append(text_part(prose))
+        located = _line_part(root, entry)
+        if located is not None:
+            parts.append(located)
+
+    symbol = payload.get("symbol")
+    if symbol is not None:
+        add(f"{payload.get('display', symbol['qualified_name'])}: {symbol['kind']} {symbol['qualified_name']}", symbol)
+    for entry in payload["results"]:
+        if "edge_kind" in entry:
+            prose = (
+                f"{entry['qualified_name']} ({entry['kind']}): {entry['edge_kind']}, {entry['resolution']}, "
+                f"depth {entry['depth']}, {entry['source']}: {entry['reason']}"
+            )
+        else:
+            test = ", test" if entry.get("is_test") else ""
+            prose = f"{entry['qualified_name']} ({entry['kind']}{test}): {entry.get('signature') or ''}".rstrip()
+        add(prose, entry)
+    footer = [f"total: {payload['total']}"]
+    footer += [str(payload[key]) for key in ("truncated", "note") if payload.get(key)]
+    parts.append(text_part("\n".join(footer)))
+    return parts
+
+
 async def _dispatch(
     repo: str | None, symbol: str, method: str, *, limit: int = DEFAULT_LIMIT, **kwargs: Any
 ) -> dict[str, Any]:
@@ -154,65 +197,70 @@ async def _dispatch(
 def register_graph_tools(server: FastMCP) -> None:
     """Register the symbol-graph tools on a FastMCP server."""
 
+    async def _answer(repo: str | None, symbol: str, method: str, **kwargs: Any) -> Any:
+        """Answer one graph query, with nib's parts when the server answers for nib."""
+        resolved = resolve_repo(repo)
+        return nib_answer(server, resolved, await _dispatch(resolved, symbol, method, **kwargs), graph_parts)
+
     @server.tool(structured_output=False)
     async def graph_definition(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Find where a symbol is declared, with its exact file, line and signature.
 
         Use this instead of grepping for `class Foo` or `void bar(`.
         """
-        return await _dispatch(repo, symbol, "definition", limit=limit)
+        return await _answer(repo, symbol, "definition", limit=limit)
 
     @server.tool(structured_output=False)
     async def graph_callers(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """List every call site of a function, method or constructor, with a reason per hit.
 
         Each result says how confidently it was resolved: `exact` means the declaring
         type was pinned down, `unique_name` means only one symbol in the workspace
         carries that name, `ambiguous` means several did.
         """
-        return await _dispatch(repo, symbol, "callers", limit=limit)
+        return await _answer(repo, symbol, "callers", limit=limit)
 
     @server.tool(structured_output=False)
     async def graph_implementations(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """List the direct and transitive subtypes of a class, interface, trait or protocol, with their depth.
 
         For every override of one method (`Type.member`), use `graph_overrides` instead.
         """
-        return await _dispatch(repo, symbol, "implementations", limit=limit)
+        return await _answer(repo, symbol, "implementations", limit=limit)
 
     @server.tool(structured_output=False)
     async def graph_overrides(
         symbol: Annotated[str, Field(description="The overridden method, as `Type.member` or a qualified name.")],
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """List every subtype method that overrides a method, with its file and line.
 
         The method-level counterpart of `graph_implementations`: `Shape.area` lists each
         concrete `area()` in the workspace, ready to be read as line spans.
         """
-        return await _dispatch(repo, symbol, "overridden_by", limit=limit)
+        return await _answer(repo, symbol, "overridden_by", limit=limit)
 
     @server.tool(structured_output=False)
     async def graph_tests_of(
         symbol: Annotated[str, Field(description=_SYMBOL_DESCRIPTION)],
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Find the tests covering a symbol: naming matches (FooTest, test_foo) first, then tests that use it."""
-        return await _dispatch(repo, symbol, "tests_of", limit=limit)
+        return await _answer(repo, symbol, "tests_of", limit=limit)
 
     @server.tool(structured_output=False)
     async def graph_neighbors(
@@ -224,7 +272,7 @@ def register_graph_tools(server: FastMCP) -> None:
             Field(description=f"Only follow these edge kinds: {', '.join(kind.value for kind in EdgeKind)}."),
         ] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Walk the graph outward from a symbol in both directions, to see what it is wired to."""
         selected = [EdgeKind(value) for value in kinds] if kinds else None
-        return await _dispatch(repo, symbol, "neighbors", limit=limit, hops=hops, kinds=selected)
+        return await _answer(repo, symbol, "neighbors", limit=limit, hops=hops, kinds=selected)

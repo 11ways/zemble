@@ -16,6 +16,7 @@ from zemble.home.cli import HOME_CONTENT
 from zemble.home.config import ConfigError, HomeConfig
 from zemble.index import ZembleIndex
 from zemble.mcp_repo import resolve_repo, with_default_note
+from zemble.nib.parts import nib_text_only
 from zemble.types import ContentType
 from zemble.workspace import resolve_home_root
 
@@ -49,6 +50,7 @@ def register_home_tool(server: FastMCP, get_index: IndexGetter) -> None:
     :param server: The server to register on.
     :param get_index: Awaitable that returns the index for a repo and content selection.
     """
+    nib_text_only(server, "home")
 
     @server.tool(structured_output=False)
     async def home(

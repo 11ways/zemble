@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -10,6 +11,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from mcp.types import CallToolResult
 
 import zemble
 from tests.conftest import FakeEmbedder, make_chunk
@@ -599,7 +601,31 @@ async def test_no_tool_returns_json_inside_a_json_string(
 
     root = str(graph_fixture_root)
     dupes_root = str(Path(__file__).parent / "fixtures" / "dedup_lanes")
-    calls: list[tuple[str, dict[str, Any]]] = [
+    calls = _every_tool_call(root, dupes_root)
+
+    with (
+        patch("zemble.index.index.load_embedder", return_value=mock_embedder),
+    ):
+        server = create_server(cache)
+        listed = await server.list_tools()
+        registered = {tool.name for tool in listed}
+        assert registered <= {name for name, _ in calls}, "every registered tool is covered by this test"
+        schemas = {tool.name for tool in listed if tool.outputSchema is not None}
+        assert schemas == set(), "a tool advertising an output schema gets its text wrapped as {'result': ...}"
+        complaints = []
+        for name, args in calls:
+            result = await server.call_tool(name, args)
+            assert not isinstance(result, CallToolResult), f"{name}: the default server answers with content only"
+            assert result[0], f"{name} answered with no content at all"
+            complaint = _double_encoding_complaint(name, result)
+            if complaint is not None:
+                complaints.append(complaint)
+    assert complaints == [], "no tool may make its client parse JSON out of JSON"
+
+
+def _every_tool_call(root: str, dupes_root: str) -> list[tuple[str, dict[str, Any]]]:
+    """One call per registered tool (dupes in both formats) against the graph and dedup fixtures."""
+    return [
         ("status", {}),
         ("search", {"query": "circle", "repo": root}),
         ("find_related", {"file_path": "src/main/java/com/example/core/Circle.java", "line": 5, "repo": root}),
@@ -617,23 +643,67 @@ async def test_no_tool_returns_json_inside_a_json_string(
         ("dupes", {"repo": dupes_root, "kind": "exact", "format": "json"}),
     ]
 
-    with (
-        patch("zemble.index.index.load_embedder", return_value=mock_embedder),
-    ):
-        server = create_server(cache)
-        listed = await server.list_tools()
-        registered = {tool.name for tool in listed}
-        assert registered <= {name for name, _ in calls}, "every registered tool is covered by this test"
-        schemas = {tool.name for tool in listed if tool.outputSchema is not None}
-        assert schemas == set(), "a tool advertising an output schema gets its text wrapped as {'result': ...}"
-        complaints = []
+
+def _without_timing(text: str) -> str:
+    """Blank the wall-clock duration a dupes report states, in either format: the one part two runs differ in."""
+    text = re.sub(r" in [0-9.]+s\n", " in Ns\n", text, count=1)
+    return re.sub(r'"elapsed_seconds": [0-9.]+', '"elapsed_seconds": N', text, count=1)
+
+
+def _nib_part_complaint(part: dict[str, Any]) -> str | None:
+    """Return why one nib part breaks protocol version 1, or None when it is a text or a true location."""
+    if set(part) == {"text"}:
+        return None if isinstance(part["text"], str) else f"text part holds {type(part['text'])}"
+    if not {"path", "start", "end"} <= set(part) <= {"path", "start", "end", "indexed"}:
+        return f"part has keys {sorted(part)}"
+    path = Path(part["path"])
+    if not path.is_absolute() or not path.is_file():
+        return f"{part['path']} is not an absolute path to a file"
+    lines = path.read_text(encoding="utf-8").split("\n")
+    if not 1 <= part["start"] <= part["end"] <= len(lines):
+        return f"{path.name}:{part['start']}-{part['end']} is outside the file"
+    if "indexed" in part and part["indexed"] != "\n".join(lines[part["start"] - 1 : part["end"]]):
+        return f"{path.name}:{part['start']}-{part['end']}: indexed is not the file's lines"
+    return None
+
+
+@pytest.mark.anyio
+async def test_nib_provider_mode_adds_parts_beside_the_unchanged_text(
+    cache: IndexCache,
+    mock_embedder: FakeEmbedder,
+    graph_fixture_root: Path,
+    graph_cache: Path,
+) -> None:
+    """`zemble nib-provider` lists the same tools and answers each with the default text plus nib's parts."""
+    root = str(graph_fixture_root)
+    dupes_root = str(Path(__file__).parent / "fixtures" / "dedup_lanes")
+    calls = [
+        *_every_tool_call(root, dupes_root),
+        ("search", {"query": "circle", "repo": root, "max_snippet_lines": None}),
+        ("search", {"query": "circle", "repo": root, "max_snippet_lines": 0}),
+        ("explain", {"query": "circle area", "repo": root, "budget": 4000}),
+    ]
+    with patch("zemble.index.index.load_embedder", return_value=mock_embedder):
+        default = create_server(cache)
+        nib = create_server(cache, nib=True)
+        listed = await nib.list_tools()
+        assert listed == await default.list_tools(), "nib mode offers exactly the default tools"
+        located: set[str] = set()
         for name, args in calls:
-            result = await server.call_tool(name, args)
-            assert result[0], f"{name} answered with no content at all"
-            complaint = _double_encoding_complaint(name, result)
-            if complaint is not None:
-                complaints.append(complaint)
-    assert complaints == [], "no tool may make its client parse JSON out of JSON"
+            expected = await default.call_tool(name, args)
+            result = await nib.call_tool(name, args)
+            assert isinstance(result, CallToolResult), f"{name}: nib mode answers with a full result"
+            if name != "status":  # status reports the moment it answered
+                texts = [_without_timing(block.text) for block in result.content]
+                assert texts == [_without_timing(block.text) for block in expected], f"{name}: the text is unchanged"
+            structured = result.structuredContent
+            assert structured is not None and structured["nib"] == 1, f"{name}: protocol version 1"
+            assert structured["parts"], f"{name}: at least one part"
+            complaints = [c for c in map(_nib_part_complaint, structured["parts"]) if c is not None]
+            assert complaints == [], f"{name}: {complaints}"
+            if any("path" in part for part in structured["parts"]):
+                located.add(name)
+    assert located == {name for name, _ in calls} - {"status", "home", "dupes"}, "every code-showing tool locates"
 
 
 _MCP_LAUNCHER = """

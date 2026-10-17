@@ -37,8 +37,12 @@ class OutlineError(Exception):
 
 def symbol_label(symbol: Symbol) -> str:
     """Name a symbol's kind and signature without repeating a keyword the signature already carries."""
-    text = symbol.signature or symbol.name
-    return text if text.split(" ", 1)[0] == symbol.kind.value else f"{symbol.kind.value} {text}"
+    return kind_label(symbol.kind.value, symbol.signature or symbol.name)
+
+
+def kind_label(kind: str, text: str) -> str:
+    """Prefix a signature or name with its kind, unless the signature already starts with that keyword."""
+    return text if text.split(" ", 1)[0] == kind else f"{kind} {text}"
 
 
 @dataclass(frozen=True)
@@ -74,12 +78,10 @@ class Outline:
 
     def render(self) -> str:
         """Render the outline as plain text."""
-        lines = [f"package {self.package}" if self.package else f"# {self.file_path}", ""]
-        if self.package:
-            lines.insert(1, f"# {self.file_path}")
+        lines = outline_header(self.package, self.file_path) + [""]
         lines += [entry.render() for entry in self.entries]
         if self.members_filter and not self.entries:
-            lines.append(f"(no member matches {self.members_filter!r})")
+            lines.append(no_member_line(self.members_filter))
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -120,11 +122,11 @@ class Signatures:
             symbol_label(self.symbol),
             f"{self.symbol.file_path}:{self.symbol.start_line}",
             "",
-            f"callers (exact): {len(self.callers)}",
+            callers_heading(len(self.callers)),
         ]
-        lines += [f"  {path}:{line}  {name}" for path, line, name in self.callers]
+        lines += [caller_line(path, line, name) for path, line, name in self.callers]
         if self.ambiguous:
-            lines.append(f"  (+{self.ambiguous} by-name or ambiguous call site(s) not listed)")
+            lines.append(ambiguous_line(self.ambiguous))
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -138,6 +140,31 @@ class Signatures:
             "callers": [{"file_path": path, "line": line, "caller": name} for path, line, name in self.callers],
             "ambiguous_callers": self.ambiguous,
         }
+
+
+def outline_header(package: str, file_path: str) -> list[str]:
+    """Return the lines an outline opens with: its package, when it has one, then its file."""
+    return [f"package {package}", f"# {file_path}"] if package else [f"# {file_path}"]
+
+
+def no_member_line(members_filter: str) -> str:
+    """Say that a member filter left an outline empty."""
+    return f"(no member matches {members_filter!r})"
+
+
+def callers_heading(count: int) -> str:
+    """Head the exact call sites of a signatures answer."""
+    return f"callers (exact): {count}"
+
+
+def caller_line(path: str, line: int, name: str) -> str:
+    """Name one exact call site of a signatures answer."""
+    return f"  {path}:{line}  {name}"
+
+
+def ambiguous_line(count: int) -> str:
+    """Count the call sites a signatures answer does not list."""
+    return f"  (+{count} by-name or ambiguous call site(s) not listed)"
 
 
 def _matches(name: str, pattern: str) -> bool:

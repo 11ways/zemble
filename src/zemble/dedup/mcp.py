@@ -14,6 +14,7 @@ from zemble.dedup.languages import supported_extensions, supported_languages
 from zemble.dedup.model import CloneKind, Lane
 from zemble.dedup.report import baseline_diff_json, format_baseline_diff, format_report, report_json
 from zemble.mcp_repo import resolve_repo, with_default_note
+from zemble.nib.parts import nib_text_only
 from zemble.refusal import Refused
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -93,6 +94,7 @@ def _run(
 
 def register_dupes_tool(server: FastMCP) -> None:
     """Register the duplication tool on a FastMCP server."""
+    nib_text_only(server, "dupes")
 
     @server.tool(structured_output=False)
     async def dupes(

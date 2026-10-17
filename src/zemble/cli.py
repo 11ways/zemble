@@ -207,13 +207,24 @@ def main() -> None:
         _mcp_main()
 
 
+#: The first argument that runs the MCP server for nib (docs/nib-provider.md) instead of plain MCP.
+_NIB_PROVIDER_MODE = "nib-provider"
+#: The modes the bare `zemble` command's MCP server accepts.
+_MCP_MODES = ("mcp", _NIB_PROVIDER_MODE)
+
+
 def _mcp_main() -> None:
     parser = argparse.ArgumentParser(
         prog="zemble",
         description="Instant local code search for agents.",
     )
     _add_content_args(parser)
-    parser.add_argument("mode", nargs="?", choices=["mcp"], help="Run the MCP stdio server (also the default).")
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=_MCP_MODES,
+        help="Run the MCP stdio server (`mcp`, also the default), or answer for nib as its provider (`nib-provider`).",
+    )
     _add_daemon_arg(parser)
     args = parser.parse_args()
     if args.no_daemon:
@@ -230,7 +241,7 @@ def _mcp_main() -> None:
     from zemble.mcp import force_exit_if_threads_linger, serve
 
     content = _resolve_content(args.content, args.include_text_files)
-    asyncio.run(serve(content))
+    asyncio.run(serve(content, nib=args.mode == _NIB_PROVIDER_MODE))
     # An MCP server that returned on stdin EOF must actually leave, even if a loaded library
     # parked a non-daemon thread; a lingering server keeps serving nothing but stale code.
     force_exit_if_threads_linger()

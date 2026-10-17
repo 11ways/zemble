@@ -21,6 +21,8 @@ from zemble.home.mcp import register_home_tool
 from zemble.index import ZembleIndex
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
 from zemble.mcp_repo import DEFAULT_REPO, resolve_repo, with_default_note
+from zemble.nib.parts import Part, nib_answer, source_part, text_part
+from zemble.nib.server import NibProviderFastMCP
 from zemble.refusal import Refused
 from zemble.runtime.mcp import StaleAwareFastMCP, register_status_tool
 from zemble.types import ContentType
@@ -134,9 +136,28 @@ def _resolve_content_selection(
     return (ContentType(content),)
 
 
-def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (ContentType.CODE,)) -> FastMCP:
-    """Build and return a configured FastMCP server backed by the given cache."""
-    server = StaleAwareFastMCP(
+def _results_parts(root: str, payload: Any) -> list[Part] | None:
+    """Lay out a `format_results` payload for nib: a line of prose per hit, then the code it shows."""
+    if not isinstance(payload, dict) or "results" not in payload:
+        return None
+    parts: list[Part] = [text_part(f"{payload['query']}: {len(payload['results'])} result(s)")]
+    for rank, entry in enumerate(payload["results"], 1):
+        path, start, end = entry["file_path"], entry["start_line"], entry["end_line"]
+        parts.append(text_part(f"#{rank}  {path}:{start}-{end}  score {entry['score']}"))
+        shown = source_part(root, path, start, entry["content"]) if entry.get("content") else None
+        if shown is not None:
+            parts.append(shown)
+    return parts
+
+
+def create_server(
+    cache: IndexCache, default_content: Sequence[ContentType] = (ContentType.CODE,), *, nib: bool = False
+) -> FastMCP:
+    """Build and return a configured FastMCP server backed by the given cache.
+
+    :param nib: Answer for nib as well (`zemble nib-provider`): results also carry nib's parts.
+    """
+    server = (NibProviderFastMCP if nib else StaleAwareFastMCP)(
         "zemble",
         instructions=(
             "Instant code search for any local or remote git repository. "
@@ -172,7 +193,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
         ] = None,
         paths: Annotated[list[str] | None, Field(description=PATHS_DESCRIPTION)] = None,
         exclude: Annotated[list[str] | None, Field(description=EXCLUDE_DESCRIPTION)] = None,
-    ) -> str | dict[str, Any]:
+    ) -> Any:
         """Search once with a focused query describing what the code does or its name.
 
         Write queries using function/class names or behavior descriptions, not error messages.
@@ -194,15 +215,15 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             },
         )
         if remote is not None:
-            return remote
+            return nib_answer(server, repo, remote, _results_parts)
         try:
             index = await _get_index(repo, cache, selected_content, paths or (), exclude or ())
         except ValueError as exc:
-            return str(exc)
+            return nib_answer(server, repo, str(exc))
         results = index.search(query, top_k=top_k, max_snippet_lines=max_snippet_lines)
         if not results:
-            return {"error": "No results found."}
-        return format_results(query, results, max_snippet_lines)
+            return nib_answer(server, repo, {"error": "No results found."})
+        return nib_answer(server, repo, format_results(query, results, max_snippet_lines), _results_parts)
 
     @server.tool(structured_output=False)
     async def find_related(
@@ -234,7 +255,7 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
         ] = None,
         paths: Annotated[list[str] | None, Field(description=PATHS_DESCRIPTION)] = None,
         exclude: Annotated[list[str] | None, Field(description=EXCLUDE_DESCRIPTION)] = None,
-    ) -> str | dict[str, Any]:
+    ) -> Any:
         """Find code similar to a known location.
 
         Useful for discovering all implementations of an interface, all callers of a function,
@@ -257,19 +278,20 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
             },
         )
         if remote is not None:
-            return remote
+            return nib_answer(server, repo, remote, _results_parts)
         try:
             index = await _get_index(repo, cache, selected_content, paths or (), exclude or ())
         except ValueError as exc:
-            return str(exc)
+            return nib_answer(server, repo, str(exc))
         chunk = index.chunk_at(file_path, line)
         if chunk is None:
-            return {"error": describe_unresolved_location(index, file_path, line), "unresolved_location": True}
+            error = {"error": describe_unresolved_location(index, file_path, line), "unresolved_location": True}
+            return nib_answer(server, repo, error)
         results = index.find_related(chunk, top_k=top_k, max_snippet_lines=max_snippet_lines)
         if not results:
-            return {"error": f"No related chunks found for {file_path}:{line}."}
+            return nib_answer(server, repo, {"error": f"No related chunks found for {file_path}:{line}."})
         label = f"Chunks related to {file_path}:{line}"
-        return format_results(label, results, max_snippet_lines)
+        return nib_answer(server, repo, format_results(label, results, max_snippet_lines), _results_parts)
 
     register_status_tool(server)
     register_graph_tools(server)
@@ -283,12 +305,10 @@ def create_server(cache: IndexCache, default_content: Sequence[ContentType] = (C
     return server
 
 
-async def serve(
-    content: Sequence[ContentType] = (ContentType.CODE,),
-) -> None:
-    """Start an MCP stdio server."""
+async def serve(content: Sequence[ContentType] = (ContentType.CODE,), *, nib: bool = False) -> None:
+    """Start an MCP stdio server; `nib` answers for nib as well (`zemble nib-provider`)."""
     cache = IndexCache()
-    server = create_server(cache, default_content=content)
+    server = create_server(cache, default_content=content, nib=nib)
     try:
         await server.run_stdio_async()
     finally:

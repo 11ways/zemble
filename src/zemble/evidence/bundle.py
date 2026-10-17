@@ -182,6 +182,9 @@ class BundleItem:
     tokens: int
     presentation: Presentation = Presentation.CONTENT
     tier: int = 0
+    #: Whether `text` is the file's own lines from `start_line` on (a truncation marker aside),
+    #: rather than zemble's rendering of the item, such as an outline.
+    verbatim: bool = False
 
     @property
     def location(self) -> str:
@@ -200,6 +203,7 @@ class BundleItem:
             "tokens": self.tokens,
             "presentation": self.presentation.value,
             "tier": self.tier,
+            "verbatim": self.verbatim,
         }
 
 
@@ -260,23 +264,13 @@ class Bundle:
         """Render the bundle as markdown, or nothing at all when no evidence survived the budget."""
         if not self.items:
             return ""
-        lines = [
-            f"# Evidence for: {self.query}",
-            "",
-            f"intent: {self.intent.value} (rule: {self.intent_rule}; order: {self.order})",
-            f"{len(self.items)} item(s), ~{self.total_tokens} tokens.",
-            "",
-        ]
+        lines = bundle_header(
+            self.query, self.intent.value, self.intent_rule, self.order, len(self.items), self.total_tokens
+        )
         for item in self.items:
             lines.append(_render_item(item))
         if self.omitted:
-            lines += ["## Not included (locations only)", ""]
-            lines += [
-                f"- {entry.file_path}:{entry.start_line}-{entry.end_line}  ({entry.reason})" for entry in self.omitted
-            ]
-            if self.unlisted_omissions:
-                lines.append(f"- ... and {self.unlisted_omissions} more, not listed for budget")
-            lines.append("")
+            lines += omitted_lines([entry.to_dict() for entry in self.omitted], self.unlisted_omissions)
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -315,6 +309,36 @@ class _Candidate:
     tier: int = 0
     #: Whether the plan already cut this text, so its fullest form is a truncated one.
     pre_truncated: bool = False
+    #: Whether `text` is the file's own lines from `start_line` on; see `BundleItem.verbatim`.
+    verbatim: bool = False
+
+
+def bundle_header(query: str, intent: str, rule: str, order: str, count: int, tokens: int) -> list[str]:
+    """Return the lines a rendered bundle opens with, its trailing blank line included."""
+    return [
+        f"# Evidence for: {query}",
+        "",
+        f"intent: {intent} (rule: {rule}; order: {order})",
+        f"{count} item(s), ~{tokens} tokens.",
+        "",
+    ]
+
+
+def item_heading(file_path: str, start_line: int, end_line: int, reason: str) -> str:
+    """Return the heading line one rendered item starts with."""
+    return f"## {file_path}:{start_line}-{end_line}  ({reason})"
+
+
+def omitted_lines(omitted: Sequence[dict[str, object]], unlisted: int) -> list[str]:
+    """Return the rendered section naming what the budget left out, from omissions as `to_dict` writes them."""
+    lines = ["## Not included (locations only)", ""]
+    lines += [
+        f"- {entry['file_path']}:{entry['start_line']}-{entry['end_line']}  ({entry['reason']})" for entry in omitted
+    ]
+    if unlisted:
+        lines.append(f"- ... and {unlisted} more, not listed for budget")
+    lines.append("")
+    return lines
 
 
 def _language_of(file_path: str) -> str:
@@ -324,7 +348,7 @@ def _language_of(file_path: str) -> str:
 
 def _render_item(item: BundleItem) -> str:
     """Render one item exactly as it is costed, so the budget matches the output."""
-    header = f"## {item.location}  ({item.reason})"
+    header = item_heading(item.file_path, item.start_line, item.end_line, item.reason)
     if item.presentation is Presentation.LOCATION:
         body = f"`{item.text}`" if item.text else "(location only)"
         return f"{header}\n{body}\n"
@@ -348,13 +372,29 @@ def _cost(candidate: _Candidate, text: str, presentation: Presentation) -> int:
     return estimate_tokens(_render_item(probe))
 
 
+_TRUNCATION_MARKER = "... (truncated, {dropped} more lines)"
+_TRUNCATION_LINE = re.compile(r"\.\.\. \(truncated, (\d+) more lines\)")
+
+
 def truncate_lines(text: str, keep: int) -> str:
     """Keep the first lines of a text and say how many were dropped."""
     lines = text.splitlines()
     if keep >= len(lines):
         return text
     dropped = len(lines) - keep
-    return "\n".join([*lines[:keep], f"... (truncated, {dropped} more lines)"])
+    return "\n".join([*lines[:keep], _TRUNCATION_MARKER.format(dropped=dropped)])
+
+
+def split_truncation(text: str) -> tuple[str, int]:
+    """Split the marker `truncate_lines` appends off a text, returning the kept text and how many lines it dropped.
+
+    A text without the marker comes back whole, with 0 dropped.
+    """
+    head, _, last = text.rpartition("\n")
+    match = _TRUNCATION_LINE.fullmatch(last)
+    if not head or match is None:
+        return text, 0
+    return head, int(match.group(1))
 
 
 class _Sources:
@@ -459,7 +499,9 @@ def _location_line(symbol: Symbol) -> str:
     return f"{symbol.kind.value} {symbol.signature or symbol.qualified_name}"
 
 
-def _candidate_for_symbol(kind: ItemKind, symbol: Symbol, reason: str, text: str, score: float) -> _Candidate:
+def _candidate_for_symbol(
+    kind: ItemKind, symbol: Symbol, reason: str, text: str, score: float, *, verbatim: bool
+) -> _Candidate:
     """Build a candidate whose evidence is one symbol's declaration."""
     return _Candidate(
         kind=kind,
@@ -471,6 +513,7 @@ def _candidate_for_symbol(kind: ItemKind, symbol: Symbol, reason: str, text: str
         location_text=symbol_label(symbol),
         score=score,
         key=(symbol.file_path, symbol.start_line, symbol.end_line),
+        verbatim=verbatim,
     )
 
 
@@ -493,7 +536,7 @@ def _test_candidates(
     for hit in (named + exercising)[: plan.cap(ItemKind.TEST)]:
         text = sources.span(hit.symbol.file_path, hit.symbol.start_line, hit.symbol.end_line, MAX_SYMBOL_LINES)
         reason = f"{hit.reason}; covers {display_name(anchor)}"
-        candidates.append(_candidate_for_symbol(ItemKind.TEST, hit.symbol, reason, text, score))
+        candidates.append(_candidate_for_symbol(ItemKind.TEST, hit.symbol, reason, text, score, verbatim=True))
     return candidates
 
 
@@ -505,7 +548,7 @@ def _caller_candidates(
     candidates = []
     for hit in ordered[: plan.cap(ItemKind.CALLER)]:
         text = sources.span(hit.symbol.file_path, hit.symbol.start_line, hit.symbol.end_line, MAX_SYMBOL_LINES)
-        candidates.append(_candidate_for_symbol(ItemKind.CALLER, hit.symbol, hit.reason, text, score))
+        candidates.append(_candidate_for_symbol(ItemKind.CALLER, hit.symbol, hit.reason, text, score, verbatim=True))
     if weak:
         candidates.append(
             _Candidate(
@@ -534,7 +577,9 @@ def _hierarchy_candidates(graph: GraphProvider, enclosing: Symbol, score: float,
     ):
         for hit in hits[: plan.cap(kind)]:
             candidates.append(
-                _candidate_for_symbol(kind, hit.symbol, hit.reason, _outline_text(graph, hit.symbol), score)
+                _candidate_for_symbol(
+                    kind, hit.symbol, hit.reason, _outline_text(graph, hit.symbol), score, verbatim=False
+                )
             )
     return candidates
 
@@ -549,7 +594,7 @@ def _callee_candidates(
         if hit.symbol.file_path == anchor.file_path:
             continue  # Already on screen: the anchor's own file is in the bundle.
         text = sources.span(hit.symbol.file_path, hit.symbol.start_line, hit.symbol.end_line, MAX_SYMBOL_LINES)
-        candidates.append(_candidate_for_symbol(ItemKind.CALLEE, hit.symbol, hit.reason, text, score))
+        candidates.append(_candidate_for_symbol(ItemKind.CALLEE, hit.symbol, hit.reason, text, score, verbatim=True))
     return candidates
 
 
@@ -573,6 +618,7 @@ def _doc_candidates(
                 location_text=path,
                 score=score,
                 key=(path, result.chunk.start_line, result.chunk.end_line),
+                verbatim=True,
             )
         )
     candidates += _sibling_docs(primary, sources, score)
@@ -610,6 +656,7 @@ def _sibling_docs(primary: Sequence[str], sources: _Sources, score: float) -> li
                     location_text=relative,
                     score=score,
                     key=(relative, 1, 1),
+                    verbatim=True,
                 )
             )
     return candidates
@@ -658,6 +705,7 @@ def _expand(
                 score=result.score,
                 key=(path, chunk.start_line, chunk.end_line),
                 pre_truncated=was_cut,
+                verbatim=True,
             )
         )
         if anchor is not None and len(anchors) < MAX_ANCHORS:
@@ -681,6 +729,7 @@ def _expand(
                         f"outline of {enclosing.name}, which declares {anchor.name}",
                         text,
                         score,
+                        verbatim=False,
                     )
                 )
             candidates += _hierarchy_candidates(graph, enclosing, score, plan)
@@ -726,7 +775,7 @@ def _seed_candidates(graph: GraphProvider, query: str, sources: _Sources, plan: 
         for hit in (exact or hits)[: plan.cap(kind)]:
             text = sources.span(hit.symbol.file_path, hit.symbol.start_line, hit.symbol.end_line, MAX_SYMBOL_LINES)
             reason = f"{hit.reason}; names {display_name(symbol)}"
-            candidates.append(_candidate_for_symbol(kind, hit.symbol, reason, text, _SEED_SCORE))
+            candidates.append(_candidate_for_symbol(kind, hit.symbol, reason, text, _SEED_SCORE, verbatim=True))
     return candidates
 
 
@@ -864,6 +913,7 @@ def _fit(candidate: _Candidate, allowance: int, floor: int | None = None) -> Bun
                 tokens=cost,
                 presentation=presentation,
                 tier=candidate.tier,
+                verbatim=candidate.verbatim,
             )
     return None
 
