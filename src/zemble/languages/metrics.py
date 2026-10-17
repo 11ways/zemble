@@ -15,7 +15,7 @@ and a generator's header (`measure_file`).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, fields
 from functools import cache
 from typing import Any, NamedTuple
@@ -367,14 +367,15 @@ def doc_comment(
     one that shares its first line with code before it trails that code and ends the run. A
     declaration that opens its parent (Python's first member opens the class block, which the
     grammar places after the comments) is looked through to the parent's siblings, and the
-    attached kinds (Rust's `#[attr]` lines) are passed over without counting. A comment whose every
-    line reads as code (`reads_as_code`) is disabled code, not documentation, and ends the run.
+    attached kinds (Rust's `#[attr]` lines) are passed over without counting. A run whose every line
+    reads as code (`reads_as_code`) is disabled code, not documentation; it is judged as a whole, since
+    a line-comment run is one node per line and a doc's example lines read as code on their own.
 
     @param declaration the declaration node, or the wrapper the spec wraps it in.
     @param body the body whose first statement may be a docstring (`ComplexitySpec.docstring_kinds`).
     @param attached_kinds sibling kinds that belong to the declaration (`LanguageSpec.annotation_kinds`).
     """
-    rows: set[int] = set()
+    run: list[Node] = []
     node, top = declaration, declaration.start_point[0]
     while True:
         previous = node.prev_named_sibling
@@ -391,12 +392,14 @@ def doc_comment(
             trails = before is not None and before.type not in spec.comment_kinds
             if trails and _last_row(before) == previous.start_point[0]:
                 break
-            if _commented_out(previous):
-                break
-            rows.update(range(previous.start_point[0], _last_row(previous) + 1))
+            run.append(previous)
         elif previous.type not in attached_kinds:
             break
         node, top = previous, previous.start_point[0]
+    rows: set[int] = set()
+    if not _commented_out(run):
+        for item in run:
+            rows.update(range(item.start_point[0], _last_row(item) + 1))
     return DocComment(len(rows) + _docstring_lines(body, spec), frozenset(rows))
 
 
@@ -421,6 +424,9 @@ GENERATED = re.compile(
 )
 #: How many leading lines a generator's header is looked for in.
 GENERATED_HEAD_LINES = 30
+#: Comment openers that declare documentation (`/**`, `/*!`, `///`, `//!`, OCaml's `(**`, Haddock's `-- |`): an example
+#: written in one is documentation wherever it stands, even where no declaration follows to attribute it to.
+DOC_OPENER = re.compile(r"(?:/\*\*|/\*!|///|//!|\(\*\*|--\s*[|^])")
 
 #: Comment openers of every measured grammar (`//`, `/*`, `*`, `#`, `;`, `%`, `--`, `!`, `<!--`, `{-`, `(*`).
 _OPENER = re.compile(r"^(?:<!--|\{-|\(\*|[/*#;%!-])+")
@@ -432,6 +438,15 @@ _CODE_ENDINGS = (";", "{", "}", "),")
 _BLOCK_KEYWORDS = frozenset({"if", "elif", "else", "for", "while", "def", "class", "try", "except", "with", "case"})
 #: Characters a keyword line ending in a colon must hold to read as code, not as a prose heading ("for example:").
 _CODE_CHARACTERS = frozenset("(=[.")
+#: A dotted name, as a call or an assignment writes it.
+_NAME = r"[A-Za-z_$][\w$]*(?:(?:\.|->|::)[A-Za-z_$][\w$]*)*"
+#: A whole statement a language without semicolons writes: a call (`a.b(c)`, no space before the
+#: parenthesis, which prose puts there), or an assignment whose right side is a call or one token.
+_STATEMENT = re.compile(rf"{_NAME}\(.*\)|{_NAME}\s*(?::=|[-+*/]?=)\s*(?:{_NAME}\(.*\)|\S+)")
+#: A javadoc or JSDoc block tag (`@return {String}`); an annotation (`@Override`) is capitalised.
+_DOC_TAG = re.compile(r"@[a-z]")
+#: A JSON value written as an example (`{"a": {"b": null}}`): data, not code.
+_JSON = re.compile(r'[\[{].*"\s*:.*[\]}],?')
 #: A word of prose: letters, an apostrophe, and at most one trailing punctuation mark.
 _PROSE_WORD = re.compile(r"[A-Za-z']+[,.;:!?]?")
 #: Consecutive prose words that make a line a sentence however it ends.
@@ -443,21 +458,29 @@ def _uncommented(comment_line: str) -> str:
     return _CLOSER.sub("", _OPENER.sub("", comment_line.strip())).strip()
 
 
-def _commented_out(comment: Node) -> bool:
-    """Whether every line of a comment that says anything reads as code: disabled code is no documentation."""
-    said = [line for line in (comment.text or b"").decode("utf-8", "replace").split("\n") if _uncommented(line)]
-    return bool(said) and all(reads_as_code(line) for line in said)
+def _commented_out(comments: list[Node]) -> bool:
+    """Whether every line of some comments that says anything reads as code: disabled code is no documentation.
+
+    Read lazily: a doc's first sentence answers, so a long docblock costs one line.
+    """
+    said = False
+    for _, line in _said(comments):
+        if not reads_as_code(line):
+            return False
+        said = True
+    return said
 
 
 def reads_as_code(comment_line: str) -> bool:
     """Whether one line of a comment reads as commented-out code, after its comment markers are stripped.
 
     A heuristic in place of Sonar S125's re-parse: the line must end the way only code ends (`;`, `{`,
-    `}`, `),`), or open a keyword block with a colon and hold one of `(=[.`; it must not hold a URL,
-    a javadoc inline tag (`{@link X}`) or a run of `_PROSE_RUN` prose words.
+    `}`, `),`), be a whole call or assignment (`_STATEMENT`), or open a keyword block with a colon and
+    hold one of `(=[.`; it must not start with a doc tag (`@return {String}`), be a JSON example, nor
+    hold a URL, an inline tag (`{@link X}`) or a run of `_PROSE_RUN` prose words.
     """
     line = _uncommented(comment_line)
-    if not line or "://" in line or "{@" in line:
+    if not line or _DOC_TAG.match(line) or _JSON.fullmatch(line) or "://" in line or "{@" in line:
         return False
     words = line.split()
     run = 0
@@ -465,7 +488,7 @@ def reads_as_code(comment_line: str) -> bool:
         run = run + 1 if _PROSE_WORD.fullmatch(word) else 0
         if run >= _PROSE_RUN:
             return False
-    if line.endswith(_CODE_ENDINGS):
+    if line.endswith(_CODE_ENDINGS) or _STATEMENT.fullmatch(line):
         return True
     keyword = re.split(r"[\s(]", line, maxsplit=1)[0]
     return (
@@ -477,6 +500,54 @@ def reads_as_code(comment_line: str) -> bool:
     )
 
 
+def _blocks(comments: list[Node], source: bytes) -> list[list[Node]]:
+    """Group the comments that start their own line into runs on adjacent lines; a trailing one annotates its line."""
+    blocks: list[list[Node]] = []
+    for node in sorted(comments, key=lambda item: item.start_byte):
+        line_start = source.rfind(b"\n", 0, node.start_byte) + 1
+        if source[line_start : node.start_byte].strip():
+            continue
+        if blocks and node.start_point[0] <= _last_row(blocks[-1][-1]) + 1:
+            blocks[-1].append(node)
+        else:
+            blocks.append([node])
+    return blocks
+
+
+def _lines(node: Node) -> Iterator[tuple[int, str]]:
+    """Each line of a comment as written, with its 0-based row."""
+    first = node.start_point[0]
+    text = (node.text or b"").decode("utf-8", "replace")
+    return enumerate(text.split("\n")[: _last_row(node) - first + 1], start=first)
+
+
+def _said(comments: list[Node]) -> Iterator[tuple[int, str]]:
+    """Each line of some comments that says anything, as (row, line as written)."""
+    return ((row, line) for node in comments for row, line in _lines(node) if _uncommented(line))
+
+
+def disabled_code(comments: list[Node], source: bytes, doc_rows: frozenset[int] = frozenset()) -> set[int]:
+    """The 0-based rows of a file's comments that are commented-out code.
+
+    Counted by block (`_blocks`): only a block whose every line reads as code is disabled code. One that
+    also holds prose is an explanation with an example, as is a block written with a `DOC_OPENER` and one
+    right below a block whose last line ends in a colon ("like this:").
+
+    @param doc_rows the rows of every doc comment the extractor attributed (`doc_comment`), never counted.
+    """
+    code: set[int] = set()
+    # The last row a block may start on to be the example a colon-ended block introduces.
+    introduced_until = -1
+    for block in _blocks(comments, source):
+        documentation = DOC_OPENER.match((block[0].text or b"").decode("utf-8", "replace")) is not None
+        if block[0].start_point[0] > introduced_until and not documentation and _commented_out(block):
+            code.update(row for row, _ in _said(block) if row not in doc_rows)
+        last = next((line for _, line in reversed(list(_lines(block[-1]))) if _uncommented(line)), "")
+        # One blank line may stand between an introduction and its example.
+        introduced_until = _last_row(block[-1]) + 2 if _uncommented(last).endswith(":") else -1
+    return code
+
+
 def measure_file(
     tree: Tree, source: bytes, spec: ComplexitySpec, doc_rows: frozenset[int] = frozenset()
 ) -> FileMetrics:
@@ -484,30 +555,28 @@ def measure_file(
 
     Lines are counted from the bytes, since a grammar's root node may stop short of trailing blank lines.
 
-    @param doc_rows the 0-based rows of every doc comment the extractor attributed (`doc_comment`), never
-        read as commented-out code: an example in a docblock is documentation.
+    @param doc_rows the 0-based rows of every doc comment the extractor attributed, for `disabled_code`.
     """
     lines = source.count(b"\n") + (1 if source and not source.endswith(b"\n") else 0)
+    comments = _comments(tree, spec)
     touched: set[int] = set()
-    code: set[int] = set()
     markers: set[int] = set()
     generated = False
-    for node in _comments(tree, spec):
-        first, last = node.start_point[0], _last_row(node)
-        touched.update(range(first, last + 1))
-        text = source[node.start_byte : node.end_byte].decode("utf-8", "replace")
-        for row, line in enumerate(text.split("\n")[: last - first + 1], start=first):
-            if MARKER.search(line):
-                markers.add(row)
-            if row < GENERATED_HEAD_LINES and not generated and GENERATED.search(line):
-                generated = True
-            if row not in doc_rows and reads_as_code(line):
-                code.add(row)
-    longest = max((len(line) for line in source.split(b"\n")), default=0)
+    for node in comments:
+        first = node.start_point[0]
+        touched.update(range(first, _last_row(node) + 1))
+        text = (node.text or b"").decode("utf-8", "replace")
+        markers.update(first + text.count("\n", 0, found.start()) for found in MARKER.finditer(text))
+        if first < GENERATED_HEAD_LINES and not generated:
+            header = GENERATED.search(text)
+            generated = header is not None and first + text.count("\n", 0, header.start()) < GENERATED_HEAD_LINES
+    code = disabled_code(comments, source, doc_rows)
+    longest = max(map(len, source.split(b"\n")))
     return FileMetrics(lines, len(touched), len(code), len(markers), longest, generated)
 
 
 __all__ = [
+    "DOC_OPENER",
     "FILE_METRIC_COLUMNS",
     "GENERATED",
     "GENERATED_HEAD_LINES",
@@ -518,6 +587,7 @@ __all__ = [
     "DocComment",
     "FileMetrics",
     "comment_lines",
+    "disabled_code",
     "doc_comment",
     "measure_callable",
     "measure_file",
