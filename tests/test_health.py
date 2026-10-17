@@ -6,6 +6,7 @@ import json
 import shutil
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ from zemble.graph.store import graph_db_path, graph_present
 from zemble.health.answers import COPYING_OPT_IN, HealthRequest, health_payload
 from zemble.health.cli import in_process
 from zemble.health.collect import collect
-from zemble.health.git import changed_lines
+from zemble.health.git import changed_lines, history_checkouts
 from zemble.health.model import Axis, Comparison, Signal, Tier
 from zemble.health.score import AXIS_WEIGHTS, SCORE_DISCLAIMER
 from zemble.health.signals import PRODUCERS
@@ -553,3 +554,132 @@ def test_cli_answers_in_both_shapes_and_builds_a_missing_graph(
     code, out = _run_cli(argv, capsys, monkeypatch)
     total = len(_EXPECTED | _COPYING)
     assert code == 0 and f"Baseline: {total} finding(s); 0 resolved, {total} remaining, 0 new" in out, out
+
+
+#: A Python function of cognitive complexity 16: for +1, if +2, for +3, if +4, if +5, `and` +1.
+_TANGLED = """def tangled(a, b, c, d):
+    total = 0
+    for i in range(a):
+        if i > b:
+            for j in range(c):
+                if j > d:
+                    if i and j:
+                        total += 1
+    return total
+"""
+_HISTORY = ["hotspot", "boundary_co_change"]
+
+
+def _edit(root: Path, *relatives: str, message: str, date: str | None = None) -> None:
+    """Append one line to each file and commit them together."""
+    for relative in relatives:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"# {message}\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", message, date=date)
+
+
+@pytest.fixture
+def history_root(tmp_path: Path, graph_cache: Path) -> Path:
+    """A scripted repository of every history shape: churn with and without complexity, co-change in and across modules.
+
+    A complex and a simple file are committed 12 times, a test file too; a cross-module and a same-module
+    pair change together in 6 of 8 commits; 20 files are committed once; a complex file has 12 commits
+    500 days old.
+    """
+    graph_cli._refreshed.clear()
+    root = tmp_path / "repo"
+    root.mkdir()
+    git(root, "init", "-q")
+    for days in range(512, 500, -1):
+        stamp = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+        _edit(root, "app/old.py", message=f"old {days}", date=stamp)
+    (root / "app/old.py").write_text(_TANGLED.replace("tangled", "aged"), encoding="utf-8")
+    (root / "app/hot.py").write_text(_TANGLED, encoding="utf-8")
+    (root / "app/simple.py").write_text("def plain(value):\n    return value + 1\n", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests/test_hot.py").write_text(_TANGLED.replace("tangled", "test_tangled"), encoding="utf-8")
+    for index in range(20):
+        (root / f"app/cold_{index}.py").write_text(f"def cold_{index}():\n    return {index}\n", encoding="utf-8")
+    for module, first, second in (("app", "app/a.py", "lib/b.py"), ("lib", "lib/c.py", "lib/d.py")):
+        for path in (first, second):
+            (root / path).parent.mkdir(exist_ok=True)
+            (root / path).write_text(f"def {Path(path).stem}():\n    return '{module}'\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "base")
+    for index in range(11):
+        _edit(root, "app/hot.py", "app/simple.py", "tests/test_hot.py", message=f"hot {index}")
+    for index in range(7):
+        # Together in the base commit and five of these seven: 6 shared of 8 either, each pair on its own.
+        _edit(root, "app/a.py", *(("lib/b.py",) if index < 5 else ()), message=f"cross {index}")
+        _edit(root, "lib/c.py", *(("lib/d.py",) if index < 5 else ()), message=f"inside {index}")
+    return root
+
+
+def test_history_reports_a_churning_complex_file_and_a_cross_module_pair(history_root: Path) -> None:
+    """A hotspot needs both churn and complexity; a co-change pair is reported only across modules."""
+    payload = _report(history_root, signals=_HISTORY)
+    health = payload["health"]
+    by_key = {finding["key"]: finding for finding in health["findings"]}
+
+    # 1. The complex file committed 12 times is a hotspot; the simple one beside it is not, nor is the test file,
+    #    and the old complex file with one commit in the window is too short a history to rank.
+    assert set(by_key) == {"hotspot:python:app/hot.py", "boundary_co_change:python:app/a.py<->lib/b.py"}, by_key
+    hot = by_key["hotspot:python:app/hot.py"]
+    assert hot["value"] > hot["threshold"], "step 1: past the top decile"
+    assert "12 commits in 365 days; complexity 16 in hot.tangled" in hot["reason"], hot["reason"]
+
+    # 2. The pair in two modules changed together in 6 of 8 commits; the pair inside `lib` is not measured.
+    pair = by_key["boundary_co_change:python:app/a.py<->lib/b.py"]
+    assert pair["value"] == 750 and "changed together in 6 of 8 commits with lib/b.py" in pair["reason"], pair
+    assert pair["elsewhere"] == ["lib/b.py:1-7"], pair["elsewhere"]
+    history = next(axis for axis in health["axes"] if axis["axis"] == "history")
+    measured = {item["signal"]: (item["past"], item["measured"]) for item in history["signals"]}
+    # Every one of the 27 changed production files is measured; only the hot one ranks.
+    assert measured == {"hotspot": (1, 27), "boundary_co_change": (1, 1)}, f"step 2: {measured}"
+
+    # 3. A path restriction keeps the pair when either file is inside it, anchored there.
+    narrowed = _report(history_root, signals=_HISTORY, paths=["lib"])
+    assert _keys(narrowed) == {"boundary_co_change:python:app/a.py<->lib/b.py"}, _keys(narrowed)
+    assert narrowed["health"]["findings"][0]["file_path"] == "lib/b.py", "step 3: anchored inside the scope"
+
+
+def test_the_history_window_excludes_older_commits(history_root: Path) -> None:
+    """The old complex file has one commit in a year and thirteen in a thousand days."""
+    year = {finding["key"] for finding in _report(history_root, signals=["hotspot"])["health"]["findings"]}
+    assert "hotspot:python:app/old.py" not in year, "step 1: its 12 old commits are outside the default window"
+    longer = _report(history_root, signals=["hotspot"], history_window=1000)["health"]
+    old = next(finding for finding in longer["findings"] if finding["key"] == "hotspot:python:app/old.py")
+    assert "13 commits in 1000 days" in old["reason"], old["reason"]
+    with pytest.raises(ValueError, match="positive number of days"):
+        _report(history_root, history_window=0)
+
+
+def test_history_off_or_outside_git_is_not_measured(
+    history_root: Path, health_root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--no-history` and a root in no checkout both leave the axis out, with a note, and still exit 0."""
+    off = _report(history_root, history=False)["health"]
+    assert not set(off["signals"]) & set(_HISTORY) and "history not measured: turned off" in off["notes"]
+
+    outside = _report(health_root)["health"]
+    history = next(axis for axis in outside["axes"] if axis["axis"] == "history")
+    assert history["score"] is None and not set(outside["signals"]) & set(_HISTORY), "step 2: not measured"
+    assert any(note.startswith("history not measured: not in a git checkout") for note in outside["notes"])
+    code, out = _run_cli(["health", str(health_root), "--no-daemon"], capsys, monkeypatch)
+    assert code == 0 and "- history: not measured (weight 1)" in out, "step 2: the CLI says so and exits 0"
+    argv = ["health", str(history_root), "--no-daemon", "--history-window", "1000", "--signals", "hotspot"]
+    code, out = _run_cli(argv, capsys, monkeypatch)
+    assert code == 0 and "13 commits in 1000 days" in out, "step 3: the window reaches the request"
+
+
+def test_a_workspace_of_checkouts_reads_each_one(history_root: Path, tmp_path: Path) -> None:
+    """A root in no checkout reads the checkouts directly under it, paths prefixed by their directory."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shutil.move(str(history_root), str(workspace / "repo"))
+    assert history_checkouts(str(workspace)) == ((str(workspace / "repo"), "repo/"),)
+    keys = _keys(_report(workspace, signals=["hotspot"]))
+    assert keys == {"hotspot:python:repo/app/hot.py"}, keys

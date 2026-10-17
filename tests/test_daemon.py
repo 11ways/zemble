@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import FakeEmbedder
+from tests.conftest import FakeEmbedder, git
 from zemble.daemon import client, server
 from zemble.daemon.cli import rotating_log_handler
 from zemble.daemon.protocol import (
@@ -779,9 +779,22 @@ def test_health_answers_over_a_real_socket(tmp_path: Path, no_embedder_load: Non
         copied = client.call("health", {"path": root, "copying": True, "signals": ["cloned_body"]}, timeout=120)
         assert copied["health"]["counts"] == {"cloned_body": 2}, f"3: {copied['health']['counts']}"
 
-        # 4. No index was loaded for it: health reads the graph and the unit index alone.
+        # 4. The history axis runs git in the daemon, its window and switch riding along.
+        off = client.call("health", {"path": root, "history": False, "signals": ["hotspot"]}, timeout=60)
+        assert off["health"]["signals"] == [] and "history not measured: turned off" in off["health"]["notes"], "4"
+        git(Path(root), "init", "-q")
+        git(Path(root), "add", "-A")
+        git(Path(root), "commit", "-q", "-m", "base")
+        read = client.call("health", {"path": root, "history_window": 30, "signals": ["hotspot"]}, timeout=60)
+        history = next(axis for axis in read["health"]["axes"] if axis["axis"] == "history")
+        assert [item["signal"] for item in history["signals"]] == ["hotspot"], f"4: measured, got {history}"
+        scored = history["signals"][0]
+        assert scored["measured"] >= 1 and scored["past"] == 0, "4: every file changed once, none ranks"
+        assert not [note for note in read["health"]["notes"] if note.startswith("history")], "4: git was read"
+
+        # 5. No index was loaded for it: health reads the graph and the unit index alone.
         status = client.call("status", timeout=30)
-        assert status["indexes"] == [], f"4: no index, got {status['indexes']}"
+        assert status["indexes"] == [], f"5: no index, got {status['indexes']}"
 
 
 def test_cli_search_reports_unavailable_without_loading_an_index(

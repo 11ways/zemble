@@ -7,9 +7,11 @@ at all (an absence it cannot vouch for, a count it cannot finish), so it neither
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from zemble.dedup.languages import SiteKind, profile_for
 from zemble.dedup.model import CloneKind, Unit
@@ -26,6 +28,7 @@ from zemble.graph.provider import display_name
 from zemble.health.collect import HIERARCHY_KINDS, HealthFacts, anonymous, language_of, named_type
 from zemble.health.copying import CODE_KINDS, CopyingFacts
 from zemble.health.git import merge_ranges
+from zemble.health.history import HOTSPOT_MIN_COMMITS
 from zemble.health.model import Signal
 from zemble.health.style import Distance
 from zemble.languages import Visibility
@@ -425,6 +428,79 @@ def _style_outlier_directory(facts: HealthFacts) -> Iterator[Sample]:
     return _style_samples(facts, facts.style.directory)
 
 
+def _hotspot_cause(facts: HealthFacts, path: str, lines: int) -> str:
+    """What makes a file a hotspot candidate (its most complex callable, its size), or "" when nothing does."""
+    complex_limit = Signal.COMPLEX_CALLABLE.facts.threshold
+    causes = []
+    measured = [
+        (metric.complexity, symbol)
+        for symbol in facts.callables_by_file.get(path, ())
+        if (metric := facts.metrics.get(symbol.id)) is not None
+    ]
+    if measured:
+        complexity, symbol = max(measured, key=lambda item: (item[0], -item[1].start_line))
+        if complexity > complex_limit:
+            causes.append(f"complexity {complexity} in {display_name(symbol)}")
+    if lines > Signal.LARGE_FILE.facts.threshold:
+        causes.append(f"{lines} lines")
+    return ", ".join(causes)
+
+
+def _hotspot(facts: HealthFacts) -> Iterator[Sample]:
+    """Every changed production file of the scope, valued by its churn rank when it is complex or large, else 0.
+
+    The rank is in thousandths of the changed production files of the view in the same checkout that
+    changed strictly less often: each checkout of a workspace is its own history, so one busy repository
+    does not set the bar for the others. Files tied at the top rank below every one of them, so an
+    evenly changed tree has none. A file neither complex nor large, or with fewer than
+    `HOTSPOT_MIN_COMMITS` commits in the window, is measured at 0: it changed, and it is no hotspot.
+    A file the window never touched is not measured.
+    """
+    history = facts.history
+    if history is None:
+        return
+    churns: dict[str, list[int]] = defaultdict(list)
+    for path, ids in history.commits.items():
+        churns[history.checkout_of(path)].append(len(ids))
+    for values in churns.values():
+        values.sort()
+    for path, metric in facts.files:
+        churn = history.churn(path)
+        if not churn:
+            continue
+        cause = _hotspot_cause(facts, path, metric.lines) if churn >= HOTSPOT_MIN_COMMITS else ""
+        peers = churns[history.checkout_of(path)]
+        rank = bisect_left(peers, churn) * 1000 // len(peers) if cause else 0
+        detail = f"{churn} commits in {history.window_days} days" + (f"; {cause}" if cause else "")
+        yield Sample(path, 1, max(metric.lines, 1), "", path, rank, detail=detail)
+
+
+def _boundary_co_change(facts: HealthFacts) -> Iterator[Sample]:
+    """Every co-changing pair of production files in different modules, valued by their commits' Jaccard.
+
+    A pair is anchored at its first file in the scope and carries the other as a place it also lives.
+    Two files of the same name (a generated per-package `sst-env.d.ts`, one `cli.py` per package) are
+    instances of one convention that a single sweep edits: they are not measured.
+    """
+    history = facts.history
+    if history is None:
+        return
+    lines = {path: max(metric.lines, 1) for path, metric in facts.population}
+    for pair in history.co_changes:
+        if facts.module_of(pair.first) == facts.module_of(pair.second):
+            continue
+        if PurePosixPath(pair.first).name == PurePosixPath(pair.second).name:
+            continue
+        anchor, other = (pair.first, pair.second) if facts.in_scope(pair.first) else (pair.second, pair.first)
+        if not facts.in_scope(anchor):
+            continue
+        detail = f"changed together in {pair.shared} of {pair.either} commits with {other}"
+        value = pair.shared * 1000 // pair.either
+        identity = f"{pair.first}<->{pair.second}"
+        elsewhere = ((other, 1, lines[other]),)
+        yield Sample(anchor, 1, lines[anchor], "", identity, value, detail=detail, elsewhere=elsewhere)
+
+
 #: The one producer of every signal; a member without one refuses at import below.
 PRODUCERS: dict[Signal, Producer] = {
     Signal.LONG_CALLABLE: _long_callable,
@@ -445,6 +521,8 @@ PRODUCERS: dict[Signal, Producer] = {
     Signal.VOCABULARY_DRIFT: _vocabulary_drift,
     Signal.STYLE_OUTLIER_REPO: _style_outlier_repo,
     Signal.STYLE_OUTLIER_DIRECTORY: _style_outlier_directory,
+    Signal.HOTSPOT: _hotspot,
+    Signal.BOUNDARY_CO_CHANGE: _boundary_co_change,
 }
 
 _missing = set(Signal) - set(PRODUCERS)

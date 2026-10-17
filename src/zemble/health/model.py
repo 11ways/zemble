@@ -12,16 +12,14 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from zemble.graph.model import Resolution
+from zemble.health.history import CO_CHANGE_MIN, MAX_CHANGESET_FILES
 
 if TYPE_CHECKING:  # pragma: no cover
     from zemble.health.git import ChangedLines
 
 
 class Axis(str, Enum):
-    """What a group of signals says about the code; one weight each in `zemble.health.score`.
-
-    HISTORY joins when a signal measures it; an axis without a signal would only ever read "not measured".
-    """
+    """What a group of signals says about the code; one weight each in `zemble.health.score`."""
 
     SIZE = "size"
     MACHINERY = "machinery"
@@ -29,6 +27,7 @@ class Axis(str, Enum):
     COPYING = "copying"
     VOCABULARY = "vocabulary"
     CONSISTENCY = "consistency"
+    HISTORY = "history"
 
 
 class Tier(str, Enum):
@@ -44,6 +43,9 @@ class Tier(str, Enum):
     #: The parse judged against its own peers (`zemble.health.style`): a finding can come or go when
     #: OTHER files change, since the norm it is measured from is theirs.
     POPULATION = "population"
+    #: The commits of a window of git history (`zemble.health.history`): a finding can come or go as the
+    #: window slides, with no change to the code.
+    HISTORY = "history"
 
 
 class Unit(str, Enum):
@@ -144,6 +146,8 @@ class Signal(str, Enum):
     VOCABULARY_DRIFT = "vocabulary_drift"
     STYLE_OUTLIER_REPO = "style_outlier_repo"
     STYLE_OUTLIER_DIRECTORY = "style_outlier_directory"
+    HOTSPOT = "hotspot"
+    BOUNDARY_CO_CHANGE = "boundary_co_change"
 
     @property
     def facts(self) -> SignalFacts:
@@ -183,6 +187,13 @@ def _population(description: str, advice: str) -> SignalFacts:
     )
     return SignalFacts(
         Axis.CONSISTENCY, Tier.POPULATION, description, Unit.PERCENT, 100, Comparison.ABOVE, None, source, advice
+    )
+
+
+def _history(description: str, threshold: int, source: str, advice: str) -> SignalFacts:
+    """Facts of a signal read off the history window, in thousandths, past its threshold when above it."""
+    return SignalFacts(
+        Axis.HISTORY, Tier.HISTORY, description, Unit.PERMILLE, threshold, Comparison.ABOVE, None, source, advice
     )
 
 
@@ -327,6 +338,23 @@ _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
     Signal.STYLE_OUTLIER_DIRECTORY: _population(
         "file whose style vector lies past the cut from its directory's files, in hundredths of the cut",
         "bring it into the style its neighbours share, or say why it reads different",
+    ),
+    Signal.HOTSPOT: _history(
+        "file past the complex_callable or large_file threshold whose churn (commits in the window) is in the "
+        "view's top decile, valued in thousandths of the view's changed files that changed less often",
+        900,
+        "hotspots, change frequency x complexity (Tornhill, Your Code as a Crime Scene, 2015; CodeScene): "
+        "the top decile of churn",
+        "simplify or split it first: it is complex and it keeps changing",
+    ),
+    Signal.BOUNDARY_CO_CHANGE: _history(
+        "two files in different modules whose commit sets in the window overlap (Jaccard) above the "
+        f"threshold, in thousandths, over at least {CO_CHANGE_MIN} shared commits",
+        300,
+        "temporal coupling (Tornhill, Your Code as a Crime Scene, 2015); code-maat's min-coupling default 30%, "
+        "read as a Jaccard (code-maat divides by the mean of the two files' commits, which is never stricter); "
+        f"changesets over {MAX_CHANGESET_FILES} files left out as code-maat does",
+        "move what changes together into one module, or extract the concept both keep changing",
     ),
 }
 

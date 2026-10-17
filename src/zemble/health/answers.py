@@ -13,6 +13,7 @@ from zemble.graph.provider import AnyProvider, SubtreeGraphProvider
 from zemble.health.baseline import BASELINE_RELATIVE_PATH, diff_baseline, load_baseline, save_baseline
 from zemble.health.collect import collect
 from zemble.health.git import changed_lines
+from zemble.health.history import DEFAULT_WINDOW_DAYS
 from zemble.health.model import Signal, Tier
 from zemble.health.report import DEFAULT_LIMIT, HealthReport, build_report
 from zemble.health.signals import measure
@@ -58,6 +59,10 @@ class HealthRequest:
     save_baseline: str | None = None
     #: Report a missing or unreadable `baseline` as a note instead of refusing.
     baseline_optional: bool = False
+    #: Whether to measure the history axis from git.
+    history: bool = True
+    #: Days of git history the history axis reads.
+    history_window: int = DEFAULT_WINDOW_DAYS
 
     @classmethod
     def from_args(cls, args: Mapping[str, Any]) -> HealthRequest:
@@ -72,6 +77,8 @@ class HealthRequest:
             baseline=args.get("baseline"),
             save_baseline=args.get("save_baseline"),
             baseline_optional=bool(args.get("baseline_optional", False)),
+            history=bool(args.get("history", True)),
+            history_window=int(args.get("history_window", DEFAULT_WINDOW_DAYS)),
         )
 
     def to_args(self, path: str) -> dict[str, Any]:
@@ -82,18 +89,29 @@ class HealthRequest:
 def health_payload(provider: AnyProvider, config: HomeConfig, request: HealthRequest | None = None) -> dict[str, Any]:
     """Measure, score and render one report: `{"health": <json>, "markdown": <text>}`.
 
-    :raises ValueError: If a signal name is unknown, `since` cannot be read, or a required baseline cannot.
+    :raises ValueError: If a signal name is unknown, `since` cannot be read, a required baseline cannot, or
+        the history window is not a positive number of days.
     """
     request = request or HealthRequest()
     selected = parse_signals(request.signals)
     if request.since is not None and request.save_baseline is not None:
         # A --since run lists part of the findings and judges the duplication tier on part of the files.
         raise ValueError("--since reports a delta, so it takes no --save-baseline; save one without --since")
+    if request.history_window < 1:
+        raise ValueError(f"--history-window takes a positive number of days, got {request.history_window}")
     changes = changed_lines(os.path.realpath(provider.path), request.since) if request.since is not None else None
     selected, copying, notes = _copying_plan(provider, request, selected)
-    facts = collect(provider, config, request.paths, copying=copying, changed=changes)
+    history = any(signal.facts.tier is Tier.HISTORY for signal in selected)
+    if history and not request.history:
+        selected, history = _without(selected, Tier.HISTORY), False
+        notes.append("history not measured: turned off")
+    window = request.history_window if history else None
+    facts = collect(provider, config, request.paths, copying=copying, changed=changes, history_window=window)
     if facts.copying is not None:
         notes.extend(facts.copying.notes)
+    if facts.history is not None and facts.history.unmeasured is not None:
+        selected = _without(selected, Tier.HISTORY)
+        notes.append(facts.history.unmeasured)
     report = build_report(
         facts.root,
         str(config.source) if config.source is not None else None,
@@ -115,8 +133,13 @@ def _copying_plan(
     bounded = request.since is not None or bool(request.paths) or isinstance(provider, SubtreeGraphProvider)
     if not wanted or (bounded if request.copying is None else request.copying):
         return selected, wanted, []
-    kept = tuple(signal for signal in selected if signal.facts.tier is not Tier.DUPLICATION)
+    kept = _without(selected, Tier.DUPLICATION)
     return kept, False, [COPYING_OPT_IN if request.copying is None else "copying not measured: turned off"]
+
+
+def _without(selected: tuple[Signal, ...], tier: Tier) -> tuple[Signal, ...]:
+    """The selected signals that do not rest on one tier, for a run that leaves that tier out."""
+    return tuple(signal for signal in selected if signal.facts.tier is not tier)
 
 
 def _with_baseline(report: HealthReport, request: HealthRequest) -> HealthReport:

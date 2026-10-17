@@ -15,6 +15,7 @@ from typing import Any
 from zemble.graph.cli import ensure_graph
 from zemble.graph.provider import open_provider
 from zemble.health.answers import HealthRequest, health_payload, parse_signals
+from zemble.health.history import DEFAULT_WINDOW_DAYS
 from zemble.health.model import Signal
 from zemble.health.report import DEFAULT_LIMIT
 from zemble.home.config import ConfigError, HomeConfig
@@ -62,6 +63,19 @@ def add_health_parser(sub: argparse._SubParsersAction) -> None:
         "default: on with --since, --paths or a sub-directory, off over a whole tree (it parses every file).",
     )
     parser.add_argument(
+        "--history",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Measure the history axis (hotspot, boundary_co_change) from git (default: on).",
+    )
+    parser.add_argument(
+        "--history-window",
+        type=int,
+        default=DEFAULT_WINDOW_DAYS,
+        metavar="DAYS",
+        help=f"Days of git history the history axis reads (default: {DEFAULT_WINDOW_DAYS}).",
+    )
+    parser.add_argument(
         "--baseline", default=None, metavar="FILE", help="Report resolved/remaining/new against a saved baseline."
     )
     parser.add_argument(
@@ -82,6 +96,8 @@ def run_health(args: argparse.Namespace) -> int:
         limit=args.limit,
         since=args.since,
         copying=args.copying,
+        history=args.history,
+        history_window=args.history_window,
         # The daemon refuses relative paths, and runs in another directory.
         baseline=os.path.abspath(args.baseline) if args.baseline else None,
         save_baseline=os.path.abspath(args.save_baseline) if args.save_baseline else None,

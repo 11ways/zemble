@@ -1,4 +1,4 @@
-"""The lines a working tree changed since a git ref: what `zemble health --since` restricts its findings to.
+"""Git reading for `zemble health`, the one place it runs git: `--since` lines and the history window's commits.
 
 AIDEV-NOTE: `git diff --unified=0 <ref>` compares the working tree with the ref, so staged and
 unstaged edits both count; untracked files git would add (`ls-files --others --exclude-standard`)
@@ -9,14 +9,24 @@ line it follows: the code around a removal changed too.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import time
 from bisect import bisect_right
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 #: Seconds one git command may take; a diff of a large branch is still well under it.
 GIT_TIMEOUT_SECONDS = 60
+#: Seconds a whole history read may take, every checkout together; past it the history axis is not
+#: measured. It runs inside a daemon request, which holds a read slot that long at most.
+HISTORY_TIMEOUT_SECONDS = 20
+#: History reads run at once, one git process each.
+_HISTORY_WORKERS = 8
+#: Starts each commit of a history log: a byte no path or hash spells.
+_RECORD = "\x1e"
 #: The last line a whole new file is taken to span.
 _WHOLE_FILE = 2**31 - 1
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -101,10 +111,106 @@ def merge_ranges(ranges: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
     return tuple(merged)
 
 
-def _git(root: str, *arguments: str, failure: str) -> str:
+@dataclass(frozen=True)
+class Commit:
+    """One commit of a history window and the files it touched, relative to the report root."""
+
+    id: str
+    files: tuple[str, ...]
+
+
+def history_checkouts(root: str) -> tuple[tuple[str, str], ...]:
+    """The (checkout directory, path prefix) pairs a root's history is read from.
+
+    A root inside a checkout is read from there; a root that is in none (a workspace of sibling
+    repositories) is read from each direct child directory that is a checkout of its own, and a
+    deeper checkout is not looked for. Empty when there is neither.
+    """
+    if _inside_checkout(root):
+        return ((root, ""),)
+    try:
+        children = sorted(entry.name for entry in os.scandir(root) if entry.is_dir(follow_symlinks=False))
+    except OSError:
+        return ()
+    found = []
+    for name in children:
+        directory = os.path.join(root, name)
+        if os.path.exists(os.path.join(directory, ".git")) and _inside_checkout(directory):
+            found.append((directory, f"{name}/"))
+    return tuple(found)
+
+
+def _inside_checkout(directory: str) -> bool:
+    """Whether git reads a directory as part of a work tree."""
+    try:
+        return _git(directory, "rev-parse", "--is-inside-work-tree", failure="").strip() == "true"
+    except ValueError:
+        return False
+
+
+def window_commits(checkouts: tuple[tuple[str, str], ...], days: int) -> list[Commit]:
+    """Every non-merge commit of the last `days` days of each checkout, with the files it touched under it.
+
+    One `git log --name-only --no-renames` per checkout, run side by side within one shared deadline.
+    Without rename detection a rename lists both paths, so the file under its current name still gets
+    the commit, as it would with detection (which cost 5x on javaweb); history before a rename stays
+    under the old name either way, since `--follow` is per file.
+
+    :raises ValueError: When a checkout's log fails or the read passes `HISTORY_TIMEOUT_SECONDS`.
+    """
+    deadline = time.monotonic() + HISTORY_TIMEOUT_SECONDS
+    with ThreadPoolExecutor(max_workers=max(1, min(_HISTORY_WORKERS, len(checkouts)))) as pool:
+        logs = list(pool.map(lambda checkout: _window_log(*checkout, days, deadline), checkouts))
+    return [commit for log in logs for commit in log]
+
+
+def _window_log(directory: str, prefix: str, days: int, deadline: float) -> list[Commit]:
+    """One checkout's commits of the window, paths relative to it and then prefixed."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ValueError(f"git log took longer than {HISTORY_TIMEOUT_SECONDS} s")
+    try:
+        log = _git(
+            directory,
+            "-c",
+            "core.quotePath=false",
+            "log",
+            f"--since={days}.days.ago",
+            "--no-merges",
+            "--no-renames",
+            "--name-only",
+            "--relative",
+            f"--format={_RECORD}%H",
+            "--",
+            ".",
+            failure=f"git log in {directory} failed",
+            timeout=remaining,
+        )
+    except ValueError:
+        if not _has_commits(directory):
+            return []  # a branch with no commit yet has no history to read
+        raise
+    commits = []
+    for record in log.split(_RECORD)[1:]:
+        lines = record.splitlines()
+        files = tuple(f"{prefix}{line}" for line in lines[1:] if line)
+        commits.append(Commit(lines[0].strip(), files))
+    return commits
+
+
+def _has_commits(directory: str) -> bool:
+    """Whether a checkout's HEAD names a commit."""
+    try:
+        _git(directory, "rev-parse", "--verify", "--quiet", "HEAD", failure="")
+    except ValueError:
+        return False
+    return True
+
+
+def _git(root: str, *arguments: str, failure: str, timeout: float = GIT_TIMEOUT_SECONDS) -> str:
     """Run one git command in `root` and return its stdout.
 
-    :raises ValueError: With `failure` and git's own message, when it cannot run or exits non-zero.
+    :raises ValueError: With `failure` and git's own message, when it cannot run, exits non-zero or times out.
     """
     try:
         completed = subprocess.run(
@@ -112,9 +218,11 @@ def _git(root: str, *arguments: str, failure: str) -> str:
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
-            timeout=GIT_TIMEOUT_SECONDS,
+            timeout=timeout,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"{failure}: took longer than {timeout:.0f} s") from None
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"{failure}: {error}") from None
     if completed.returncode != 0:
@@ -123,4 +231,12 @@ def _git(root: str, *arguments: str, failure: str) -> str:
     return completed.stdout
 
 
-__all__ = ["ChangedLines", "changed_lines", "merge_ranges"]
+__all__ = [
+    "HISTORY_TIMEOUT_SECONDS",
+    "ChangedLines",
+    "Commit",
+    "changed_lines",
+    "history_checkouts",
+    "merge_ranges",
+    "window_commits",
+]

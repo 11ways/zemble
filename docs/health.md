@@ -3,10 +3,10 @@
 `zemble health [path]` (MCP `health`) is a ranked, reference-free report of code-shape
 findings plus a score. It reads the symbol graph (`docs/graph.md`), for layering the
 workspace's own `.zemble/home.toml` (`docs/home.md`), for the duplication tier the
-`zemble dupes` channels (`docs/dedup.md`) through their per-root unit index, and for the
-consistency axis one plain read of each measured file's text; it never builds a search index
-and never embeds anything. It is a REPORT, never a gate: it exits 0 whenever it could answer,
-however many findings it has.
+`zemble dupes` channels (`docs/dedup.md`) through their per-root unit index, for the
+consistency axis one plain read of each measured file's text, and for the history axis one
+`git log` per checkout; it never builds a search index and never embeds anything. It is a
+REPORT, never a gate: it exits 0 whenever it could answer, however many findings it has.
 
 ```
 zemble health ./my-project                       # top 25 findings, the score and its axes
@@ -16,6 +16,8 @@ zemble health ./my-project --paths src/core src/api
 zemble health ./my-project/src/core              # a sub-directory: its own paths, its findings only
 zemble health ./my-project --copying             # whole tree with the duplication tier (slow; see below)
 zemble health ./my-project --since main          # the branch delta: findings touching changed lines
+zemble health ./my-project --history-window 90   # the history axis over the last 90 days
+zemble health ./my-project --no-history         # leave git out
 zemble health ./my-project --save-baseline base.json
 zemble health ./my-project --since main --baseline base.json   # delta findings marked new or remaining
 ```
@@ -52,6 +54,8 @@ graph's own `is_test`) is never measured.
 | `vocabulary_drift` | vocabulary | duplication | a value or value set declared in more than one place (one per `vocabulary` class) | existence: a `zemble dupes --kind vocabulary` class |
 | `style_outlier_repo` | consistency | population | a file's style vector lies past the cut from its language's files (value: distance in hundredths of the cut, > 100) | declared here: robust distance past the chi-square 0.99 quantile of the kept dimensions (see "The consistency axis") |
 | `style_outlier_directory` | consistency | population | the same against its directory's files, where those are not its whole language | as above |
+| `hotspot` | history | history | a file past `complex_callable` or `large_file` with at least 5 commits in the window, whose churn ranks in its checkout's top decile (value: thousandths of the checkout's changed files that changed strictly less often, > 900) | hotspots, change frequency x complexity (Tornhill, Your Code as a Crime Scene; CodeScene); the 5-commit floor is code-maat's `min-revs` default |
+| `boundary_co_change` | history | history | two files in different modules whose commit sets overlap with a Jaccard > 300 per mille over at least 5 shared commits (one finding per pair) | temporal coupling (Tornhill); code-maat's `min-coupling` 30% and `min-shared-revs` 5 defaults, changesets over 30 files left out (`max-changeset-size`) |
 
 The tool defaults quoted above are as the step's design states them; they were not re-verified
 against the tools' current releases.
@@ -63,8 +67,49 @@ directly inside it (a decorated tool inside its `register_*`, a closure) is subt
 that one is measured on its own. Cognitive complexity follows Sonar and keeps nested
 lambdas and functions in the enclosing callable.
 
-HISTORY is a later axis: it joins `Axis` when a signal measures it, so no axis exists that
-could only ever read "not measured".
+## The history axis
+
+`zemble.health.history` reads one window of git history (`--history-window DAYS`, default 365)
+through `zemble.health.git`, the one module that runs git, in a subprocess only:
+
+```
+git -c core.quotePath=false log --since=<DAYS>.days.ago --no-merges --no-renames \
+    --name-only --relative --format=<RS>%H -- .
+```
+
+A root inside a checkout is read from there (`--relative` keeps a sub-directory view's paths
+relative to it). A root in no checkout that holds checkouts directly under it (a workspace of
+sibling repositories, like javaweb with its 28) reads each, side by side, paths prefixed by the
+directory; a deeper checkout is not looked for. A root with neither, a failing git, or a read past
+`HISTORY_TIMEOUT_SECONDS` (20 s, every checkout together) leaves both signals out of the run with a
+note, so the axis reads "not measured" and the run still exits 0. In the daemon the read runs in the
+request's worker thread, so it holds that read slot 20 s at most and never the event loop.
+
+Only current production files of the view take part: test files, deleted files and files that are
+not measured never do, so test code is never flagged, as everywhere in health. Renames are not
+followed: `--follow` is per file and so one process per file; without rename detection a rename
+commit lists both paths, which credits the commit to the file under its current name exactly as
+detection would (and detection cost 5x: 1.8 s against 0.34 s for javaweb's 28 logs in sequence),
+while history before a rename stays under the old name either way.
+
+- `hotspot` measures every production file of the scope the window touched. Its value is the
+  churn rank, in thousandths of the changed production files of the same checkout that changed
+  strictly less often (each checkout is its own history: one busy repository does not set the bar
+  for the others), when the file is past `complex_callable` (its most complex callable) or
+  `large_file`, and has at least 5 commits; otherwise 0, since it changed and is no hotspot. Files
+  tied at the top rank below every one of them, so an evenly changed tree has no hotspot. The
+  reason names the commits and what makes the file a hotspot (`complexity 23 in Daemon.handle,
+  1322 lines`).
+- `boundary_co_change` measures every pair of production files in different modules that changed
+  together in at least 5 commits (`HomeConfig.module_of`: the declared modules of a `home.toml`,
+  else the top-level directory). A changeset over 30 files counts toward churn but not toward
+  co-change (a reformat or a sweep says nothing about which files belong together). Its value is
+  the Jaccard of the two files' commit sets in thousandths; the reason reads `changed together in
+  N of M commits with <other file>`, the key is the sorted pair, and the other file rides along as
+  a place the finding also lives (so `--since` lists it when either file changed). Two files of
+  the same name are not measured: one generated `sst-env.d.ts` per package, or one `cli.py` per
+  package, are instances of one convention that a single sweep edits, and moving them into one
+  module is not the fix.
 
 ## The consistency axis
 
@@ -192,6 +237,12 @@ with the tier 103-114 s and 2.7 GB, against 12.3 s and 397 MB without it. That i
   vocabulary channel still reads every file's sites, since a vocabulary is compared over the tree;
 - `--no-copying` (MCP `copying=false`) turns it off anywhere.
 
+The history axis is on by default, because it costs under the 10 s it would have to stay under:
+the git read is 0.05 s on zemble (342 commits) and 0.09-0.73 s on javaweb (28 checkouts, 4620
+commits in 365 days, read side by side), and the whole history measurement 0.06 s and 1.0 s. Were
+a window to pass 10 s, the rule would make it opt-in like the duplication tier; `--no-history`
+(MCP `history=false`) turns it off anywhere.
+
 ## The resolution rule
 
 A graph signal names a floor, the weakest `Resolution` an edge may have to count:
@@ -303,26 +354,32 @@ composite         = sum(weight(axis) * axis score) / sum(weight(axis))   over me
 ```
 
 Weights (`AXIS_WEIGHTS` in `src/zemble/health/score.py`, the one table): size 1, machinery 1,
-layering 2, copying 1, vocabulary 1, consistency 1 (a forbidden edge breaks a rule the workspace
-wrote down; the rest are general conventions or the code's own peers). A style finding weighs 1
-(its unit is hundredths of the cut, not lines). An axis with no measured unit (no `home.toml` with
-`[[forbidden]]` rules, the duplication tier not run, a language below 6 measured files, or
-`--signals` leaving it out) is "not measured" and takes no part in the composite; it is never
+layering 2, copying 1, vocabulary 1, consistency 1, history 1 (a forbidden edge breaks a rule the
+workspace wrote down; the rest are general conventions or the code's own peers). A style finding
+weighs 1 (its unit is hundredths of the cut, not lines), and so does a history finding (thousandths).
+The history axis measures only files the window touched, so its `hotspot` fraction is the share of
+the changed production files that are hotspots, and its `boundary_co_change` fraction the share of
+the cross-module pairs that changed together at least 5 times that are coupled past the bar. An axis
+with no measured unit (no `home.toml` with `[[forbidden]]` rules, the duplication tier not run, a
+language below 6 measured files, no git checkout or `--no-history`, or `--signals` leaving it out) is
+"not measured" and takes no part in the composite; it is never
 100. The computation is deterministic: the same tree gives the same report (no wall time is
 printed in it).
 
 ## Surfaces
 
 - CLI `zemble health [path] [--limit N] [--signals a,b] [--paths P ...] [--since REF]
-  [--copying | --no-copying] [--baseline FILE] [--save-baseline FILE] [--json] [--no-daemon]`,
+  [--copying | --no-copying] [--history | --no-history] [--history-window DAYS]
+  [--baseline FILE] [--save-baseline FILE] [--json] [--no-daemon]`,
   through the warm daemon first, in process otherwise (graph built or refreshed as `outline`
   does). A path with no graph gets one built.
-- MCP `health` (`repo`, `limit`, `signals`, `paths`, `since`, `copying`, `baseline`,
-  `save_baseline`), returning the markdown; under `zemble nib-provider` it answers with one text
-  part. Every surface builds one `HealthRequest` (`zemble.health.answers`), whose field names
-  are the daemon's argument names.
+- MCP `health` (`repo`, `limit`, `signals`, `paths`, `since`, `copying`, `history`,
+  `history_window`, `baseline`, `save_baseline`), returning the markdown; under
+  `zemble nib-provider` it answers with one text part. Every surface builds one `HealthRequest`
+  (`zemble.health.answers`), whose field names are the daemon's argument names.
 - Daemon command `health`, reading its warm graph; no search index is loaded for it, the
-  duplication tier included (it reads the unit index).
+  duplication tier included (it reads the unit index). The history axis runs git in the daemon's
+  worker thread for the request, bounded by `HISTORY_TIMEOUT_SECONDS` (20 s).
 - A sub-directory of a tree with a graph is answered from that graph: paths relative to the
   sub-directory, only its units measured, callers anywhere counted. The config is the nearest
   ancestor's `home.toml`, as `home` reads it.
@@ -483,6 +540,43 @@ the axis exists to surface such files (upstream Semble code shows up on zemble t
 two role findings above (a state holder, a lone public registry) are the residue the rules do
 not remove; see Known limits.
 
+### The history axis (2026-10-17)
+
+In process, this machine: the git read is 0.05 s on zemble (1 checkout, 342 commits in 365 days)
+and 0.09-0.73 s on javaweb (28 checkouts read side by side, 4620 commits); the whole history
+measurement (read, per-file commit sets, co-change pairs) 0.06 s and 1.0 s, inside the walls'
+own run-to-run noise. Composite score without / with the axis: zemble 86.6 / 88.8 (history 95.5:
+`hotspot` 9 of 198 changed files), javaweb 93.0 / 93.5 (history 96.1: `hotspot` 173 of 4454).
+
+Five systematic problems were found by hand on zemble, javaweb and opencode's `packages/` (a
+multi-author TypeScript monorepo, 12585 commits a year), each fixed by a general rule:
+
+1. One decile over all of javaweb's 28 checkouts let the busiest repository set the bar for every
+   other (171 hotspots, 51 in hawkeye): the rank is per checkout (175; hawkeye 32).
+2. A short history put a file changed 3 times in a small repository's top decile
+   (`microcopy/tools/robbedoes/memory-profile.py`, its repository 16 commits a year): a file needs 5
+   commits, code-maat's `min-revs` default (173).
+3. Every one of opencode's 51 cross-module pairs past the bar was a generated `sst-env.d.ts`, one per
+   package, regenerated by one sweep: two files of the same name are not measured (51 -> 0).
+4. With those gone, a Jaccard bar of 0.5 (the design's example) found nothing on any tree, while
+   the strongest pairs below it were real coupling: code-maat's `min-coupling` default 30% is the
+   bar (zemble's `src/zemble` view 0 -> 3, opencode 0 -> 1).
+5. Measuring only the complex or large files made the axis read "173 of 284 complex, active files
+   are hotspots" (javaweb history 39.1): every changed file is measured, a non-hotspot at 0, so the
+   fraction is the share of changed files that are hotspots (96.1).
+
+Hand review, top findings:
+
+| Tree | Finding | Verdict |
+| --- | --- | --- |
+| zemble | hotspots 1-9: `daemon/server.py` (37 commits, `Daemon.handle` 23, 1322 lines), `graph/store.py` (24, 2230 lines), `dedup/detect.py` (17, 1108 lines), `index/create.py` (17, `write_index` 31), `mcp.py` (17, `create_server` 23), `dedup/mcp.py` (14, `register_dupes_tool` 18), `dedup/cli.py` (12, `run_dupes` 18), `embedding/preflight.py` (12, `embed_status` 19), `graph/provider.py` (11, `_walk` 46) | 9 of 9 real; `register_dupes_tool` owes its complexity to the tool function nested in it, which Sonar's rule counts in the enclosing callable |
+| zemble | `boundary_co_change`: none over the whole tree (generic config: all production code is under `src/`, one top-level module) | as designed |
+| zemble `src/zemble` | `cache.py` with `index/create.py` (9 of 24), `index/types.py` (6 of 17), `index/index.py` (8 of 23) | 3 of 3 real: the index cache layer lives outside `index/` and changes with its internals |
+| javaweb | hotspots 1-10: `DominoElement` (51, `registerReviver` 67), `HttpConduit` (70, `matchEndpoint` 32), `orcono/.../app.scss` (33, 1911 lines), `zenit/tools/lib/gradle.js` (25, `runGradleStreaming` 57), `HawkeyeCompile.groovy` (22, `lower` 27), `IRTranspiler` (210, 3354 lines), `orcono/.../Main.java` (51, 1123 lines), `ServerDominoElement` (43, `dispatchEvent` 22), `RenderContext` (139, `getValueFromPath` 41), `CouchbaseDatasource` (49, `upsert` 31) | 10 of 10 real; the two size-only ones are a stylesheet and a bootstrap class that keep growing |
+| javaweb | `boundary_co_change`: none, by construction: every declared module is its own checkout, and a commit never spans two | not measurable there |
+| opencode | `core/src/flag/flag.ts` with `opencode/src/effect/runtime-flags.ts` (15 of 48) | real: two flag vocabularies kept in step by hand |
+| opencode | hotspot 2: `sdk/js/src/v2/gen/types.gen.ts` (364 commits, 13625 lines) | generated; a legitimate finding by the policy above (`large_file` reports it too) |
+
 ## Known limits
 
 - `lone_public_callable` counts one caller as a finding, as designed: in a Python codebase most
@@ -523,3 +617,15 @@ not remove; see Known limits.
   A small population (javaweb's 48 JavaScript files of several kinds) passes more (17%).
 - A sub-directory view compares its files with that sub-directory's files only, since the view
   holds no others; `--paths` and `--since` keep the whole view as the norm.
+- History is per checkout: in a workspace of sibling repositories a cross-repository coupling is
+  invisible (commits never span two histories), and a checkout nested deeper than the root's
+  direct children is not read. History before a rename stays under the old path (`--follow` is
+  per file), so a renamed file starts its churn again.
+- `hotspot` reads size as well as complexity, so a data table or stylesheet that keeps growing
+  (opencode's `i18n/en.ts`, javaweb's `DevSeed.java`) is a hotspot by size alone, and so is a
+  generated file that is regenerated often.
+- A pair below 5 shared commits is not measured however coupled it is, and files changed in
+  sweeps over 30 files lose those commits for co-change (not for churn).
+- Knowledge distribution (a file with one author, Tornhill's knowledge silos) is not a signal:
+  every javaweb checkout but three and zemble have one author in the window, so it would flag
+  every active file there and could not be checked by hand.

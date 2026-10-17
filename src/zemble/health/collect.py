@@ -33,6 +33,7 @@ from zemble.graph.model import (
 from zemble.graph.provider import AnyProvider
 from zemble.health.copying import CopyingFacts, measure_copying
 from zemble.health.git import ChangedLines
+from zemble.health.history import HistoryFacts, measure_history
 from zemble.health.model import Comparison, Signal
 from zemble.home.config import HomeConfig
 from zemble.index.files import detect_language
@@ -127,6 +128,8 @@ class HealthFacts:
     #: (path, metrics) of every measured production file of the view, in the scope or not: the peers a
     #: file's style is compared with, so `--paths` and `--since` judge against the whole view.
     population: list[tuple[str, FileMetrics]] = field(default_factory=list)
+    #: The history window's commits per production file of the view, when the report measures history.
+    history: HistoryFacts | None = None
     _modules: dict[str, str] = field(default_factory=dict)
 
     def in_scope(self, file_path: str) -> bool:
@@ -314,6 +317,7 @@ def collect(
     *,
     copying: bool = False,
     changed: ChangedLines | None = None,
+    history_window: int | None = None,
 ) -> HealthFacts:
     """Read every fact the signals need from an open provider and the workspace config.
 
@@ -322,6 +326,7 @@ def collect(
     :param paths: Sub-paths to restrict the report to, relative to the directory or absolute.
     :param copying: Whether to run the duplication channels (`zemble.health.copying`).
     :param changed: The lines a `--since` run reports on; the duplication run then compares only their files.
+    :param history_window: Days of git history to read for the history axis; None reads none.
     """
     root = os.path.realpath(provider.path)
     scope = tuple(relative for path in paths if (relative := _relative(root, path)))
@@ -357,6 +362,8 @@ def collect(
     if copying:
         files = None if changed is None else [path for path in changed.files if facts.in_scope(path)]
         facts.copying = measure_copying(provider, scope, files)
+    if history_window is not None:
+        facts.history = measure_history(root, [path for path, _ in facts.population], history_window)
     return facts
 
 

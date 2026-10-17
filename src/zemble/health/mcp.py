@@ -12,6 +12,7 @@ from zemble.daemon.protocol import DaemonError, failure_message
 from zemble.health.answers import HealthRequest
 from zemble.health.baseline import BASELINE_RELATIVE_PATH
 from zemble.health.cli import in_process
+from zemble.health.history import DEFAULT_WINDOW_DAYS
 from zemble.health.model import Signal
 from zemble.health.report import DEFAULT_LIMIT
 from zemble.home.config import ConfigError
@@ -58,6 +59,13 @@ def register_health_tool(server: FastMCP) -> None:
                 "default: on with `since`, `paths` or a sub-directory, off over a whole tree."
             ),
         ] = None,
+        history: Annotated[
+            bool,
+            Field(description="Measure the history axis (hotspot, boundary_co_change) from the git log."),
+        ] = True,
+        history_window: Annotated[
+            int, Field(description="Days of git history the history axis reads.", ge=1)
+        ] = DEFAULT_WINDOW_DAYS,
         baseline: Annotated[
             bool,
             Field(
@@ -79,10 +87,12 @@ def register_health_tool(server: FastMCP) -> None:
         interfaces, single-subclass abstract types, public callables with at most one caller,
         unreferenced private code, pass-through methods), layering (edges crossing a `.zemble/home.toml`
         forbidden dependency), copying (files and bodies inside exact or renamed clone classes),
-        vocabulary (values declared in several places) and consistency (files whose style reads different
-        from their language's or their directory's other files). Thresholds are absolute and documented; graph
-        findings rest only on edges resolved exactly or by unique name. `since` turns it into a branch
-        delta. The score is not a target: address or explain the findings. This is a report, never a gate.
+        vocabulary (values declared in several places), consistency (files whose style reads different
+        from their language's or their directory's other files) and history (complex files that keep changing,
+        files in different modules that change together, from the git log). Thresholds are absolute and
+        documented; graph findings rest only on edges resolved exactly or by unique name. `since` turns it
+        into a branch delta. The score is not a target: address or explain the findings. This is a report,
+        never a gate.
         """
         # Imported here: `zemble.mcp` imports this module, so the reverse import can
         # only run once the server is being built.
@@ -98,6 +108,8 @@ def register_health_tool(server: FastMCP) -> None:
             limit=limit,
             since=since,
             copying=copying,
+            history=history,
+            history_window=history_window,
             baseline=fixed if baseline else None,
             save_baseline=fixed if save_baseline else None,
             baseline_optional=True,

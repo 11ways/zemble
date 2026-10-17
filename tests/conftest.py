@@ -52,10 +52,14 @@ GIT_ENV = {
 }
 
 
-def git(repo: Path, *arguments: str) -> str:
-    """Run one git command inside a scripted repository and return its stdout."""
+def git(repo: Path, *arguments: str, date: str | None = None) -> str:
+    """Run one git command inside a scripted repository and return its stdout.
+
+    @param date an author and committer date for a commit (`2020-01-01T12:00:00`), to back-date history.
+    """
+    env = GIT_ENV if date is None else {**GIT_ENV, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
     completed = subprocess.run(
-        ["git", "-C", str(repo), *arguments], check=True, capture_output=True, text=True, env=GIT_ENV
+        ["git", "-C", str(repo), *arguments], check=True, capture_output=True, text=True, env=env
     )
     return completed.stdout
 
