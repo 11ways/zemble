@@ -231,6 +231,10 @@ network access the defaults need, and it happens once.
 server, AGENTS.md / CLAUDE.md instructions, a `zemble-search` sub-agent). It notices an
 editable install and points the generated configs at your checkout path rather than at a
 PyPI release, so they launch the code you have. `zemble uninstall` removes them again.
+When a provider-capable [nib](docs/nib-provider.md) is on `PATH`, Claude Code and OpenCode get
+zemble through `nib setup --user --provider zemble=<zemble>` instead, and its tools are named
+`mcp__nib__zemble_<tool>` rather than `mcp__zemble__<tool>`. Claude Code paths follow
+`CLAUDE_CONFIG_DIR`.
 For per-agent manual setup, see [the installation docs](docs/installation.md).
 
 ## Quickstart

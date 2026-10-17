@@ -44,6 +44,14 @@ zemble install --agent claude pi --type mcp subagent --yes
 
 The MCP server config, `AGENTS.md`/`CLAUDE.md` instructions, and sub-agent files that `zemble install` writes all pin `uvx` to the exact zemble you have installed: the local source path for an editable or directory install (`/path/to/zemble[mcp]`), the exact commit for a non-editable git install, and the version otherwise, so agents keep calling the code the instructions were written for. After upgrading (`uv tool upgrade zemble` or `pip install --upgrade zemble`), rerun `zemble install`. This is idempotent and rewrites the pin (and anything else that changed) in place for every agent you select.
 
+### Hosted by nib
+
+When [nib](nib-provider.md) is on `PATH` and `nib setup --help` documents `--provider NAME=PROGRAM`, the MCP integration for Claude Code and OpenCode goes through nib instead: `zemble install` runs `nib setup --user --provider zemble=<absolute path of zemble>` (nib appends `nib-provider` itself, so it gets the `zemble` executable on `PATH`, not a `uvx` launcher) with its own environment, `CLAUDE_CONFIG_DIR` included, and writes neither `mcpServers.zemble` nor OpenCode's `mcp.zemble`. nib then removes the standalone `zemble` registrations it replaces and remembers the provider in `~/.config/nib/setup.json`; the installer prints nib's report lines, flags the ones that say a step failed (nib exits 0 either way), and warns when an old `mcpServers.zemble` entry survives, since it would duplicate the tools. The tools then appear as `mcp__nib__zemble_<tool>` (for example `mcp__nib__zemble_graph_callers`) instead of `mcp__zemble__<tool>`; the instructions block names both spellings. Other agents are configured as before.
+
+`zemble uninstall` runs `nib setup --user --provider zemble=`, which stops hosting zemble and forgets it, and then removes the MCP entries as before. nib does not put a standalone zemble server back.
+
+Without a usable nib, nothing changes. Claude Code's paths follow `CLAUDE_CONFIG_DIR` when it is set: `$CLAUDE_CONFIG_DIR/.claude.json`, `$CLAUDE_CONFIG_DIR/CLAUDE.md` and `$CLAUDE_CONFIG_DIR/agents/`, instead of `~/.claude.json` and `~/.claude/`.
+
 ---
 
 ## Manual setup

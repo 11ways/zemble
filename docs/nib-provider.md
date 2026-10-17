@@ -10,6 +10,10 @@ as it is now, as `[PATH#TAG]` + `N:TEXT` rows the agent can edit from.
 nib --provider zemble=zemble          # or: nib setup --provider zemble=zemble
 ```
 
+`zemble install` does this for you when nib is on `PATH` (see
+[installation](installation.md#hosted-by-nib)); `zemble uninstall` undoes it with
+`nib setup --user --provider zemble=`.
+
 nib runs `zemble nib-provider` with its project directory as the working directory. That is the same
 stdio server as `zemble` / `zemble mcp`, with the same tools, the same daemon routing and the same
 `--content` and `--no-daemon` options; a tool's default `repo` is that directory, as it is today.

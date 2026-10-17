@@ -16,7 +16,7 @@ from zemble.version import __version__
 
 _HOME = Path.home()
 
-Action = Literal["created", "updated", "unchanged", "not-found", "removed", "error", "skipped"]
+Action = Literal["created", "updated", "unchanged", "not-found", "removed", "error", "skipped", "hosted"]
 Mode = Literal["install", "uninstall"]
 
 
@@ -86,15 +86,15 @@ INSTRUCTIONS = f"""\
 {ZEMBLE_START}
 ## Zemble Code Search
 
-A `zemble` MCP server is available. Its tools:
-- `mcp__zemble__search` — search a codebase with a natural-language or code query. Returns file path + exact line.
-- `mcp__zemble__find_related` — code similar to a specific file and line (logic-duplication leads, parallel implementations).
-- `mcp__zemble__graph_definition` / `graph_callers` / `graph_implementations` / `graph_overrides` / `graph_tests_of` / `graph_neighbors` — the Java symbol graph: where a symbol is declared, who calls it, its subtypes, every override of one method (`Type.member`), its tests, its one-hop neighbourhood.
-- `mcp__zemble__outline` — a Java file's or type's declarations, signatures only (~200 tokens).
-- `mcp__zemble__explain` — a budgeted evidence bundle for a query (primary chunks + enclosing-type outline + tests + callers, each labelled with why it is there).
-- `mcp__zemble__signatures` — a symbol's signature plus its exactly-resolved call sites.
-- `mcp__zemble__dupes` — clone classes (exact / alpha-renamed / logic) ranked by weight; a REPORT, never a gate.
-- `mcp__zemble__home` — "does this already exist, and where should it live?": existing mechanisms, candidate home modules ranked with reasons, and a verdict. Run it BEFORE designing any mechanism; cite its answer.
+A `zemble` MCP server is available. Its tools are named `mcp__zemble__<tool>`, or `mcp__nib__zemble_<tool>` when nib hosts zemble (`mcp__nib__zemble_graph_callers`):
+- `search` -- search a codebase with a natural-language or code query. Returns file path + exact line.
+- `find_related` -- code similar to a specific file and line (logic-duplication leads, parallel implementations).
+- `graph_definition` / `graph_callers` / `graph_implementations` / `graph_overrides` / `graph_tests_of` / `graph_neighbors` -- the Java symbol graph: where a symbol is declared, who calls it, its subtypes, every override of one method (`Type.member`), its tests, its one-hop neighbourhood.
+- `outline` -- a Java file's or type's declarations, signatures only (~200 tokens).
+- `explain` -- a budgeted evidence bundle for a query (primary chunks + enclosing-type outline + tests + callers, each labelled with why it is there).
+- `signatures` -- a symbol's signature plus its exactly-resolved call sites.
+- `dupes` -- clone classes (exact / alpha-renamed / logic) ranked by weight; a REPORT, never a gate.
+- `home` -- "does this already exist, and where should it live?": existing mechanisms, candidate home modules ranked with reasons, and a verdict. Run it BEFORE designing any mechanism; cite its answer.
 
 `repo` is optional on every tool: it defaults to the directory the session started in (each tool's description announces the resolved path). Output cost is bounded and stated: `search` returns `top_k` (default 5) results of `max_snippet_lines` (default 10) lines; graph tools cap at `limit` (default 50) and always report `total`.
 
@@ -154,10 +154,28 @@ class AgentTarget:
     mcp: McpConfig | None
     instructions_path: Path | None  # None = not supported for this agent
     subagent_path: Path | None = None  # global (user-level) sub-agent file; None = unsupported
+    nib_hostable: bool = False  # `nib setup --user` registers nib-hosted zemble for this agent itself
 
     def resolved_mcp_path(self) -> Path | None:
         """Return the resolved MCP config path, or None if MCP is unsupported."""
         return self.mcp.path if self.mcp else None
+
+
+def _claude_target() -> AgentTarget:
+    """Return the Claude Code target; CLAUDE_CONFIG_DIR moves the config folder and puts `.claude.json` inside it."""
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    folder = Path(configured) if configured else _HOME / ".claude"
+    user_config = folder / ".claude.json" if configured else _HOME / ".claude.json"
+    return AgentTarget(
+        id="claude",
+        display_name="Claude Code",
+        binary="claude",
+        config_dir=folder,
+        mcp=McpConfig(user_config, "mcpServers", _STDIO_SERVER_CONFIG),
+        instructions_path=folder / "CLAUDE.md",
+        subagent_path=folder / "agents" / "zemble-search.md",
+        nib_hostable=True,
+    )
 
 
 def _opencode_mcp_path() -> Path:
@@ -181,15 +199,7 @@ def _vscode_mcp_path() -> Path:
 
 
 AGENTS: list[AgentTarget] = [
-    AgentTarget(
-        id="claude",
-        display_name="Claude Code",
-        binary="claude",
-        config_dir=_HOME / ".claude",
-        mcp=McpConfig(_HOME / ".claude.json", "mcpServers", _STDIO_SERVER_CONFIG),
-        instructions_path=_HOME / ".claude" / "CLAUDE.md",
-        subagent_path=_HOME / ".claude" / "agents" / "zemble-search.md",
-    ),
+    _claude_target(),
     AgentTarget(
         id="cursor",
         display_name="Cursor",
@@ -225,6 +235,7 @@ AGENTS: list[AgentTarget] = [
         mcp=McpConfig(_opencode_mcp_path(), "mcp", _OPENCODE_SERVER_CONFIG),
         instructions_path=_HOME / ".config" / "opencode" / "AGENTS.md",
         subagent_path=_HOME / ".config" / "opencode" / "agents" / "zemble-search.md",
+        nib_hostable=True,
     ),
     AgentTarget(
         id="copilot",

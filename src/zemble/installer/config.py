@@ -164,8 +164,8 @@ def merge_json_member(path: Path, section_key: str, member_key: str, value: dict
     return "updated" if existed else "created"
 
 
-def remove_json_member(path: Path, section_key: str, member_key: str) -> Action:
-    """Remove `section_key.member_key` from a JSON5 config file, leaving everything else intact."""
+def _locate_member(path: Path, section_key: str, member_key: str) -> tuple[Node, bytes] | Action:
+    """Return `section_key.member_key` of a JSON5 config file with its source bytes, or why there is none."""
     if not path.exists():
         return "not-found"
 
@@ -181,8 +181,20 @@ def remove_json_member(path: Path, section_key: str, member_key: str) -> Action:
             return "not-found"
         container = _value_of(section)
     member = _member(container, src, member_key)
-    if member is None:
-        return "not-found"
+    return "not-found" if member is None else (member, src)
+
+
+def has_json_member(path: Path, section_key: str, member_key: str) -> bool:
+    """Return True when a JSON5 config file holds `section_key.member_key`."""
+    return isinstance(_locate_member(path, section_key, member_key), tuple)
+
+
+def remove_json_member(path: Path, section_key: str, member_key: str) -> Action:
+    """Remove `section_key.member_key` from a JSON5 config file, leaving everything else intact."""
+    located = _locate_member(path, section_key, member_key)
+    if not isinstance(located, tuple):
+        return located
+    member, src = located
 
     new_text = _delete_member(src, member).decode("utf-8")
     if not _reparse_ok(new_text):

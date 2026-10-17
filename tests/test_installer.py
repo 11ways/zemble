@@ -1,12 +1,16 @@
 import importlib.metadata
 import json
+import re
+import shlex
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from zemble.installer import run
 from zemble.installer.agents import (
+    _OPENCODE_SERVER_CONFIG,
     _STDIO_SERVER_CONFIG,
     AGENTS,
     INSTRUCTIONS,
@@ -14,6 +18,7 @@ from zemble.installer.agents import (
     ZEMBLE_PIN,
     ZEMBLE_START,
     IntegrationType,
+    _claude_target,
     _opencode_mcp_path,
     _vscode_mcp_path,
     is_detected,
@@ -23,6 +28,7 @@ from zemble.installer.config import (
     _CODEX_MCP_BLOCK,
     _CODEX_MCP_HEADER,
     _json5_parser,
+    has_json_member,
     merge_json_member,
     merge_toml_block,
     remove_json_member,
@@ -40,6 +46,7 @@ from zemble.installer.installer import (
     merge_mcp,
     remove_mcp,
 )
+from zemble.installer.nib import nib_usable
 from zemble.version import __version__
 
 _BLOCK = f"{ZEMBLE_START}\n## Zemble\nsome instructions\n{ZEMBLE_END}\n"
@@ -60,8 +67,17 @@ def claude_agent(tmp_path):
 
 
 @pytest.fixture
-def run_setup(monkeypatch, tmp_path, claude_agent):
-    """Patches AGENTS with claude+cursor in tmp_path; stubs _checkbox to select all."""
+def bin_dir(monkeypatch, tmp_path):
+    """An empty directory that is all of PATH, so no real nib, claude or zemble is found."""
+    path = tmp_path / "bin"
+    path.mkdir()
+    monkeypatch.setenv("PATH", str(path))
+    return path
+
+
+@pytest.fixture
+def run_setup(monkeypatch, tmp_path, claude_agent, bin_dir):
+    """Patches AGENTS with claude+cursor in tmp_path; stubs _checkbox to select all; PATH holds no nib."""
     cursor = next(a for a in AGENTS if a.id == "cursor")
     cursor = replace(
         cursor,
@@ -635,3 +651,176 @@ def test_run_unattended_empty_selection_exits(run_setup, agent_ids, integration_
     with pytest.raises(SystemExit) as exc_info:
         run("install", agent_ids=agent_ids, integration_ids=integration_ids, yes=True)
     assert exc_info.value.code == 1
+
+
+_NIB_HELP = (
+    "Usage: nib setup [--user] [--dry-run] [--quiet] [--provider NAME=PROGRAM]...\n"
+    "Registers nib in this folder: the MCP server in .mcp.json\n"
+)
+_OLD_NIB_HELP = "Usage: nib setup [--user] [--dry-run]\nRegisters nib in this folder: the MCP server in .mcp.json\n"
+_ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+def _fake_nib(bin_dir, help_text, report=()):
+    """Put a `nib` on PATH that answers `setup --help` with help_text and logs every other call's argv and env."""
+    log = bin_dir.parent / "nib.log"
+    script = bin_dir / "nib"
+    script.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2" = "setup --help" ]; then\n'
+        f"  printf '%s' {shlex.quote(help_text)}\n"
+        "  exit 0\n"
+        "fi\n"
+        f"log={shlex.quote(str(log))}\n"
+        "printf 'call\\n' >> \"$log\"\n"
+        'for a in "$@"; do printf \'arg=%s\\n\' "$a" >> "$log"; done\n'
+        'printf \'CLAUDE_CONFIG_DIR=%s\\n\' "$CLAUDE_CONFIG_DIR" >> "$log"\n'
+        + "".join(f"printf '%s\\n' {shlex.quote(line)}\n" for line in report)
+    )
+    script.chmod(0o755)
+    return log
+
+
+def _nib_calls(log):
+    """Return the logged `nib` calls as dicts of `args` and `CLAUDE_CONFIG_DIR`."""
+    if not log.exists():
+        return []
+    calls = []
+    for line in log.read_text().splitlines():
+        if line == "call":
+            calls.append({"args": []})
+        elif line.startswith("arg="):
+            calls[-1]["args"].append(line[len("arg=") :])
+        else:
+            calls[-1]["CLAUDE_CONFIG_DIR"] = line.split("=", 1)[1]
+    return calls
+
+
+@pytest.fixture
+def nib_agents(monkeypatch, tmp_path, claude_agent, bin_dir):
+    """Claude, OpenCode and Cursor rooted in tmp_path, a `zemble` on PATH, and CLAUDE_CONFIG_DIR set."""
+    opencode = next(a for a in AGENTS if a.id == "opencode")
+    opencode = replace(opencode, mcp=replace(opencode.mcp, path=tmp_path / "opencode.jsonc"))
+    cursor = next(a for a in AGENTS if a.id == "cursor")
+    cursor = replace(cursor, mcp=replace(cursor.mcp, path=tmp_path / "cursor.json"))
+    monkeypatch.setattr("zemble.installer.installer.AGENTS", [claude_agent, opencode, cursor])
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    zemble = bin_dir / "zemble"
+    zemble.write_text("#!/bin/sh\n")
+    zemble.chmod(0o755)
+    return claude_agent, opencode, cursor
+
+
+def _install_mcp(mode, capsys):
+    """Run the installer unattended for the MCP integration of the nib_agents trio and return its plain output."""
+    run(mode, agent_ids=["claude", "opencode", "cursor"], integration_ids=[IntegrationType.MCP], yes=True)
+    return _ANSI.sub("", capsys.readouterr().out)
+
+
+def test_nib_usable(bin_dir):
+    """Nib is usable only when on PATH with a `setup --help` that documents --provider NAME=PROGRAM."""
+    assert not nib_usable()
+    _fake_nib(bin_dir, _OLD_NIB_HELP)
+    assert not nib_usable()
+    _fake_nib(bin_dir, _NIB_HELP)
+    assert nib_usable()
+
+
+def test_install_registers_through_nib(nib_agents, bin_dir, tmp_path, capsys):
+    """Install hands Claude and OpenCode to `nib setup --user --provider zemble=<zemble>`; Cursor is as before."""
+    claude, opencode, cursor = nib_agents
+    program = str(bin_dir / "zemble")
+    report = [
+        f"~/.config/nib/setup.json: remembers zemble={program} for later setups",
+        f"claude mcp: replaced the nib registration for this user, to host zemble={program} instead of no provider",
+    ]
+    log = _fake_nib(bin_dir, _NIB_HELP, report)
+    out = _install_mcp("install", capsys)
+
+    assert _nib_calls(log) == [
+        {
+            "args": ["setup", "--user", "--provider", f"zemble={program}"],
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-config"),
+        }
+    ]
+    assert not claude.mcp.path.exists()
+    assert not opencode.mcp.path.exists()
+    assert has_json_member(cursor.mcp.path, "mcpServers", "zemble")
+    assert (
+        f"Registered zemble through nib (nib setup --user --provider zemble={program}); skipped writing "
+        f"Claude Code mcpServers.zemble in {claude.mcp.path}, Opencode mcp.zemble in {opencode.mcp.path}." in out
+    )
+    for line in report:
+        assert line in out and f"! {line}" not in out
+    assert "(hosted)" in out and "nib hosts zemble for this agent, nothing written" in out
+
+
+def test_install_through_nib_leaves_a_stale_entry_to_nib(nib_agents, bin_dir, capsys):
+    """A stale mcpServers.zemble is nib's to remove; the installer never edits it and warns when it survives."""
+    claude, _, _ = nib_agents
+    claude.mcp.path.write_text(json.dumps({"mcpServers": {"zemble": _STDIO_SERVER_CONFIG}}, indent=2) + "\n")
+    before = claude.mcp.path.read_bytes()
+    removed = "claude mcp: removed the zemble registration for this user, now hosted by nib"
+    _fake_nib(bin_dir, _NIB_HELP, [removed])
+    out = _install_mcp("install", capsys)
+
+    assert claude.mcp.path.read_bytes() == before
+    assert removed in out and f"! {removed}" not in out
+    assert f"! {claude.mcp.path} still holds mcpServers.zemble, which duplicates the tools nib hosts" in out
+
+
+def test_install_through_nib_surfaces_failure_lines(nib_agents, bin_dir, capsys):
+    """Nib exits 0 on a failed step, so its failure lines are what the installer flags."""
+    failure = "~/.claude.json: could not be written: permission denied"
+    _fake_nib(bin_dir, _NIB_HELP, [failure])
+    assert f"! {failure}" in _install_mcp("install", capsys)
+
+
+def test_uninstall_stops_hosting_through_nib(nib_agents, bin_dir, tmp_path, capsys):
+    """Uninstall runs `nib setup --user --provider zemble=` and still removes the MCP entries as before."""
+    claude, _, _ = nib_agents
+    claude.mcp.path.write_text(json.dumps({"mcpServers": {"zemble": _STDIO_SERVER_CONFIG}}, indent=2) + "\n")
+    log = _fake_nib(bin_dir, _NIB_HELP, ["~/.config/nib/setup.json: remembers no provider for later setups"])
+    out = _install_mcp("uninstall", capsys)
+
+    assert _nib_calls(log) == [
+        {"args": ["setup", "--user", "--provider", "zemble="], "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-config")}
+    ]
+    assert not has_json_member(claude.mcp.path, "mcpServers", "zemble")
+    assert "nib does not put a standalone zemble server back" in out
+
+
+@pytest.mark.parametrize("help_text", [None, _OLD_NIB_HELP])
+def test_install_without_usable_nib_writes_entries_as_before(nib_agents, bin_dir, capsys, help_text):
+    """Without nib, or with one whose help lacks --provider, the MCP entries are written byte for byte as before."""
+    claude, opencode, _ = nib_agents
+    log = _fake_nib(bin_dir, help_text) if help_text else bin_dir.parent / "nib.log"
+    out = _install_mcp("install", capsys)
+
+    assert _nib_calls(log) == []
+    assert "Registered zemble through nib" not in out
+    assert claude.mcp.path.read_text() == json.dumps({"mcpServers": {"zemble": _STDIO_SERVER_CONFIG}}, indent=2) + "\n"
+    assert opencode.mcp.path.read_text() == json.dumps({"mcp": {"zemble": _OPENCODE_SERVER_CONFIG}}, indent=2) + "\n"
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_claude_target_honours_claude_config_dir(monkeypatch, tmp_path, configured):
+    """CLAUDE_CONFIG_DIR moves every Claude path into it, `.claude.json` included; unset means the home defaults."""
+    folder = tmp_path / "claude-config"
+    if configured:
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(folder))
+    else:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    target = _claude_target()
+    home = Path.home()
+    expected_folder = folder if configured else home / ".claude"
+    assert target.config_dir == expected_folder
+    assert target.mcp.path == (folder / ".claude.json" if configured else home / ".claude.json")
+    assert target.instructions_path == expected_folder / "CLAUDE.md"
+    assert target.subagent_path == expected_folder / "agents" / "zemble-search.md"
+
+
+def test_instructions_name_both_tool_spellings():
+    """The instructions block names the plain MCP tool spelling and the nib-hosted one."""
+    assert "`mcp__zemble__<tool>`" in INSTRUCTIONS
+    assert "`mcp__nib__zemble_<tool>`" in INSTRUCTIONS

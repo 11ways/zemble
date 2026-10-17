@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import shlex
 import sys
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Callable, NoReturn, Sequence, TypeVar
 
+from zemble.installer import nib
 from zemble.installer.agents import (
     AGENTS,
     INSTRUCTIONS,
@@ -17,6 +19,7 @@ from zemble.installer.agents import (
     is_detected,
 )
 from zemble.installer.config import (
+    has_json_member,
     merge_json_member,
     merge_toml_block,
     remove_json_member,
@@ -31,9 +34,11 @@ _GREEN = "\033[32m"
 _DIM = "\033[2m"
 _RESET = "\033[0m"
 _BOLD = "\033[1m"
+_RED = "\033[31m"
 _ACTION_DETAIL: dict[str, str] = {
     "skipped": "JSON5 grammar unavailable — add manually (see README)",
     "error": "could not parse or edit config",
+    "hosted": "nib hosts zemble for this agent, nothing written",
 }
 
 
@@ -155,29 +160,81 @@ def _checkbox(prompt: str, items: Sequence[tuple[str, _T, bool]]) -> list[_T] | 
     return questionary.checkbox(prompt, choices=choices, style=style, instruction=instruction).ask()
 
 
-def _print_plan(agents: list[AgentTarget], integrations: list[_Integration]) -> None:
+def _hosted_by_nib(nib_program: str | None, agent: AgentTarget, integ: _Integration) -> bool:
+    """True when an install leaves this agent's MCP entry to nib; an uninstall's program is empty, so never then."""
+    return bool(nib_program) and integ.id is IntegrationType.MCP and agent.nib_hostable
+
+
+def _nib_program(mode: Mode, agents: list[AgentTarget], integrations: list[_Integration]) -> str | None:
+    """Return the program nib should host as zemble ("" to stop hosting it), or None when nib takes no part."""
+    if not any(i.id is IntegrationType.MCP for i in integrations) or not any(a.nib_hostable for a in agents):
+        return None
+    if not nib.nib_usable():
+        return None
+    if mode == "uninstall":
+        return ""
+    program = nib.provider_program()
+    if program is None:
+        note = "nib can host providers, but no zemble executable was found to hand it; writing MCP entries."
+        print(f"  {_DIM}{note}{_RESET}")
+    return program
+
+
+def _print_plan(agents: list[AgentTarget], integrations: list[_Integration], nib_program: str | None = None) -> None:
     """Print what will be written or removed for each selected agent and integration."""
     print(f"\n  {_BOLD}Plan:{_RESET}\n")
+    if nib_program is not None:
+        print(f"  {_BOLD}nib{_RESET}\n    {shlex.join(nib.setup_command(nib_program))}\n")
     for agent in agents:
         print(f"  {_BOLD}{agent.display_name}{_RESET}")
         for integ in integrations:
             path = integ.plan_path(agent)
             ok = path is not None
-            print(f"    {integ.label:<13} {_tick(ok)}  {path if ok else '(not supported)'}")
+            where = "(hosted by nib)" if _hosted_by_nib(nib_program, agent, integ) else path
+            print(f"    {integ.label:<13} {_tick(ok)}  {where if ok else '(not supported)'}")
     print()
 
 
-def _apply(mode: Mode, agents: list[AgentTarget], integrations: list[_Integration]) -> None:
+def _run_nib(mode: Mode, nib_program: str, hosted: list[AgentTarget]) -> None:
+    """Run `nib setup` for zemble, say what it means for the agents nib registers, and pass its lines through."""
+    command = shlex.join(nib.setup_command(nib_program))
+    print(f"  {_BOLD}nib{_RESET}")
+    if mode == "install":
+        skipped = ", ".join(f"{a.display_name} {a.mcp.key}.zemble in {a.mcp.path}" for a in hosted if a.mcp)
+        print(f"    Registered zemble through nib ({command}); skipped writing {skipped}.")
+    else:
+        print(f"    Stopped hosting zemble in nib ({command}); nib does not put a standalone zemble server back.")
+    for line in nib.run_setup(nib_program):
+        failed = nib.is_failure(line)
+        print(f"    {_RED + '!' + _RESET if failed else _tick(True)} {line}")
+    if mode == "install":
+        for agent in hosted:
+            if agent.mcp and has_json_member(agent.mcp.path, agent.mcp.key, "zemble"):
+                print(
+                    f"    {_RED}!{_RESET} {agent.mcp.path} still holds {agent.mcp.key}.zemble, which duplicates "
+                    "the tools nib hosts; remove that entry."
+                )
+    print()
+
+
+def _apply(
+    mode: Mode, agents: list[AgentTarget], integrations: list[_Integration], nib_program: str | None = None
+) -> None:
     """Execute install or uninstall for all chosen agents and integrations, printing results."""
     print()
+    if nib_program is not None:
+        _run_nib(mode, nib_program, [a for a in agents if a.nib_hostable])
     for agent in agents:
         print(f"  {_BOLD}{agent.display_name}{_RESET}")
         for integ in integrations:
-            result = integ.apply(agent, mode)
+            if _hosted_by_nib(nib_program, agent, integ):
+                result: WriteResult | None = WriteResult(agent.mcp.path, "hosted") if agent.mcp else None
+            else:
+                result = integ.apply(agent, mode)
             if result is None:
                 print(f"    {_DIM}– {integ.id}: not supported{_RESET}")
                 continue
-            ok = result.action in ("created", "updated", "removed", "unchanged")
+            ok = result.action in ("created", "updated", "removed", "unchanged", "hosted")
             detail = _ACTION_DETAIL.get(result.action, "")
             suffix = f" — {detail}" if detail else ""
             print(f"    {_tick(ok)} {integ.id} ({result.action}){suffix} → {result.path}")
@@ -220,7 +277,8 @@ def run(
             f"Select integrations to {'enable' if install else 'remove'}:", integ_items
         ) or _exit("Nothing selected. Exiting.")
 
-    _print_plan(chosen_agents, chosen_integrations)
+    nib_program = _nib_program(mode, chosen_agents, chosen_integrations)
+    _print_plan(chosen_agents, chosen_integrations, nib_program)
 
     if not yes:
         question = "Proceed?" if install else "Remove zemble configuration?"
@@ -229,6 +287,6 @@ def run(
         if not questionary.confirm(question, default=install).ask():
             _exit("Cancelled.")
 
-    _apply(mode, chosen_agents, chosen_integrations)
+    _apply(mode, chosen_agents, chosen_integrations, nib_program)
     footer = " Restart your agents to pick up the changes." if install else ""
     print(f"  {_GREEN}Done!{_RESET}{footer}\n")
