@@ -62,7 +62,7 @@ from zemble.types import ContentType
 logger = logging.getLogger(__name__)
 DEFAULT_WORKERS = min(10, os.cpu_count() or 2)
 
-GRAPH_FORMAT_VERSION = 11
+GRAPH_FORMAT_VERSION = 12
 #: The file naming the current graph version (first line) and the one it replaced (second).
 GRAPH_POINTER_NAME = "graph.current"
 #: The file whose OS lock is held by the one process allowed to write a workspace's graph.
@@ -851,6 +851,7 @@ def _add_measurements(connection: sqlite3.Connection) -> None:
 _MEASURED_SINCE: dict[str, int] = {
     "recursion counted by receiver": 10,
     "doc comments, commented-out code, markers and generated headers": 11,
+    "a generator's header is more than a scaffold's author line": 12,
 }
 
 
