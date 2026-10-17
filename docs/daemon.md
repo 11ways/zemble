@@ -374,7 +374,8 @@ code, but that is backend execution, not a client fallback.
   edge tallies into private memory (measured: 209 MiB on javaweb, 642 MiB on the zenit
   workspace; `zemble.health.collect.read_estimate_mb` sizes it from the row counts, on the high
   side). The daemon admits that read against the lower of its budget and its current
-  `RLIMIT_DATA` (lowered to the serving reserve while a graph construction runs), evicting idle
+  `RLIMIT_DATA` (lowered while a graph construction runs to what the construction budget leaves
+  of the total, 2048 MiB by default, never under 512 or its own use plus 192), evicting idle
   indexes first; when it still does not fit, it answers `{"ok": false, "kind": "outgrown",
   "error": ...}` and the client raises `CommandOutgrown`. Unlike a refusal, the answer is the
   same from any process: it is read from the stored graph, nothing is built. So the CLI and the

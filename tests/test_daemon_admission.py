@@ -9,7 +9,14 @@ import pytest
 from tests.conftest import FakeEmbedder
 from zemble.daemon import server
 from zemble.daemon.admission import AdmissionBusy, ReadAdmission
-from zemble.daemon.graph_jobs import GraphJobs
+from zemble.daemon.graph_jobs import GraphJobs, serving_reserve_mb
+
+
+def test_the_serving_side_keeps_what_the_construction_budget_leaves():
+    """A build leaves the daemon the total less the construction budget, never under its own use or the floor."""
+    assert serving_reserve_mb(240.0, 4096, 2048) == 2048, "a whole-graph read of 642 MiB fits beside a build"
+    assert serving_reserve_mb(240.0, 1024, 1024) == 512, "the floor"
+    assert serving_reserve_mb(900.0, 1024, 1024) == 1092, "its own use plus scratch"
 
 
 @pytest.mark.anyio

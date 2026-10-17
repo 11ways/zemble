@@ -17,6 +17,21 @@ from zemble.daemon.memory import MIB, MemoryRefused, private_mb
 TOTAL_MEMORY_ENV = "ZEMBLE_DAEMON_TOTAL_MEMORY_MB"
 GRAPH_MEMORY_ENV = "ZEMBLE_GRAPH_BUILD_MEMORY_MB"
 
+#: Private memory the serving side keeps for concurrent reads while a worker builds, beyond what it holds.
+SERVING_SCRATCH_MB = 192
+#: The least the serving side keeps while a worker builds.
+SERVING_FLOOR_MB = 512
+
+
+def serving_reserve_mb(private: float, total_mb: int, build_mb: int) -> float:
+    """The serving side's private-memory ceiling while a worker builds: what the construction budget leaves.
+
+    Never below its own use plus scratch, nor the floor; the worker gets the rest of the total, so the
+    aggregate is still bounded, and a whole-graph read (`health`, ~642 MiB on a 250k-symbol
+    workspace) stays answerable in the daemon while another root builds.
+    """
+    return max(private + SERVING_SCRATCH_MB, SERVING_FLOOR_MB, total_mb - build_mb)
+
 
 class GraphJobs:
     """Own one construction process and one joined job per canonical graph root."""
@@ -145,7 +160,7 @@ class GraphJobs:
                 old_soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
                 # AIDEV-NOTE: reserve bounded concurrent read scratch while the worker owns the rest;
                 # summing per-process limits, not RSS alone, bounds the complete construction lifetime.
-                serving_limit = max(private_mb() + 192, 512)
+                serving_limit = serving_reserve_mb(private_mb(), self.total_mb, self.build_mb)
                 worker_limit = int(min(self.build_mb, self.total_mb - serving_limit))
                 if worker_limit < 512:
                     raise MemoryRefused("insufficient aggregate graph construction headroom")
