@@ -379,7 +379,11 @@ printed in it).
   (`zemble.health.answers`), whose field names are the daemon's argument names.
 - Daemon command `health`, reading its warm graph; no search index is loaded for it, the
   duplication tier included (it reads the unit index). The history axis runs git in the daemon's
-  worker thread for the request, bounded by `HISTORY_TIMEOUT_SECONDS` (20 s).
+  worker thread for the request, bounded by `HISTORY_TIMEOUT_SECONDS` (20 s). The read holds the
+  whole graph's symbols and tallies in private memory (`read_estimate_mb`: 32 MiB plus 1.5 KiB per
+  symbol and 64 B per edge, measured 209 MiB on javaweb and 321 MiB on the zenit workspace), so the
+  daemon admits it against its memory ceiling first and otherwise answers `outgrown`: the CLI and the
+  MCP tool then read the stored graph in their own process and say so (`docs/daemon.md`, fallback rules).
 - A sub-directory of a tree with a graph is answered from that graph: paths relative to the
   sub-directory, only its units measured, callers anywhere counted. The config is the nearest
   ancestor's `home.toml`, as `home` reads it.

@@ -26,6 +26,7 @@ from zemble.daemon.protocol import (
     START_TIMEOUT_SECONDS,
     CommandBusy,
     CommandFailed,
+    CommandOutgrown,
     CommandRefused,
     DaemonUnavailable,
     ErrorKind,
@@ -202,6 +203,8 @@ def _response_result(response: dict[str, Any]) -> Any:
             raise CommandRefused(message)
         if kind is ErrorKind.BUSY:
             raise CommandBusy(message)
+        if kind is ErrorKind.OUTGROWN:
+            raise CommandOutgrown(message)
         raise CommandFailed(message)
     result = response.get("result")
     if result is None:

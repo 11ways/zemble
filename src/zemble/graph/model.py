@@ -217,3 +217,13 @@ class FileDependency:
     kind: EdgeKind
     resolution: Resolution
     edges: int
+
+
+@dataclass(frozen=True)
+class RowCounts:
+    """How many rows a graph holds, for sizing a whole-graph read before it starts."""
+
+    symbols: int
+    edges: int
+    metrics: int
+    files: int

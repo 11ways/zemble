@@ -26,6 +26,7 @@ from zemble.graph.model import (
     FileDependency,
     Hit,
     Resolution,
+    RowCounts,
     Symbol,
     is_test_path,
 )
@@ -159,6 +160,10 @@ class GraphProvider(Protocol):
 
     def unresolved_name_tallies(self, kinds: Sequence[EdgeKind] | None = None) -> dict[tuple[EdgeKind, str], int]:
         """Count the edges with no destination by kind and written name, across the whole graph."""
+        ...
+
+    def row_counts(self) -> RowCounts:
+        """Count the graph's symbols, edges, measured callables and files, for sizing a whole-graph read."""
         ...
 
     def file_dependencies(self, kinds: Sequence[EdgeKind]) -> list[FileDependency]:
@@ -597,6 +602,14 @@ class SqliteGraphProvider:
             for row in self.connection.execute(query, kinds_parameters)
         }
 
+    def row_counts(self) -> RowCounts:
+        """Count the whole graph's rows, four cheap queries."""
+
+        def count(table: str) -> int:
+            return int(self.connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])  # noqa: S608
+
+        return RowCounts(count("symbols"), count("edge_rows"), count("symbol_metrics"), count("files"))
+
     def file_dependencies(self, kinds: Sequence[EdgeKind], *, prefix: str = "") -> list[FileDependency]:
         """Count the resolved edges from each file under a prefix into each other file, by kind and resolution."""
         kinds_where, kinds_parameters = _kinds_clause("e.kind", kinds)
@@ -820,6 +833,10 @@ class SubtreeGraphProvider:
     def unresolved_name_tallies(self, kinds: Sequence[EdgeKind] | None = None) -> dict[tuple[EdgeKind, str], int]:
         """Count the destination-less edges of the whole ancestor graph: names carry no path to filter on."""
         return self.graph.unresolved_name_tallies(kinds)
+
+    def row_counts(self) -> RowCounts:
+        """Count the whole ancestor graph: a view's bulk reads tally edges and names across all of it."""
+        return self.graph.row_counts()
 
     def file_dependencies(self, kinds: Sequence[EdgeKind]) -> list[FileDependency]:
         """Count the edges leaving in-folder files; a target outside the folder is spelled `../`-relative to it."""

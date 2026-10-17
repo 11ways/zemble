@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import sqlite3
@@ -683,3 +684,66 @@ def test_a_workspace_of_checkouts_reads_each_one(history_root: Path, tmp_path: P
     assert history_checkouts(str(workspace)) == ((str(workspace / "repo"), "repo/"),)
     keys = _keys(_report(workspace, signals=["hotspot"]))
     assert keys == {"hotspot:python:repo/app/hot.py"}, keys
+
+
+def test_read_estimate_sizes_a_graph_on_the_high_side(health_root: Path) -> None:
+    """The daemon sizes a health read from row counts: above every measured read, growing with the graph."""
+    from zemble.graph.model import RowCounts
+    from zemble.health.collect import read_estimate_mb
+
+    _report(health_root)
+    provider = open_provider(str(health_root))
+    try:
+        counts = provider.row_counts()
+    finally:
+        provider.close()
+    assert counts.symbols > 0 and counts.edges > 0 and counts.metrics > 0 and counts.files > 0, counts
+    small = read_estimate_mb(counts)
+    javaweb = read_estimate_mb(RowCounts(symbols=122269, edges=1258533, metrics=67762, files=7909))
+    zenit = read_estimate_mb(RowCounts(symbols=246682, edges=2694116, metrics=0, files=14593))
+    # Measured VmData growth of a fresh process: javaweb 209 MiB, the zenit workspace 321 MiB.
+    assert small < javaweb < zenit and javaweb > 209 and zenit > 321, (small, javaweb, zenit)
+
+
+def test_an_outgrown_daemon_answer_is_read_in_process(
+    health_root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon that cannot hold the read answers `outgrown`; the CLI and the MCP tool then read the stored graph."""
+    from zemble.daemon import client
+    from zemble.daemon.protocol import CommandOutgrown
+    from zemble.index_cache import IndexCache
+    from zemble.mcp import create_server
+
+    _report(health_root)  # the stored graph the fallback reads
+    outgrown = CommandOutgrown("health needs ~300 MiB of private memory and this daemon has 10 MiB free.")
+    asked: list[str] = []
+
+    def daemon(cmd: str, args: Any = None, **_: Any) -> Any:
+        asked.append(cmd)
+        raise outgrown
+
+    monkeypatch.setattr(client, "call", daemon)
+    monkeypatch.setattr(client, "_disabled_reason", None)
+    monkeypatch.delenv("ZEMBLE_DAEMON", raising=False)
+    monkeypatch.setattr("zemble.health.cli.ensure_graph", lambda *a, **k: None)
+
+    # 1. The CLI answers from the stored graph, exits 0, and says on stderr why it did not come from the daemon.
+    monkeypatch.setattr(sys, "argv", ["zemble", "health", str(health_root), "--limit", "3"])
+    with pytest.raises(SystemExit) as exit_info:
+        _cli_main()
+    captured = capsys.readouterr()
+    assert exit_info.value.code in (0, None) and asked == ["health"], (exit_info.value.code, asked)
+    assert SCORE_DISCLAIMER in captured.out, captured.out[:300]
+    assert str(outgrown) in captured.err and "Answering in this process from the stored graph" in captured.err
+
+    # 2. The MCP tool does the same and carries the reason as a note above the report.
+    async def outgrown_call(cmd: str, args: dict[str, Any]) -> Any:
+        asked.append(f"mcp:{cmd}")
+        raise outgrown
+
+    monkeypatch.setattr("zemble.mcp._daemon_call", outgrown_call)
+    instance = create_server(IndexCache())
+    result = asyncio.run(instance.call_tool("health", {"repo": str(health_root), "limit": 3}))
+    text = result[0].text
+    assert text.startswith(f"Note: {outgrown} Answered in the MCP server's process"), text[:300]
+    assert SCORE_DISCLAIMER in text and asked[-1] == "mcp:health", (text[:300], asked)

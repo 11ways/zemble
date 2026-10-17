@@ -23,6 +23,18 @@ class MemoryRefused(Refused):
     DEFAULT_KNOB = MEMORY_ENV
 
 
+class ReadOutgrown(RuntimeError):
+    """A read this daemon cannot hold in its own process; it is answered from stored data, so another can.
+
+    Not a `Refused`: a refusal is the same answer in every process, and this one is not.
+    """
+
+    def __init__(self, message: str) -> None:
+        """Carry the memory knob, so a handler reading `knob` off any daemon error gets an answer."""
+        super().__init__(message)
+        self.knob = MEMORY_ENV
+
+
 def default_budget_mb() -> int:
     """Use at most fifteen percent of physical RAM and never more than four GiB."""
     try:
@@ -45,6 +57,12 @@ def private_mb() -> float:
     except (OSError, IndexError, ValueError):
         pass
     return 0.0
+
+
+def data_limit_mb() -> float:
+    """The process's current private-memory ceiling (the `RLIMIT_DATA` soft limit) in MiB, or infinity."""
+    soft, _hard = resource.getrlimit(resource.RLIMIT_DATA)
+    return float("inf") if soft == resource.RLIM_INFINITY else soft / MIB
 
 
 def allocation_backstop(budget_mb: int) -> int:

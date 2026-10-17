@@ -49,6 +49,9 @@ class ErrorKind(StrEnum):
     REFUSED = "refused"
     #: Capacity is occupied; retry through the daemon, never build locally.
     BUSY = "busy"
+    #: This daemon's own process cannot hold the read beside what it already serves. The answer
+    #: comes from stored data, so the caller may read it in a process of its own, never building.
+    OUTGROWN = "outgrown"
 
 
 def error_kind(raw: object) -> ErrorKind:
@@ -83,12 +86,18 @@ class CommandBusy(CommandFailed):
     """The daemon has no free execution slot; the caller may retry."""
 
 
+class CommandOutgrown(CommandFailed):
+    """The daemon could not hold the read in its own process; the caller may read the stored data itself."""
+
+
 def failure_message(error: DaemonError) -> str:
     """Render retryable availability errors separately from refusals and command failures."""
     if isinstance(error, CommandBusy):
         return f"Daemon busy, retry: {error}"
     if isinstance(error, DaemonUnavailable):
         return f"Daemon unavailable, retry: {error}"
+    if isinstance(error, CommandOutgrown):
+        return str(error)
     if isinstance(error, CommandRefused):
         return str(error)
     return f"Daemon command failed: {error}; no in-process fallback."

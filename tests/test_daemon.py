@@ -24,6 +24,7 @@ from zemble.daemon.protocol import (
     LOG_BACKUP_COUNT,
     LOG_MAX_BYTES,
     CommandFailed,
+    CommandOutgrown,
     CommandRefused,
     DaemonError,
     DaemonUnavailable,
@@ -222,6 +223,7 @@ async def test_every_command_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     monkeypatch.setattr("zemble.graph.mcp.answer", lambda *args, **kwargs: '{"results": []}')
     # The evidence handlers are exercised for real over a socket below; here only dispatch is.
     monkeypatch.setattr(server, "_with_graph", lambda root, work, **kwargs: {"stubbed": True})
+    monkeypatch.setattr(server, "_health_need_mb", lambda root: 1.0)
 
     async def prepared(*args, **kwargs):
         return None
@@ -1310,3 +1312,24 @@ async def test_a_refused_command_logs_its_reason(
     assert any("Refusing to index" in line and "may chunk" in line for line in logged), (
         f"the refusal's own reason has to reach the log, got {logged}"
     )
+
+
+def test_health_the_daemon_cannot_hold_is_answered_outgrown(
+    tmp_path: Path, no_embedder_load: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read sized past the daemon's memory ceiling answers `outgrown` over the socket; a smaller one answers."""
+    import shutil
+
+    from zemble.graph import cli as graph_cli
+    from zemble.health import collect
+
+    graph_cli._refreshed.clear()
+    root = str(shutil.copytree(Path(__file__).parent / "fixtures" / "health", tmp_path / "workspace"))
+    with running_server(watch=False, idle_minutes=0):
+        monkeypatch.setattr(collect, "read_estimate_mb", lambda counts: 10.0**6)
+        with pytest.raises(CommandOutgrown, match="health needs ~1000000 MiB of private memory") as raised:
+            client.call("health", {"path": root, "limit": 5}, timeout=180)
+        assert "answer it in a process of its own" in str(raised.value)
+        monkeypatch.setattr(collect, "read_estimate_mb", lambda counts: 1.0)
+        answer = client.call("health", {"path": root, "limit": 5}, timeout=180)
+        assert answer["health"]["total"] > 0, "the same request answers once it fits"

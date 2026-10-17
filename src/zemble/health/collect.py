@@ -27,6 +27,7 @@ from zemble.graph.model import (
     EdgeTally,
     FileDependency,
     Resolution,
+    RowCounts,
     Symbol,
     SymbolKind,
 )
@@ -47,6 +48,20 @@ if TYPE_CHECKING:  # pragma: no cover
 
 #: The language every unmeasurable file is reported under.
 UNKNOWN_LANGUAGE = "unknown"
+
+#: What one whole-graph `collect` holds in private memory, measured as the `VmData` growth of a fresh process
+#: (javaweb, 122k symbols and 1.26M edges: 209 MiB; zenit, 247k and 2.69M: 321 MiB; zemble, 8.5k and 36k:
+#: 22 MiB) and rounded up: the daemon sizes a read by these before starting it, so a miss on the high side
+#: costs an eviction or an in-process answer, and a miss on the low side would kill the read half way.
+READ_BASE_MB = 32.0
+READ_BYTES_PER_SYMBOL = 1536
+READ_BYTES_PER_EDGE = 64
+
+
+def read_estimate_mb(counts: RowCounts) -> float:
+    """Private memory one `collect` over a graph of this size needs, in MiB, on the high side."""
+    return READ_BASE_MB + (counts.symbols * READ_BYTES_PER_SYMBOL + counts.edges * READ_BYTES_PER_EDGE) / (1024 * 1024)
+
 
 #: Edges that say "a subtype of this".
 HIERARCHY_KINDS = frozenset({EdgeKind.EXTENDS, EdgeKind.IMPLEMENTS})

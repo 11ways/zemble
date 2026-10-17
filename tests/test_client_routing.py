@@ -18,6 +18,7 @@ from zemble.daemon.protocol import (
     REVISION_FIELD,
     CommandBusy,
     CommandFailed,
+    CommandOutgrown,
     CommandRefused,
     DaemonUnavailable,
     ErrorKind,
@@ -241,7 +242,8 @@ async def test_long_running_mcp_follows_each_new_daemon_revision(daemon_mode, tm
 
 
 @pytest.mark.parametrize(
-    "kind, exception", [("busy", CommandBusy), ("refused", CommandRefused), ("future", CommandFailed)]
+    "kind, exception",
+    [("busy", CommandBusy), ("refused", CommandRefused), ("outgrown", CommandOutgrown), ("future", CommandFailed)],
 )
 def test_error_kinds_never_authorize_fallback(daemon_mode, monkeypatch, kind, exception):
     """New or unknown daemon errors remain explicit errors on the wire."""

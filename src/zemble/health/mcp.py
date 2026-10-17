@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Annotated
 
 from pydantic import Field
 
-from zemble.daemon.protocol import DaemonError, failure_message
+from zemble.daemon.protocol import CommandOutgrown, DaemonError, failure_message
 from zemble.health.answers import HealthRequest
 from zemble.health.baseline import BASELINE_RELATIVE_PATH
 from zemble.health.cli import in_process
@@ -114,15 +114,20 @@ def register_health_tool(server: FastMCP) -> None:
             save_baseline=fixed if save_baseline else None,
             baseline_optional=True,
         )
+        note = ""
         try:
-            payload = await _daemon_call("health", request.to_args(repo))
+            try:
+                payload = await _daemon_call("health", request.to_args(repo))
+            except CommandOutgrown as outgrown:
+                note = f"Note: {outgrown} Answered in the MCP server's process from the stored graph.\n\n"
+                payload = None
             if payload is None:
                 payload = await asyncio.to_thread(in_process, repo, request)
         except DaemonError as error:
             return failure_message(error)
         except (ConfigError, ValueError) as error:
             return str(error)
-        return str(payload["markdown"])
+        return note + str(payload["markdown"])
 
 
 __all__ = ["register_health_tool"]

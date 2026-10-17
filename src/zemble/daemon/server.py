@@ -35,7 +35,9 @@ from zemble.daemon.memory import (
     MEMORY_ENV,
     MIB,
     MemoryRefused,
+    ReadOutgrown,
     allocation_backstop,
+    data_limit_mb,
     default_budget_mb,
     private_mb,
 )
@@ -417,6 +419,23 @@ class Daemon:
             gc.collect()
             release_free_heap()
         return True
+
+    def admit_read(self, need_mb: float, what: str) -> None:
+        """Make private-memory room for one bulk read, or say that only another process can hold it.
+
+        The ceiling is the lower of the budget and the current `RLIMIT_DATA`, which a running graph
+        construction lowers to the serving reserve (`GraphJobs._build_once`).
+
+        :raises ReadOutgrown: If evicting idle indexes cannot free `need_mb` under that ceiling.
+        """
+        ceiling = min(self.max_rss_mb, data_limit_mb())
+        if self._admit(need_mb) and private_mb() + need_mb <= ceiling:
+            return
+        free = max(ceiling - private_mb(), 0.0)
+        raise ReadOutgrown(
+            f"{what} needs ~{need_mb:.0f} MiB of private memory and this daemon has {free:.0f} MiB free under "
+            f"its {ceiling:.0f} MiB ceiling ({MEMORY_ENV}); answer it in a process of its own."
+        )
 
     async def _resident_for(
         self, path: str, ref: str | None, content: tuple[ContentType, ...], exclude: tuple[str, ...]
@@ -863,13 +882,7 @@ class Daemon:
                 "kind": ErrorKind.REFUSED.value,
             }
         except Exception as exc:
-            refused = isinstance(exc, REFUSAL_TYPES)
-            kind = ErrorKind.REFUSED if refused else ErrorKind.FAILED
-            # A refusal carries no traceback worth printing, but it does carry the numbers and
-            # the knob that decided it. Logging only "refused" left 322 log lines saying nothing.
-            logger.warning("Command %r %s: %s", command, "refused" if refused else "failed", exc, exc_info=not refused)
-            message = str(exc) if refused else f"{type(exc).__name__}: {exc}"
-            return {"id": request_id, "ok": False, "error": message, "kind": kind.value}
+            return _failure_response(request_id, str(command), exc)
         finally:
             self.last_request_at = time.monotonic()
             self._query_keys.pop(request_task, None)
@@ -1066,6 +1079,20 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
     return await asyncio.to_thread(answer, path, str(args.get("symbol", "")), command, fresh=True, **extra)
 
 
+def _failure_response(request_id: Any, command: str, exc: Exception) -> dict[str, Any]:
+    """Shape one failed command as its error kind: outgrown, refused, or failed with a traceback logged."""
+    if isinstance(exc, ReadOutgrown):
+        logger.info("Command %r outgrown: %s", command, exc)
+        return {"id": request_id, "ok": False, "error": str(exc), "kind": ErrorKind.OUTGROWN.value}
+    refused = isinstance(exc, REFUSAL_TYPES)
+    kind = ErrorKind.REFUSED if refused else ErrorKind.FAILED
+    # A refusal carries no traceback worth printing, but it does carry the numbers and
+    # the knob that decided it. Logging only "refused" left 322 log lines saying nothing.
+    logger.warning("Command %r %s: %s", command, "refused" if refused else "failed", exc, exc_info=not refused)
+    message = str(exc) if refused else f"{type(exc).__name__}: {exc}"
+    return {"id": request_id, "ok": False, "error": message, "kind": kind.value}
+
+
 def _with_graph(root: str, work: Callable[[Any], Any], *, fresh: bool = False) -> Any:
     """Run one graph question against a fresh provider, building the graph if needed.
 
@@ -1165,7 +1192,26 @@ async def _cmd_health(daemon: Daemon, args: dict[str, Any]) -> Any:
     root = _root_of(args)
     config = await asyncio.to_thread(HomeConfig.load, resolve_home_root(root))
     request = HealthRequest.from_args(args)
-    return await daemon.with_graph(root, lambda graph: health_payload(graph, config, request))
+    await daemon.graphs.ensure(root, time.monotonic() + 25)
+    daemon.admit_read(await asyncio.to_thread(_health_need_mb, root), "health")
+    try:
+        return await daemon.with_graph(root, lambda graph: health_payload(graph, config, request))
+    except MemoryError as exc:
+        raise ReadOutgrown(
+            f"health outgrew this daemon's private memory mid-read ({MEMORY_ENV}); answer it in a process of its own."
+        ) from exc
+
+
+def _health_need_mb(root: str) -> float:
+    """Estimate one health read's private memory from the graph's row counts; runs in a worker thread."""
+    from zemble.graph.provider import open_provider
+    from zemble.health.collect import read_estimate_mb
+
+    provider = open_provider(root)
+    try:
+        return read_estimate_mb(provider.row_counts())
+    finally:
+        provider.close()
 
 
 async def _cmd_refresh(daemon: Daemon, args: dict[str, Any]) -> Any:

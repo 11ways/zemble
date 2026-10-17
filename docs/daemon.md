@@ -370,6 +370,17 @@ code, but that is backend execution, not a client fallback.
   once, on the `Refused` base in `zemble/refusal.py`, and `REFUSAL_TYPES` is that base rather
   than a hand-maintained union, so a new refusal type is reported here with no second edit and
   can never reach this handler without the field it reads.
+- **A read the daemon has outgrown is neither.** `health` loads a whole graph's symbols and
+  edge tallies into private memory (measured: 209 MiB on javaweb, 321 MiB on the zenit
+  workspace; `zemble.health.collect.read_estimate_mb` sizes it from the row counts, on the high
+  side). The daemon admits that read against the lower of its budget and its current
+  `RLIMIT_DATA` (lowered to the serving reserve while a graph construction runs), evicting idle
+  indexes first; when it still does not fit, it answers `{"ok": false, "kind": "outgrown",
+  "error": ...}` and the client raises `CommandOutgrown`. Unlike a refusal, the answer is the
+  same from any process: it is read from the stored graph, nothing is built. So the CLI and the
+  MCP tool answer it in their own process from that graph, saying so on stderr or in a note,
+  and a `MemoryError` inside the read reports the same kind. An old client reads the unknown kind
+  as `failed` and reports it without fallback.
 - `--no-daemon` deliberately permits local indexes. MCP accepts it in either
   `zemble --no-daemon` or `zemble mcp --no-daemon` form; local model loading is lazy.
 - `ZEMBLE_DAEMON=0` alone refuses access and tells the caller to unset it or pass the
