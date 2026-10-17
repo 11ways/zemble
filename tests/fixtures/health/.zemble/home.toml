@@ -1,0 +1,10 @@
+order = ["core", "app"]
+
+[modules]
+core = "src/main/java/com/example/core/**"
+app = "src/main/java/com/example/app/**"
+
+[[forbidden]]
+from = "core"
+to = "app"
+why = "the core never reaches into an application"

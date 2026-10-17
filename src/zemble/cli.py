@@ -27,6 +27,7 @@ from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.embedding.server_cli import EMBED_SERVER_COMMANDS, add_embed_server_parser, run_embed_server
 from zemble.evidence.cli import EVIDENCE_COMMANDS, add_evidence_parser, run_evidence
 from zemble.graph.cli import add_graph_parser, run_graph
+from zemble.health.cli import HEALTH_COMMANDS, add_health_parser, run_health
 from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
 from zemble.index import ZembleIndex, resolve_embedder
 from zemble.index.scope import megabytes
@@ -62,6 +63,7 @@ _SUBCOMMAND_RUNNERS = {
     "daemon": run_daemon,
     **dict.fromkeys(EVIDENCE_COMMANDS, run_evidence),
     **dict.fromkeys(HOME_COMMANDS, run_home),
+    **dict.fromkeys(HEALTH_COMMANDS, run_health),
     **dict.fromkeys(EMBED_STATUS_COMMANDS, run_embed_status),
     **dict.fromkeys(EMBED_SERVER_COMMANDS, run_embed_server),
     **dict.fromkeys(STATUS_COMMANDS, run_status),
@@ -722,6 +724,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_dupes_parser(sub)
     add_evidence_parser(sub)
     add_home_parser(sub)
+    add_health_parser(sub)
     add_embed_status_parser(sub)
     add_embed_server_parser(sub)
     add_daemon_parser(sub)

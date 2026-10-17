@@ -11,6 +11,8 @@ from pathlib import PurePosixPath
 # so both `src/test/java/...` (Maven) and `src/browserTest/java/...` (Gradle
 # source sets, as used across the javaweb workspace) are recognised.
 TEST_PATH_SEGMENTS: frozenset[str] = frozenset({"test", "tests", "browsertest", "integrationtest", "testfixtures"})
+#: How an anonymous class's name begins (`$anon@<line>`); nothing can name one, so nothing references it.
+ANONYMOUS_MARKER = "$anon@"
 
 
 class SymbolKind(str, Enum):
@@ -78,6 +80,23 @@ class Resolution(str, Enum):
     UNIQUE_NAME = "unique_name"
     AMBIGUOUS = "ambiguous"
     UNRESOLVED = "unresolved"
+
+    @property
+    def strength(self) -> int:
+        """Rank from most confident (highest) to least; a member without a rank raises."""
+        return _RESOLUTION_STRENGTH[self]
+
+    def at_least(self, floor: Resolution) -> bool:
+        """Whether this resolution is as confident as `floor` or more."""
+        return self.strength >= floor.strength
+
+
+_RESOLUTION_STRENGTH: dict[Resolution, int] = {
+    Resolution.EXACT: 3,
+    Resolution.UNIQUE_NAME: 2,
+    Resolution.AMBIGUOUS: 1,
+    Resolution.UNRESOLVED: 0,
+}
 
 
 def is_test_path(relative_path: str) -> bool:
@@ -175,3 +194,26 @@ class Hit:
     depth: int = 1
     # The edge's producer: "tree-sitter" or the name of the tool whose facts replaced it.
     source: str = "tree-sitter"
+
+
+@dataclass(frozen=True)
+class EdgeTally:
+    """How many distinct symbols reach one symbol over one edge kind at one resolution."""
+
+    symbol_id: str
+    kind: EdgeKind
+    resolution: Resolution
+    #: Whether the reaching symbols live in a test source set.
+    from_test: bool
+    sources: int
+
+
+@dataclass(frozen=True)
+class FileDependency:
+    """Resolved edges of one kind and resolution from one file into declarations of another."""
+
+    source_path: str
+    target_path: str
+    kind: EdgeKind
+    resolution: Resolution
+    edges: int

@@ -14,7 +14,7 @@ from logging import getLogger
 from semble_grammars import LanguageNotFoundError, UnsupportedPlatformError, get_parser
 from tree_sitter import Node, Parser
 
-from zemble.graph.model import Edge, EdgeKind, Symbol, SymbolKind, is_test_path, make_symbol_id
+from zemble.graph.model import ANONYMOUS_MARKER, Edge, EdgeKind, Symbol, SymbolKind, is_test_path, make_symbol_id
 from zemble.languages.catalog import JAVA_BLOCK_KINDS, JAVA_COMPLEXITY
 from zemble.languages.metrics import CallableMetrics, FileMetrics, measure_callable, measure_file
 
@@ -801,7 +801,7 @@ class _JavaExtractor:
         """Create the symbol for an anonymous class and extract its members."""
         self._anon_counter += 1
         line = self._line(node)
-        name = f"$anon@{line}"
+        name = f"{ANONYMOUS_MARKER}{line}"
         qualified = f"{prefix}${'anon'}@{line}"
         symbol = self._add_symbol(
             Symbol(

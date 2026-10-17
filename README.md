@@ -59,6 +59,14 @@ the grammar specs in `src/zemble/languages/catalog.py`). Logic clones are
 never reported on embedding similarity alone: a structural check has to agree, and the
 reason is printed. It is a report, never a gate. See [docs/dedup.md](docs/dedup.md).
 
+**Health** (`zemble health`, MCP `health`). A ranked report of code-shape findings (long,
+deep, complex callables; large types and files; single-implementation interfaces,
+single-subclass abstract types, public callables with at most one caller, unreferenced
+private code; edges crossing a `home.toml` forbidden dependency) plus a score per axis. Every
+threshold is absolute and documented, graph findings rest only on edges resolved exactly or by
+unique name, and the score is not a target. It is a report, never a gate. See
+[docs/health.md](docs/health.md).
+
 **Home** (`zemble home`, MCP `home`). "Does this feature already exist, and which module
 should it live in?" Answered from the existing mechanisms search and the graph find,
 plus the module map, forbidden dependencies and declared-home tables the workspace states
@@ -287,6 +295,7 @@ zemble outline ./my-project PageWindow --members page
 zemble signatures ./my-project PageWindow.of
 zemble dupes ./my-project --kind exact,renamed --limit 20
 zemble home ./my-project "cache a computed thumbnail on disk"
+zemble health ./my-project --limit 20
 ```
 
 The daemon manages itself, but it can be driven by hand:
@@ -408,6 +417,7 @@ tools and prints the code they point at from the live file.
 | `signatures` | A declaration plus its exactly resolved call sites. |
 | `dupes` | Clone classes over the workspace's code, in every language with a grammar. |
 | `home` | Existing mechanisms, candidate homes, verdict and checklist. |
+| `health` | Ranked code-shape findings and a score per axis; a report, never a gate. |
 | `status` | Which zemble code this server is running (version, source root, revision, start time) and whether the checkout moved under it. |
 
 An ambiguous symbol comes back as an `error` payload with a `candidates` list rather than

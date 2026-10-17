@@ -639,6 +639,7 @@ def _every_tool_call(root: str, dupes_root: str) -> list[tuple[str, dict[str, An
         ("signatures", {"symbol": "Helpers.twice", "repo": root}),
         ("explain", {"query": "circle area", "repo": root, "budget": 400}),
         ("home", {"description": "compute the area of a shape", "repo": root}),
+        ("health", {"repo": root}),
         ("dupes", {"repo": dupes_root, "kind": "exact"}),
         ("dupes", {"repo": dupes_root, "kind": "exact", "format": "json"}),
     ]
@@ -703,7 +704,9 @@ async def test_nib_provider_mode_adds_parts_beside_the_unchanged_text(
             assert complaints == [], f"{name}: {complaints}"
             if any("path" in part for part in structured["parts"]):
                 located.add(name)
-    assert located == {name for name, _ in calls} - {"status", "home", "dupes"}, "every code-showing tool locates"
+    assert located == {name for name, _ in calls} - {"status", "home", "dupes", "health"}, (
+        "every code-showing tool locates"
+    )
 
 
 _MCP_LAUNCHER = """

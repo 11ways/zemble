@@ -571,6 +571,8 @@ PYTHON = LanguageSpec(
         ("tuple_pattern", "@identifier*"),
     ),
     constructor_names=frozenset({"__init__", "__new__"}),
+    # Data-model methods (`__repr__`, `__enter__`, `__post_init__`): the interpreter calls them.
+    runtime_hook_patterns=("__*__",),
     capitalized_call_is_new=True,
     underscore_is_private=True,
     test_file_patterns=("test_*.py", "*_test.py", "conftest.py"),
@@ -679,6 +681,8 @@ GO = LanguageSpec(
         ("range_clause", "left/@identifier*"),
     ),
     capitalized_is_public=True,
+    # Package initialisers: the runtime calls every `init` before `main`.
+    runtime_hook_patterns=("init",),
     default_visibility=Visibility.PACKAGE,
     test_file_patterns=("*_test.go",),
 )
@@ -1088,6 +1092,8 @@ PHP = LanguageSpec(
         ("catch_clause", "name"),
     ),
     constructor_names=frozenset({"__construct"}),
+    # Magic methods (`__get`, `__toString`, `__invoke`): the engine calls them.
+    runtime_hook_patterns=("__*",),
     test_file_patterns=("*Test.php",),
     package_separator="\\",
     member_separators=frozenset({"->", "::", "?->"}),

@@ -17,6 +17,7 @@ from zemble.daemon.protocol import CommandFailed, DaemonError, failure_message
 from zemble.dedup.mcp import register_dupes_tool
 from zemble.evidence.mcp import register_evidence_tools
 from zemble.graph.mcp import register_graph_tools
+from zemble.health.mcp import register_health_tool
 from zemble.home.mcp import register_home_tool
 from zemble.index import ZembleIndex
 from zemble.index_cache import CACHE_MAX_SIZE, IndexCache
@@ -302,6 +303,7 @@ def create_server(
         default_content,
     )
     register_home_tool(server, lambda repo, selected: _get_index(repo, cache, selected))
+    register_health_tool(server)
     return server
 
 

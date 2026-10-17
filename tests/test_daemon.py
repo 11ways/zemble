@@ -238,6 +238,7 @@ async def test_every_command_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         "outline": {"path": str(tmp_path), "target": "Thing"},
         "signatures": {"path": str(tmp_path), "symbol": "Thing.method"},
         "home": {"path": str(tmp_path), "description": "anything"},
+        "health": {"path": str(tmp_path)},
         "refresh": {"path": str(tmp_path)},
         "evict": {"path": str(tmp_path)},
     }
@@ -752,6 +753,31 @@ def test_home_answers_over_a_real_socket(graph_fixture_root: Path, tmp_path: Pat
         # 4. The root is resident once, shared with every other surface.
         status = client.call("status", timeout=30)
         assert [index["root"] for index in status["indexes"]] == [root], "4: one warm index for the workspace"
+
+
+def test_health_answers_over_a_real_socket(tmp_path: Path, no_embedder_load: None) -> None:
+    """`health` answers from the daemon's own graph, in both renderings, with no index loaded."""
+    import shutil
+
+    from zemble.graph import cli as graph_cli
+    from zemble.health.score import SCORE_DISCLAIMER
+
+    graph_cli._refreshed.clear()
+    root = str(shutil.copytree(Path(__file__).parent / "fixtures" / "health", tmp_path / "workspace"))
+    with running_server(watch=False, idle_minutes=0):
+        # 1. Both renderings come back, the score line carrying its disclaimer.
+        answer = client.call("health", {"path": root, "limit": 5}, timeout=180)
+        assert SCORE_DISCLAIMER in answer["markdown"], "1: the markdown with its score line"
+        assert answer["health"]["total"] > 5 and len(answer["health"]["findings"]) == 5, "1: capped, total kept"
+
+        # 2. The workspace's own home.toml judges the crossing.
+        only = client.call("health", {"path": root, "signals": ["forbidden_crossing"]}, timeout=60)
+        crossings = [finding["key"] for finding in only["health"]["findings"]]
+        assert crossings == ["forbidden_crossing:java:src/main/java/com/example/core/Leaker.java->app"], "2"
+
+        # 3. No index was loaded for it: health reads the graph alone.
+        status = client.call("status", timeout=30)
+        assert status["indexes"] == [], f"3: no index, got {status['indexes']}"
 
 
 def test_cli_search_reports_unavailable_without_loading_an_index(

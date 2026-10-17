@@ -63,6 +63,42 @@ def test_measurement_journey(built_graph: SqliteGraphProvider) -> None:
     assert every == sorted(every, key=lambda pair: (pair[0].file_path, pair[0].start_line, pair[0].id))
 
 
+def test_bulk_readers_agree_with_the_per_symbol_queries(built_graph: SqliteGraphProvider) -> None:
+    """Each whole-graph aggregate equals what the per-symbol queries answer, one symbol at a time."""
+    symbols = list(built_graph.all_symbols())
+    assert len(symbols) == built_graph.connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0], "1: all"
+
+    # 2. Inbound CALLS tallies: distinct callers per callee, resolution and test-ness, as `callers` lists them.
+    tallies = built_graph.inbound_tallies([EdgeKind.CALLS])
+    assert any(tally.sources for tally in tallies), "2: the fixture has calls"
+    for symbol in symbols:
+        expected: dict[tuple[Resolution, bool], set[str]] = {}
+        for hit in built_graph.callers(symbol.id):
+            expected.setdefault((hit.resolution, hit.symbol.is_test), set()).add(hit.symbol.id)
+        mine = [tally for tally in tallies if tally.symbol_id == symbol.id]
+        found = {(tally.resolution, tally.from_test): tally.sources for tally in mine}
+        assert found == {key: len(ids) for key, ids in expected.items()}, f"2: {symbol.id}"
+
+    # 3. Outgoing OVERRIDES edges are the ones `overrides_of` follows, plus the unresolved ones it cannot.
+    overriding = {edge.src_id for edge in built_graph.outgoing_edges([EdgeKind.OVERRIDES]) if edge.dst_id}
+    assert overriding == {symbol.id for symbol in symbols if built_graph.overrides_of(symbol.id)}, "3: overrides"
+
+    # 4. Destination-less edges are counted by the name they wrote, and none of them resolved.
+    names = built_graph.unresolved_name_tallies([EdgeKind.CALLS])
+    rows = built_graph.connection.execute(
+        "SELECT COUNT(*) FROM edge_rows WHERE kind = 'calls' AND dst IS NULL AND dst_name IS NOT NULL"
+    ).fetchone()[0]
+    assert sum(names.values()) == rows, "4: every unresolved call is counted once"
+
+    # 5. Every measured file is a source file, and file dependencies never point a file at itself.
+    sources = {path for path, _ in built_graph.source_files()}
+    measured = {path for path, _, _ in built_graph.file_measurements()}
+    root = Path(built_graph.path).resolve()
+    assert {str(root / path) for path in measured} <= sources, "5: measured files are sources"
+    dependencies = built_graph.file_dependencies([EdgeKind.CALLS, EdgeKind.IMPORTS, EdgeKind.REFERENCES_TYPE])
+    assert dependencies and all(item.source_path != item.target_path for item in dependencies), "5: cross-file only"
+
+
 def test_call_graph_journey(built_graph: SqliteGraphProvider) -> None:
     """Callers and callees are answered with a reason apiece."""
     twice = built_graph.definition("Helpers.twice")[0]

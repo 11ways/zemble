@@ -550,6 +550,7 @@ def _takes(subparser: argparse.ArgumentParser, option: str) -> bool:
 _NEVER_BUILDS_PROOFS: dict[tuple[str, ...], list[list[str]]] = {
     ("outline",): [["outline", "{root}", "auth.py", "--no-daemon"]],
     ("signatures",): [["signatures", "{root}", "authenticate", "--no-daemon"]],
+    ("health",): [["health", "{root}", "--no-daemon"], ["health", "{root}", "--json", "--no-daemon"]],
     ("graph", "build"): [["graph", "build", "{root}", "--no-daemon"]],
     ("graph", "facts", "status"): [["graph", "facts", "status", "{root}", "--no-daemon"]],
     **{

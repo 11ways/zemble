@@ -799,7 +799,7 @@ class Daemon:
         if command in {"search", "find_related", "home", "explain", "stats", "architectural"}:
             async with asyncio.timeout_at(deadline):
                 await self.index_for(prepared)
-        if command in {"graph", "home", "explain", "outline", "signatures", "find_related", "architectural"}:
+        if command in {"graph", "home", "explain", "outline", "signatures", "health", "find_related", "architectural"}:
             await self.graphs.ensure(_root_of(prepared), deadline)
 
     # -- serving ------------------------------------------------------------
@@ -1153,6 +1153,23 @@ async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:
     )
 
 
+async def _cmd_health(daemon: Daemon, args: dict[str, Any]) -> Any:
+    """Report code-shape findings over the daemon's graph and the nearest declared workspace config."""
+    from zemble.health.answers import health_payload
+    from zemble.health.report import DEFAULT_LIMIT
+    from zemble.home.config import HomeConfig
+    from zemble.workspace import resolve_home_root
+
+    root = _root_of(args)
+    config = await asyncio.to_thread(HomeConfig.load, resolve_home_root(root))
+    signals = args.get("signals")
+    paths = args.get("paths") or []
+    limit = int(args.get("limit", DEFAULT_LIMIT))
+    return await daemon.with_graph(
+        root, lambda graph: health_payload(graph, config, signals=signals, paths=paths, limit=limit)
+    )
+
+
 async def _cmd_refresh(daemon: Daemon, args: dict[str, Any]) -> Any:
     """Load a root, rescan it until a pass finds the tree at rest, and report it; `zemble index` asks this."""
     async with daemon._operation_lock:
@@ -1207,6 +1224,7 @@ COMMANDS: dict[str, Handler] = {
     "outline": _cmd_outline,
     "signatures": _cmd_signatures,
     "home": _cmd_home,
+    "health": _cmd_health,
     "architectural": _cmd_architectural,
     "refresh": _cmd_refresh,
     "evict": _cmd_evict,

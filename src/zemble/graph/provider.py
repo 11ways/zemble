@@ -8,6 +8,8 @@ better resolution and drops straight in behind it.
 from __future__ import annotations
 
 import json
+import os
+import posixpath
 import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import replace
@@ -15,7 +17,18 @@ from itertools import chain
 from typing import Protocol, runtime_checkable
 
 from zemble.graph.facts import TREE_SITTER_SOURCE
-from zemble.graph.model import NAMED_KINDS, TYPE_KINDS, Edge, EdgeKind, Hit, Resolution, Symbol
+from zemble.graph.model import (
+    NAMED_KINDS,
+    TYPE_KINDS,
+    Edge,
+    EdgeKind,
+    EdgeTally,
+    FileDependency,
+    Hit,
+    Resolution,
+    Symbol,
+    is_test_path,
+)
 from zemble.graph.store import connect, edge_from_row, resolve_graph_root, symbol_from_row
 from zemble.languages.metrics import CallableMetrics, FileMetrics
 
@@ -124,6 +137,34 @@ class GraphProvider(Protocol):
         """Yield every measured callable with its measurements, by file and line."""
         ...
 
+    def all_symbols(self) -> Iterator[Symbol]:
+        """Yield every symbol, by file and line."""
+        ...
+
+    def file_measurements(self) -> Iterator[tuple[str, FileMetrics, bool]]:
+        """Yield every measured file's path, line counts and whether it is test code, by path."""
+        ...
+
+    def inbound_tallies(self, kinds: Sequence[EdgeKind] | None = None) -> list[EdgeTally]:
+        """Count, per symbol, the distinct symbols reaching it by edge kind, resolution and test-ness."""
+        ...
+
+    def outgoing_edges(self, kinds: Sequence[EdgeKind]) -> list[Edge]:
+        """Return every edge of these kinds leaving a symbol, at any resolution, resolved or not."""
+        ...
+
+    def source_files(self) -> list[tuple[str, bool]]:
+        """Return the absolute path of every file the graph was built from, and whether it is test code."""
+        ...
+
+    def unresolved_name_tallies(self, kinds: Sequence[EdgeKind] | None = None) -> dict[tuple[EdgeKind, str], int]:
+        """Count the edges with no destination by kind and written name, across the whole graph."""
+        ...
+
+    def file_dependencies(self, kinds: Sequence[EdgeKind]) -> list[FileDependency]:
+        """Count the resolved edges from each file into each other file, by kind and resolution."""
+        ...
+
 
 def display_name(symbol: Symbol) -> str:
     """Return a short human label: `Type` for types, `Type.member` for members."""
@@ -160,6 +201,34 @@ _METRICS_SELECT = "SELECT symbol_id, lines, statements, complexity, nesting FROM
 def _metrics_from_row(row: sqlite3.Row) -> CallableMetrics:
     """Rebuild one callable's measurements from a row carrying the `symbol_metrics` columns."""
     return CallableMetrics(row["lines"], row["statements"], row["complexity"], row["nesting"])
+
+
+#: Whether a `files f` row is test code: any symbol it declares is (the extractors' own verdict).
+_FILE_IS_TEST = "(SELECT MAX(s.is_test) FROM symbols s WHERE s.file_path = f.path)"
+
+
+def _file_is_test(row: sqlite3.Row) -> bool:
+    """Read `_FILE_IS_TEST`, falling back to the path for a file that declares nothing."""
+    return bool(row["is_test"]) or is_test_path(row["path"])
+
+
+def _under(column: str, prefix: str) -> tuple[str, tuple[str, ...]]:
+    """A WHERE clause keeping the rows whose `column` text starts with `prefix`, and its parameters.
+
+    Every text under `prefix` sorts between it and the same text with its last character bumped,
+    so the clause is an index range scan; an empty prefix keeps every row.
+    """
+    if not prefix:
+        return "1", ()
+    return f"{column} >= ? AND {column} < ?", (prefix, prefix[:-1] + chr(ord(prefix[-1]) + 1))
+
+
+def _kinds_clause(column: str, kinds: Sequence[EdgeKind] | None) -> tuple[str, tuple[str, ...]]:
+    """A WHERE clause keeping the edges of these kinds (every kind for None), and its parameters."""
+    if kinds is None:
+        return "1", ()
+    values = tuple(kind.value for kind in kinds)
+    return f"{column} IN ({','.join('?' * len(values))})", values
 
 
 class SqliteGraphProvider:
@@ -441,17 +510,115 @@ class SqliteGraphProvider:
 
     def all_metrics(self, *, prefix: str = "") -> Iterator[tuple[Symbol, CallableMetrics]]:
         """Yield every measured callable with its measurements, by file and line, optionally under a path prefix."""
+        where, parameters = _under("s.file_path", prefix)
         query = (
             "SELECT s.*, m.lines, m.statements, m.complexity, m.nesting "
-            "FROM symbol_metrics m JOIN symbols s ON s.id = m.symbol_id"
+            f"FROM symbol_metrics m JOIN symbols s ON s.id = m.symbol_id WHERE {where} "  # noqa: S608
+            "ORDER BY s.file_path, s.start_line, s.id"
         )
-        parameters: tuple[str, ...] = ()
-        if prefix:
-            # Every path under `prefix` sorts between it and the same text with its last character bumped.
-            query += " WHERE s.file_path >= ? AND s.file_path < ?"
-            parameters = (prefix, prefix[:-1] + chr(ord(prefix[-1]) + 1))
-        for row in self.connection.execute(f"{query} ORDER BY s.file_path, s.start_line, s.id", parameters):
+        for row in self.connection.execute(query, parameters):
             yield symbol_from_row(row), _metrics_from_row(row)
+
+    # ---- bulk reads: whole-graph aggregates, one query each -------------
+
+    def all_symbols(self, *, prefix: str = "") -> Iterator[Symbol]:
+        """Yield every symbol, by file and line, optionally under a path prefix."""
+        where, parameters = _under("file_path", prefix)
+        query = f"SELECT * FROM symbols WHERE {where} ORDER BY file_path, start_line, id"  # noqa: S608
+        for row in self.connection.execute(query, parameters):
+            yield symbol_from_row(row)
+
+    def file_measurements(self, *, prefix: str = "") -> Iterator[tuple[str, FileMetrics, bool]]:
+        """Yield every measured file's path, line counts and test-ness, by path, optionally under a prefix.
+
+        A file is test code when any symbol it declares is, else when its path is under a test source set.
+        """
+        where, parameters = _under("f.path", prefix)
+        query = (
+            "SELECT f.path, f.lines, f.comment_lines, "
+            f"{_FILE_IS_TEST} AS is_test "
+            f"FROM files f WHERE f.lines IS NOT NULL AND {where} ORDER BY f.path"  # noqa: S608
+        )
+        for row in self.connection.execute(query, parameters):
+            path = row["path"]
+            yield path, FileMetrics(row["lines"], row["comment_lines"]), _file_is_test(row)
+
+    def inbound_tallies(self, kinds: Sequence[EdgeKind] | None = None, *, prefix: str = "") -> list[EdgeTally]:
+        """Count, per symbol under a prefix, the distinct symbols reaching it by kind, resolution and test-ness.
+
+        Sources are counted wherever they live: a caller outside the prefix still calls.
+        """
+        kinds_where, kinds_parameters = _kinds_clause("e.kind", kinds)
+        under, under_parameters = _under("d.text", prefix)
+        query = (
+            "SELECT d.text AS dst_id, e.kind, e.resolution, COALESCE(s.is_test, 0) AS from_test, "
+            "COUNT(DISTINCT e.src) AS sources "
+            "FROM edge_rows e JOIN refs d ON d.key = e.dst JOIN refs r ON r.key = e.src "
+            "LEFT JOIN symbols s ON s.id = r.text "
+            f"WHERE {kinds_where} AND {under} "  # noqa: S608
+            "GROUP BY e.dst, e.kind, e.resolution, from_test"
+        )
+        return [
+            EdgeTally(
+                row["dst_id"],
+                EdgeKind(row["kind"]),
+                Resolution(row["resolution"]),
+                bool(row["from_test"]),
+                row["sources"],
+            )
+            for row in self.connection.execute(query, kinds_parameters + under_parameters)
+        ]
+
+    def outgoing_edges(self, kinds: Sequence[EdgeKind], *, prefix: str = "") -> list[Edge]:
+        """Return every edge of these kinds leaving a symbol under a prefix, at any resolution, resolved or not."""
+        kinds_where, kinds_parameters = _kinds_clause("kind", kinds)
+        under, under_parameters = _under("src_id", prefix)
+        query = f"SELECT * FROM edges WHERE {kinds_where} AND {under} ORDER BY src_id, line"  # noqa: S608
+        return [edge_from_row(row) for row in self.connection.execute(query, kinds_parameters + under_parameters)]
+
+    def source_files(self) -> list[tuple[str, bool]]:
+        """Return the absolute path of every file the graph was built from, and its test-ness, sorted."""
+        root = os.path.realpath(self.path)
+        rows = self.connection.execute(f"SELECT f.path, {_FILE_IS_TEST} AS is_test FROM files f ORDER BY f.path")  # noqa: S608
+        return [(os.path.join(root, row["path"]), _file_is_test(row)) for row in rows]
+
+    def unresolved_name_tallies(self, kinds: Sequence[EdgeKind] | None = None) -> dict[tuple[EdgeKind, str], int]:
+        """Count the edges with no destination (ambiguous or unresolved) by kind and written name.
+
+        Always the whole graph: a name written anywhere may mean a symbol in any sub-directory.
+        """
+        kinds_where, kinds_parameters = _kinds_clause("kind", kinds)
+        query = (
+            "SELECT kind, dst_name, COUNT(*) AS edges FROM edge_rows "
+            f"WHERE dst IS NULL AND dst_name IS NOT NULL AND {kinds_where} GROUP BY kind, dst_name"  # noqa: S608
+        )
+        return {
+            (EdgeKind(row["kind"]), row["dst_name"]): row["edges"]
+            for row in self.connection.execute(query, kinds_parameters)
+        }
+
+    def file_dependencies(self, kinds: Sequence[EdgeKind], *, prefix: str = "") -> list[FileDependency]:
+        """Count the resolved edges from each file under a prefix into each other file, by kind and resolution."""
+        kinds_where, kinds_parameters = _kinds_clause("e.kind", kinds)
+        under, under_parameters = _under("f.text", prefix)
+        query = (
+            "SELECT f.text AS source_path, substr(d.text, 1, instr(d.text, '#') - 1) AS target_path, "
+            "e.kind, e.resolution, COUNT(*) AS edges "
+            "FROM edge_rows e JOIN refs f ON f.key = e.file JOIN refs d ON d.key = e.dst "
+            f"WHERE {kinds_where} AND {under} "  # noqa: S608
+            "GROUP BY e.file, target_path, e.kind, e.resolution"
+        )
+        return [
+            FileDependency(
+                row["source_path"],
+                row["target_path"],
+                EdgeKind(row["kind"]),
+                Resolution(row["resolution"]),
+                row["edges"],
+            )
+            for row in self.connection.execute(query, kinds_parameters + under_parameters)
+            if row["target_path"] and row["target_path"] != row["source_path"]
+        ]
 
     # ---- coverage --------------------------------------------------------
 
@@ -615,6 +782,55 @@ class SubtreeGraphProvider:
             rebased = self._rebased(symbol)
             if rebased is not None:
                 yield rebased, metric
+
+    def all_symbols(self) -> Iterator[Symbol]:
+        """Yield every in-folder symbol, rebased."""
+        for symbol in self.graph.all_symbols(prefix=self._lead):
+            rebased = self._rebased(symbol)
+            if rebased is not None:
+                yield rebased
+
+    def file_measurements(self) -> Iterator[tuple[str, FileMetrics, bool]]:
+        """Yield every measured in-folder file, its path rebased."""
+        for path, metric, is_test in self.graph.file_measurements(prefix=self._lead):
+            yield self._strip(path), metric, is_test
+
+    def inbound_tallies(self, kinds: Sequence[EdgeKind] | None = None) -> list[EdgeTally]:
+        """Count the sources reaching each in-folder symbol, wherever those sources live, ids rebased."""
+        return [
+            replace(tally, symbol_id=self._strip(tally.symbol_id))
+            for tally in self.graph.inbound_tallies(kinds, prefix=self._lead)
+        ]
+
+    def outgoing_edges(self, kinds: Sequence[EdgeKind]) -> list[Edge]:
+        """Return the edges leaving in-folder symbols, rebased; a destination outside the folder reads None."""
+        return [
+            replace(
+                edge,
+                src_id=self._strip(edge.src_id),
+                dst_id=self._strip(edge.dst_id) if edge.dst_id and edge.dst_id.startswith(self._lead) else None,
+            )
+            for edge in self.graph.outgoing_edges(kinds, prefix=self._lead)
+        ]
+
+    def source_files(self) -> list[tuple[str, bool]]:
+        """Return every file of the ancestor graph: code outside the folder may still reference code inside it."""
+        return self.graph.source_files()
+
+    def unresolved_name_tallies(self, kinds: Sequence[EdgeKind] | None = None) -> dict[tuple[EdgeKind, str], int]:
+        """Count the destination-less edges of the whole ancestor graph: names carry no path to filter on."""
+        return self.graph.unresolved_name_tallies(kinds)
+
+    def file_dependencies(self, kinds: Sequence[EdgeKind]) -> list[FileDependency]:
+        """Count the edges leaving in-folder files; a target outside the folder is spelled `../`-relative to it."""
+        return [
+            replace(
+                dependency,
+                source_path=self._strip(dependency.source_path),
+                target_path=posixpath.relpath(dependency.target_path, self.prefix),
+            )
+            for dependency in self.graph.file_dependencies(kinds, prefix=self._lead)
+        ]
 
     def meta(self) -> dict[str, str]:
         """Return the ancestor graph's stored metadata."""

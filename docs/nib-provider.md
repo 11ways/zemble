@@ -30,7 +30,7 @@ when the file changed since. Locations of one file with no text between them pri
 | `outline` | The package and file, then each declaration's first line, as one block. |
 | `signatures` | The signature's label and line, then per exact call site its text and line. |
 | `explain` | The bundle header, then per item its heading and the lines it shows; outline-style items and bare locations stay prose. |
-| `dupes`, `home`, `status` | One text part holding the plain text. |
+| `dupes`, `home`, `health`, `status` | One text part holding the plain text. |
 
 Only lines zemble knows are located: a graph hit or declaration gets its one line, never a guessed
 span. A chunk is a byte range, so its first line may start after the indentation; when it still sits

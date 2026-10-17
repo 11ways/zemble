@@ -209,6 +209,8 @@ class LanguageSpec:
     binding_paths: tuple[tuple[str, str], ...] = ()
     #: Callable names that are constructors (`__init__`, `initialize`, `constructor`).
     constructor_names: frozenset[str] = frozenset()
+    #: Callable-name globs the language runtime calls by convention, never through a call anyone writes.
+    runtime_hook_patterns: tuple[str, ...] = ()
     #: Whether a bare capitalised call is a constructor (`Point(1)` in Python, Kotlin, Swift).
     capitalized_call_is_new: bool = False
     #: Whether a capitalised name is exported (Go) or a leading underscore hides one (Python).
