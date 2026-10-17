@@ -74,6 +74,21 @@ _EXPECTED = {
     f"undocumented_public:java:{_PKG}.core.AbstractStore.save()",
     f"undocumented_public:java:{_PKG}.core.Billing.total(int[])",
     f"undocumented_public:java:{_PKG}.core.Pricing.total(int[])",
+    # The coupling fixture's own public declarations, undocumented like the rest.
+    *(
+        f"undocumented_public:java:{_PKG}.{name}"
+        for name in (
+            "app.AppPlugin",
+            "core.Clock.now()",
+            "core.Customer",
+            "core.Ledger.Audit",
+            "core.Ledger.record(int)",
+            "core.Plugin.name()",
+            "core.SystemClock",
+            "core.south.South",
+            *(f"core.Tower.Level{level}" for level in range(1, 8)),
+        )
+    ),
 }
 
 #: The duplication tier's findings on the fixture, by key: two copied bodies in two files, one
@@ -90,9 +105,10 @@ _COPYING = {
 #: Shapes the fixture holds on purpose that no signal may report.
 _NEVER = (
     "Shape:",  # two implementors
-    "Plugin",  # one implementor, in another module: an extension point
+    # One implementor, in another module: an extension point.
+    f"single_implementation_interface:java:{_PKG}.core.Plugin",
     "EnglishGreeter.greet",  # overrides, called through the interface only
-    "Greeter.greet",  # a contract member is the contract, not a helper
+    f"lone_public_callable:java:{_PKG}.core.Greeter.greet",  # a contract member is the contract, not a helper
     "FileStore.save",  # overrides, called through the abstract type only
     "Launcher.main",  # the entry point; its many calls are static ones on a type name
     "Util.frameworkHook",  # annotated: a framework reaches it
@@ -105,8 +121,9 @@ _NEVER = (
     "Customer.",  # called from Invoice, outside its own type
     "Invoice.replay",  # calls a ledger's logic, not its getters: no envy
     "Invoice.moves",  # one read, then calls on what each call returned: a chain, not envy
-    "Tower.Level6",  # five ancestors: at the bar, not past it
-    "Clock",  # one production implementor and a test double: a seam
+    f"deep_inheritance:java:{_PKG}.core.Tower.Level6",  # five ancestors: at the bar, not past it
+    # One production implementor and a test double: a seam.
+    f"single_implementation_interface:java:{_PKG}.core.Clock",
     "pass_through:java:com.example.core.Leaker.leak()",  # forwards no parameter: it names a value
 )
 
@@ -436,7 +453,7 @@ def test_a_sub_directory_is_reported_in_its_own_paths(health_root: Path) -> None
     expected = {
         key.replace(f"{_CORE}/", "")
         for key in _EXPECTED | _COPYING
-        if "app.Launcher" not in key and "zoo.py" not in key
+        if f"{_PKG}.app." not in key and "zoo.py" not in key
     }
     assert _keys(payload) == expected, f"step 2: got {sorted(_keys(payload) ^ expected)}"
 

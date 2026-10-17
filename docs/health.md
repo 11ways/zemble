@@ -153,7 +153,7 @@ UNKNOWN is never measured, as Checkstyle reads the surrounding scope). Not measu
 reason: constructors (the type says what they build), overrides and possible overrides
 (`may_override`: the supertype documents the contract), runtime hooks (`__repr__`), `main`,
 members of anonymous types, declarations inside a callable, and one-statement bodies
-(`style.is_boilerplate`: a getter says what its name says). The finding spans the declaration's
+(`CallableMetrics.is_boilerplate`: a getter says what its name says). The finding spans the declaration's
 first line only, where the doc goes, so a `--since` run lists it when the declaration is new or
 re-declared, not on every edit inside it. The advice is the workspace convention: a
 one-sentence docblock, then only the gotchas.

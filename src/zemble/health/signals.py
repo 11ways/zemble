@@ -33,7 +33,7 @@ from zemble.health.git import merge_ranges
 from zemble.health.history import HOTSPOT_MIN_COMMITS
 from zemble.health.model import Signal
 from zemble.health.structure import ancestor_depths, strongly_connected
-from zemble.health.style import Distance, is_boilerplate
+from zemble.health.style import Distance
 from zemble.languages import Visibility
 from zemble.languages.metrics import CallableMetrics
 
@@ -701,7 +701,7 @@ def _api_declaration(facts: HealthFacts, symbol: Symbol) -> bool:
     A named type or a method or function declared in a type or file counts. Not a constructor (its
     type says what it builds), an override (the supertype documents the contract), a runtime hook
     (the language documents `__repr__`), `main`, a member of an anonymous type, or a one-statement
-    body (`style.is_boilerplate`: an accessor says what its name says).
+    body (`CallableMetrics.is_boilerplate`: an accessor says what its name says).
     """
     container = facts.container(symbol)
     if container is not None and container.kind in CALLABLE_KINDS:
@@ -713,7 +713,7 @@ def _api_declaration(facts: HealthFacts, symbol: Symbol) -> bool:
     if symbol.id in facts.may_override or facts.is_runtime_hook(symbol):
         return False
     metric = facts.metrics.get(symbol.id)
-    if metric is not None and is_boilerplate(metric):
+    if metric is not None and metric.is_boilerplate:
         return False
     return _public_api(facts, symbol)
 
