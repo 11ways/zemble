@@ -230,6 +230,45 @@ def test_a_format_8_store_measures_every_file_on_its_next_build(
     assert build_graph(path).extracted_files == 0, "step 2: a migrated store is current"
 
 
+def test_a_format_9_store_recounts_recursion_on_its_next_build(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
+) -> None:
+    """A store measured before receiver-aware recursion re-extracts every file once, even from a change set."""
+    workspace = _copy_workspace(graph_fixture_root, tmp_path / "ws")
+    path = str(workspace)
+    built = build_graph(path)
+    db = graph_db_path(path)
+    assert db is not None
+    legacy = sqlite3.connect(db)
+    legacy.execute("UPDATE meta SET value = '9' WHERE key = 'format_version'")
+    legacy.execute("UPDATE symbol_metrics SET complexity = complexity + 1")
+    legacy.commit()
+    legacy.close()
+
+    # 1. Opening the store marks every file changed and raises its format, before any build.
+    open_db(db).close()
+    open_db(db).close()
+    check = sqlite3.connect(db)
+    version = check.execute("SELECT value FROM meta WHERE key = 'format_version'").fetchone()[0]
+    stamped = check.execute("SELECT COUNT(*) FROM files WHERE mtime_ns IS NOT NULL").fetchone()[0]
+    check.close()
+    assert (version, stamped) == (str(GRAPH_FORMAT_VERSION), 0), "step 1: migrated once, every stamp cleared"
+
+    # 2. A watcher's build naming one file re-measures all of them, as a fresh build would.
+    circle = workspace / "src/main/java/com/example/core/Circle.java"
+    migrated = build_graph(path, changed_paths=[circle])
+    assert migrated.extracted_files == built.extracted_files, "step 2: every file is extracted again"
+    connection = connect(path)
+    stale = connection.execute("SELECT COUNT(*) FROM symbol_metrics WHERE complexity > 0").fetchone()[0]
+    fresh = sum(1 for _ in connection.execute("SELECT 1 FROM symbol_metrics"))
+    connection.close()
+    assert fresh == built.measured_callables, "step 2: and every callable is measured"
+    assert stale < fresh, "step 2: the planted stale complexities are gone"
+
+    # 3. After that the store is current.
+    assert build_graph(path).extracted_files == 0, "step 3: a migrated store is current"
+
+
 def test_torn_store_journey(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path, caplog) -> None:
     """A store torn by a killed build is refused loudly and rebuilt, never read past."""
     workspace = _copy_workspace(graph_fixture_root, tmp_path / "ws")

@@ -21,11 +21,12 @@ from tree_sitter import Node, Parser
 from zemble.graph.java import FileExtraction
 from zemble.graph.model import DECLARED_TYPE_KINDS, Edge, EdgeKind, Symbol, SymbolKind, is_test_path, make_symbol_id
 from zemble.languages.catalog import is_test_file, spec_for
-from zemble.languages.metrics import measure_callable, measure_file
+from zemble.languages.metrics import Called, measure_callable, measure_file, own_receivers
 from zemble.languages.paths import resolve, text
 from zemble.languages.read import (
     NAME_KINDS,
     QUALIFIED_KINDS,
+    SELF_RECEIVER,
     Call,
     Declared,
     annotations_of,
@@ -417,7 +418,8 @@ class _GenericExtractor:
                 name,
                 self.source,
                 block_kinds=self.spec.block_kinds,
-                call_names=self._call_names,
+                calls=self._calls,
+                receivers=own_receivers(frozenset({SELF_RECEIVER}), holder.name if holder.is_type else None),
             )
         if body.parent is not node and body is not node:
             self._consumed.add(body.id)
@@ -578,10 +580,10 @@ class _GenericExtractor:
             is_new=call.is_new,
         )
 
-    def _call_names(self, node: Node, source: bytes) -> list[str]:
-        """The name one node calls, read by the same call rules that emit CALLS edges."""
+    def _calls(self, node: Node, source: bytes) -> list[Called]:
+        """The call one node makes, read by the same call rules that emit CALLS edges."""
         call = call_at(self.spec, node, source)
-        return [call.name] if call is not None else []
+        return [Called(call.name, call.receiver)] if call is not None else []
 
 
 _ROLE_HANDLERS = {

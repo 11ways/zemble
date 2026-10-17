@@ -17,6 +17,9 @@ from zemble.languages.paths import resolve, resolve_all, text
 from zemble.languages.spec import CallRule, LanguageSpec, Rule
 from zemble.languages.visibility import VISIBILITY_WORDS, Visibility
 
+#: The one receiver spelling a call on the enclosing instance is folded into, whatever the language writes.
+SELF_RECEIVER = "this"
+
 #: Node kinds that are a plain name, in every bundled grammar.
 NAME_KINDS: frozenset[str] = frozenset(
     {
@@ -542,7 +545,7 @@ def _describe_call(spec: LanguageSpec, rule: CallRule, node: Node, source: bytes
         receiver, name = name.rsplit(spec.symbol_namespace_separator, 1)
     name = name.lstrip(".")
     if receiver is not None and receiver in spec.self_names:
-        receiver = "this"
+        receiver = SELF_RECEIVER
     receiver_type = _receiver_type(receiver)
     is_new = rule.is_new
     if name in spec.constructor_call_names and receiver_type is not None:
@@ -555,7 +558,7 @@ def _describe_call(spec: LanguageSpec, rule: CallRule, node: Node, source: bytes
 
 def _receiver_type(receiver: str | None) -> str | None:
     """A receiver written as a capitalised name is taken to be a type."""
-    if receiver is None or receiver == "this":
+    if receiver is None or receiver == SELF_RECEIVER:
         return None
     head = type_name(receiver.lstrip("(&*")).rsplit(".", 1)[-1]
     return head if head[:1].isupper() else None
@@ -594,6 +597,7 @@ __all__ = [
     "NAME_KINDS",
     "QUALIFIED_KINDS",
     "STRING_KINDS",
+    "SELF_RECEIVER",
     "Call",
     "Declared",
     "annotations_of",

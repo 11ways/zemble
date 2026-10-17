@@ -303,6 +303,16 @@ backfilled, and the migration clears every stored stamp instead; the next build,
 watcher's change set included, re-extracts every file in place. Measurements are written
 and removed with their file's symbols, and the facts overlay never touches them: a fact
 replaces an edge, never a symbol, so a covered file keeps its tree-sitter measurements.
+Format version 10 counts a call as recursion only when it is bare or written on one of the
+callable's own receivers (a self spelling or the enclosing type's name), so
+`size() { return items.size(); }` is no longer complexity 1. The migration clears the stamps
+as format 9's did and raises the stored version at once; the call readers of both extractors
+answer one shape, `metrics.Called` (name and receiver as written). A Go receiver parameter is
+a name the writer chose and `self_parameters` does not name it, so `s.walk()` inside `walk` is
+not counted; in the generic grammars every self spelling, `super` included where a spec lists
+it, folds into `this`, so `super.f()` inside `f` still counts there (Java tells them apart).
+On javaweb 3330 of 67762 callables went down (3099 by 1, the largest by 17), none went up,
+and the rebuilt graph has the same 122269 symbols and 1258533 edges.
 
 ### Durability
 

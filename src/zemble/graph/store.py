@@ -61,7 +61,7 @@ from zemble.types import ContentType
 logger = logging.getLogger(__name__)
 DEFAULT_WORKERS = min(10, os.cpu_count() or 2)
 
-GRAPH_FORMAT_VERSION = 9
+GRAPH_FORMAT_VERSION = 10
 #: The file naming the current graph version (first line) and the one it replaced (second).
 GRAPH_POINTER_NAME = "graph.current"
 #: The file whose OS lock is held by the one process allowed to write a workspace's graph.
@@ -817,6 +817,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
     if "annotation_args" not in symbol_columns:
         connection.execute("ALTER TABLE symbols ADD COLUMN annotation_args TEXT")
     _add_measurements(connection)
+    _remeasure_recursion(connection)
     _backfill_declaration_keys(connection)
 
 
@@ -833,6 +834,25 @@ def _add_measurements(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE files ADD COLUMN lines INTEGER")
     connection.execute("ALTER TABLE files ADD COLUMN comment_lines INTEGER")
     connection.execute("UPDATE files SET mtime_ns = NULL")
+    connection.commit()
+
+
+#: The first format whose complexity counts recursion only on the callable's own receivers.
+_RECEIVER_AWARE_RECURSION = 10
+
+
+def _remeasure_recursion(connection: sqlite3.Connection) -> None:
+    """Mark every file of a store measured before receiver-aware recursion changed, as `_add_measurements` does.
+
+    The stored format is raised here, not only by the build's meta write, so a store that is
+    opened and closed again (`zemble graph compact`) is not marked changed a second time.
+    """
+    row = connection.execute("SELECT value FROM meta WHERE key = 'format_version'").fetchone()
+    if row is None or int(row[0]) >= _RECEIVER_AWARE_RECURSION:
+        return
+    logger.info("graph: recounting recursion by receiver; every file is re-extracted (format %d)", GRAPH_FORMAT_VERSION)
+    connection.execute("UPDATE files SET mtime_ns = NULL")
+    connection.execute("UPDATE meta SET value = ? WHERE key = 'format_version'", (str(_RECEIVER_AWARE_RECURSION),))
     connection.commit()
 
 

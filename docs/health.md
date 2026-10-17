@@ -103,8 +103,8 @@ came out of the hand review below:
 - A callable that is one statement without control flow (`statements <= 1` and `nesting == 0`:
   an accessor, a delegation, a constant) is boilerplate. The callable-shape dimensions and
   `public_share` read the rest, and a file with fewer than 3 such bodies does not measure the
-  callable-shape dimensions at all. Nesting rather than complexity decides, because a delegation
-  to a same-named method (`size() { return items.size(); }`) scores a recursion increment.
+  callable-shape dimensions at all. Nesting rather than complexity decides, because a one-line
+  predicate (`return a && b;`) scores a complexity of 1 without breaking the linear flow.
 - Type names are left out of the naming shares (every language here spells them one way, so
   they only counted types again), and a one-word lower-case name (`run`) fits snake_case and
   camelCase alike, so it is evidence for neither.
@@ -346,7 +346,7 @@ Findings per signal:
 | Repo | long | params | nesting | complex | large type | large file | types/file | single impl | single sub | lone public | unreferenced | forbidden |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | zemble | 22 | 83 | 20 | 63 | 4 | 6 | 15 | 0 | 0 | 247 | 5 | 0 |
-| javaweb | 674 | 669 | 490 | 1058 | 243 | 87 | 0 | 135 | 12 | 3025 | 11 | 0 |
+| javaweb | 674 | 669 | 490 | 1051 (1058 before graph format 10) | 243 | 87 | 0 | 135 | 12 | 3025 | 11 | 0 |
 | gin | 9 | 0 | 7 | 12 | 0 | 1 | 3 | 0 | 0 | 40 | 0 | 0 |
 | express | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 0 | 0 | 9 | 0 | 0 |
 | monolog | 5 | 18 | 8 | 12 | 1 | 0 | 0 | 0 | 0 | 29 | 0 | 0 |
@@ -432,7 +432,7 @@ In process over an existing graph, this machine (walls vary +-15% with other loa
 | Repo | Style measurement alone | Whole run without / with the axis | Peak | Score without / with | consistency | `style_outlier_repo` | `style_outlier_directory` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | zemble | 0.04 s (159 files with a vector) | 0.43 / 0.45 s | 80 MB | 84.3 / 86.8 | 91.9 | 11 of 154 (7.1%) | 14 of 154 |
-| javaweb (`--no-copying`) | 0.61 s (3222 files) | 10.7-11.3 / 11.4 s | 400 / 406 MB | 91.7 / 93.0 | 98.3 | 75 of 3208: Java 67 of 3160 (2.1%), JavaScript 8 of 48 | 31 of 3200 |
+| javaweb (`--no-copying`) | 0.61 s (3222 files) | 10.7-11.3 / 11.4 s | 400 / 406 MB | 91.7 / 93.0 | 98.3 | 75 of 3208: Java 67 of 3160 (2.1%), JavaScript 8 of 48 | 31 of 3200 (34 on graph format 10) |
 
 zemble's Python keeps 11 dimensions (the naming shares are constant: every shaped Python name
 is snake_case); its 5 Java files are under the 6-file minimum. javaweb's Java keeps 10, its
@@ -446,8 +446,9 @@ repo findings on javaweb at each step: 743 -> 489 -> 109 -> 107 -> 67, directory
    clip at 3 scales.
 2. Java's median callable was a 4-line getter, so every class with logic read different from
    the beans around it ("longer callables, more complex, fewer public"): the boilerplate rule.
-3. `size() { return items.size(); }` scores a cognitive complexity of 1 (the metric counts the
+3. `size() { return items.size(); }` scored a cognitive complexity of 1 (the metric counted the
    same-named call as recursion), so delegations escaped the boilerplate rule: nesting decides.
+   The metric has since been fixed (graph format 10), and nesting still decides for predicates.
 4. Accessors are public by role, so `public_share` still split data classes from logic classes:
    it reads the non-boilerplate declarations only.
 5. In Python, `PascalCase` share only counted types again and one-word names read as "fewer
@@ -520,8 +521,5 @@ not remove; see Known limits.
 - Real code is heavier-tailed than the normal assumption behind the cut: 7.1% of zemble's
   Python files and 2.1% of javaweb's Java files pass a cut that would pass 1% of normal data.
   A small population (javaweb's 48 JavaScript files of several kinds) passes more (17%).
-- The cognitive complexity metric counts a call to a same-named method on another object
-  (`items.size()` inside `size()`) as recursion; the boilerplate rule reads nesting to stay clear
-  of it. Not fixed here: the measurement is graph-building code.
 - A sub-directory view compares its files with that sub-directory's files only, since the view
   holds no others; `--paths` and `--since` keep the whole view as the norm.

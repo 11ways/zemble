@@ -6,9 +6,11 @@ import pytest
 from semble_grammars import get_parser
 
 from zemble.dedup.languages import LanguageProfile, profile_for
+from zemble.graph.generic import extract_generic_file
+from zemble.graph.java import extract_java_file
 from zemble.index.files import detect_language
 from zemble.languages.catalog import JAVA_COMPLEXITY, complexity_for, spec_for
-from zemble.languages.metrics import CallableMetrics, comment_lines, measure_callable
+from zemble.languages.metrics import CallableMetrics, Called, CallReader, comment_lines, measure_callable
 
 FIXTURES = Path(__file__).parent / "fixtures" / "metrics"
 SAMPLES = Path(__file__).parent / "fixtures" / "polyglot_samples"
@@ -85,6 +87,11 @@ JAVA = {
 COMMENT_LINES = {language: 1 for language in EXPECTED} | {"java": 3}
 
 
+def _bare_calls(profile: LanguageProfile) -> CallReader:
+    """A duplication profile's call names as receiverless calls: the fixtures' recursion is a bare call."""
+    return lambda node, source: [Called(name, None) for name in profile.call_names(node, source)]
+
+
 def _measure(path: Path, profile: LanguageProfile) -> tuple[int, dict[str, CallableMetrics]]:
     """Measure every top-level callable of one file through its duplication profile's readers."""
     source = path.read_bytes()
@@ -104,7 +111,7 @@ def _measure(path: Path, profile: LanguageProfile) -> tuple[int, dict[str, Calla
             continue
         name = profile.member_name(node, source)
         measured[name] = measure_callable(
-            body, spec, name, source, block_kinds=profile.block_kinds, call_names=profile.call_names
+            body, spec, name, source, block_kinds=profile.block_kinds, calls=_bare_calls(profile)
         )
     return comment_lines(tree, spec), measured
 
@@ -157,11 +164,69 @@ def test_recursion_needs_a_name_and_a_call_reader() -> None:
     java = profile_for("A.java")
     assert java is not None
     counted = measure_callable(
-        body, JAVA_COMPLEXITY, "f", source, block_kinds=java.block_kinds, call_names=java.call_names
+        body, JAVA_COMPLEXITY, "f", source, block_kinds=java.block_kinds, calls=_bare_calls(java)
     )
     assert counted.complexity == 1, "a call to its own name counts"
     assert measure_callable(body, JAVA_COMPLEXITY, None, source, block_kinds=java.block_kinds).complexity == 0
     assert measure_callable(body, JAVA_COMPLEXITY, "f", source, block_kinds=java.block_kinds).complexity == 0
+
+
+def _complexity_by_name(extraction) -> dict[str, int]:
+    """Each measured callable's complexity, keyed by its qualified name."""
+    names = {symbol.id: symbol.qualified_name for symbol in extraction.symbols}
+    return {names[symbol_id]: metric.complexity for symbol_id, metric in extraction.metrics.items()}
+
+
+def test_java_recursion_is_a_call_on_its_own_receiver() -> None:
+    """`items.size()` inside `size()` is another object's method; `this.size()`, `Box.size()` and `size()` recurse."""
+    source = b"""class Box {
+    java.util.List<String> items;
+    int size() { return items.size(); }
+    int self(int n) { return this.self(n - 1); }
+    int bare(int n) { return bare(n - 1); }
+    static int typed(int n) { return Box.typed(n - 1); }
+    int parent() { return super.parent(); }
+}
+"""
+    got = _complexity_by_name(extract_java_file(source, "src/main/java/Box.java"))
+    assert got["Box.size"] == 0, "a call on a field is not recursion"
+    assert got["Box.self"] == 1, "a call on `this` is"
+    assert got["Box.bare"] == 1, "so is a bare call"
+    assert got["Box.typed"] == 1, "and a call on the enclosing type's own name"
+    assert got["Box.parent"] == 0, "`super.f()` calls the parent's method"
+
+
+def test_python_recursion_is_a_call_on_self() -> None:
+    """`self.walk()` inside `walk` recurses; `other.walk()` walks another object."""
+    source = b"""class Tree:
+    def walk(self, n):
+        return self.walk(n - 1)
+
+    def visit(self, other):
+        return other.visit(self)
+
+    def size(self):
+        return len(self.items.size())
+"""
+    got = _complexity_by_name(extract_generic_file(source, "tree.py", "python"))
+    assert got["tree.Tree.walk"] == 1, "a call on self is recursion"
+    assert got["tree.Tree.visit"] == 0, "a call on another receiver is not"
+    assert got["tree.Tree.size"] == 0, "nor is a call on an attribute of self"
+
+
+def test_go_method_receivers_are_not_counted() -> None:
+    """A Go receiver parameter is a name the writer chose, so `s.walk()` is not read as recursion; a bare call is."""
+    source = b"""package tree
+
+type Store struct{}
+
+func (s *Store) walk(n int) int { return s.walk(n - 1) }
+
+func count(n int) int { return count(n - 1) }
+"""
+    got = _complexity_by_name(extract_generic_file(source, "tree.go", "go"))
+    assert got["tree.Store.walk"] == 0, "the receiver parameter is not a self spelling"
+    assert got["tree.count"] == 1, "a bare call to the function itself is recursion"
 
 
 def test_a_long_else_if_chain_is_measured_without_recursing() -> None:

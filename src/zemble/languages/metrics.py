@@ -2,7 +2,8 @@
 
 Cognitive complexity follows Sonar's rules: structures that break the linear flow add 1 plus
 the nesting level they sit at, else and else-if branches add 1 flat, a run of one boolean
-operator adds 1, a labelled jump adds 1 and so does a call to the callable itself. Nested
+operator adds 1, a labelled jump adds 1 and so does a call to the callable itself (bare, or on
+one of its own receivers: `items.size()` inside `size()` calls another object's method). Nested
 lambdas and functions open a nesting level and their contents count toward the enclosing
 callable, as Sonar counts them.
 """
@@ -12,13 +13,28 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
+from typing import NamedTuple
 
 from tree_sitter import Language, Node, Query, QueryCursor, Tree
 
 from zemble.languages.spec import ComplexitySpec
 
-#: Reads the names one node calls; empty for a node that is no call.
-CallNames = Callable[[Node, bytes], list[str]]
+
+class Called(NamedTuple):
+    """One call a node makes, as the extractor that emits its CALLS edge reads it."""
+
+    name: str
+    #: The receiver as written (the generic reader folds every self spelling into `this`), or None for a bare call.
+    receiver: str | None
+
+
+#: Reads the calls one node makes; empty for a node that is no call.
+CallReader = Callable[[Node, bytes], list[Called]]
+
+
+def own_receivers(self_names: frozenset[str], type_name: str | None) -> frozenset[str]:
+    """The receivers a call to the callable itself may be written on: its self spellings and its type's name."""
+    return self_names | {type_name} if type_name else self_names
 
 
 @dataclass(frozen=True)
@@ -54,13 +70,15 @@ class _Walker:
         source: bytes,
         block_kinds: frozenset[str],
         own_name: str | None,
-        call_names: CallNames | None,
+        calls: CallReader | None,
+        receivers: frozenset[str],
     ) -> None:
         self.spec = spec
         self.source = source
         self.block_kinds = block_kinds
         self.own_name = own_name if spec.recursion else None
-        self.call_names = call_names
+        self.calls = calls
+        self.receivers = receivers
         self.labels = dict(spec.labelled_jumps)
         self.statements = 0
         self.complexity = 0
@@ -168,12 +186,20 @@ class _Walker:
         `apply` chain, Perl's bracketed bareword), so a call directly under its own twin is
         the same call and does not count again.
         """
-        if self.own_name is None or self.call_names is None:
+        calls = self.calls
+        if self.own_name is None or calls is None:
             return False
-        if self.own_name not in self.call_names(node, self.source):
+        if not self._calls_itself(calls, node):
             return False
         parent = node.parent
-        return parent is None or self.own_name not in self.call_names(parent, self.source)
+        return parent is None or not self._calls_itself(calls, parent)
+
+    def _calls_itself(self, calls: CallReader, node: Node) -> bool:
+        """Whether one of a node's calls names the callable, bare or on one of its own receivers."""
+        return any(
+            call.name == self.own_name and (call.receiver is None or call.receiver in self.receivers)
+            for call in calls(node, self.source)
+        )
 
     def walk(self, body: Node) -> None:
         """Measure a body and everything below it.
@@ -185,7 +211,7 @@ class _Walker:
         counted = self.counted
         # Without recursion to read, a node of no counted kind adds nothing: a fast path that
         # skips most of a tree. Its level was already recorded when its opener was visited.
-        every = self.own_name is not None and self.call_names is not None
+        every = self.own_name is not None and self.calls is not None
         while stack:
             node, level, root = stack.pop()
             if not every and not root and node.type not in counted:
@@ -232,7 +258,8 @@ def measure_callable(
     source: bytes,
     *,
     block_kinds: frozenset[str],
-    call_names: CallNames | None = None,
+    calls: CallReader | None = None,
+    receivers: frozenset[str] = frozenset(),
 ) -> CallableMetrics:
     """Measure one callable body.
 
@@ -242,11 +269,14 @@ def measure_callable(
     @param own_name the callable's simple name, for recursion; None counts no recursion.
     @param block_kinds the language's statement block kinds (`LanguageSpec.block_kinds`, or a
         hand-written profile's), so statements are counted where duplication windows are cut.
-    @param call_names the language's call reader; without it recursion is not counted.
+    @param calls the language's call reader; without it recursion is not counted.
+    @param receivers the receivers a self call is written on (`own_receivers`); a call on any
+        other receiver is another object's method of the same name. A Go method's receiver
+        parameter is a name the writer chose, so `s.walk()` inside `walk` is not counted.
     """
     if own_name is not None and source.find(own_name.encode(), body.start_byte, body.end_byte) < 0:
         own_name = None
-    walker = _Walker(spec, source, block_kinds, own_name, call_names)
+    walker = _Walker(spec, source, block_kinds, own_name, calls, receivers)
     walker.walk(body)
     lines = body.end_point[0] - body.start_point[0] + 1
     return CallableMetrics(lines, walker.statements, walker.complexity, walker.nesting)
@@ -285,4 +315,13 @@ def measure_file(tree: Tree, source: bytes, spec: ComplexitySpec) -> FileMetrics
     return FileMetrics(lines, comment_lines(tree, spec))
 
 
-__all__ = ["CallNames", "CallableMetrics", "FileMetrics", "comment_lines", "measure_callable", "measure_file"]
+__all__ = [
+    "CallReader",
+    "CallableMetrics",
+    "Called",
+    "FileMetrics",
+    "comment_lines",
+    "measure_callable",
+    "measure_file",
+    "own_receivers",
+]

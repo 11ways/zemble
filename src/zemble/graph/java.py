@@ -16,7 +16,7 @@ from tree_sitter import Node, Parser
 
 from zemble.graph.model import ANONYMOUS_MARKER, Edge, EdgeKind, Symbol, SymbolKind, is_test_path, make_symbol_id
 from zemble.languages.catalog import JAVA_BLOCK_KINDS, JAVA_COMPLEXITY
-from zemble.languages.metrics import CallableMetrics, FileMetrics, measure_callable, measure_file
+from zemble.languages.metrics import CallableMetrics, Called, FileMetrics, measure_callable, measure_file, own_receivers
 
 logger = getLogger(__name__)
 
@@ -40,6 +40,9 @@ _TYPE_HOLDER_NODES = frozenset(
 
 # Primitive and pseudo types that are never workspace symbols.
 _NON_TYPES = frozenset({"var", "void", "int", "long", "short", "byte", "char", "boolean", "float", "double"})
+
+# Receivers a call on the enclosing instance is written on; `super.f()` inside `f` calls the parent's method.
+_JAVA_SELF_NAMES = frozenset({"this"})
 
 
 @dataclass
@@ -614,7 +617,13 @@ class _JavaExtractor:
         body = node.child_by_field_name("body")
         if body is not None:
             self.result.metrics[symbol.id] = measure_callable(
-                body, JAVA_COMPLEXITY, name, self.source, block_kinds=JAVA_BLOCK_KINDS, call_names=self._call_names
+                body,
+                JAVA_COMPLEXITY,
+                name,
+                self.source,
+                block_kinds=JAVA_BLOCK_KINDS,
+                calls=self._calls,
+                receivers=own_receivers(_JAVA_SELF_NAMES, owner.name),
             )
             self._walk_statements(body, symbol, body_scope, owner.qualified_name)
         self._type_vars -= added_vars
@@ -633,23 +642,27 @@ class _JavaExtractor:
 
     # ---- statements and expressions -------------------------------------
 
-    def _called_name(self, node: Node) -> str | None:
-        """The name a call node's CALLS edge is written to, or None when the node is no call."""
+    def _called(self, node: Node) -> Called | None:
+        """The call a node's CALLS edge is written for, receiver as written, or None when the node is no call."""
         kind = node.type
         if kind == "method_invocation":
             name = node.child_by_field_name("name")
-            return self.text(name) if name is not None else None
+            if name is None:
+                return None
+            receiver = node.child_by_field_name("object")
+            return Called(self.text(name), self.text(receiver) if receiver is not None else None)
         if kind == "object_creation_expression":
-            return self._erase(node.child_by_field_name("type"))
+            erased = self._erase(node.child_by_field_name("type"))
+            return Called(erased, None) if erased else None
         if kind == "explicit_constructor_invocation":
             constructor = node.child_by_field_name("constructor")
-            return constructor.type if constructor is not None else None
+            return Called(constructor.type, constructor.type) if constructor is not None else None
         return None
 
-    def _call_names(self, node: Node, source: bytes) -> list[str]:
-        """The names one node calls, as the measurements read recursion; the source is the extractor's own."""
-        name = self._called_name(node)
-        return [name] if name else []
+    def _calls(self, node: Node, source: bytes) -> list[Called]:
+        """The calls one node makes, as the measurements read recursion; the source is the extractor's own."""
+        called = self._called(node)
+        return [called] if called is not None else []
 
     def _walk_statements(self, node: Node, owner: Symbol, scope: _Scope, prefix: str) -> None:
         """Walk a body, attributing every reference to the owning symbol."""
@@ -728,11 +741,11 @@ class _JavaExtractor:
         if receiver is not None and receiver == receiver_type:
             # `Foo.bar()`: the receiver text is a type name, which is a type reference.
             self._add_edge(owner.id, receiver_type, EdgeKind.REFERENCES_TYPE, self._line(node))
-        called = self._called_name(node)
+        called = self._called(node)
         if name_node is not None and called is not None:
             self._add_edge(
                 owner.id,
-                called,
+                called.name,
                 EdgeKind.CALLS,
                 self._line(name_node),
                 arity=len(arguments.named_children) if arguments is not None else -1,
@@ -778,7 +791,8 @@ class _JavaExtractor:
         type_node = node.child_by_field_name("type")
         self._emit_type_refs(type_node, owner.id)
         arguments = node.child_by_field_name("arguments")
-        erased = self._called_name(node)
+        called = self._called(node)
+        erased = called.name if called is not None else None
         if erased:
             self._add_edge(
                 owner.id,
@@ -864,7 +878,8 @@ class _JavaExtractor:
 
     def _on_explicit_constructor_invocation(self, node: Node, owner: Symbol, scope: _Scope, prefix: str) -> bool:
         """Emit a CALLS edge for a `this(...)` or `super(...)` chained constructor call."""
-        constructor = self._called_name(node)
+        called = self._called(node)
+        constructor = called.name if called is not None else None
         arguments = node.child_by_field_name("arguments")
         if constructor is not None:
             self._add_edge(

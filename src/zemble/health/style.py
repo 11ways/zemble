@@ -140,8 +140,8 @@ def is_boilerplate(metric: CallableMetrics) -> bool:
 
     Such bodies are shaped by the language and the file's role (a record's getters), not by how its
     author writes logic, so they would make every data class read different from every logic class.
-    Nesting rather than complexity decides: a delegation to a same-named method elsewhere
-    (`size() { return items.size(); }`) reads as recursion and scores a complexity of 1.
+    Nesting rather than complexity decides: a one-line predicate (`return a && b;`) scores a
+    complexity of 1 without breaking the linear flow.
     """
     return metric.statements <= 1 and metric.nesting == 0
 
