@@ -49,6 +49,31 @@ _EXPECTED = {
     f"package_cycle:java:core:{_CORE}/north",
     f"package_cycle:java:core:{_CORE}/south",
     f"feature_envy:java:{_PKG}.core.Invoice.label()",
+    # The fixture documents nothing; these are its public API declarations: types, and callables with
+    # logic (getters, constructors, overrides, `main` and package-private types are not measured).
+    *(
+        f"undocumented_public:java:{_PKG}.{name}"
+        for name in (
+            "app.Launcher",
+            "core.Billing",
+            "core.Calculator",
+            "core.Circle",
+            "core.Facade",
+            "core.FileStore",
+            "core.Operator",
+            "core.Pricing",
+            "core.Square",
+            "core.State",
+            "core.Status",
+            "core.Util",
+        )
+    ),
+    f"undocumented_public:java:{_PKG}.core.Util.tangled(int,int,int,int,int,int)",
+    f"undocumented_public:java:{_PKG}.core.Greeter.greet(String)",
+    f"undocumented_public:java:{_PKG}.core.Shape.area()",
+    f"undocumented_public:java:{_PKG}.core.AbstractStore.save()",
+    f"undocumented_public:java:{_PKG}.core.Billing.total(int[])",
+    f"undocumented_public:java:{_PKG}.core.Pricing.total(int[])",
 }
 
 #: The duplication tier's findings on the fixture, by key: two copied bodies in two files, one
@@ -321,6 +346,50 @@ def test_since_and_paths_judge_against_the_whole_view(style_root: Path) -> None:
     assert _keys(alone) == {foreign} and "against 8 python files" in alone["health"]["findings"][0]["reason"], "step 3"
 
 
+_DOCS = "src/main/java/com/example/docs"
+_DOCUMENTATION = [signal.value for signal in Signal if signal.facts.axis is Axis.DOCUMENTATION]
+
+
+@pytest.fixture
+def docs_root(tmp_path: Path, graph_cache: Path) -> Path:
+    """A private copy of the documentation fixture: one file of doc shapes, one generated, one minified."""
+    graph_cli._refreshed.clear()
+    return Path(shutil.copytree(Path(__file__).parent / "fixtures" / "health_docs", tmp_path / "health_docs"))
+
+
+def test_the_documentation_axis_reports_exactly_its_suspects(docs_root: Path) -> None:
+    """Undocumented API, an overlong docblock, disabled code and a marker; never a getter, constructor or private."""
+    payload = _report(docs_root, signals=_DOCUMENTATION)
+    by_key = {finding["key"]: finding for finding in payload["health"]["findings"]}
+
+    # 1. The exact set, with what each measured.
+    values = {key: finding["value"] for key, finding in by_key.items()}
+    assert values == {
+        "undocumented_public:java:com.example.docs.Documented.undocumented(int)": 0,
+        "long_docblock:java:com.example.docs.Documented.verbose(int)": 21,
+        f"commented_out_code:java:{_DOCS}/Documented.java": 3,
+        f"stale_marker:java:{_DOCS}/Documented.java": 1,
+    }, values
+
+    # 2. A missing doc is anchored on the declaration's first line, where the doc goes.
+    missing = by_key["undocumented_public:java:com.example.docs.Documented.undocumented(int)"]
+    assert missing["start_line"] == missing["end_line"] == 24, missing
+
+    # 3. The axis is scored like every other one.
+    axes = {axis["axis"]: axis for axis in payload["health"]["axes"]}
+    assert axes["documentation"]["score"] is not None and axes["documentation"]["weight"] == 1.0
+
+
+def test_generated_and_minified_files_are_measured_by_no_signal(docs_root: Path) -> None:
+    """A `DO NOT EDIT` header and a 2000-byte line take a file out of every tier, with one note naming them."""
+    payload = _report(docs_root, copying=True)
+    keys = _keys(payload)
+    assert keys, "step 1: the measured file still has findings"
+    assert not [key for key in keys if "Generated" in key or "bundle" in key], f"step 1: {sorted(keys)}"
+    note = f"2 generated or minified file(s) not measured: {_DOCS}/Generated.java, src/main/js/bundle.js"
+    assert note in payload["health"]["notes"], payload["health"]["notes"]
+
+
 def test_an_ambiguous_edge_never_supports_a_graph_finding(health_root: Path) -> None:
     """Demoting the supporting edges to AMBIGUOUS withdraws the findings they supported."""
     before = _keys(_report(health_root))
@@ -495,21 +564,25 @@ def test_since_lists_the_changed_spans_and_keeps_the_whole_score(health_root: Pa
     expected = {
         f"{signal}:java:{tangled}"
         for signal in ("long_callable", "complex_callable", "deep_nesting", "many_parameters")
-    } | {f"lone_public_callable:java:{_PKG}.core.Fresh.fresh(int)"}
+    } | {
+        f"lone_public_callable:java:{_PKG}.core.Fresh.fresh(int)",
+        f"undocumented_public:java:{_PKG}.core.Fresh",
+    }
     assert _keys(payload) == expected, f"step 2: got {sorted(_keys(payload) ^ expected)}"
-    assert health["since"] == {"ref": "HEAD", "files": 2, "scope_total": len(_EXPECTED) + 1}, health["since"]
+    assert health["since"] == {"ref": "HEAD", "files": 2, "scope_total": len(_EXPECTED) + 2}, health["since"]
 
     # 3. The score is the whole scope's: the same as a whole run without the duplication tier, which a
     #    --since run measures over the changed files only and so leaves out of the score.
     whole = _report(health_root, copying=False)["health"]
     assert health["score"] == whole["score"], "step 3: the composite is not recomputed over the delta"
     assert set(health["unscored"]) == {s.value for s in Signal if s.facts.tier is Tier.DUPLICATION}, "step 3"
-    assert "Since HEAD: 5 finding(s)" in payload["markdown"], "step 3: the delta count is printed"
+    assert "Since HEAD: 6 finding(s)" in payload["markdown"], "step 3: the delta count is printed"
 
     # 4. Against the baseline saved at the commit, the delta reads remaining and new.
     marked = _report(health_root, since="HEAD", baseline=str(saved))["health"]
     statuses = {finding["key"]: finding["baseline"] for finding in marked["findings"]}
     assert statuses.pop(f"lone_public_callable:java:{_PKG}.core.Fresh.fresh(int)") == "new", "step 4"
+    assert statuses.pop(f"undocumented_public:java:{_PKG}.core.Fresh") == "new", "step 4"
     assert set(statuses.values()) == {"remaining"}, f"step 4: {statuses}"
 
     # 5. A ref that names no commit, and --since with --save-baseline, are refused.

@@ -16,8 +16,8 @@ from zemble.health.model import Axis, Signal
 from zemble.health.signals import Sample
 
 #: The one weight table. Layering counts double: a forbidden edge breaks a rule the workspace wrote
-#: down, while size, machinery, coupling, copying, vocabulary, consistency and history are judged against
-#: general conventions or against the code's own peers.
+#: down, while size, machinery, coupling, copying, vocabulary, consistency, history and documentation are
+#: judged against general conventions or against the code's own peers.
 AXIS_WEIGHTS: dict[Axis, float] = {
     Axis.SIZE: 1.0,
     Axis.MACHINERY: 1.0,
@@ -27,6 +27,7 @@ AXIS_WEIGHTS: dict[Axis, float] = {
     Axis.VOCABULARY: 1.0,
     Axis.CONSISTENCY: 1.0,
     Axis.HISTORY: 1.0,
+    Axis.DOCUMENTATION: 1.0,
 }
 
 _unweighted = set(Axis) - set(AXIS_WEIGHTS)

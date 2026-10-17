@@ -11,7 +11,7 @@ import posixpath
 from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 
 from zemble.dedup.languages import SiteKind, profile_for
@@ -33,7 +33,7 @@ from zemble.health.git import merge_ranges
 from zemble.health.history import HOTSPOT_MIN_COMMITS
 from zemble.health.model import Signal
 from zemble.health.structure import ancestor_depths, strongly_connected
-from zemble.health.style import Distance
+from zemble.health.style import Distance, is_boilerplate
 from zemble.languages import Visibility
 from zemble.languages.metrics import CallableMetrics
 
@@ -685,6 +685,73 @@ def _boundary_co_change(facts: HealthFacts) -> Iterator[Sample]:
         yield Sample(anchor, 1, lines[anchor], "", identity, value, detail=detail, elsewhere=elsewhere)
 
 
+def _public_api(facts: HealthFacts, symbol: Symbol) -> bool:
+    """Whether a symbol is public and so is every type around it, as Checkstyle's surrounding scope reads it."""
+    current: Symbol | None = symbol
+    while current is not None and (current is symbol or current.kind in DECLARED_TYPE_KINDS):
+        if facts.visibility(current) is not Visibility.PUBLIC:
+            return False
+        current = facts.container(current)
+    return True
+
+
+def _api_declaration(facts: HealthFacts, symbol: Symbol) -> bool:
+    """Whether a reader of the public API needs this declaration's doc, which `_undocumented_public` measures.
+
+    A named type or a method or function declared in a type or file counts. Not a constructor (its
+    type says what it builds), an override (the supertype documents the contract), a runtime hook
+    (the language documents `__repr__`), `main`, a member of an anonymous type, or a one-statement
+    body (`style.is_boilerplate`: an accessor says what its name says).
+    """
+    container = facts.container(symbol)
+    if container is not None and container.kind in CALLABLE_KINDS:
+        return False
+    if named_type(symbol):
+        return _public_api(facts, symbol)
+    if symbol.kind not in _MEMBER_CALLABLE_KINDS or symbol.name == _MAIN or anonymous(container):
+        return False
+    if symbol.id in facts.may_override or facts.is_runtime_hook(symbol):
+        return False
+    metric = facts.metrics.get(symbol.id)
+    if metric is not None and is_boilerplate(metric):
+        return False
+    return _public_api(facts, symbol)
+
+
+def _undocumented_public(facts: HealthFacts) -> Iterator[Sample]:
+    """Doc lines of every public API declaration of the scope (`_api_declaration`), anchored on its first line.
+
+    The doc goes above that line, so a `--since` run lists the finding when the declaration is new or
+    re-declared, not on every edit inside a body or a type. UNKNOWN visibility is never public.
+    """
+    for symbol in facts.production:
+        if _api_declaration(facts, symbol):
+            yield replace(_symbol_sample(symbol, symbol.doc_lines), end_line=symbol.start_line)
+
+
+#: Declarations a doc comment is attributed to by the extractors.
+_DOCUMENTED_KINDS = DECLARED_TYPE_KINDS | CALLABLE_KINDS | {SymbolKind.FIELD}
+
+
+def _long_docblock(facts: HealthFacts) -> Iterator[Sample]:
+    """Doc lines of every documented type, callable and field of the scope."""
+    for symbol in facts.production:
+        if symbol.doc_lines and symbol.kind in _DOCUMENTED_KINDS:
+            yield _symbol_sample(symbol, symbol.doc_lines)
+
+
+def _commented_out_code(facts: HealthFacts) -> Iterator[Sample]:
+    """Comment lines outside any docblock that read as code, of every measured production file."""
+    for path, metric in facts.files:
+        yield Sample(path, 1, max(metric.lines, 1), "", path, metric.commented_code_lines)
+
+
+def _stale_marker(facts: HealthFacts) -> Iterator[Sample]:
+    """Comment lines holding an unfinished-work marker, of every measured production file."""
+    for path, metric in facts.files:
+        yield Sample(path, 1, max(metric.lines, 1), "", path, metric.marker_lines)
+
+
 #: The one producer of every signal; a member without one refuses at import below.
 PRODUCERS: dict[Signal, Producer] = {
     Signal.LONG_CALLABLE: _long_callable,
@@ -710,6 +777,10 @@ PRODUCERS: dict[Signal, Producer] = {
     Signal.STYLE_OUTLIER_DIRECTORY: _style_outlier_directory,
     Signal.HOTSPOT: _hotspot,
     Signal.BOUNDARY_CO_CHANGE: _boundary_co_change,
+    Signal.UNDOCUMENTED_PUBLIC: _undocumented_public,
+    Signal.LONG_DOCBLOCK: _long_docblock,
+    Signal.COMMENTED_OUT_CODE: _commented_out_code,
+    Signal.STALE_MARKER: _stale_marker,
 }
 
 _missing = set(Signal) - set(PRODUCERS)

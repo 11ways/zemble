@@ -43,6 +43,22 @@ class CopyingFacts:
         """Whether the run compared this file against the tree, so its units may be measured."""
         return self.focus is None or file_path in self.focus
 
+    def without(self, files: frozenset[str]) -> CopyingFacts:
+        """The run with every unit in these files dropped, and every class left with one member or none."""
+        if not files:
+            return self
+        classes = []
+        for clone in self.classes:
+            members = tuple(member for member in clone.members if member.file_path not in files)
+            if len(members) > 1:
+                classes.append(replace(clone, members=members) if len(members) < len(clone.members) else clone)
+        return replace(
+            self,
+            classes=tuple(classes),
+            shaped=tuple(unit for unit in self.shaped if unit.file_path not in files),
+            sites=tuple(unit for unit in self.sites if unit.file_path not in files),
+        )
+
 
 def measure_copying(provider: AnyProvider, scope: Sequence[str], changed: Sequence[str] | None) -> CopyingFacts:
     """Run the duplication channels for a report.

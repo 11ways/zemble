@@ -92,6 +92,21 @@ _FILE_LEVEL = frozenset({SymbolKind.MODULE, SymbolKind.PACKAGE})
 #: a count); the flag is "from test" for a caller and "reads data" (`HealthFacts.reads_data`) for a call.
 HomeRow = tuple[str, Resolution, bool, int]
 
+#: A file with a line longer than this, in bytes, is minified or generated data, not code anyone writes: a
+#: minified bundle (`dc-runtime.js` in a docs mockup gave javaweb two findings nobody could act on) puts a whole
+#: program on a few lines, while hand-written code stays under 200 (ruff's and Checkstyle's limits are 120 and
+#: 80 to 150; zemble's own longest measured line is far below this).
+MINIFIED_LINE_BYTES = 1000
+#: File-name endings a minifier writes.
+MINIFIED_SUFFIXES = (".min.js", ".min.css", ".min.mjs")
+#: Paths an exclusion note names before it only counts the rest.
+_EXCLUDED_SHOWN = 5
+
+
+def unmeasured(file_path: str, metric: FileMetrics) -> bool:
+    """Whether no signal measures a file: a generator wrote it (`FileMetrics.generated`), or it is minified."""
+    return metric.generated or metric.longest_line > MINIFIED_LINE_BYTES or file_path.endswith(MINIFIED_SUFFIXES)
+
 
 @cache
 def language_of(file_path: str) -> str:
@@ -158,6 +173,8 @@ class HealthFacts:
     population: list[tuple[str, FileMetrics]] = field(default_factory=list)
     #: The history window's commits per production file of the view, when the report measures history.
     history: HistoryFacts | None = None
+    #: Production files of the view no signal measures (`unmeasured`): generated or minified.
+    excluded: frozenset[str] = frozenset()
     _modules: dict[str, str] = field(default_factory=dict)
     _homes: dict[str, str] = field(default_factory=dict)
 
@@ -167,8 +184,19 @@ class HealthFacts:
 
     @cached_property
     def everywhere(self) -> list[Symbol]:
-        """Every non-test symbol of the view, in the scope or not, by file and line."""
-        return [symbol for symbol in self.symbols.values() if not symbol.is_test]
+        """Every non-test symbol of the view outside the excluded files, in the scope or not, by file and line."""
+        return [
+            symbol for symbol in self.symbols.values() if not symbol.is_test and symbol.file_path not in self.excluded
+        ]
+
+    @property
+    def excluded_note(self) -> str | None:
+        """The report note naming the excluded files in the scope, or None without any."""
+        shown = sorted(path for path in self.excluded if self.in_scope(path))
+        if not shown:
+            return None
+        more = f" and {len(shown) - _EXCLUDED_SHOWN} more" if len(shown) > _EXCLUDED_SHOWN else ""
+        return f"{len(shown)} generated or minified file(s) not measured: {', '.join(shown[:_EXCLUDED_SHOWN])}{more}"
 
     @cached_property
     def production(self) -> list[Symbol]:
@@ -445,7 +473,9 @@ def collect(
             for tally in provider.call_tallies()
         ),
     )
-    facts.population = [(path, metric) for path, metric, is_test in provider.file_measurements() if not is_test]
+    measured = [(path, metric) for path, metric, is_test in provider.file_measurements() if not is_test]
+    facts.excluded = frozenset(path for path, metric in measured if unmeasured(path, metric))
+    facts.population = [(path, metric) for path, metric in measured if path not in facts.excluded]
     facts.files = [(path, metric) for path, metric in facts.population if facts.in_scope(path)]
     production = {path for path, _ in facts.files}
     facts.dependencies = [
@@ -455,7 +485,7 @@ def collect(
     ]
     if copying:
         files = None if changed is None else [path for path in changed.files if facts.in_scope(path)]
-        facts.copying = measure_copying(provider, scope, files)
+        facts.copying = measure_copying(provider, scope, files).without(facts.excluded)
     if history_window is not None:
         facts.history = measure_history(root, [path for path, _ in facts.population], history_window)
     return facts

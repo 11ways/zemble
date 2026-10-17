@@ -29,6 +29,7 @@ class Axis(str, Enum):
     VOCABULARY = "vocabulary"
     CONSISTENCY = "consistency"
     HISTORY = "history"
+    DOCUMENTATION = "documentation"
 
 
 class Tier(str, Enum):
@@ -152,6 +153,10 @@ class Signal(str, Enum):
     STYLE_OUTLIER_DIRECTORY = "style_outlier_directory"
     HOTSPOT = "hotspot"
     BOUNDARY_CO_CHANGE = "boundary_co_change"
+    UNDOCUMENTED_PUBLIC = "undocumented_public"
+    LONG_DOCBLOCK = "long_docblock"
+    COMMENTED_OUT_CODE = "commented_out_code"
+    STALE_MARKER = "stale_marker"
 
     @property
     def facts(self) -> SignalFacts:
@@ -159,9 +164,17 @@ class Signal(str, Enum):
         return _SIGNAL_FACTS[self]
 
 
-def _syntactic(axis: Axis, description: str, unit: Unit, threshold: int, source: str, advice: str) -> SignalFacts:
-    """Facts of a signal read off the parse alone, past its threshold when above it."""
-    return SignalFacts(axis, Tier.SYNTACTIC, description, unit, threshold, Comparison.ABOVE, None, source, advice)
+def _syntactic(
+    axis: Axis,
+    description: str,
+    unit: Unit,
+    threshold: int,
+    source: str,
+    advice: str,
+    comparison: Comparison = Comparison.ABOVE,
+) -> SignalFacts:
+    """Facts of a signal read off the parse alone, past its threshold when above it unless it says otherwise."""
+    return SignalFacts(axis, Tier.SYNTACTIC, description, unit, threshold, comparison, None, source, advice)
 
 
 def _graph(
@@ -393,6 +406,46 @@ _SIGNAL_FACTS: dict[Signal, SignalFacts] = {
         "read as a Jaccard (code-maat divides by the mean of the two files' commits, which is never stricter); "
         f"changesets over {MAX_CHANGESET_FILES} files left out as code-maat does",
         "move what changes together into one module, or extract the concept both keep changing",
+    ),
+    Signal.UNDOCUMENTED_PUBLIC: _syntactic(
+        Axis.DOCUMENTATION,
+        "public named type, method or function with no doc comment or docstring, in doc lines; constructors, "
+        "overrides, runtime hooks, `main`, one-statement bodies and members of anonymous or non-public types "
+        "are not measured",
+        Unit.COUNT,
+        0,
+        "Sonar rule S1176 (public API should be documented); Checkstyle MissingJavadocType and "
+        "MissingJavadocMethod at their default public scope",
+        "write a one-sentence docblock: what it is for, then only the gotchas",
+        Comparison.AT_MOST,
+    ),
+    Signal.LONG_DOCBLOCK: _syntactic(
+        Axis.DOCUMENTATION,
+        "doc comment and docstring of a type, callable or field longer than the threshold, in lines",
+        Unit.LINES,
+        20,
+        "declared here: no common tool default; the workspace convention is a one-sentence summary plus "
+        "the gotchas, and twenty lines leave room for a long list of those",
+        "cut it to the one-sentence summary and the gotchas; examples and standard patterns go to docs",
+    ),
+    Signal.COMMENTED_OUT_CODE: _syntactic(
+        Axis.DOCUMENTATION,
+        "file whose comments outside any docblock hold more lines that read as code than the threshold",
+        Unit.COUNT,
+        2,
+        "Sonar rule S125 (sections of code should not be commented out), read by a line heuristic instead "
+        "of a re-parse; two lines tolerate one explanatory snippet. Counted per file (each weighs 1): weighed "
+        "by its lines, a file under the bar would weigh 0 and the score would say how concentrated the "
+        "disabled code is, not how widespread",
+        "delete it; git remembers",
+    ),
+    Signal.STALE_MARKER: _syntactic(
+        Axis.DOCUMENTATION,
+        "file whose comments hold upper-case TODO, FIXME, XXX or HACK markers, in lines",
+        Unit.COUNT,
+        0,
+        "Sonar rules S1135 (TODO tags) and S1134 (FIXME tags); counted per file, each weighing 1",
+        "resolve it, or turn it into a tracked issue and delete the comment",
     ),
 }
 

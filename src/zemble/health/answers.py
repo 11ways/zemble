@@ -109,6 +109,9 @@ def health_payload(provider: AnyProvider, config: HomeConfig, request: HealthReq
     facts = collect(provider, config, request.paths, copying=copying, changed=changes, history_window=window)
     if facts.copying is not None:
         notes.extend(facts.copying.notes)
+    excluded = facts.excluded_note
+    if excluded is not None:
+        notes.append(excluded)
     if facts.history is not None and facts.history.unmeasured is not None:
         selected = _without(selected, Tier.HISTORY)
         notes.append(facts.history.unmeasured)
