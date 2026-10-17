@@ -17,7 +17,7 @@ from zemble.graph.provider import open_provider
 from zemble.health.answers import HealthRequest, health_payload, parse_signals
 from zemble.health.history import DEFAULT_WINDOW_DAYS
 from zemble.health.model import Signal
-from zemble.health.report import DEFAULT_LIMIT
+from zemble.health.report import DEFAULT_LIMIT, DEFAULT_PER_SIGNAL
 from zemble.home.config import ConfigError, HomeConfig
 from zemble.workspace import resolve_home_root
 
@@ -41,6 +41,14 @@ def add_health_parser(sub: argparse._SubParsersAction) -> None:
         "--limit", type=int, default=DEFAULT_LIMIT, help=f"Findings to list (default: {DEFAULT_LIMIT})."
     )
     parser.add_argument("--signals", default=None, help="Comma-separated signals to measure (default: all).")
+    parser.add_argument(
+        "--per-signal",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"Rows of one signal to list at most (default: {DEFAULT_PER_SIGNAL} over a scope, no cap with "
+        "--since; 0 lifts the cap).",
+    )
     parser.add_argument(
         "--paths",
         nargs="+",
@@ -94,6 +102,7 @@ def run_health(args: argparse.Namespace) -> int:
         signals=tuple(args.signals.split(",")) if args.signals else None,
         paths=tuple(args.paths or ()),
         limit=args.limit,
+        per_signal=args.per_signal,
         since=args.since,
         copying=args.copying,
         history=args.history,

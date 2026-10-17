@@ -250,6 +250,14 @@ text = "Nothing lands without at least one wired consumer and a test"
 [[rules]]
 text = "zenit core owns no visual components beyond Icon"
 modules = ["zenit"]
+
+# What `zemble health` leaves out: a shape this workspace explains once instead of per row.
+# `signals` left out takes the files out of every signal; `why` is printed on every run.
+# Frozen code (`[dupes] frozen`, migrations by default) is measured by nothing already.
+[[health.exempt]]
+paths = ["zenit-folio/src/common/java/be/elevenways/zenit/folio/codec/*"]
+signals = ["feature_envy"]
+why = "a wire codec reads the stream it is given"
 ```
 
 `order` may also be written inside `[modules]`, which is how the design note

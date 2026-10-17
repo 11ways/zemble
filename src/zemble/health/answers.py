@@ -15,7 +15,8 @@ from zemble.health.collect import collect
 from zemble.health.git import changed_lines
 from zemble.health.history import DEFAULT_WINDOW_DAYS
 from zemble.health.model import Signal, Tier
-from zemble.health.report import DEFAULT_LIMIT, HealthReport, build_report
+from zemble.health.report import DEFAULT_LIMIT, DEFAULT_PER_SIGNAL, HealthReport, build_report
+from zemble.health.settings import HealthSettings
 from zemble.health.signals import measure
 from zemble.home.config import HomeConfig
 
@@ -49,6 +50,9 @@ class HealthRequest:
     signals: tuple[str, ...] | None = None
     paths: tuple[str, ...] = ()
     limit: int = DEFAULT_LIMIT
+    #: Rows of one signal the listing shows at most; None caps a whole-scope run at `DEFAULT_PER_SIGNAL` and a
+    #: `since` run (a delta small enough to read whole) not at all; 0 never caps.
+    per_signal: int | None = None
     #: A git ref: list only the findings touching a line changed since it.
     since: str | None = None
     #: Whether to measure the duplication tier; None measures it only for a bounded scope (the cost rule).
@@ -73,6 +77,7 @@ class HealthRequest:
             paths=tuple(args.get("paths") or ()),
             limit=int(args.get("limit", DEFAULT_LIMIT)),
             since=args.get("since"),
+            per_signal=None if args.get("per_signal") is None else int(args["per_signal"]),
             copying=args.get("copying"),
             baseline=args.get("baseline"),
             save_baseline=args.get("save_baseline"),
@@ -91,6 +96,7 @@ def health_payload(provider: AnyProvider, config: HomeConfig, request: HealthReq
 
     :raises ValueError: If a signal name is unknown, `since` cannot be read, a required baseline cannot, or
         the history window is not a positive number of days.
+    :raises ConfigError: If the config's `[health]` or `[dupes]` section is malformed.
     """
     request = request or HealthRequest()
     selected = parse_signals(request.signals)
@@ -99,6 +105,9 @@ def health_payload(provider: AnyProvider, config: HomeConfig, request: HealthReq
         raise ValueError("--since reports a delta, so it takes no --save-baseline; save one without --since")
     if request.history_window < 1:
         raise ValueError(f"--history-window takes a positive number of days, got {request.history_window}")
+    if request.per_signal is not None and request.per_signal < 0:
+        raise ValueError(f"--per-signal takes 0 (no cap) or a number of rows, got {request.per_signal}")
+    settings = HealthSettings.of(config)
     changes = changed_lines(os.path.realpath(provider.path), request.since) if request.since is not None else None
     selected, copying, notes = _copying_plan(provider, request, selected)
     history = any(signal.facts.tier is Tier.HISTORY for signal in selected)
@@ -106,26 +115,31 @@ def health_payload(provider: AnyProvider, config: HomeConfig, request: HealthReq
         selected, history = _without(selected, Tier.HISTORY), False
         notes.append("history not measured: turned off")
     window = request.history_window if history else None
-    facts = collect(provider, config, request.paths, copying=copying, changed=changes, history_window=window)
+    facts = collect(
+        provider, config, request.paths, copying=copying, changed=changes, history_window=window, settings=settings
+    )
     if facts.copying is not None:
         notes.extend(facts.copying.notes)
-    excluded = facts.excluded_note
-    if excluded is not None:
-        notes.append(excluded)
+    notes.extend(note for note in (facts.excluded_note, facts.frozen_note) if note is not None)
     if facts.history is not None and facts.history.unmeasured is not None:
         selected = _without(selected, Tier.HISTORY)
         notes.append(facts.history.unmeasured)
+    samples, taken = settings.apply(measure(facts, selected), facts.config_path)
+    notes.extend(rule.note(len(facts.exempt_files.get(rule, ())), taken.get(rule, {})) for rule in settings.exemptions)
     report = build_report(
         facts.root,
         str(config.source) if config.source is not None else None,
-        measure(facts, selected),
+        samples,
         facts.paths,
         since=changes,
         copying_focus=facts.copying.focus if facts.copying is not None else None,
         notes=tuple(notes),
     )
     report = _with_baseline(report, request)
-    return {"health": report.to_dict(request.limit), "markdown": report.markdown(request.limit)}
+    per_signal = request.per_signal
+    if per_signal is None:
+        per_signal = 0 if request.since is not None else DEFAULT_PER_SIGNAL
+    return {"health": report.to_dict(request.limit, per_signal), "markdown": report.markdown(request.limit, per_signal)}
 
 
 def _copying_plan(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -19,6 +19,9 @@ if TYPE_CHECKING:  # pragma: no cover
 
 #: Findings a report lists unless asked otherwise.
 DEFAULT_LIMIT = 25
+#: Rows of one signal a listing shows at most, unless asked otherwise: ranked by percentile alone, the top of a
+#: whole workspace is its few giant types and hotspots and every other signal sits below the cut.
+DEFAULT_PER_SIGNAL = 3
 
 
 @dataclass(frozen=True)
@@ -69,10 +72,10 @@ class HealthReport:
             counted[finding.signal.value] += 1
         return counted
 
-    def to_dict(self, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
-        """Render the report as JSON-ready data, the findings capped at `limit`."""
+    def to_dict(self, limit: int = DEFAULT_LIMIT, per_signal: int = 0) -> dict[str, Any]:
+        """Render the report as JSON-ready data, capped at `per_signal` rows per signal and `limit` in all."""
         listed = self.listed
-        shown = folded(listed)[:limit]
+        shown = capped(folded(listed), per_signal)[:limit]
         baseline = self.baseline
         findings = []
         for finding, members in shown:
@@ -94,6 +97,7 @@ class HealthReport:
             if self.since is None
             else {"ref": self.since.ref, "files": len(self.since.files), "scope_total": len(self.findings)},
             "counts": self.counts(),
+            "per_signal": per_signal,
             "total": len(listed),
             "truncated": len(shown) < len(folded(listed)),
             "findings": findings,
@@ -101,8 +105,8 @@ class HealthReport:
             "notes": list(self.notes),
         }
 
-    def markdown(self, limit: int = DEFAULT_LIMIT) -> str:
-        """Render the report as the text the CLI prints and the MCP tool returns."""
+    def markdown(self, limit: int = DEFAULT_LIMIT, per_signal: int = 0) -> str:
+        """Render the report as the text the CLI prints and the MCP tool returns; the caps are `to_dict`'s."""
         score = "not measured" if self.composite is None else f"{self.composite:.1f} / 100"
         lines = [f"# Health: {self.root}", "", f"Score: {score} ({SCORE_DISCLAIMER})", ""]
         lines.extend(_axis_line(axis, self.unscored) for axis in self.axes)
@@ -120,11 +124,12 @@ class HealthReport:
         if self.baseline is not None:
             lines.extend(_baseline_lines(self.baseline, limit))
             return "\n".join(lines).rstrip() + "\n"
-        shown = folded(listed)[:limit]
+        shown = capped(folded(listed), per_signal)[:limit]
         if not shown:
             lines.append("No findings.")
             return "\n".join(lines) + "\n"
-        cut = f", truncated to {len(shown)}" if len(shown) < len(folded(listed)) else ""
+        cap = f", at most {per_signal} per signal" if per_signal else ""
+        cut = f", truncated to {len(shown)}{cap}" if len(shown) < len(folded(listed)) else ""
         lines.append(f"## Findings ({len(listed)} total{cut}; ranked by percentile, then severity)")
         lines.append("")
         lines.extend(_finding_line(finding, len(members)) for finding, members in shown)
@@ -194,6 +199,21 @@ def folded(findings: Sequence[Finding]) -> list[tuple[Finding, tuple[Finding, ..
             first[key] = members
         rows.append((finding, members))
     return [(finding, tuple(members)) for finding, members in rows]
+
+
+def capped(
+    rows: Sequence[tuple[Finding, tuple[Finding, ...]]], per_signal: int
+) -> list[tuple[Finding, tuple[Finding, ...]]]:
+    """The first `per_signal` rows of each signal, in their order; 0 keeps every row."""
+    if per_signal <= 0:
+        return list(rows)
+    seen: Counter[Signal] = Counter()
+    kept = []
+    for finding, members in rows:
+        if seen[finding.signal] < per_signal:
+            seen[finding.signal] += 1
+            kept.append((finding, members))
+    return kept
 
 
 def _finding_line(finding: Finding, members: int = 0) -> str:
@@ -294,4 +314,4 @@ def build_report(
     )
 
 
-__all__ = ["DEFAULT_LIMIT", "HealthReport", "build_report"]
+__all__ = ["DEFAULT_LIMIT", "DEFAULT_PER_SIGNAL", "HealthReport", "build_report", "capped", "folded"]

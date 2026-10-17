@@ -7,6 +7,7 @@ import json
 import shutil
 import sqlite3
 import sys
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -25,10 +26,12 @@ from zemble.health.collect import collect, generated_header
 from zemble.health.git import changed_lines, history_checkouts
 from zemble.health.history import measure_history
 from zemble.health.model import Axis, Comparison, Signal, Tier
+from zemble.health.report import DEFAULT_PER_SIGNAL
 from zemble.health.score import AXIS_WEIGHTS, SCORE_DISCLAIMER
+from zemble.health.settings import HealthSettings
 from zemble.health.signals import PRODUCERS
 from zemble.health.style import NameShape, StyleDimension, StyleMeasurement, chi_square_quantile, measure_style
-from zemble.home.config import HomeConfig
+from zemble.home.config import ConfigError, HomeConfig
 
 _CORE = "src/main/java/com/example/core"
 _PKG = "com.example"
@@ -140,7 +143,7 @@ def health_root(tmp_path: Path, graph_cache: Path) -> Path:
 def _report(root: Path, **arguments: Any) -> dict[str, Any]:
     """Refresh the graph (a test may have edited the tree) and answer in process; the daemon's argument names."""
     graph_cli._refreshed.clear()
-    return in_process(str(root), HealthRequest.from_args({"limit": 500, **arguments}))
+    return in_process(str(root), HealthRequest.from_args({"limit": 500, "per_signal": 0, **arguments}))
 
 
 def _keys(payload: dict[str, Any]) -> set[str]:
@@ -939,3 +942,125 @@ def test_an_outgrown_daemon_answer_is_read_in_process(
     text = result[0].text
     assert text.startswith(f"Note: {outgrown} Answered in the MCP server's process"), text[:300]
     assert SCORE_DISCLAIMER in text and asked[-1] == "mcp:health", (text[:300], asked)
+
+
+_MIGRATION = "src/main/java/com/example/migration/InitialMigration.java"
+
+
+def test_frozen_code_is_measured_by_nothing_unless_the_workspace_thaws_it(health_root: Path) -> None:
+    """The fixture's migration is frozen by the `[dupes] frozen` defaults; an empty override measures it again."""
+    payload = _report(health_root)
+    assert not [key for key in _keys(payload) if "migration" in key], "step 1: nothing on frozen code"
+    note = f"1 file(s) not measured, frozen code ([dupes] frozen): {_MIGRATION}"
+    assert note in payload["health"]["notes"], payload["health"]["notes"]
+
+    config = health_root / ".zemble" / "home.toml"
+    config.write_text(config.read_text(encoding="utf-8") + "\n[dupes]\nfrozen = []\n", encoding="utf-8")
+    thawed = _keys(_report(health_root))
+    expected = {
+        f"undocumented_public:java:{_PKG}.migration.InitialMigration",
+        f"many_parameters:java:{_PKG}.migration.InitialMigration.up(int,int,int,int,int,int)",
+    }
+    assert expected <= thawed, f"step 2: one home for the frozen globs, missing {sorted(expected - thawed)}"
+
+
+_EXEMPT = """
+[[health.exempt]]
+paths = ["src/main/java/com/example/core/Util.java"]
+signals = ["long_callable", "complex_callable"]
+why = "Util is the planted tangle"
+
+[[health.exempt]]
+paths = ["src/main/python/*"]
+why = "the zoo is a menagerie on purpose"
+
+[[health.exempt]]
+paths = ["nowhere/**"]
+why = "a stale rule"
+"""
+
+
+def _measured(health: dict[str, Any], signal: str) -> int:
+    """How many units one signal measured, off the axis lines."""
+    return next(item["measured"] for axis in health["axes"] for item in axis["signals"] if item["signal"] == signal)
+
+
+def test_a_workspace_exempts_what_it_explains_once(health_root: Path) -> None:
+    """A signal exemption drops its units from the population; a whole one drops the file; each rule is noted."""
+    before = _report(health_root)["health"]
+    config = health_root / ".zemble" / "home.toml"
+    config.write_text(config.read_text(encoding="utf-8") + _EXEMPT, encoding="utf-8")
+    payload = _report(health_root)
+    keys = _keys(payload)
+    health = payload["health"]
+    tangled = f"{_PKG}.core.Util.tangled(int,int,int,int,int,int)"
+
+    # 1. The named signals no longer report Util, the others still do; the zoo is gone from every signal.
+    assert not {f"long_callable:java:{tangled}", f"complex_callable:java:{tangled}"} & keys, "step 1: exempt"
+    assert {f"deep_nesting:java:{tangled}", f"many_parameters:java:{tangled}"} <= keys, "step 1: still measured"
+    assert not [key for key in keys if "zoo.py" in key], "step 1: a whole-signal exemption"
+
+    # 2. The population shrinks by what the rule covers: exempt units are unmeasured, not past.
+    dropped = _measured(before, "long_callable") - _measured(health, "long_callable")
+    assert dropped >= 1 and _measured(before, "complex_callable") - _measured(health, "complex_callable") == dropped
+    assert _measured(before, "many_types_per_file") - _measured(health, "many_types_per_file") == 1, "step 2: file"
+
+    # 3. Every rule is noted with what it took out, a stale one with that it matched nothing.
+    notes = health["notes"]
+    assert (
+        f"exempt (Util is the planted tangle): {dropped} long_callable, {dropped} complex_callable unit(s) not measured"
+        in notes
+    ), notes
+    assert "exempt (the zoo is a menagerie on purpose): 1 file(s) not measured" in notes, notes
+    assert "exempt (a stale rule): matched no file" in notes, notes
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("[health]\nnope = 1\n", "unknown key"),
+        ('[[health.exempt]]\npaths = "x"\nwhy = "w"\nsignals = ["ghost"]\n', "unknown signal"),
+        ('[[health.exempt]]\npaths = "x"\n', "non-empty 'why'"),
+        ('[[health.exempt]]\nwhy = "w"\n', "must be a string or a list of strings"),
+        ('[[health.exempt]]\npaths = []\nwhy = "w"\n', "at least one path"),
+        ('[[health.exempt]]\npaths = "x"\nwhy = "w"\nextra = 1\n', "unknown key"),
+        ("[health]\nexempt = 1\n", "array of tables"),
+        ('[dupes]\nfrozzen = ["x"]\n', "unknown key"),
+    ],
+)
+def test_a_malformed_health_section_is_loud(tmp_path: Path, body: str, message: str) -> None:
+    """Every shape of nonsense in `[health]` (and the `[dupes]` it reads) refuses rather than being ignored."""
+    (tmp_path / ".zemble").mkdir()
+    (tmp_path / ".zemble" / "home.toml").write_text(body, encoding="utf-8")
+    with pytest.raises(ConfigError, match=message):
+        HealthSettings.of(HomeConfig.load(tmp_path))
+
+
+def test_the_listing_caps_rows_per_signal(
+    health_root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A whole-scope listing shows at most N rows per signal, a delta every row; 0 lifts the cap."""
+    payload = _report(health_root, per_signal=1, limit=500)
+    health = payload["health"]
+    signals = [finding["signal"] for finding in health["findings"]]
+    assert len(signals) == len(set(signals)) and health["truncated"] and health["per_signal"] == 1, signals
+    assert health["total"] == len(_EXPECTED), "step 1: the total is still every finding"
+    assert ", at most 1 per signal; ranked by percentile" in payload["markdown"], payload["markdown"][-600:]
+
+    # 2. The defaults: 3 over a scope, none on a delta, and the CLI flag reaches the payload.
+    whole = in_process(str(health_root), HealthRequest(limit=500))["health"]
+    assert whole["per_signal"] == DEFAULT_PER_SIGNAL, whole["per_signal"]
+    assert max(Counter(f["signal"] for f in whole["findings"]).values()) == DEFAULT_PER_SIGNAL, "step 2: capped"
+    git(health_root, "init", "-q")
+    git(health_root, "add", "-A")
+    git(health_root, "commit", "-q", "-m", "base")
+    delta = in_process(str(health_root), HealthRequest(since="HEAD"))["health"]
+    assert delta["per_signal"] == 0, "step 2: a delta is read whole"
+    code, out = _run_cli(
+        ["health", str(health_root), "--json", "--per-signal", "0", "--no-daemon"], capsys, monkeypatch
+    )
+    assert code == 0 and json.loads(out)["per_signal"] == 0, "step 2: the flag"
+
+    # 3. A negative cap is refused.
+    with pytest.raises(ValueError, match="--per-signal"):
+        _report(health_root, per_signal=-1)

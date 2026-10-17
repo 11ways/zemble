@@ -114,6 +114,8 @@ class HomeConfig:
     rules: tuple[WorkspaceRule, ...] = ()
     #: The `[dupes]` section as written, each key a list of strings; `zemble.dedup.settings` owns its keys.
     dupes: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
+    #: The `[health]` section as written; `zemble.health.settings` owns its keys.
+    health: dict[str, Any] = None  # type: ignore[assignment]
     #: The file this came from; None means nothing was declared.
     source: Path | None = None
 
@@ -129,6 +131,8 @@ class HomeConfig:
             object.__setattr__(self, "source_set_globs", {})
         if self.dupes is None:
             object.__setattr__(self, "dupes", {})
+        if self.health is None:
+            object.__setattr__(self, "health", {})
 
     @property
     def generic(self) -> bool:
@@ -242,6 +246,7 @@ class HomeConfig:
             "skills": {name: list(values) for name, values in self.skills.items()},
             "rules": [rule.to_dict() for rule in self.rules],
             "dupes": {name: list(values) for name, values in self.dupes.items()},
+            "health": dict(self.health),
         }
 
     @classmethod
@@ -299,8 +304,10 @@ class HomeConfig:
         dupes = {
             name: tuple(_strings(value, f"dupes.{name}", path)) for name, value in _table(raw, "dupes", path).items()
         }
+        health = _table(raw, "health", path)
         unknown = set(raw) - {
-            "order", "modules", "forbidden", "tables", "skills", "rules", "dependencies", "source_sets", "dupes"
+            "order", "modules", "forbidden", "tables", "skills", "rules", "dependencies", "source_sets",
+            "dupes", "health",
         }  # fmt: skip
         if unknown:
             raise ConfigError(f"{path}: unknown section(s): {', '.join(sorted(unknown))}")
@@ -318,6 +325,7 @@ class HomeConfig:
             skills=skills,
             rules=rules,
             dupes=dupes,
+            health=health,
             source=path,
         )
         _check_names(config, path)

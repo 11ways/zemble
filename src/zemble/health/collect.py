@@ -38,6 +38,7 @@ from zemble.health.copying import CopyingFacts, measure_copying
 from zemble.health.git import ChangedLines
 from zemble.health.history import HistoryFacts, measure_history
 from zemble.health.model import Comparison, Signal
+from zemble.health.settings import FROZEN_REASON, Exemption, HealthSettings
 from zemble.home.config import HomeConfig
 from zemble.index.files import detect_language
 from zemble.languages import Visibility, spec_for
@@ -200,8 +201,17 @@ class HealthFacts:
     population: list[tuple[str, FileMetrics]] = field(default_factory=list)
     #: The history window's commits per production file of the view, when the report measures history.
     history: HistoryFacts | None = None
-    #: Production files of the view no signal measures (`unmeasured`): generated or minified.
+    #: Production files of the view no signal measures: generated or minified (`unmeasured`), frozen
+    #: (`HealthSettings.is_frozen`) or under a whole-signal exemption (`exempt_files`).
     excluded: frozenset[str] = frozenset()
+    #: The workspace's `[health]` section and frozen globs.
+    settings: HealthSettings = field(default_factory=HealthSettings)
+    #: The excluded files `unmeasured` took out, the note's subject.
+    builtin_excluded: frozenset[str] = frozenset()
+    #: The excluded files that are frozen code.
+    frozen: frozenset[str] = frozenset()
+    #: Per whole-signal exemption, the files it took out.
+    exempt_files: dict[Exemption, tuple[str, ...]] = field(default_factory=dict)
     _modules: dict[str, str] = field(default_factory=dict)
     _homes: dict[str, str] = field(default_factory=dict)
 
@@ -218,12 +228,21 @@ class HealthFacts:
 
     @property
     def excluded_note(self) -> str | None:
-        """The report note naming the excluded files in the scope, or None without any."""
-        shown = sorted(path for path in self.excluded if self.in_scope(path))
+        """The report note naming the generated or minified files in the scope, or None without any."""
+        return self._exclusion_note(self.builtin_excluded, "generated or minified file(s) not measured")
+
+    @property
+    def frozen_note(self) -> str | None:
+        """The report note naming the frozen files in the scope, or None without any."""
+        return self._exclusion_note(self.frozen, f"file(s) not measured, {FROZEN_REASON}")
+
+    def _exclusion_note(self, paths: frozenset[str], what: str) -> str | None:
+        """`N <what>: <up to 5 paths> and M more` over the paths in the scope, or None without any."""
+        shown = sorted(path for path in paths if self.in_scope(path))
         if not shown:
             return None
         more = f" and {len(shown) - _EXCLUDED_SHOWN} more" if len(shown) > _EXCLUDED_SHOWN else ""
-        return f"{len(shown)} generated or minified file(s) not measured: {', '.join(shown[:_EXCLUDED_SHOWN])}{more}"
+        return f"{len(shown)} {what}: {', '.join(shown[:_EXCLUDED_SHOWN])}{more}"
 
     @cached_property
     def production(self) -> list[Symbol]:
@@ -397,10 +416,10 @@ class HealthFacts:
         """The declared module of a path relative to `root`, memoised: dependency rows repeat their files."""
         module = self._modules.get(file_path)
         if module is None:
-            module = self._modules[file_path] = self.config.module_of(self._config_path(file_path))
+            module = self._modules[file_path] = self.config.module_of(self.config_path(file_path))
         return module
 
-    def _config_path(self, file_path: str) -> str:
+    def config_path(self, file_path: str) -> str:
         """A path relative to `root` respelled relative to the root that declared the config."""
         if self._config_root == self.root:
             return file_path
@@ -453,6 +472,7 @@ def collect(
     copying: bool = False,
     changed: ChangedLines | None = None,
     history_window: int | None = None,
+    settings: HealthSettings | None = None,
 ) -> HealthFacts:
     """Read every fact the signals need from an open provider and the workspace config.
 
@@ -462,6 +482,7 @@ def collect(
     :param copying: Whether to run the duplication channels (`zemble.health.copying`).
     :param changed: The lines a `--since` run reports on; the duplication run then compares only their files.
     :param history_window: Days of git history to read for the history axis; None reads none.
+    :param settings: The workspace's `[health]` section and frozen globs; None takes the defaults (no exemption).
     """
     root = os.path.realpath(provider.path)
     scope = tuple(relative for path in paths if (relative := _relative(root, path)))
@@ -485,6 +506,7 @@ def collect(
         links=links,
         paths=scope,
         sources=tuple(provider.source_files()),
+        settings=settings or HealthSettings(),
     )
     facts.callers = _by_callable(
         facts,
@@ -501,7 +523,19 @@ def collect(
         ),
     )
     measured = [(path, metric) for path, metric, is_test in provider.file_measurements() if not is_test]
-    facts.excluded = frozenset(path for path, metric in measured if unmeasured(path, metric, facts.absolute(path)))
+    facts.builtin_excluded = frozenset(
+        path for path, metric in measured if unmeasured(path, metric, facts.absolute(path))
+    )
+    facts.frozen = frozenset(path for path, _ in measured if facts.settings.is_frozen(facts.config_path(path)))
+    exempt: dict[Exemption, list[str]] = defaultdict(list)
+    for path, _ in measured:
+        rule = facts.settings.whole_exemption(facts.config_path(path))
+        if rule is not None:
+            exempt[rule].append(path)
+    facts.exempt_files = {rule: tuple(paths) for rule, paths in exempt.items()}
+    facts.excluded = (
+        facts.builtin_excluded | facts.frozen | frozenset(path for paths in exempt.values() for path in paths)
+    )
     facts.population = [(path, metric) for path, metric in measured if path not in facts.excluded]
     facts.files = [(path, metric) for path, metric in facts.population if facts.in_scope(path)]
     production = {path for path, _ in facts.files}

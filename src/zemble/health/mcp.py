@@ -14,7 +14,7 @@ from zemble.health.baseline import BASELINE_RELATIVE_PATH
 from zemble.health.cli import in_process
 from zemble.health.history import DEFAULT_WINDOW_DAYS
 from zemble.health.model import Signal
-from zemble.health.report import DEFAULT_LIMIT
+from zemble.health.report import DEFAULT_LIMIT, DEFAULT_PER_SIGNAL
 from zemble.home.config import ConfigError
 from zemble.mcp_repo import resolve_repo, with_default_note
 from zemble.nib.parts import nib_text_only
@@ -37,6 +37,14 @@ def register_health_tool(server: FastMCP) -> None:
     async def health(
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description="Findings to list.", ge=1, le=500)] = DEFAULT_LIMIT,
+        per_signal: Annotated[
+            int | None,
+            Field(
+                description=f"Rows of one signal to list at most (default: {DEFAULT_PER_SIGNAL} over a scope, "
+                "no cap with `since`; 0 lifts the cap).",
+                ge=0,
+            ),
+        ] = None,
         signals: Annotated[
             list[str] | None,
             Field(description=f"Signals to measure (default: all): {', '.join(signal.value for signal in Signal)}."),
@@ -108,6 +116,7 @@ def register_health_tool(server: FastMCP) -> None:
             signals=tuple(signals) if signals is not None else None,
             paths=tuple(paths or ()),
             limit=limit,
+            per_signal=per_signal,
             since=since,
             copying=copying,
             history=history,

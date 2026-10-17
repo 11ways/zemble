@@ -12,6 +12,7 @@ REPORT, never a gate: it exits 0 whenever it could answer, however many findings
 ```
 zemble health ./my-project                       # top 25 findings, the score and its axes
 zemble health ./my-project --limit 100 --json    # the same payload as JSON
+zemble health ./my-project --per-signal 0        # no cap per signal (default 3 over a scope, none with --since)
 zemble health ./my-project --signals long_callable,complex_callable
 zemble health ./my-project --paths src/core src/api
 zemble health ./my-project/src/core              # a sub-directory: its own paths, its findings only
@@ -34,7 +35,8 @@ threshold, comparison, resolution floor, source and advice are facts on the memb
 (`SignalFacts`), and `src/zemble/health/signals.py` refuses to import without a producer for
 every member. Test code is excluded from every signal: a unit in a test source set (the
 graph's own `is_test`) is never measured. So is a generated or minified file (see "Generated and
-minified files").
+minified files"), frozen code and whatever the workspace exempts (see "Frozen code and
+exemptions").
 
 | Signal | Axis | Tier | Finding when | Threshold source |
 | --- | --- | --- | --- | --- |
@@ -204,6 +206,46 @@ or when its name ends in `.min.js`, `.min.css` or `.min.mjs`, or is a vendored b
 undocumented public functions). The report carries one note, `N
 generated or minified file(s) not measured: <up to 5 paths>`. The reason: a minified
 `dc-runtime.js` in a javaweb docs mockup gave two findings nobody could act on.
+
+### Frozen code and exemptions
+
+`zemble.health.settings` reads two things off the workspace's `home.toml`. Frozen code
+(`ShapeSettings.frozen`, the `[dupes] frozen` globs, default `*/migration/*`, `*/migrations/*`,
+`*/db/migrate/*`; one home for the duplication report and this one; matched against the path
+with a leading slash, so a glob anchored at the root starts with `/`) is measured by nothing, like a
+generated file: nobody edits a shipped migration, so no finding on one is one anyone can act on.
+The note reads `N file(s) not measured, frozen code ([dupes] frozen): <up to 5 paths>`; a
+workspace that edits its migrations writes `[dupes] frozen = []`, and one whose migration
+FRAMEWORK lives in a `migration/` directory too (zenit's `orm/migration`) names its script
+directories instead. The hohenheim and
+quirkyquarters `InitialMigration.up` (1353 and 558 lines) were the two top `long_callable` rows of
+the zenit workspace before this.
+
+An exemption is a `[[health.exempt]]` entry: `paths` (a glob or a list, matched against the
+workspace-relative path with `fnmatch`, `*` crossing directories as `[modules]` globs do),
+`signals` (a list of signal names; left out, the entry takes its files out of every signal of every
+tier) and `why` (required; the report repeats it). Signal exemptions drop their units from the
+signal's population after measuring, so an exempt unit is unmeasured, not past: it neither ranks
+nor scores. Every entry is noted on every run with what it took out (`exempt (<why>): 12
+feature_envy unit(s) not measured`, `exempt (<why>): 3 file(s) not measured`) or with `matched no
+unit` / `matched no file`, so a rule nothing matches any more stays visible. An unknown key, an
+unknown signal, an entry without paths or without a reason is a `ConfigError` (the CLI exits 1, the
+MCP tool answers with the message), never ignored: the same loudness `home.toml` has everywhere.
+
+```toml
+[[health.exempt]]
+paths = ["zenit-folio/src/common/java/be/elevenways/zenit/folio/codec/*"]
+signals = ["feature_envy"]
+why = "a wire codec reads the stream it is given; that is not envy of the reader"
+
+[[health.exempt]]
+paths = ["docs/**"]
+why = "mockups, not code anyone maintains"
+```
+
+An exemption explains a shape; it is for the cases the signals cannot tell apart (a decoder from an
+envious method, a deliberate AST hierarchy from a deep one), never for a finding one would rather
+not see. The `why` is printed on every run for that reason.
 
 ## The history axis
 
@@ -444,8 +486,12 @@ A finding's percentile is the share of every measured value of the same signal a
 language in the scope that is no more suspect than it, 0-100 to one decimal. "More suspect"
 follows the signal's comparison: larger for `above`, smaller for `at_most`, closer to the
 threshold for `equals`. Findings are ranked by percentile, then by how far past the threshold,
-then by signal, file and line: one list, no grouping, capped by `limit` (default 25) with
-`total` and `truncated`.
+then by signal, file and line: one list, no grouping, capped at `per_signal` rows per signal
+(`--per-signal`, default 3 over a scope and none on a `--since` delta, 0 for no cap) and at
+`limit` in all (default 25), with `total`, `per_signal` and `truncated`. The per-signal cap is
+why the listing is readable over a whole workspace: ranked by percentile alone, zenit's top 25
+was its seven giant types, three large files and fifteen hotspots, every other signal below the
+cut; capped, the same list shows three rows of each of eight signals.
 
 Each finding has a stable `key`: `signal:language:identity`, where identity is the symbol id
 without its file (`com.example.Util.tangled(int,int)`), for a file-level unit the path, and for
@@ -522,12 +568,12 @@ printed in it).
 
 ## Surfaces
 
-- CLI `zemble health [path] [--limit N] [--signals a,b] [--paths P ...] [--since REF]
+- CLI `zemble health [path] [--limit N] [--per-signal N] [--signals a,b] [--paths P ...] [--since REF]
   [--copying | --no-copying] [--history | --no-history] [--history-window DAYS]
   [--baseline FILE] [--save-baseline FILE] [--json] [--no-daemon]`,
   through the warm daemon first, in process otherwise (graph built or refreshed as `outline`
   does). A path with no graph gets one built.
-- MCP `health` (`repo`, `limit`, `signals`, `paths`, `since`, `copying`, `history`,
+- MCP `health` (`repo`, `limit`, `per_signal`, `signals`, `paths`, `since`, `copying`, `history`,
   `history_window`, `baseline`, `save_baseline`), returning the markdown; under
   `zemble nib-provider` it answers with one text part. Every surface builds one `HealthRequest`
   (`zemble.health.answers`), whose field names are the daemon's argument names.
@@ -809,13 +855,14 @@ away if the file carries a generator's header (not re-checked here).
 - `feature_envy` reads getter-shaped calls (no parameter, one statement, no control flow), which also
   match the one-statement reads of a stream API: a wire codec reading a `BinaryReader` (`r.u16()`)
   is reported though moving it would be wrong, and so is a composition root reading a module's
-  getters to wire services (quirkyquarters' `AiModule.createDirector`). It does not see field access
+  getters to wire services (quirkyquarters' `AiModule.createDirector`). The signal cannot tell
+  them apart; a `[[health.exempt]]` entry naming the codec or module directory explains them once
+  (see "Frozen code and exemptions"). It does not see field access
   (`other.x`), so a method reading public fields directly is never envious, and a sub-directory view
-  never names a type outside it as the envied one. Test code the graph does not mark as test
-  (textum's `src/browserTestCommon/`, which `TEST_PATH_SEGMENTS` does not list) is measured like
-  production: on zenit it fills most of the top 15.
+  never names a type outside it as the envied one.
 - `deep_inheritance` counts only ancestors the graph holds: a class whose chain continues into a
   library is measured from its topmost workspace ancestor, so its true depth is higher.
+  A deliberate hierarchy (an AST of unit types) is answered by an exemption, not by the signal.
 - Dynamic dispatch by a computed name (`getattr(self, f"_keyword_{name}")` in `hwk.py`) is
   invisible to both the graph and the source-text check: those 4 `_keyword_*` methods stay
   reported on zemble.
