@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -13,17 +14,18 @@ from zemble.evidence.answers import explain_payload, outline_payload, signatures
 from zemble.evidence.bundle import bundle_header, item_heading, omitted_lines, split_truncation
 from zemble.evidence.outline import (
     ambiguous_line,
-    caller_line,
     callers_heading,
     kind_label,
     no_member_line,
+    omitted_line,
     outline_header,
 )
 from zemble.graph.cli import ensure_graph
+from zemble.graph.mcp import CallSite, call_site_parts
 from zemble.graph.provider import AnyProvider, open_provider
 from zemble.index import ZembleIndex
 from zemble.mcp_repo import resolve_repo, with_default_note
-from zemble.nib.parts import Part, location_part, nib_answer, source_part, text_part
+from zemble.nib.parts import Part, file_lines, location_part, nib_answer, source_part, text_part
 from zemble.types import ContentType
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -81,11 +83,11 @@ def _explain_here(index: ZembleIndex, repo: str, query: str, budget: int, top_k:
         provider.close()
 
 
-def _outline_here(repo: str, target: str, members: str | None) -> dict[str, Any]:
+def _outline_here(repo: str, target: str, members: str | None, everything: bool) -> dict[str, Any]:
     """Outline a file or a type in this process."""
     provider = _open(repo)
     try:
-        return outline_payload(provider, target, members)
+        return outline_payload(provider, target, members, everything)
     finally:
         provider.close()
 
@@ -186,35 +188,67 @@ def explain_parts(root: str, payload: dict[str, Any]) -> list[Part]:
     return parts
 
 
-def outline_parts(root: str, payload: dict[str, Any]) -> list[Part] | None:
-    """Lay out an outline for nib: its header, then every declaration's own line, as one block.
+#: Lines past a declaration's first one searched for the line naming it.
+_DECLARATION_SCAN = 20
 
-    Only the declaration's first line is located: the graph does not record where a
+#: The annotations or decorators a line opens with (`@Override`, `@Named("x")`, `@app.route("/")`).
+_LEADING_ANNOTATIONS = re.compile(r"^\s*(?:@[\w.$]+(?:\([^()]*\))?\s*)*")
+
+
+def declaration_line(lines: Sequence[str] | None, start: int, end: int, name: str) -> int:
+    """The line that names a declaration: past the annotations or decorators it starts with, else `start`.
+
+    AIDEV-NOTE: the graph records where a declaration starts, which for an annotated Java
+    method is its first `@Annotation` line; a row of that line alone would not say what it
+    declares. The name is looked for after a line's leading annotations, so `@Named("run")`
+    does not count as naming `run`, while `@NonNull Foo run()` does.
+    """
+    if not lines or not name:
+        return start
+    named = re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])")
+    last = min(end, start + _DECLARATION_SCAN, len(lines))
+    for number in range(start, last + 1):
+        text = lines[number - 1]
+        if named.search(text, _LEADING_ANNOTATIONS.match(text).end()):  # type: ignore[union-attr]
+            return number
+    return start
+
+
+def outline_parts(root: str, payload: dict[str, Any]) -> list[Part] | None:
+    """Lay out an outline for nib: its header, every declaration's naming line as one block, then what it left out.
+
+    Only one line per declaration is located: the graph does not record where a
     signature ends, and a guessed span could cut or overrun it.
     """
     if "entries" not in payload:
         return None
     parts = [text_part("\n".join(outline_header(payload["package"], payload["file_path"])))]
+    lines = file_lines(location_part(root, payload["file_path"], 1, 1)["path"])
     for entry in payload["entries"]:
-        parts.append(location_part(root, payload["file_path"], entry["start_line"], entry["start_line"]))
+        line = declaration_line(lines, entry["start_line"], entry["end_line"], entry["name"])
+        parts.append(location_part(root, payload["file_path"], line, line))
     if payload["members_filter"] and not payload["entries"]:
         parts.append(text_part(no_member_line(payload["members_filter"])))
+    # A daemon older than the field lists everything and sends no counts.
+    omitted = payload.get("omitted") or {}
+    note = omitted_line(omitted.get("private", 0), omitted.get("fields", 0))
+    if note:
+        parts.append(text_part(note))
     return parts
 
 
 def signatures_parts(root: str, payload: dict[str, Any]) -> list[Part] | None:
-    """Lay out a signatures answer for nib: the declaration's line, then each exact call site's line."""
+    """Lay out a signatures answer for nib: the declaration's line, then its exact call sites by file and caller."""
     if "callers" not in payload:
         return None
     label = kind_label(payload["kind"], payload["signature"] or payload["qualified_name"])
+    sites = [CallSite(caller["file_path"], caller["line"], caller["caller"]) for caller in payload["callers"]]
     parts = [
         text_part(label),
         location_part(root, payload["file_path"], payload["start_line"], payload["start_line"]),
         text_part(callers_heading(len(payload["callers"]))),
     ]
-    for caller in payload["callers"]:
-        parts.append(text_part(caller_line(caller["file_path"], caller["line"], caller["caller"])))
-        parts.append(location_part(root, caller["file_path"], caller["line"], caller["line"]))
+    parts += call_site_parts(root, sites)
     if payload["ambiguous_callers"]:
         parts.append(text_part(ambiguous_line(payload["ambiguous_callers"])))
     return parts
@@ -273,21 +307,31 @@ def register_evidence_tools(
             str, Field(description="A workspace-relative file path, or a simple or qualified type name.")
         ],
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
-        members: Annotated[str | None, Field(description="Only show members whose name matches this pattern.")] = None,
+        members: Annotated[
+            str | None,
+            Field(description="Only show members whose name matches this pattern, private ones and fields included."),
+        ] = None,
+        all: Annotated[  # noqa: A002 - the wire name callers write
+            bool, Field(description="List private members and fields too, instead of counting them.")
+        ] = False,
     ) -> Any:
-        """List what a file, type or module declares, signatures only, for a few hundred tokens.
+        """List the API a file, type or module declares, one declaration line per member.
 
-        Use this before reading a file: it shows every member with its line range, so
-        the next read can be a line span instead of a whole file.
+        Use this before reading a file: each member's line number lets the next read be a
+        line span instead of a whole file. Private members and fields are counted, not
+        listed, unless `all` is set or `members` names them.
         """
         repo = resolve_repo(repo)
         try:
-            payload = await _remote("outline", {"path": repo, "target": target, "members": members})
+            payload = await _remote("outline", {"path": repo, "target": target, "members": members, "all": all})
         except DaemonError as exc:
             return nib_answer(server, repo, {"error": failure_message(exc)})
         if payload is None:
-            payload = await asyncio.to_thread(_outline_here, repo, target, members)
-        return nib_answer(server, repo, _as_payload(payload, "outline"), outline_parts)
+            payload = await asyncio.to_thread(_outline_here, repo, target, members, all)
+        if "error" in payload:
+            return nib_answer(server, repo, _as_payload(payload, "outline"))
+        found = payload["outline"]
+        return nib_answer(server, repo, payload["text"], lambda root, _: outline_parts(root, found))
 
     @server.tool(structured_output=False)
     async def signatures(

@@ -90,7 +90,7 @@ A `zemble` MCP server is available. Its tools are named `mcp__zemble__<tool>`, o
 - `search` -- search a codebase with a natural-language or code query. Returns file path + exact line.
 - `find_related` -- code similar to a specific file and line (logic-duplication leads, parallel implementations).
 - `graph_definition` / `graph_callers` / `graph_implementations` / `graph_overrides` / `graph_tests_of` / `graph_neighbors` -- the Java symbol graph: where a symbol is declared, who calls it, its subtypes, every override of one method (`Type.member`), its tests, its one-hop neighbourhood.
-- `outline` -- a Java file's or type's declarations, signatures only (~200 tokens).
+- `outline` -- a file's or type's API, one declaration line per member (~200 tokens); private members and fields are counted, `all: true` lists them.
 - `explain` -- a budgeted evidence bundle for a query (primary chunks + enclosing-type outline + tests + callers, each labelled with why it is there).
 - `signatures` -- a symbol's signature plus its exactly-resolved call sites.
 - `dupes` -- clone classes (exact / alpha-renamed / logic) ranked by weight; a REPORT, never a gate.

@@ -43,10 +43,10 @@ def explain_payload(
     return {"bundle": bundle.to_dict(), "markdown": bundle.render()}
 
 
-def outline_payload(graph: GraphProvider, target: str, members: str | None) -> dict[str, Any]:
+def outline_payload(graph: GraphProvider, target: str, members: str | None, everything: bool = False) -> dict[str, Any]:
     """Outline a file or a type, reporting a bad target as data rather than an exception."""
     try:
-        rendered = outline(graph, target, members)
+        rendered = outline(graph, target, members, everything)
     except OutlineError as error:
         return error_payload(error.message, error.candidates)
     return {"outline": rendered.to_dict(), "text": rendered.render()}

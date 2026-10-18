@@ -91,7 +91,7 @@ def _lines(text: str) -> list[str]:
     return lines
 
 
-def _file_lines(path: str) -> list[str] | None:
+def file_lines(path: str) -> list[str] | None:
     """Return a file's lines, or None when it cannot be read."""
     try:
         with open(path, encoding="utf-8", errors="replace", newline="") as handle:
@@ -112,7 +112,7 @@ def source_part(root: str, file_path: str, start: int, text: str) -> Part | None
     if not text or not lines:
         return None
     part = location_part(root, file_path, start, start + len(lines) - 1)
-    window = (_file_lines(part["path"]) or [])[start - 1 : start - 1 + len(lines)]
+    window = (file_lines(part["path"]) or [])[start - 1 : start - 1 + len(lines)]
     part["indexed"] = "\n".join(window if _sits_in(lines, window) else lines)
     return part
 
@@ -132,6 +132,7 @@ __all__ = [
     "NibMode",
     "Part",
     "PartsBuilder",
+    "file_lines",
     "location_part",
     "nib_answer",
     "source_part",

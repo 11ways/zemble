@@ -206,6 +206,8 @@ class Hit:
     depth: int = 1
     # The edge's producer: "tree-sitter" or the name of the tool whose facts replaced it.
     source: str = "tree-sitter"
+    # How the edge was resolved, as `reason` words it (`exact match`, `ambiguous, 3 candidates`, a tool's name).
+    grade: str = ""
 
 
 @dataclass(frozen=True)

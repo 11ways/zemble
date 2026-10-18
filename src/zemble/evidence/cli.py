@@ -59,6 +59,7 @@ def add_evidence_parser(sub: argparse._SubParsersAction) -> None:
     add_root_arg(outline_p, help="Workspace directory the graph was built for.")
     outline_p.add_argument("target", help="Workspace-relative file path, or a simple or qualified type name.")
     outline_p.add_argument("--members", metavar="PATTERN", help="Only show members matching this name pattern.")
+    outline_p.add_argument("--all", action="store_true", dest="everything", help="List private members and fields too.")
     outline_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
     _add_daemon_arg(outline_p)
 
@@ -101,7 +102,7 @@ def _daemon_args(args: argparse.Namespace) -> dict[str, Any]:
             "content": [ContentType.CODE.value],
         }
     if args.command == "outline":
-        return {"path": args.path, "target": args.target, "members": args.members}
+        return {"path": args.path, "target": args.target, "members": args.members, "all": args.everything}
     return {"path": args.path, "symbol": args.symbol}
 
 
@@ -124,7 +125,7 @@ def _in_process(args: argparse.Namespace) -> dict[str, Any]:
             intent = None if args.intent == AUTO_INTENT else parse_intent(args.intent)
             return explain_payload(index, provider, args.query, args.budget, args.top_k, intent)
         if args.command == "outline":
-            return outline_payload(provider, args.target, args.members)
+            return outline_payload(provider, args.target, args.members, args.everything)
         return signatures_payload(provider, args.symbol)
     finally:
         provider.close()

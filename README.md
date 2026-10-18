@@ -46,9 +46,9 @@ See [docs/graph.md](docs/graph.md).
 
 **Evidence bundles** (`zemble explain`, `outline`, `signatures`). `explain` searches,
 follows the graph one hop out of what it found, and packs the result under a token budget
-with a reason per item and an explicit list of what did not fit. `outline` is a
-signature-only view of a file or a type (150 to 300 tokens for a whole class) and
-`signatures` prints a declaration plus the call sites the graph resolved exactly.
+with a reason per item and an explicit list of what did not fit. `outline` lists the API
+of a file or a type, one line per member (private members and fields are counted unless
+asked for), and `signatures` prints a declaration plus the call sites the graph resolved exactly.
 [docs/evidence.md](docs/evidence.md) also carries the honest measurement: bundles do not
 beat plain search on hit rate, they buy structure.
 
@@ -419,12 +419,12 @@ tools and prints the code they point at from the live file.
 | `search` | Natural-language or code query over a repo, in the `code`, `docs`, `config` or `all` lane. Narrowable with `paths` and `exclude`. |
 | `find_related` | Chunks similar to a given file and line. Narrowable with `paths` and `exclude`. |
 | `graph_definition` | Where a symbol is declared. |
-| `graph_callers` | Who calls it, with the resolution grade and a reason per hit. |
+| `graph_callers` | Who calls it, grouped by file and calling method: the lines of the first 10 call sites, the rest by file, caller and line, and the exact total. |
 | `graph_implementations` | Implementations and subclasses of a type. |
 | `graph_tests_of` | Tests naming or exercising a symbol. |
 | `graph_neighbors` | An n-hop walk around a symbol, filterable by edge kind. |
 | `explain` | A budgeted evidence bundle as markdown. Narrowable with `paths` and `exclude`. |
-| `outline` | Signature-only view of a file or a type. |
+| `outline` | The API of a file or a type, one declaration line per member; `all` adds private members and fields, `members` filters by name. |
 | `signatures` | A declaration plus its exactly resolved call sites. |
 | `dupes` | Clone classes over the workspace's code, in every language with a grammar. |
 | `home` | Existing mechanisms, candidate homes, verdict and checklist. |

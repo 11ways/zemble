@@ -490,8 +490,13 @@ def _anchor_of(symbols: Iterable[Symbol]) -> tuple[Symbol | None, Symbol | None]
 
 
 def _outline_text(graph: GraphProvider, symbol: Symbol) -> str:
-    """Render a type's outline, capped, for use as evidence."""
-    return truncate_lines(outline_of(graph, symbol).render(), MAX_OUTLINE_LINES)
+    """Render a type's outline, capped, for use as evidence.
+
+    AIDEV-NOTE: every member, as before outlines counted private members and fields: the
+    bundle is already held to its token budget, and a shorter outline item would change what
+    the packing keeps, which `benchmarks/evidence_eval.py` measures.
+    """
+    return truncate_lines(outline_of(graph, symbol, everything=True).render(), MAX_OUTLINE_LINES)
 
 
 def _location_line(symbol: Symbol) -> str:

@@ -1157,7 +1157,8 @@ async def _cmd_outline(daemon: Daemon, args: dict[str, Any]) -> Any:
     root = _root_of(args)
     target = str(args.get("target", ""))
     members = args.get("members")
-    return await daemon.with_graph(root, lambda graph: outline_payload(graph, target, members))
+    everything = bool(args.get("all", False))
+    return await daemon.with_graph(root, lambda graph: outline_payload(graph, target, members, everything))
 
 
 async def _cmd_signatures(daemon: Daemon, args: dict[str, Any]) -> Any:

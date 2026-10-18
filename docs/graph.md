@@ -627,7 +627,11 @@ Six tools are registered on the existing zemble MCP server:
 `Type.member`), `graph_tests_of` and `graph_neighbors`. Each takes `symbol` and
 an optional `repo` (defaulting to the server's start directory, announced in the
 parameter description), builds the graph on first use and refreshes it once per
-server process, and returns JSON. An ambiguous name comes back as an `error`
+server process, and returns JSON, except `graph_callers`, which returns text: the
+queried symbol, a count of call sites, callers and files (with the resolution tally
+when any is not exact and the tools that wrote edges), then every listed call site
+grouped by file and calling method (`path: Caller L12, L30; Other L5 (ambiguous, 2 candidates)`).
+An ambiguous name comes back as an `error`
 with a `candidates` list rather than as a failure. Every answer is capped at
 `limit` results (default 50) and carries `total`, plus a `truncated` note when
 the cap bit, so a cap is never silent. A wire command outside the query

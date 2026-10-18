@@ -153,7 +153,7 @@ source text, worse on text that is mostly punctuation.
 
 ```
 zemble explain <path> "<query>" [--budget 3000] [--top-k 20] [--intent NAME] [--json]
-zemble outline <path> <file-or-type> [--members PATTERN] [--json]
+zemble outline <path> <file-or-type> [--members PATTERN] [--all] [--json]
 zemble signatures <path> <symbol> [--json]
 ```
 
@@ -162,8 +162,13 @@ An unavailable or busy daemon is reported without a local fallback (see
 `docs/daemon.md`), so they share one RAM copy of the index
 and the graph with `search`. Both the index and the symbol graph are built on
 demand and refreshed once per process, the same way `zemble graph` does it. `outline` takes a workspace
-relative file path or a simple or qualified type name; `--members` matches a
-plain word as `*word*` and prunes the types left with nothing under them. Exit
+relative file path or a simple or qualified type name. By default it lists what code outside the
+file can use: members a language rule places as private (Java `private`, Python `_name` other
+than runtime hooks such as `__init__`, Rust without `pub`) and every field are counted in a closing
+`(not listed: ...)` line instead; package-private and unplaceable members stay listed. `--all`
+lists everything. `--members` searches every member, private ones and fields included, matches a
+plain word as `*word*` and prunes the types left with nothing under them. `explain` outlines
+keep every member. Exit
 codes match the graph subcommands: `0` answered, `1` nothing found, `2` the name
 was ambiguous, with the candidates on stderr.
 
@@ -183,8 +188,8 @@ record PageWindow(int page, int pageCount, int offset, int pageSize)  L19-85
 ## MCP
 
 Three tools are registered on the existing server: `explain` (returns the
-markdown bundle, default budget 2500), `outline` and `signatures` (both return
-JSON). All three go through the daemon first; when there is none, `explain`
+markdown bundle, default budget 2500), `outline` (returns the outline text above;
+`all: true` is `--all`) and `signatures` (returns JSON). All three go through the daemon first; when there is none, `explain`
 receives the index from the server's own cache, so it still shares the warm index
 with `search`.
 
@@ -334,7 +339,7 @@ The hit-rate result says a bundle is not a better *finder*. It is a better
 *answer shape* once something is found: every item says why it is there, tests
 and callers arrive without a second round trip, and the omission list tells an
 agent what exists without paying for it. The cheapest surfaces here are
-`outline` (a whole class for 150-300 tokens) and `signatures`, and neither
+`outline` (a class's API for 150-300 tokens) and `signatures`, and neither
 depends on the packing result above.
 
 ## Limits

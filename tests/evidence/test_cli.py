@@ -144,12 +144,16 @@ def test_mcp_tools(graph_fixture_root: Path, graph_cache: Path, cache: IndexCach
     bundle = asyncio.run(_call(cache, graph_fixture_root, "explain", {"query": "area", "repo": root, "budget": 900}))
     assert bundle.startswith("# Evidence for: area"), "step 1: the bundle is markdown"
 
-    # 2. `outline` returns JSON entries.
-    outline_payload = json.loads(
-        asyncio.run(_call(cache, graph_fixture_root, "outline", {"target": "Registry", "repo": root}))
+    # 2. `outline` returns its text: the API by default, with what it counted instead of listing.
+    outline_text = asyncio.run(_call(cache, graph_fixture_root, "outline", {"target": "Registry", "repo": root}))
+    assert outline_text.startswith("package com.example.core"), "step 2: the package is reported"
+    assert "method Shape anonymousShape()" in outline_text, "step 2: members are listed"
+    assert "field String name" not in outline_text, "step 2: a field is counted, not listed"
+    assert "(not listed: 1 field(s); pass `all`" in outline_text, "step 2: and the answer says how to list it"
+    everything = asyncio.run(
+        _call(cache, graph_fixture_root, "outline", {"target": "Registry", "repo": root, "all": True})
     )
-    assert outline_payload["package"] == "com.example.core", "step 2: the package is reported"
-    assert any(entry["name"] == "anonymousShape" for entry in outline_payload["entries"]), "step 2: members are listed"
+    assert "field String name" in everything and "not listed" not in everything, "step 2: `all` lists the field"
 
     # 3. `signatures` returns the exact callers.
     signature_payload = json.loads(

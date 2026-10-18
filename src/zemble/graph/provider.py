@@ -45,7 +45,8 @@ from zemble.languages.metrics import FILE_METRIC_COLUMNS, CallableMetrics, FileM
 
 _HIERARCHY_KINDS = (EdgeKind.EXTENDS.value, EdgeKind.IMPLEMENTS.value)
 
-_RESOLUTION_PHRASES = {
+#: How a hit's `grade` words each resolution an edge can have.
+RESOLUTION_PHRASES = {
     Resolution.EXACT: "exact match",
     Resolution.UNIQUE_NAME: "by-name match",
     Resolution.AMBIGUOUS: "ambiguous",
@@ -197,25 +198,30 @@ def display_name(symbol: Symbol) -> str:
     return ".".join(parts[-2:]) if len(parts) >= 2 else symbol.qualified_name
 
 
-def _reason(symbol: Symbol, edge: Edge, depth: int = 1, *, outgoing: bool = False) -> str:
-    """Build the one-line sentence explaining why a hit is in the answer.
+def _grade(edge: Edge) -> str:
+    """Word how an edge was resolved: its grade, the tool that wrote it, and the generated member it came through.
 
     An edge an external tool wrote names that tool instead of a resolution grade: the
     grade is always `exact` there, and which tool said so is the part worth reading. An edge
     that reached its source through a source map also names the generated member it was
     written about, because "this template calls it" is only half the story a reader needs.
     """
-    table = _VERBS_OUT if outgoing else _VERBS
-    verb = table.get(edge.kind, edge.kind.value)
-    phrase = _RESOLUTION_PHRASES[edge.resolution]
+    phrase = RESOLUTION_PHRASES[edge.resolution]
     if edge.resolution is Resolution.AMBIGUOUS:
         phrase = f"ambiguous, {edge.ambiguity()} candidates"
     if edge.source != TREE_SITTER_SOURCE:
         phrase = edge.source
     if edge.origin_ref:
         phrase = f"{phrase} via {edge.origin_ref}"
+    return phrase
+
+
+def _reason(symbol: Symbol, edge: Edge, depth: int = 1, *, outgoing: bool = False) -> str:
+    """Build the one-line sentence explaining why a hit is in the answer."""
+    table = _VERBS_OUT if outgoing else _VERBS
+    verb = table.get(edge.kind, edge.kind.value)
     depth_note = f", depth {depth}" if depth > 1 else ""
-    return f"{verb} {display_name(symbol)} (line {edge.line}, {phrase}{depth_note})"
+    return f"{verb} {display_name(symbol)} (line {edge.line}, {_grade(edge)}{depth_note})"
 
 
 _METRICS_SELECT = "SELECT symbol_id, lines, statements, complexity, nesting FROM symbol_metrics"
@@ -398,6 +404,7 @@ class SqliteGraphProvider:
                     reason=_reason(symbol, edge, depth, outgoing=side == "dst"),
                     depth=depth,
                     source=edge.source,
+                    grade=_grade(edge),
                 )
             )
         return hits

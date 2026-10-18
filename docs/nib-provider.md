@@ -30,9 +30,10 @@ when the file changed since. Locations of one file with no text between them pri
 | Tools | Layout |
 | --- | --- |
 | `search`, `find_related` | A header, then per hit a text line (rank, path:range, score) and the snippet's location: the first `max_snippet_lines` lines, the whole chunk for `None`, none for `0`. |
-| `graph_*` | The queried symbol, then per hit a text line (name, kind, edge, resolution, depth, source, reason) and the one line it points at; a footer with `total`, `truncated`, `note`. |
-| `outline` | The package and file, then each declaration's first line, as one block. |
-| `signatures` | The signature's label and line, then per exact call site its text and line. |
+| `graph_callers` | The queried symbol, a count of call sites, callers and files, then per file one text line naming its callers and their lines, followed by those lines as one block; only the first 10 call sites get their lines, the rest are text lines by file, caller and line; a footer with the exact `total` and `truncated`. |
+| other `graph_*` | The queried symbol, then per hit a text line (name, kind, edge, resolution, depth, source, reason) and the one line it points at; a footer with `total`, `truncated`, `note`. A refusal is text, one line per candidate. |
+| `outline` | The package and file, then the line naming each listed declaration (past its annotations), as one block, then the `(not listed: ...)` count of private members and fields. |
+| `signatures` | The signature's label and line, then its exact call sites grouped by file and caller, laid out as `graph_callers` does. |
 | `explain` | The bundle header, then per item its heading and the lines it shows; outline-style items and bare locations stay prose. |
 | `dupes`, `home`, `health`, `status` | One text part holding the plain text. |
 
