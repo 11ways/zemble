@@ -13,7 +13,6 @@ import re
 from collections import Counter, defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from fnmatch import fnmatch
 from functools import cache, cached_property
 from itertools import islice
 from pathlib import Path, PurePosixPath
@@ -34,6 +33,7 @@ from zemble.graph.model import (
     SymbolKind,
 )
 from zemble.graph.provider import AnyProvider
+from zemble.graph.visibility import in_contract, is_runtime_hook, symbol_visibility
 from zemble.health.copying import CopyingFacts, measure_copying
 from zemble.health.git import ChangedLines
 from zemble.health.history import HistoryFacts, measure_history
@@ -41,10 +41,8 @@ from zemble.health.model import Comparison, Signal
 from zemble.health.settings import FROZEN_REASON, Exemption, HealthSettings
 from zemble.home.config import HomeConfig
 from zemble.index.files import detect_language
-from zemble.languages import Visibility, spec_for
+from zemble.languages import Visibility
 from zemble.languages.metrics import CallableMetrics, FileMetrics
-from zemble.languages.read import visibility_of
-from zemble.languages.visibility import VISIBILITY_WORDS
 
 if TYPE_CHECKING:  # pragma: no cover
     from zemble.health.style import StyleMeasurement
@@ -81,9 +79,6 @@ _WORD = re.compile(r"[A-Za-z_$][\w$]*")
 
 #: Edges a module depends on another module through.
 DEPENDENCY_KINDS = (EdgeKind.IMPORTS, EdgeKind.CALLS, EdgeKind.REFERENCES_TYPE)
-
-#: Container kinds whose members are part of a contract: as visible as the container unless they say otherwise.
-_CONTRACT_KINDS = frozenset({SymbolKind.INTERFACE, SymbolKind.ANNOTATION})
 
 _NAME_SPLIT = re.compile(r"[.:/\\#]")
 
@@ -341,8 +336,7 @@ class HealthFacts:
 
     def in_contract(self, symbol: Symbol) -> bool:
         """Whether a symbol is a member of an interface, trait, protocol or annotation type."""
-        container = self.container(symbol)
-        return container is not None and container.kind in _CONTRACT_KINDS
+        return in_contract(symbol, self.container)
 
     def overridden(self, symbol: Symbol) -> bool:
         """Whether anything overrides a callable, by an edge at any resolution: a weak edge still means it may."""
@@ -358,31 +352,12 @@ class HealthFacts:
         return dict(found)
 
     def visibility(self, symbol: Symbol) -> Visibility:
-        """How far a symbol reaches; UNKNOWN for a language no rule places.
-
-        A member of an interface (trait, protocol) without a word of its own is as visible as the
-        interface: it is part of the contract, in every language that has one.
-        """
-        container = self.container(symbol)
-        written = set(symbol.modifiers)
-        for word, level in VISIBILITY_WORDS:
-            if word in written:
-                return level
-        if container is not None and self.in_contract(symbol):
-            return self.visibility(container)
-        language = language_of(symbol.file_path)
-        if language == "java":
-            return Visibility.PACKAGE
-        spec = spec_for(language)
-        if spec is None:
-            return Visibility.UNKNOWN
-        in_type = container is not None and container.kind in DECLARED_TYPE_KINDS
-        return visibility_of(spec, symbol.name, symbol.modifiers, in_type=in_type)
+        """How far a symbol reaches; UNKNOWN for a language no rule places."""
+        return symbol_visibility(symbol, self.container)
 
     def is_runtime_hook(self, symbol: Symbol) -> bool:
         """Whether the language runtime calls this callable by its name alone (`__repr__`)."""
-        spec = spec_for(language_of(symbol.file_path))
-        return spec is not None and any(fnmatch(symbol.name, pattern) for pattern in spec.runtime_hook_patterns)
+        return is_runtime_hook(symbol)
 
     def reaching(
         self, symbol: Symbol, kinds: frozenset[EdgeKind], floor: Resolution, *, tests: bool
