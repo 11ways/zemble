@@ -396,6 +396,19 @@ class GraphStoreMissing(RuntimeError):
     """No graph has been built for a workspace yet."""
 
 
+class GraphStoreStale(RuntimeError):
+    """The current graph version was written in another format than this zemble reads; a build migrates it."""
+
+
+def stored_format(connection: sqlite3.Connection) -> int | None:
+    """Return the format a graph version records, or None when it records none."""
+    try:
+        row = connection.execute("SELECT value FROM meta WHERE key = 'format_version'").fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    return int(row[0]) if row is not None and str(row[0]).isdigit() else None
+
+
 def is_corruption(exc: BaseException) -> bool:
     """Return whether an error says the store itself is unreadable rather than the query."""
     if isinstance(exc, GraphStoreCorrupt):

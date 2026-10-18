@@ -32,7 +32,15 @@ from zemble.graph.model import (
     Symbol,
     is_test_path,
 )
-from zemble.graph.store import connect, edge_from_row, resolve_graph_root, symbol_from_row
+from zemble.graph.store import (
+    GRAPH_FORMAT_VERSION,
+    GraphStoreStale,
+    connect,
+    edge_from_row,
+    resolve_graph_root,
+    stored_format,
+    symbol_from_row,
+)
 from zemble.languages.metrics import FILE_METRIC_COLUMNS, CallableMetrics, FileMetrics
 
 _HIERARCHY_KINDS = (EdgeKind.EXTENDS.value, EdgeKind.IMPLEMENTS.value)
@@ -253,9 +261,19 @@ class SqliteGraphProvider:
     """A `GraphProvider` backed by the sqlite graph built by `zemble.graph.store`."""
 
     def __init__(self, path: str) -> None:
-        """Open the graph database of a workspace path."""
+        """Open the graph database of a workspace path.
+
+        :raises GraphStoreStale: If the current version is in another format than this zemble reads: its rows
+            lack columns the readers name (a format-10 store has no `doc_lines`), so it is refused, never read.
+        """
         self.path = path
         self.connection: sqlite3.Connection = connect(path)
+        stored = stored_format(self.connection)
+        if stored != GRAPH_FORMAT_VERSION:
+            self.connection.close()
+            raise GraphStoreStale(
+                f"the symbol graph of {path} is format {stored}, this zemble reads format {GRAPH_FORMAT_VERSION}"
+            )
         self.traversal_truncated = False
 
     def close(self) -> None:

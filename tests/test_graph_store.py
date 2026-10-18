@@ -280,6 +280,41 @@ def test_an_older_format_store_remeasures_on_its_next_build(
     assert build_graph(path).extracted_files == 0, "step 3: a migrated store is current"
 
 
+@pytest.mark.parametrize("stored", ["10", "12"])
+def test_a_reader_never_reads_an_older_format_store_and_the_daemon_migrates_it_first(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path, stored: str
+) -> None:
+    """A daemon opening its graph before any build migrated it read a format-10 store's rows and died on doc_lines."""
+    from zemble.daemon.server import _with_graph
+    from zemble.graph.provider import open_provider
+    from zemble.graph.store import GraphStoreStale
+
+    workspace = _copy_workspace(graph_fixture_root, tmp_path / "ws")
+    path = str(workspace)
+    build_graph(path)
+    db = graph_db_path(path)
+    assert db is not None
+    legacy = sqlite3.connect(db)
+    legacy.execute("UPDATE meta SET value = ? WHERE key = 'format_version'", (stored,))
+    if stored == "10":
+        legacy.execute("ALTER TABLE symbols DROP COLUMN doc_lines")
+    legacy.commit()
+    legacy.close()
+    circle = "src/main/java/com/example/core/Circle.java"
+
+    # 1. A reader refuses the old format by name instead of reading rows that lack its columns.
+    with pytest.raises(GraphStoreStale, match=f"format {stored}, this zemble reads format {GRAPH_FORMAT_VERSION}"):
+        open_provider(path)
+
+    # 2. The daemon's graph question (the architectural candidates' path: fresh, no ensure) migrates it and answers.
+    symbols = _with_graph(path, lambda graph: graph.symbols_in_file(circle), fresh=True)
+    assert any(symbol.name == "Circle" for symbol in symbols), "step 2: answered from the migrated store"
+    check = connect(path)
+    version = check.execute("SELECT value FROM meta WHERE key = 'format_version'").fetchone()[0]
+    check.close()
+    assert version == str(GRAPH_FORMAT_VERSION), "step 2: the store is current again"
+
+
 def test_torn_store_journey(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path, caplog) -> None:
     """A store torn by a killed build is refused loudly and rebuilt, never read past."""
     workspace = _copy_workspace(graph_fixture_root, tmp_path / "ws")

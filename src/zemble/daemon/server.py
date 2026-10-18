@@ -1101,10 +1101,17 @@ def _with_graph(root: str, work: Callable[[Any], Any], *, fresh: bool = False) -
     """
     from zemble.graph.cli import ensure_graph
     from zemble.graph.provider import open_provider
+    from zemble.graph.store import GraphStoreStale, build_graph, resolve_graph_root
 
     if not fresh:
         ensure_graph(root, allow_daemon=False)
-    provider = open_provider(root)
+    try:
+        provider = open_provider(root)
+    except GraphStoreStale:
+        # A version of an older format (the daemon came up before its first build migrated it) is migrated by a
+        # build first; one still stale after it raises GraphStoreStale, which names the format: never a bad read.
+        build_graph(resolve_graph_root(root)[0])
+        provider = open_provider(root)
     try:
         return work(provider)
     finally:
