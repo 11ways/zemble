@@ -11,7 +11,9 @@ import com.sun.source.util.Trees;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
+import javax.tools.JavaFileManager;
 import javax.tools.JavaFileObject;
+import javax.tools.StandardLocation;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -30,11 +32,21 @@ import java.util.Set;
  * <p>Enable with {@code -Xplugin:ZembleFacts out=<file> root=<dir>}; every failure is swallowed after
  * one stderr line so a broken plugin can never break a build. The retired {@code append} option is
  * ignored: every compilation merges into the existing file (see {@link FactWriter}).
+ *
+ * <p>{@code base=classes} resolves a relative {@code out} and {@code root} against javac's class output
+ * directory ({@code -d}) instead of the working directory, so a build tool can pass one constant,
+ * machine-independent argument. Reading that directory needs javac's internal context, which a Gradle
+ * daemon exports; where it is not exported the plugin says so once and writes nothing. A jar older than
+ * {@link #OPTIONS_ATTRIBUTE} ignores {@code base} and would resolve the paths against the working
+ * directory, so a build tool checks that manifest attribute before passing it.
  */
 public final class FactsPlugin implements Plugin {
 
     static final String NAME = "ZembleFacts";
     static final String VERSION = "0.1.0";
+
+    /** The jar manifest attribute listing the options beyond {@code out} and {@code root} this jar reads. */
+    static final String OPTIONS_ATTRIBUTE = "Zemble-Facts-Options";
 
     private static final String DEFAULT_OUT = "build/zemble/facts.jsonl";
 
@@ -47,9 +59,9 @@ public final class FactsPlugin implements Plugin {
     public void init(JavacTask task, String... args) {
         Path workingDir = Paths.get("").toAbsolutePath().normalize();
 
-        Path out = workingDir.resolve(DEFAULT_OUT);
-        Path root = workingDir;
-
+        String outValue = null;
+        String rootValue = null;
+        String base = "cwd";
         for (String arg : args) {
             int split = arg.indexOf('=');
             if (split < 0) {
@@ -58,13 +70,42 @@ public final class FactsPlugin implements Plugin {
             String key = arg.substring(0, split).trim().toLowerCase(Locale.ROOT);
             String value = arg.substring(split + 1).trim();
             switch (key) {
-                case "out" -> out = workingDir.resolve(value).normalize();
-                case "root" -> root = workingDir.resolve(value).toAbsolutePath().normalize();
+                case "out" -> outValue = value;
+                case "root" -> rootValue = value;
+                case "base" -> base = value;
                 default -> { }
             }
         }
 
+        Path anchor;
+        try {
+            anchor = switch (base) {
+                case "cwd" -> workingDir;
+                case "classes" -> classOutput(task);
+                default -> throw new IllegalArgumentException("unknown base '" + base + "', one of cwd, classes");
+            };
+        } catch (Exception | LinkageError unavailable) {
+            System.err.println("zemble-javac-facts: no facts for this compile: " + unavailable);
+            return;
+        }
+
+        Path out = outValue == null ? workingDir.resolve(DEFAULT_OUT) : anchor.resolve(outValue).normalize();
+        Path root = rootValue == null ? workingDir : anchor.resolve(rootValue).toAbsolutePath().normalize();
         task.addTaskListener(new FactsListener(task, out, root));
+    }
+
+    /**
+     * javac's class output directory: where the class {@code zemble.Anchor} would be written, two levels up.
+     *
+     * @throws ReflectiveOperationException when javac does not export its context to this plugin
+     */
+    static Path classOutput(JavacTask task) throws ReflectiveOperationException, IOException {
+        Object context = task.getClass().getMethod("getContext").invoke(task);
+        JavaFileManager files = (JavaFileManager) context.getClass().getMethod("get", Class.class)
+                .invoke(context, JavaFileManager.class);
+        JavaFileObject anchor = files.getJavaFileForOutput(StandardLocation.CLASS_OUTPUT, "zemble.Anchor",
+                JavaFileObject.Kind.CLASS, null);
+        return Paths.get(anchor.toUri()).toAbsolutePath().normalize().getParent().getParent();
     }
 
     /** Runs after ANALYZE so every tree the scanner touches is attributed; one instance per javac task. */

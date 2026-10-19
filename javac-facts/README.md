@@ -73,8 +73,20 @@ Options are space-separated `key=value` pairs inside the `-Xplugin:` value.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `out` | `build/zemble/facts.jsonl` | Output file, resolved against the compiler's working directory. |
-| `root` | the working directory | Emitted `path` values are relative to this, with forward slashes. The header records it relative to the output file's directory. |
+| `out` | `build/zemble/facts.jsonl` | Output file, resolved against the compiler's working directory, or against `base`. |
+| `root` | the working directory | Emitted `path` values are relative to this, with forward slashes. The header records it relative to the output file's directory. Resolved like `out`. |
+| `base` | `cwd` | What a relative `out` and `root` resolve against: `cwd`, or `classes` for javac's class output directory (`-d`). |
+
+`base=classes` lets a build tool pass one constant, machine-independent argument (Gradle keys a compile's cache entry
+by its arguments): `-Xplugin:ZembleFacts base=classes out=../../../zemble/facts-compileJava.jsonl root=../../..`.
+Reading the class output directory needs javac's internal context; a Gradle daemon exports it
+(`--add-exports jdk.compiler/com.sun.tools.javac.api` and `.util`), plain `javac` needs those two flags as `-J`
+options. Without them the plugin prints one line and writes nothing; the compile is never failed.
+
+Compatibility: the jar's manifest attribute `Zemble-Facts-Options: base` says it reads `base`. A jar without it
+ignores `base` and resolves the paths against the working directory, so a build tool checks the attribute before
+passing `base=classes` (protoblast's plugin wires no facts for such a jar and says so). This jar given the old form
+(absolute `out` and `root`, no `base`) behaves exactly as before.
 
 Every compilation MERGES into the file it finds: blocks for the sources it analyzed are replaced,
 blocks for sources that no longer exist under `root` are dropped, and every other block is kept. An
