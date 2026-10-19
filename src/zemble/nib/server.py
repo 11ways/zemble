@@ -8,7 +8,7 @@ from typing import Any
 from mcp.types import CallToolResult, ContentBlock, TextContent
 
 from zemble.nib.parts import NibAnswer, NibMode, structured, text_part
-from zemble.runtime.mcp import StaleAwareFastMCP, warn_if_stale
+from zemble.runtime.mcp import StaleAwareFastMCP
 
 
 class NibProviderFastMCP(NibMode, StaleAwareFastMCP):
@@ -30,7 +30,7 @@ class NibProviderFastMCP(NibMode, StaleAwareFastMCP):
         self, name: str, arguments: dict[str, Any]
     ) -> Sequence[ContentBlock] | dict[str, Any] | CallToolResult:
         """Answer one tool call, adding nib's parts when the tool supplied an answer for nib."""
-        warn_if_stale()
+        self.before_call(name, arguments)
         raw = await self._tool_manager.call_tool(name, arguments, context=self.get_context(), convert_result=False)
         tool = self._tool_manager.get_tool(name)
         if tool is None:

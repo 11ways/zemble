@@ -1,4 +1,4 @@
-"""The `status` MCP tool, plus the throttled staleness warning the server logs.
+"""The `status` MCP tool, the throttled staleness warning the server logs, and the missing-argument check.
 
 AIDEV-NOTE: the warning is checked at most once a minute because `source_changed_since_start`
 shells out to git; a per-request git call would tax every search to report a rare event.
@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ContentBlock
 
 from zemble.nib.parts import nib_text_only
@@ -48,6 +49,37 @@ def warn_if_stale(now: float | None = None) -> str | None:
     return note
 
 
+def missing_arguments(server: FastMCP, name: str, arguments: dict[str, Any] | None) -> None:
+    """Refuse a call that leaves out a required argument, naming each one and what it takes, from the tool's schema.
+
+    AIDEV-NOTE: FastMCP would otherwise answer with pydantic's validation dump. A client that
+    defers tool schemas (Claude Code loads them through ToolSearch) can send `{}` for a tool
+    whose schema it never loaded, so an empty call says so. An unknown tool is left to FastMCP.
+
+    :raises ToolError: When any argument the schema marks required is absent.
+    """
+    tool = server._tool_manager.get_tool(name)
+    if tool is None:
+        return
+    given = arguments or {}
+    properties = tool.parameters.get("properties", {})
+    missing = [field for field in tool.parameters.get("required", []) if field not in given]
+    if not missing:
+        return
+    lines = [f"{name} needs {_expected(field, properties.get(field, {}))}" for field in missing]
+    if not given:
+        lines.append("The call carried no arguments at all; load this tool's schema before calling it.")
+    raise ToolError("\n".join(lines))
+
+
+def _expected(field: str, schema: dict[str, Any]) -> str:
+    """Describe one argument as its schema declares it: name, JSON type and description."""
+    kind = schema.get("type")
+    head = f"`{field}` ({kind})" if isinstance(kind, str) else f"`{field}`"
+    description = schema.get("description")
+    return f"{head}: {description}" if description else head
+
+
 class StaleAwareFastMCP(FastMCP):
     """A FastMCP that checks, at the start of every tool call, whether its source went stale.
 
@@ -56,9 +88,14 @@ class StaleAwareFastMCP(FastMCP):
     instance-attribute wrap would only be seen by direct callers, never by a real request.
     """
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Sequence[ContentBlock] | dict[str, Any]:
-        """Warn once about stale source, then answer the tool call as FastMCP would."""
+    def before_call(self, name: str, arguments: dict[str, Any] | None) -> None:
+        """Run what every tool call in every server variant does first: the staleness probe, then the argument check."""
         warn_if_stale()
+        missing_arguments(self, name, arguments)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Sequence[ContentBlock] | dict[str, Any]:
+        """Warn once about stale source and refuse missing arguments, then answer the tool call as FastMCP would."""
+        self.before_call(name, arguments)
         return await super().call_tool(name, arguments)
 
 

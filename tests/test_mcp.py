@@ -563,6 +563,41 @@ async def test_tool_calls_probe_for_staleness(cache: IndexCache, monkeypatch: py
     assert probes == [None], "the call went through the staleness-aware server"
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("nib", [False, True], ids=["mcp", "nib-provider"])
+async def test_a_missing_required_argument_is_named_from_the_schema(cache: IndexCache, nib: bool) -> None:
+    """Every tool refuses a call missing a required argument by naming it and its description, never a pydantic dump."""
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    server = create_server(cache, nib=nib)
+    async with create_connected_server_and_client_session(server._mcp_server) as client:
+        tools = (await client.list_tools()).tools
+        checked = 0
+        for tool in tools:
+            required = tool.inputSchema.get("required", [])
+            if not required:
+                continue
+            checked += 1
+            result = await client.call_tool(tool.name, {})
+            text = result.content[0].text
+            assert result.isError, f"{tool.name}: an empty call is an error"
+            assert "validation error" not in text and "pydantic" not in text, f"{tool.name}: no pydantic dump: {text}"
+            for field in required:
+                description = tool.inputSchema["properties"][field]["description"]
+                assert f"{tool.name} needs `{field}`" in text and description in text, f"{tool.name}: {text}"
+            assert "no arguments at all" in text, f"{tool.name}: an empty call says it carried nothing"
+        assert checked >= 5, "the sweep reached the tools that take required arguments"
+
+        outline = await client.call_tool("outline", {})
+        assert outline.content[0].text.splitlines()[0] == (
+            "outline needs `target` (string): A workspace-relative file path, or a simple or qualified type name."
+        )
+        partial = await client.call_tool("find_related", {"file_path": "a.py"})
+        text = partial.content[0].text
+        assert partial.isError and "find_related needs `line` (integer)" in text, text
+        assert "`file_path`" not in text and "no arguments at all" not in text, "only the absent argument is named"
+
+
 def _double_encoding_complaint(name: str, result: Any) -> str | None:
     """Return why one tool result is not handed over exactly once, or None when it is clean.
 
