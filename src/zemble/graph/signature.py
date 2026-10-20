@@ -1,8 +1,9 @@
 """Signature-qualified symbol queries, `Type.method(Param,...)`, and the parameter-type normal form they match on.
 
-A symbol stores its parameter types erased as the source wrote them (`List<String>` as `List`) and a
-compiler ref spells them fully qualified, so both sides, and whatever a caller types, meet on the
-simple erased name: `java.util.List<String>` and `List` are the same parameter here.
+A symbol stores its parameter types erased (`List<String>` as `List`, a type variable `M extends Model`
+as `Model`, javac's erasure) and a compiler ref spells them fully qualified, so both sides, and whatever
+a caller types, meet on the simple erased name: `java.util.List<String>` and `List` are the same
+parameter here. A type variable written in a query is not reinterpreted: `of(M)` names a type `M`.
 """
 
 from __future__ import annotations

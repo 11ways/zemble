@@ -140,9 +140,9 @@ class _JavaExtractor:
         self.result = FileExtraction(file_path=relative_path, package="")
         self.is_test = is_test_path(relative_path)
         self._anon_counter = 0
-        # Type variables in scope (class/method type parameters). They name no workspace
-        # symbol, so references to them are dropped rather than left permanently unresolved.
-        self._type_vars: set[str] = set()
+        # Type variables in scope (class/method type parameters), each mapped to its erasure. They name
+        # no workspace symbol, so references to them are dropped rather than left permanently unresolved.
+        self._type_vars: dict[str, str] = {}
         #: The rows of every doc comment attributed to a declaration, which the file pass never reads as code.
         self.doc_rows: set[int] = set()
 
@@ -268,6 +268,14 @@ class _JavaExtractor:
         for child in node.children:
             self._emit_type_refs(child, owner_id)
 
+    def _parameter_type(self, node: Node | None) -> str | None:
+        """Erase a parameter's type node the way javac does: a type variable becomes its bound's erasure."""
+        erased = self._erase(node)
+        if erased is None:
+            return None
+        base, _, arrays = erased.partition("[")
+        return self._type_vars.get(base, base) + (f"[{arrays}" if arrays else "")
+
     def _param_types(self, parameters: Node | None) -> list[str]:
         """Return the erased parameter types of a formal parameter list."""
         if parameters is None:
@@ -275,9 +283,10 @@ class _JavaExtractor:
         types: list[str] = []
         for child in parameters.named_children:
             if child.type == "formal_parameter":
-                types.append(self._erase(child.child_by_field_name("type")) or "?")
+                types.append(self._parameter_type(child.child_by_field_name("type")) or "?")
             elif child.type == "spread_parameter":
-                erased = self._erase(next((c for c in child.named_children if c.type != "variable_declarator"), None))
+                element = next((c for c in child.named_children if c.type != "variable_declarator"), None)
+                erased = self._parameter_type(element)
                 types.append(f"{erased}[]" if erased else "?[]")
             elif child.type == "receiver_parameter":
                 continue
@@ -301,20 +310,36 @@ class _JavaExtractor:
             if name_node is not None:
                 scope.declare(self.text(name_node), self._erase(type_node))
 
-    def _push_type_vars(self, node: Node) -> set[str]:
-        """Add a declaration's type parameters to the in-scope type variables, returning the added names."""
+    def _push_type_vars(self, node: Node) -> dict[str, str]:
+        """Bring a declaration's type parameters into scope, returning the scope to restore afterwards.
+
+        AIDEV-NOTE: each variable maps to its erasure (first bound, Object when unbounded, a bound
+        naming another variable followed to that one's erasure), because javac writes a generic
+        parameter that way and compiler facts would otherwise never map to the overload.
+        """
+        outer = self._type_vars
         type_parameters = node.child_by_field_name("type_parameters")
         if type_parameters is None:
-            return set()
-        added = {
-            self.text(name)
-            for child in type_parameters.named_children
-            if child.type == "type_parameter"
-            for name in [next((c for c in child.named_children if c.type == "type_identifier"), None)]
-            if name is not None
-        } - self._type_vars
-        self._type_vars |= added
-        return added
+            return outer
+        bounds: dict[str, str | None] = {}
+        for child in type_parameters.named_children:
+            name = next((c for c in child.named_children if c.type == "type_identifier"), None)
+            if child.type != "type_parameter" or name is None:
+                continue
+            bound = next((c for c in child.named_children if c.type == "type_bound"), None)
+            first = bound.named_children[0] if bound is not None and bound.named_children else None
+            bounds[self.text(name)] = self._erase(first)
+
+        def erasure(variable: str, seen: frozenset[str]) -> str:
+            bound = bounds[variable]
+            if bound is None or bound in seen:
+                return "Object"
+            if bound in bounds:
+                return erasure(bound, seen | {variable})
+            return outer.get(bound, bound)
+
+        self._type_vars = {**outer, **{variable: erasure(variable, frozenset()) for variable in bounds}}
+        return outer
 
     # ---- top level -----------------------------------------------------
 
@@ -379,7 +404,7 @@ class _JavaExtractor:
     def _visit_type(self, node: Node, container_id: str | None, prefix: str) -> Symbol:
         """Extract one type declaration and everything inside it."""
         kind = _TYPE_DECLARATIONS[node.type]
-        added_vars = self._push_type_vars(node)
+        outer_vars = self._push_type_vars(node)
         name_node = node.child_by_field_name("name")
         name = self.text(name_node) if name_node is not None else "<anonymous>"
         qualified = f"{prefix}.{name}" if prefix else name
@@ -408,7 +433,7 @@ class _JavaExtractor:
         body = node.child_by_field_name("body")
         if body is not None:
             self._visit_body(body, symbol, qualified, fields)
-        self._type_vars -= added_vars
+        self._type_vars = outer_vars
         return symbol
 
     def _type_signature(self, node: Node, kind: SymbolKind, name: str) -> str:
@@ -477,7 +502,7 @@ class _JavaExtractor:
             )
             self._emit_type_refs(type_node, owner.id)
             erased = self._erase(type_node)
-            owner.param_types.append(erased or "?")
+            owner.param_types.append(self._parameter_type(type_node) or "?")
             if erased:
                 fields[name] = erased
         return fields
@@ -599,7 +624,7 @@ class _JavaExtractor:
         name_node = node.child_by_field_name("name")
         if name_node is None:
             return
-        added_vars = self._push_type_vars(node)
+        outer_vars = self._push_type_vars(node)
         name = self.text(name_node)
         parameters = node.child_by_field_name("parameters")
         param_types = (
@@ -646,7 +671,7 @@ class _JavaExtractor:
                 receivers=own_receivers(_JAVA_SELF_NAMES, owner.name),
             )
             self._walk_statements(body, symbol, body_scope, owner.qualified_name)
-        self._type_vars -= added_vars
+        self._type_vars = outer_vars
 
     def _callable_signature(self, node: Node, name: str, parameters: Node | None, return_node: Node | None) -> str:
         """Build the one-line signature of a callable, keeping declared generics."""

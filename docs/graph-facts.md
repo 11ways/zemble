@@ -104,8 +104,10 @@ what zemble does with each:
 
 The type is resolved first, then the member is looked up among that type's own
 declarations. Overloads are separated by arity and then by the **simple** names
-of the erased parameter types, because zemble records parameter types as the
-source wrote them (`List<String>` is stored as `List`). Matching is exact:
+of the erased parameter types. zemble erases parameter types the way javac does
+(`List<String>` is stored as `List`; a type variable as its first bound, `Object`
+when unbounded, method and class type parameters alike), so a javac ref meets the
+stored form. Matching is exact:
 
 - The type is unknown to the workspace -> the target is **external**. It is kept
   as an edge with no `dst_id`, the full ref as `dst_name` and resolution
@@ -117,10 +119,6 @@ source wrote them (`List<String>` is stored as `List`). Matching is exact:
   consulted as a second rung (file plus line) before giving up.
 - A source ref (`from`) that does not map drops the edge, because there is
   nothing to hang it on.
-
-Generic parameters are the known sharp edge: javac erases `T` to its bound while
-zemble stores the type variable as written, so a method whose overloads differ
-only in a type variable can end up unmapped. It is reported, not guessed.
 
 ## Discovery
 

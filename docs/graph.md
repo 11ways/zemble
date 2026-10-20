@@ -606,7 +606,9 @@ zemble graph neighbors       <path> <symbol> [--hops N] [--kinds KIND ...] [--js
 (`PageWindow.of`), and any of them may carry a signature, `RecordSource.of(Class)`, to pick
 one overload: parameter types simple or qualified, type arguments ignored, varargs as
 `Type...` or `Type[]`, compared with the erased simple names the symbol stores
-(`zemble.graph.signature`; a type variable is matched as written, `of(M)`). A query builds
+(`zemble.graph.signature`). A type variable parameter is stored as javac erases it, its first
+bound (`<M extends Model> of(M)` is `of(Model)`, an unbounded one `of(Object)`), so the form
+the overload list and compiler facts spell is the one that matches; `of(M)` does not. A query builds
 the graph if none exists yet. `compact` brings every
 graph in the cache to the current format and gives freed pages back, under each graph's
 writer lock; a graph is otherwise only migrated when something next writes it.
