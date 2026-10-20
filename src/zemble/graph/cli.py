@@ -10,6 +10,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from zemble.graph.facts import (
@@ -21,8 +22,9 @@ from zemble.graph.facts import (
     facts_source_globs,
     load_overlay,
 )
-from zemble.graph.model import TYPE_KINDS, EdgeKind, Hit, Symbol, SymbolKind
+from zemble.graph.model import CALLABLE_KINDS, TYPE_KINDS, EdgeKind, Hit, Symbol, SymbolKind
 from zemble.graph.provider import AnyProvider, SqliteGraphProvider, display_name, open_provider
+from zemble.graph.signature import SymbolQuery, signature_form
 from zemble.graph.store import (
     StoredDeclaredSymbols,
     build_graph,
@@ -100,7 +102,9 @@ def add_graph_parser(sub: argparse._SubParsersAction) -> None:
     for command in QUERY_COMMANDS:
         query_p = graph_sub.add_parser(command, help=f"Graph query: {command}.")
         add_root_arg(query_p, help="Workspace directory the graph was built for.")
-        query_p.add_argument("symbol", help="Simple name, qualified name, or Type.member.")
+        query_p.add_argument(
+            "symbol", help="Simple name, qualified name, or Type.member, optionally (Param,...) for one overload."
+        )
         query_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
         query_p.add_argument("--no-daemon", action="store_true", help="Do not use the warm daemon.")
         if command == "neighbors":
@@ -415,18 +419,118 @@ def select_symbol(symbols: Sequence[Symbol], name: str) -> tuple[Symbol | None, 
     """Pick the one symbol a written name means, or report the competing candidates.
 
     A constructor carries its type's name, so `Foo` would always look ambiguous; when
-    a type of that name exists the type wins and its constructors drop out.
+    a type of that name exists the type wins and its constructors drop out. A signature
+    (`Type.member(Param)`) has already narrowed `symbols`; only the name part is compared here.
     """
     if not symbols:
         return None, []
-    exact = [symbol for symbol in symbols if symbol.qualified_name == name]
+    written = SymbolQuery.parse(name).name
+    exact = [symbol for symbol in symbols if symbol.qualified_name == written]
     pool = list(exact or symbols)
-    last = name.rsplit(".", 1)[-1]
+    last = written.rsplit(".", 1)[-1]
     if any(symbol.kind in TYPE_KINDS and symbol.name == last for symbol in pool):
         pool = [symbol for symbol in pool if symbol.kind is not SymbolKind.CONSTRUCTOR]
     if len(pool) == 1:
         return pool[0], pool
     return None, pool
+
+
+#: How many overload signatures a refusal spells out before it only counts the rest.
+SHOWN_OVERLOADS = 10
+
+
+def _forms(symbols: Sequence[Symbol]) -> list[str]:
+    """Spell callables as signature queries, in declaration order."""
+    ordered = sorted(symbols, key=lambda symbol: (symbol.file_path, symbol.start_line))
+    return [signature_form(display_name(symbol), symbol) for symbol in ordered]
+
+
+def _listed(forms: Sequence[str]) -> str:
+    """Join signature forms, counting the ones past `SHOWN_OVERLOADS`."""
+    shown = ", ".join(forms[:SHOWN_OVERLOADS])
+    rest = len(forms) - SHOWN_OVERLOADS
+    return shown + (f" and {rest} more" if rest > 0 else "")
+
+
+def _is_overload_set(symbols: Sequence[Symbol]) -> bool:
+    """Whether several symbols are the overloads of one callable: one name in one container."""
+    return (
+        len(symbols) > 1
+        and all(symbol.kind in CALLABLE_KINDS for symbol in symbols)
+        and len({(symbol.qualified_name, symbol.container_id) for symbol in symbols}) == 1
+    )
+
+
+def overloads_of(provider: AnyProvider, symbol: Symbol) -> list[Symbol]:
+    """Return the callables sharing a symbol's name and container, itself included; just itself when not overloaded."""
+    if symbol.kind not in CALLABLE_KINDS:
+        return [symbol]
+    found = [
+        other
+        for other in provider.definition(symbol.qualified_name)
+        if other.kind in CALLABLE_KINDS
+        and other.qualified_name == symbol.qualified_name
+        and other.container_id == symbol.container_id
+    ]
+    return found or [symbol]
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """Why a written name chose no symbol, with the exit code and the overloads that would narrow it."""
+
+    message: str
+    exit_code: int
+    #: Signature queries a caller can retry with, when the name meant a callable's overloads.
+    overloads: list[str] = field(default_factory=list)
+
+
+def refuse_selection(provider: AnyProvider, written: str, candidates: Sequence[Symbol]) -> Refusal:
+    """Word an unknown or ambiguous name; overloads are named by signature, since no qualified name separates them."""
+    if candidates:
+        if _is_overload_set(candidates):
+            forms = _forms(candidates)
+            return Refusal(
+                f"{written!r} names {len(forms)} overloads; narrow it with a signature: {_listed(forms)}.",
+                EXIT_AMBIGUOUS,
+                forms,
+            )
+        return Refusal(f"{written!r} is ambiguous; pass a qualified name.", EXIT_AMBIGUOUS)
+    query = SymbolQuery.parse(written)
+    declared = (
+        [symbol for symbol in provider.definition(query.name) if symbol.kind in CALLABLE_KINDS]
+        if query.params is not None
+        else []
+    )
+    if declared:
+        forms = _forms(declared)
+        return Refusal(f"No overload {written!r}; declared: {_listed(forms)}.", EXIT_NOT_FOUND, forms)
+    return Refusal(f"No symbol named {written!r}. {provider.coverage_note()}", EXIT_NOT_FOUND)
+
+
+def overload_context(provider: AnyProvider, chosen: Symbol, method: str) -> dict[str, object]:
+    """Name a chosen callable's overloads, and for callers count the call sites no overload could claim.
+
+    Empty when the symbol is not overloaded. The count matters because a call tree-sitter could not
+    separate between overloads has no destination, so no single overload's answer lists it.
+    """
+    siblings = overloads_of(provider, chosen)
+    if len(siblings) < 2:
+        return {}
+    forms = _forms(siblings)
+    display = display_name(chosen)
+    note = (
+        f"{display} has {len(forms)} overloads ({_listed(forms)}); "
+        f"this answer is {signature_form(display, chosen)} only."
+    )
+    if method == "callers":
+        unattributed = provider.unattributed_calls(chosen.id)
+        if unattributed:
+            note += (
+                f" {unattributed} ambiguous call site(s) of {display} with {chosen.arity} argument(s) could not be "
+                "pinned to one overload (no fresh compiler facts cover their files) and are not listed."
+            )
+    return {"overloads": forms, "overload_note": note}
 
 
 def _run_query(args: argparse.Namespace) -> int:
@@ -452,13 +556,17 @@ def _answer_query(args: argparse.Namespace, provider: AnyProvider) -> int:
         hits = provider.neighbors(chosen.id, hops=args.hops, kinds=kinds)
     else:
         hits = getattr(provider, _METHODS[args.graph_command])(chosen.id)
+    overloads = overload_context(provider, chosen, _METHODS.get(args.graph_command, args.graph_command))
     if args.json:
-        print(json.dumps({"symbol": _symbol_json(chosen), "results": [_hit_json(hit) for hit in hits]}, indent=2))
+        payload = {"symbol": _symbol_json(chosen), "results": [_hit_json(hit) for hit in hits], **overloads}
+        print(json.dumps(payload, indent=2))
         return 0
     print(f"{display_name(chosen)}  [{chosen.kind.value}]  {chosen.file_path}:{chosen.start_line}")
     print(f"{args.graph_command}: {len(hits)} result(s)")
     for hit in hits:
         print(f"  {hit.symbol.file_path}:{hit.line}  {hit.reason}")
+    if overloads:
+        print(f"  ({overloads['overload_note']})")
     if not hits:
         print(f"  ({provider.coverage_note()})")
     return 0
@@ -470,7 +578,7 @@ def _print_definitions(args: argparse.Namespace, provider: AnyProvider, symbols:
         print(json.dumps({"results": [_symbol_json(symbol) for symbol in symbols]}, indent=2))
         return 0 if symbols else EXIT_NOT_FOUND
     if not symbols:
-        print(f"No symbol named {args.symbol!r}. {provider.coverage_note()}", file=sys.stderr)
+        print(refuse_selection(provider, args.symbol, []).message, file=sys.stderr)
         return EXIT_NOT_FOUND
     for symbol in symbols:
         print(f"{symbol.kind.value:14} {symbol.file_path}:{symbol.start_line}  {symbol.signature or symbol.name}")
@@ -479,29 +587,22 @@ def _print_definitions(args: argparse.Namespace, provider: AnyProvider, symbols:
 
 def _report_selection_failure(args: argparse.Namespace, provider: AnyProvider, candidates: Sequence[Symbol]) -> int:
     """Report an unknown or ambiguous name with the exit code that says which."""
-    if not candidates:
-        message = f"No symbol named {args.symbol!r}. {provider.coverage_note()}"
-        if args.json:
-            print(json.dumps({"error": message, "candidates": []}, indent=2))
-        else:
-            print(message, file=sys.stderr)
-        return EXIT_NOT_FOUND
+    refusal = refuse_selection(provider, args.symbol, candidates)
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "error": f"{args.symbol!r} is ambiguous",
-                    "candidates": [_symbol_json(symbol) for symbol in candidates],
-                },
-                indent=2,
-            )
-        )
-    else:
-        print(f"{args.symbol!r} is ambiguous; {len(candidates)} candidates:", file=sys.stderr)
+        payload: dict[str, object] = {
+            "error": refusal.message,
+            "candidates": [_symbol_json(symbol) for symbol in candidates],
+        }
+        if refusal.overloads:
+            payload["overloads"] = refusal.overloads
+        print(json.dumps(payload, indent=2))
+        return refusal.exit_code
+    print(refusal.message, file=sys.stderr)
+    if candidates and not refusal.overloads:
+        print(f"{len(candidates)} candidates:", file=sys.stderr)
         for symbol in candidates:
             print(f"  {symbol.qualified_name}  [{symbol.kind.value}]  {symbol.file_path}", file=sys.stderr)
-        print("Re-run with a qualified name.", file=sys.stderr)
-    return EXIT_AMBIGUOUS
+    return refusal.exit_code
 
 
 def _symbol_json(symbol: Symbol) -> dict[str, object]:

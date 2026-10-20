@@ -32,6 +32,7 @@ from zemble.graph.model import (
     Symbol,
     is_test_path,
 )
+from zemble.graph.signature import SymbolQuery
 from zemble.graph.store import (
     GRAPH_FORMAT_VERSION,
     GraphStoreStale,
@@ -84,11 +85,15 @@ class GraphProvider(Protocol):
     """Relationship queries over a workspace's symbols."""
 
     def definition(self, name: str) -> list[Symbol]:
-        """Find declarations matching a simple name, a qualified name or `Type.member`."""
+        """Find declarations matching a simple name, a qualified name or `Type.member`, optionally `(Param,...)`."""
         ...
 
     def callers(self, symbol_id: str) -> list[Hit]:
         """Find every call site that reaches a callable."""
+        ...
+
+    def unattributed_calls(self, symbol_id: str) -> int:
+        """Count the ambiguous call sites that may mean this callable but name no destination."""
         ...
 
     def callees(self, symbol_id: str) -> list[Hit]:
@@ -326,7 +331,15 @@ class SqliteGraphProvider:
         return sorted(symbols, key=lambda symbol: (symbol.end_line - symbol.start_line, symbol.start_line, symbol.id))
 
     def definition(self, name: str) -> list[Symbol]:
-        """Find declarations matching a simple name, a qualified name or `Type.member`."""
+        """Find declarations matching a simple name, a qualified name or `Type.member`, each optionally `(Param,...)`.
+
+        A signature keeps only the callables whose parameter types match (`zemble.graph.signature`).
+        """
+        query = SymbolQuery.parse(name)
+        return [symbol for symbol in self._named(query.name) if query.accepts(symbol)]
+
+    def _named(self, name: str) -> list[Symbol]:
+        """Find declarations matching a simple name, a qualified name or `Type.member`, best match first."""
         # Both branches use an index: `qualified_name` for a full name, `name` for the
         # last segment of `Type.member`. A LIKE '%.x' suffix scan would not.
         rows = self.connection.execute(
@@ -355,6 +368,39 @@ class SqliteGraphProvider:
             return bucket, 0 if symbol.kind in NAMED_KINDS else 1, symbol.id
 
         return sorted(symbols, key=rank)
+
+    def unattributed_calls(self, symbol_id: str, *, prefix: str = "") -> int:
+        """Count the ambiguous call sites under a prefix that may mean this callable but name no destination.
+
+        AIDEV-NOTE: an ambiguous edge keeps only its candidate COUNT (`Edge.candidates`), so "may mean
+        this one" is read from what the call wrote: the callable's name and arity on a receiver that
+        names its declaring type, or a bare call in the type's own file. It is a count to warn with,
+        never a list of callers.
+        """
+        symbol = self.symbol(symbol_id)
+        owner = self.symbol(symbol.container_id) if symbol is not None and symbol.container_id else None
+        if symbol is None or owner is None:
+            return 0
+        under, under_parameters = _under("file_path", prefix)
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM edges WHERE dst_name = ? AND kind = ? AND dst_id IS NULL AND resolution = ? "
+            "AND (arity = ? OR arity < 0) "
+            "AND (receiver_type IN (?, ?) OR receiver IN (?, ?) OR (receiver IS NULL AND file_path = ?)) "
+            f"AND {under}",  # noqa: S608 - `under` is a literal clause with placeholders
+            (
+                symbol.name,
+                EdgeKind.CALLS.value,
+                Resolution.AMBIGUOUS.value,
+                symbol.arity,
+                owner.name,
+                owner.qualified_name,
+                owner.name,
+                owner.qualified_name,
+                owner.file_path,
+                *under_parameters,
+            ),
+        ).fetchone()
+        return int(row[0])
 
     # ---- edge queries ---------------------------------------------------
 
@@ -817,12 +863,16 @@ class SubtreeGraphProvider:
         return self._symbols(self.graph.symbols_at(self._lead + file_path, start_line, end_line))
 
     def definition(self, name: str) -> list[Symbol]:
-        """Find in-folder declarations matching a simple name, a qualified name or `Type.member`."""
+        """Find in-folder declarations matching a simple name, a qualified name or `Type.member`, optionally signed."""
         return self._symbols(self.graph.definition(name))
 
     def callers(self, symbol_id: str) -> list[Hit]:
         """Find every in-folder call site that reaches a callable."""
         return self._hits(self.graph.callers(self._inbound(symbol_id)))
+
+    def unattributed_calls(self, symbol_id: str) -> int:
+        """Count the in-folder ambiguous call sites that may mean this callable but name no destination."""
+        return self.graph.unattributed_calls(self._inbound(symbol_id), prefix=self._lead)
 
     def callees(self, symbol_id: str) -> list[Hit]:
         """Find every in-folder callable invoked from a symbol's body."""

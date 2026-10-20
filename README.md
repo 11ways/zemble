@@ -285,7 +285,8 @@ zemble status
 zemble embed-status ./my-project --embedder voyage:voyage-4-lite@1024
 ```
 
-Graph queries take a simple name (`PageWindow`), a qualified name or `Type.member`:
+Graph queries take a simple name (`PageWindow`), a qualified name or `Type.member`, and a
+signature picks one overload (`RecordSource.of(Class)`):
 
 ```bash
 zemble graph callers ./my-project PageWindow.of

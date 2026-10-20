@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
 
-from zemble.graph.cli import PROVIDER_METHODS, ensure_graph, select_symbol
+from zemble.graph.cli import PROVIDER_METHODS, ensure_graph, overload_context, refuse_selection, select_symbol
 from zemble.graph.facts import TREE_SITTER_SOURCE
 from zemble.graph.model import EdgeKind, Hit, Resolution, Symbol
 from zemble.graph.provider import RESOLUTION_PHRASES, AnyProvider, display_name, open_provider
@@ -25,7 +25,10 @@ _REPO_DESCRIPTION = with_default_note(
     "Hawkeye templates with compiler-grade lanes) is built on first use "
     "and refreshed once per server process."
 )
-_SYMBOL_DESCRIPTION = "A simple name (`PageWindow`), a qualified name, or `Type.member` (`PageWindow.of`)."
+_SYMBOL_DESCRIPTION = (
+    "A simple name (`PageWindow`), a qualified name, or `Type.member` (`PageWindow.of`); add the parameter "
+    "types, simple or qualified, to pick one overload (`RecordSource.of(Class)`)."
+)
 _LIMIT_DESCRIPTION = "Results to return at most; the payload's `total` says how many exist."
 
 #: Hits returned per graph answer unless the caller raises it; keeps a hot symbol
@@ -100,14 +103,17 @@ def answer(
         candidates = provider.definition(symbol)
         if method == "definition":
             if not candidates:
-                return {"error": f"No symbol named {symbol!r}.", "note": provider.coverage_note()}
+                refusal = refuse_selection(provider, symbol, candidates)
+                return {"error": refusal.message, "overloads": refusal.overloads, "note": provider.coverage_note()}
             return _capped(candidates, limit, _symbol_json)
         chosen, competing = select_symbol(candidates, symbol)
         if chosen is None:
+            refusal = refuse_selection(provider, symbol, competing)
             if not competing:
-                return {"error": f"No symbol named {symbol!r}.", "note": provider.coverage_note()}
+                return {"error": refusal.message, "overloads": refusal.overloads, "note": provider.coverage_note()}
             return {
-                "error": f"{symbol!r} is ambiguous; pass a qualified name.",
+                "error": refusal.message,
+                "overloads": refusal.overloads,
                 "candidates": [_symbol_json(found) for found in competing],
             }
         traversal = method in {"neighbors", "implementations", "supertypes"}
@@ -119,6 +125,7 @@ def answer(
             "symbol": _symbol_json(chosen),
             "display": display_name(chosen),
             **_capped(hits, limit, _hit_json),
+            **overload_context(provider, chosen, method),
         }
         if traversal and provider.traversal_truncated:
             payload["total_exact"] = False
@@ -168,7 +175,7 @@ def _queried_parts(root: str, payload: dict[str, Any]) -> list[Part]:
 def _footer_part(payload: dict[str, Any]) -> Part:
     """State the exact total, and the cap or coverage note when there is one."""
     footer = [f"total: {payload['total']}"]
-    footer += [str(payload[key]) for key in ("truncated", "note") if payload.get(key)]
+    footer += [str(payload[key]) for key in ("truncated", "overload_note", "note") if payload.get(key)]
     return text_part("\n".join(footer))
 
 
@@ -406,7 +413,15 @@ def register_graph_tools(server: FastMCP) -> None:
 
     @server.tool(structured_output=False)
     async def graph_overrides(
-        symbol: Annotated[str, Field(description="The overridden method, as `Type.member` or a qualified name.")],
+        symbol: Annotated[
+            str,
+            Field(
+                description=(
+                    "The overridden method, as `Type.member` or a qualified name; "
+                    "`Type.member(Param)` picks one overload."
+                )
+            ),
+        ],
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
         limit: Annotated[int, Field(description=_LIMIT_DESCRIPTION, ge=1, le=500)] = DEFAULT_LIMIT,
     ) -> Any:

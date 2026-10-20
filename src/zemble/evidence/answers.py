@@ -11,7 +11,7 @@ from typing import Any
 from zemble.evidence.bundle import build_bundle
 from zemble.evidence.intent import Intent
 from zemble.evidence.outline import OutlineError, Signatures, outline, signatures
-from zemble.graph.cli import select_symbol
+from zemble.graph.cli import refuse_selection, select_symbol
 from zemble.graph.model import Symbol
 from zemble.graph.provider import GraphProvider
 from zemble.index import ZembleIndex
@@ -56,12 +56,7 @@ def signatures_payload(graph: GraphProvider, symbol: str) -> dict[str, Any]:
     """Resolve a written name to one symbol and describe it, or report why it could not be."""
     chosen, candidates = select_symbol(graph.definition(symbol), symbol)
     if chosen is None:
-        message = (
-            f"{symbol!r} is ambiguous; pass a qualified name."
-            if candidates
-            else f"No symbol named {symbol!r}. {graph.coverage_note()}"
-        )
-        return error_payload(message, candidates)
+        return error_payload(refuse_selection(graph, symbol, candidates).message, candidates)
     answer: Signatures = signatures(graph, chosen)
     return {"signatures": answer.to_dict(), "text": answer.render()}
 

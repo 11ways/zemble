@@ -603,12 +603,21 @@ zemble graph neighbors       <path> <symbol> [--hops N] [--kinds KIND ...] [--js
 
 `<symbol>` is a simple name (`PageWindow`), a qualified name
 (`be.elevenways.zenit.common.data.PageWindow`) or `Type.member`
-(`PageWindow.of`). A query builds the graph if none exists yet. `compact` brings every
+(`PageWindow.of`), and any of them may carry a signature, `RecordSource.of(Class)`, to pick
+one overload: parameter types simple or qualified, type arguments ignored, varargs as
+`Type...` or `Type[]`, compared with the erased simple names the symbol stores
+(`zemble.graph.signature`; a type variable is matched as written, `of(M)`). A query builds
+the graph if none exists yet. `compact` brings every
 graph in the cache to the current format and gives freed pages back, under each graph's
 writer lock; a graph is otherwise only migrated when something next writes it.
 
 Exit codes: `0` answered, `1` no such symbol, `2` the name is ambiguous, in which
-case every candidate is listed on stderr so the next call can be qualified.
+case every candidate is listed on stderr so the next call can be qualified. A bare
+`Type.member` that names several overloads lists their signatures instead, and an
+overload's answer names its siblings; for callers it also counts the ambiguous call
+sites tree-sitter could not pin to one overload (files no fresh compiler facts cover),
+which no overload's answer lists. Overloads are separated exactly only where facts
+resolved the call (`docs/graph-facts.md`).
 
 ```
 $ zemble graph callers ~/projects/javaweb PageWindow.of
@@ -631,7 +640,8 @@ server process, and returns JSON, except `graph_callers`, which returns text: th
 queried symbol, a count of call sites, callers and files (with the resolution tally
 when any is not exact and the tools that wrote edges), then every listed call site
 grouped by file and calling method (`path: Caller L12, L30; Other L5 (ambiguous, 2 candidates)`).
-An ambiguous name comes back as an `error`
+An ambiguous name comes back as an `error` (with `overloads`, the signatures to retry
+with, when the candidates are one callable's overloads)
 with a `candidates` list rather than as a failure. Every answer is capped at
 `limit` results (default 50) and carries `total`, plus a `truncated` note when
 the cap bit, so a cap is never silent. A wire command outside the query

@@ -40,6 +40,7 @@ from zemble.graph.model import (
     Symbol,
     SymbolKind,
 )
+from zemble.graph.signature import same_parameters, simple_type_name
 from zemble.index.file_walker import ignored_prefix
 
 logger = logging.getLogger(__name__)
@@ -660,13 +661,6 @@ class RefMapper(Protocol):
         ...
 
 
-def _simple(name: str) -> str:
-    """Reduce a possibly qualified type name to its last segment, keeping array brackets."""
-    base, _, arrays = name.partition("[")
-    suffix = f"[{arrays}" if arrays else ""
-    return base.rsplit(".", 1)[-1].strip() + suffix
-
-
 def parse_java_ref(ref: str) -> ParsedRef:
     """Split a Java-flavoured ref into its type, member and erased parameter types."""
     type_name, separator, member = ref.partition("#")
@@ -908,9 +902,9 @@ def _is_local(symbol: Symbol, by_id: dict[str, Symbol]) -> bool:
 def _ref_name(parsed: ParsedRef) -> str:
     """Return the name a ref's target is written as in an edge."""
     if parsed.member is None:
-        return _simple(parsed.type_name)
+        return simple_type_name(parsed.type_name)
     if parsed.is_constructor:
-        return _simple(parsed.type_name)
+        return simple_type_name(parsed.type_name)
     return parsed.member
 
 
@@ -919,8 +913,7 @@ def _narrow_by_params(candidates: list[Symbol], params: tuple[str, ...]) -> list
     same_arity = [symbol for symbol in candidates if len(symbol.param_types) == len(params)]
     if len(same_arity) <= 1:
         return same_arity
-    wanted = [_simple(param) for param in params]
-    return [symbol for symbol in same_arity if [_simple(param) for param in symbol.param_types] == wanted]
+    return [symbol for symbol in same_arity if same_parameters(symbol.param_types, params)]
 
 
 #: The ref flavour of each language a facts file may declare.

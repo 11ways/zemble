@@ -65,7 +65,7 @@ def add_evidence_parser(sub: argparse._SubParsersAction) -> None:
 
     signatures_p = sub.add_parser("signatures", help="A symbol's signature and the call sites resolved exactly.")
     add_root_arg(signatures_p, help="Workspace directory the graph was built for.")
-    signatures_p.add_argument("symbol", help="Simple name, qualified name, or Type.member.")
+    signatures_p.add_argument("symbol", help="Simple name, qualified name, or Type.member, optionally (Param,...).")
     signatures_p.add_argument("--json", action="store_true", help="Print machine-readable output.")
     _add_daemon_arg(signatures_p)
 

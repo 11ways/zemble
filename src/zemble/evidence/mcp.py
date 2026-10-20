@@ -335,7 +335,14 @@ def register_evidence_tools(
 
     @server.tool(structured_output=False)
     async def signatures(
-        symbol: Annotated[str, Field(description="A simple name, a qualified name, or `Type.member`.")],
+        symbol: Annotated[
+            str,
+            Field(
+                description=(
+                    "A simple name, a qualified name, or `Type.member`; `Type.member(Param)` picks one overload."
+                )
+            ),
+        ],
         repo: Annotated[str | None, Field(description=_REPO_DESCRIPTION)] = None,
     ) -> Any:
         """Show a symbol's signature and the call sites the graph resolved exactly.
