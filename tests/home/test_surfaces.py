@@ -174,6 +174,7 @@ def test_cli_prefers_the_daemon_and_reports_when_it_is_gone(
         "home": {"verdict": "NEW_MECHANISM", "mechanisms": [], "candidates": [{"module": "core"}]},
         "markdown": "# Home for: served by the daemon\n",
     }
+    in_process = home_cli._in_process
     monkeypatch.setattr(client, "call", lambda cmd, args, **kwargs: served)
     monkeypatch.setattr(home_cli, "_in_process", lambda args: pytest.fail("must not answer in-process"))
     assert _run(monkeypatch, workspace, "home", str(workspace), "anything") == 0, "step 1: the daemon answer is used"
@@ -183,11 +184,12 @@ def test_cli_prefers_the_daemon_and_reports_when_it_is_gone(
     def _refuse(*args: Any, **kwargs: Any) -> Any:
         raise DaemonUnavailable("not running (ENOENT)")
 
+    monkeypatch.setattr(home_cli, "_in_process", in_process)
     monkeypatch.setattr(client, "call", _refuse)
-    assert _run(monkeypatch, workspace, "home", str(workspace), "compute an area") == 1
+    assert _run(monkeypatch, workspace, "home", str(workspace), "compute an area") == 0, "step 2: answered"
     captured = capsys.readouterr()
-    assert "Daemon unavailable, retry" in captured.err
-    assert captured.out == ""
+    assert "daemon unavailable: not running (ENOENT); answering in this process." in captured.err
+    assert "compute an area" in captured.out, "step 2: the in-process answer is printed"
 
 
 def test_mcp_tool_reports_a_refusal_as_the_answer(workspace: Path, cache: IndexCache) -> None:

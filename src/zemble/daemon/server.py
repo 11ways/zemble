@@ -34,7 +34,7 @@ from zemble.daemon.graph_jobs import GraphJobs
 from zemble.daemon.memory import (
     MEMORY_ENV,
     MIB,
-    MemoryRefused,
+    MemoryBusy,
     ReadOutgrown,
     allocation_backstop,
     data_limit_mb,
@@ -307,7 +307,11 @@ class Daemon:
         from zemble.daemon.read_cache import ReadCache
 
         self.read_cache = ReadCache()
-        self.graphs = GraphJobs(self._load_lock, self.max_rss_mb)
+        # AIDEV-NOTE: graph construction has a lock of its own; it takes the index construction lock
+        # only while it lowers this process's data limit and starts its worker, so an index load
+        # never waits out a whole graph build (minutes on a busy workspace) - it fits under the
+        # lowered ceiling (`_admit`) or is asked again.
+        self.graphs = GraphJobs(self._load_lock, self.max_rss_mb, make_room=self._admit)
         self._request_tasks: set[asyncio.Task[Any]] = set()
         self._query_keys: dict[asyncio.Task[Any], CacheKey] = {}
         self._watch_tasks: dict[CacheKey, asyncio.Task[None]] = {}
@@ -403,8 +407,11 @@ class Daemon:
         return None
 
     def _admit(self, reserve_mb: float, keep: CacheKey | None = None) -> bool:
-        """Evict idle LRU stores until private-memory headroom covers the work."""
-        while private_mb() + reserve_mb > self.max_rss_mb:
+        """Evict idle LRU stores until private-memory headroom covers the work under the current ceiling.
+
+        The ceiling is the lower of the budget and the data limit, which a running graph construction lowers.
+        """
+        while private_mb() + reserve_mb > min(self.max_rss_mb, data_limit_mb()):
             victim = next(
                 (
                     key
@@ -419,6 +426,27 @@ class Daemon:
             gc.collect()
             release_free_heap()
         return True
+
+    def _short_of_memory(self, need_mb: float, what: str) -> CommandBusy | ReadOutgrown:
+        """Name work that does not fit: busy while work that will end holds memory, else outgrown, never refused.
+
+        Busy is asked again until it fits; outgrown is answered by the caller in a process of its own.
+        """
+        ceiling = min(self.max_rss_mb, data_limit_mb())
+        own = asyncio.current_task()
+        ending = (
+            any(not job.done() for job in self.graphs.jobs.values())
+            or bool(self.rebuilding)
+            or any(self.cache.is_building(key) for key in list(self.cache._tasks))
+            or any(task is not own for task in self._query_keys)
+        )
+        if ending:
+            return MemoryBusy(f"{what} waits for ~{need_mb:.0f} MiB of private memory that running work holds")
+        free = max(ceiling - private_mb(), 0.0)
+        return ReadOutgrown(
+            f"{what} needs ~{need_mb:.0f} MiB of private memory and this daemon has {free:.0f} MiB free under "
+            f"its {ceiling:.0f} MiB ceiling ({MEMORY_ENV}); answer it in a process of its own."
+        )
 
     def admit_read(self, need_mb: float, what: str) -> None:
         """Make private-memory room for one bulk read, or say that only another process can hold it.
@@ -465,9 +493,7 @@ class Daemon:
             )
             reserve = _work_reserve(estimate)
         if not self._admit(reserve):
-            raise MemoryRefused(
-                f"Loading {path} needs ~{reserve:.0f} MiB headroom within {self.max_rss_mb} MiB ({MEMORY_ENV})."
-            )
+            raise self._short_of_memory(reserve, f"Loading {path}")
         return await self.cache.get_with_key(path, ref=ref, content=content, exclude=exclude)
 
     async def _join_build(
@@ -849,7 +875,7 @@ class Daemon:
                 self.reads.check_room()
                 await self._bounded_prepare(str(command), args, deadline)
                 if not self._admit(32):
-                    raise MemoryRefused(f"No query headroom within {self.max_rss_mb} MiB ({MEMORY_ENV}).")
+                    raise self._short_of_memory(32, "This query")
                 result = await self.reads.run(lambda: self._execute_read(handler, args), deadline)
         except TimeoutError:
             return {
@@ -875,11 +901,12 @@ class Daemon:
         except MemoryError:
             gc.collect()
             release_free_heap()
+            # Outgrown, never refused: the request fits in a process of its own, and the client answers it there.
             return {
                 "id": request_id,
                 "ok": False,
                 "error": f"Daemon allocation refused by {MEMORY_ENV}",
-                "kind": ErrorKind.REFUSED.value,
+                "kind": ErrorKind.OUTGROWN.value,
             }
         except Exception as exc:
             return _failure_response(request_id, str(command), exc)

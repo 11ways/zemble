@@ -1,5 +1,22 @@
 # Client index ownership
 
+## Since 2026-10-22: a query never fails
+
+The table below records the change that stopped clients loading indexes on daemon errors, after
+an MCP client peaked at 768 MiB keeping indexes it had loaded on failures. Its rule became "no
+answer rather than a local index", and that rule is now replaced: a zemble query always ends in
+an answer (`client.answer`, [daemon.md](daemon.md#fallback-rules-a-query-never-fails)).
+
+- Busy is waited out, never reported. The daemon's memory shortages are `busy` while work that
+  will free memory runs and `outgrown` otherwise, never `refused`.
+- What the daemon cannot answer - `outgrown`, still unreachable after three tries, failing a
+  command twice, a malformed reply, `ZEMBLE_DAEMON=0` - is answered by the calling process for
+  that request only (`client.answer_here`, scoped by `client.request_scope`).
+- The lesson of the table is kept: such a request borrows its index and the client's cache
+  evicts it once loaded, so the client never retains a generation the daemon owns, and a healthy
+  daemon still means no client model and no client index.
+- A deliberate refusal (scope, work ceiling, spending budget) is still the answer.
+
 ## Finding and routing
 
 At `f424be3`, `_via_daemon` (CLI) and `_daemon_call` (MCP) caught general daemon

@@ -181,23 +181,25 @@ def test_cli_explain_prefers_the_daemon_and_reports_an_outage(
 
     # 1. A daemon answer is rendered as-is, without scanning the workspace here.
     warm = {"bundle": {"items": [{"reason": "from the daemon"}]}, "markdown": "# Evidence for: warm"}
+    scan = evidence_cli.ensure_graph
     monkeypatch.setattr(client, "call", lambda cmd, args, **kwargs: warm)
     monkeypatch.setattr(evidence_cli, "ensure_graph", lambda *args, **kwargs: pytest.fail("no in-process scan"))
     assert _run(monkeypatch, graph_fixture_root, "explain", root, "warm") == 0, "step 1: the daemon answer is a success"
     assert capsys.readouterr().out.startswith("# Evidence for: warm"), "step 1: printed verbatim"
 
-    # 2. An unreachable daemon is one stderr line, then the real in-process bundle. Only the two
-    # patches above are reverted: `monkeypatch.undo()` would also drop the cache and daemon
-    # isolation the fixtures set, and build the fixture graph in the developer's real cache.
+    # 2. An unreachable daemon is one stderr line, then the real in-process bundle. Only the scan
+    # patch is put back: `monkeypatch.undo()` would also drop the cache and daemon isolation the
+    # fixtures set, and build the fixture graph in the developer's real cache.
 
     def _refuse(*args: Any, **kwargs: Any) -> Any:
         raise DaemonUnavailable("not running (ENOENT)")
 
+    monkeypatch.setattr(evidence_cli, "ensure_graph", scan)
     monkeypatch.setattr(client, "call", _refuse)
-    assert _run(monkeypatch, graph_fixture_root, "explain", root, "how is an area computed", "--budget", "1200") == 1
+    assert _run(monkeypatch, graph_fixture_root, "explain", root, "how is an area computed", "--budget", "1200") == 0
     captured = capsys.readouterr()
-    assert "Daemon unavailable, retry" in captured.err
-    assert captured.out == ""
+    assert "daemon unavailable: not running (ENOENT); answering in this process." in captured.err
+    assert captured.out.startswith("# Evidence for: how is an area computed"), "step 2: answered in this process"
 
 
 def test_mcp_explain_prefers_the_daemon(

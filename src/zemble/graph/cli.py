@@ -405,13 +405,18 @@ def _ensure_via_daemon(path: str) -> bool:
     """Ask the daemon to guarantee a fresh graph for a path.
 
     :param path: The workspace directory.
-    :return: Whether the daemon answered; False means do it in this process.
+    :return: Whether the daemon answered; False means do it in this process, as for a daemon that cannot.
     """
     from zemble.daemon import client
 
     if client.in_process():
         return False
-    client.call("graph", {"path": path, "command": "ensure"})
+    try:
+        client.answer("graph", {"path": path, "command": "ensure"})
+    except client.AnswerHere as exc:
+        print(f"{exc}; answering in this process.", file=sys.stderr)
+        client.answer_here(str(exc))
+        return False
     return True
 
 

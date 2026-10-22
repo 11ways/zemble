@@ -372,7 +372,7 @@ def _via_daemon(
     :raises SystemExit: If the daemon deliberately refused the command.
     """
     from zemble.daemon import client
-    from zemble.daemon.protocol import CommandFailed, CommandOutgrown, DaemonError, failure_message
+    from zemble.daemon.protocol import CommandFailed, DaemonError, failure_message
 
     if no_daemon:
         # An explicit opt-out is not a failure: no fallback line is printed for it.
@@ -385,13 +385,14 @@ def _via_daemon(
         print(f"{option} requires explicit --no-daemon; the daemon uses its own configuration.", file=sys.stderr)
         raise SystemExit(1)
     try:
-        result = client.call(cmd, args)
+        result = client.answer(cmd, args)
         if not isinstance(result, dict):
-            print(failure_message(CommandFailed("daemon returned an invalid payload")), file=sys.stderr)
-            raise SystemExit(1)
+            raise client.AnswerHere(str(CommandFailed("daemon returned an invalid payload")))
         return result
-    except CommandOutgrown as exc:
-        print(f"{exc} Answering in this process from the stored graph.", file=sys.stderr)
+    except client.AnswerHere as exc:
+        # zemble never fails a query: what the daemon cannot answer, this process does.
+        print(f"{exc}; answering in this process.", file=sys.stderr)
+        client.answer_here(str(exc))
         return None
     except DaemonError as exc:
         print(failure_message(exc), file=sys.stderr)

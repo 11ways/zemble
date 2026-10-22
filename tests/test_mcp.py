@@ -818,22 +818,26 @@ async def test_a_daemon_refusal_is_reported_once(cache: IndexCache, monkeypatch:
 
 
 @pytest.mark.anyio
-async def test_a_daemon_outage_never_falls_back(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unreachable daemon must not populate the client's cache."""
+async def test_a_daemon_outage_is_answered_here(cache: IndexCache, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zemble never fails a query: an unreachable daemon is asked again, then this process answers the call."""
     monkeypatch.setattr(daemon_client, "_disabled_reason", None)
+    asked: list[str] = []
 
     def _unavailable(cmd: str, args: dict[str, Any], **kwargs: Any) -> Any:
+        asked.append(cmd)
         raise DaemonUnavailable("not running (ENOENT)")
 
     monkeypatch.setattr(daemon_client, "call", _unavailable)
     fake_index = MagicMock()
     fake_index.filtered.return_value = fake_index
     fake_index.search.return_value = []
-    with patch("zemble.mcp.ZembleIndex.from_path", side_effect=AssertionError("local index loaded")):
+    with patch("zemble.mcp._get_index", return_value=fake_index) as local:
         server = create_server(cache)
         result = await server.call_tool("search", {"query": "anything", "repo": "/some/path"})
-    assert "Daemon unavailable, retry" in _tool_text(result)
-    assert not cache._tasks
+    assert asked == ["search"] * daemon_client.UNAVAILABLE_TRIES, "the daemon was asked again first"
+    assert "No results found" in _tool_text(result)
+    local.assert_called_once()
+    assert not daemon_client.in_process(), "the grant ended with the call"
 
 
 @pytest.mark.anyio

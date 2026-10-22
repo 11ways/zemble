@@ -11,6 +11,7 @@ from __future__ import annotations
 import resource
 from pathlib import Path
 
+from zemble.daemon.protocol import CommandBusy
 from zemble.refusal import Refused
 
 MIB = 1024 * 1024
@@ -33,6 +34,12 @@ class ReadOutgrown(RuntimeError):
         """Carry the memory knob, so a handler reading `knob` off any daemon error gets an answer."""
         super().__init__(message)
         self.knob = MEMORY_ENV
+
+
+class MemoryBusy(CommandBusy):
+    """Work that does not fit beside construction or reads that will end, so it is asked again, never refused."""
+
+    retry_after_ms = 1000
 
 
 def default_budget_mb() -> int:

@@ -26,6 +26,7 @@ from zemble.daemon.protocol import (
     CommandFailed,
     CommandOutgrown,
     CommandRefused,
+    DaemonDisabled,
     DaemonError,
     DaemonUnavailable,
     ErrorKind,
@@ -273,9 +274,9 @@ def test_call_without_a_daemon_and_no_autostart() -> None:
 
 
 def test_env_switch_disables_the_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ZEMBLE_DAEMON=0 refuses before anything is spawned."""
+    """ZEMBLE_DAEMON=0 stops the client before anything is spawned; the caller answers in its own process."""
     monkeypatch.setenv("ZEMBLE_DAEMON", "0")
-    with pytest.raises(CommandRefused, match="ZEMBLE_DAEMON=0"):
+    with pytest.raises(DaemonDisabled, match="ZEMBLE_DAEMON=0"):
         client.call("ping")
     assert not socket_path().exists(), "no daemon was started"
 
@@ -799,24 +800,27 @@ def test_health_answers_over_a_real_socket(tmp_path: Path, no_embedder_load: Non
         assert status["indexes"] == [], f"5: no index, got {status['indexes']}"
 
 
-def test_cli_search_reports_unavailable_without_loading_an_index(
+def test_cli_search_answers_an_outage_in_this_process(
     tmp_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An outage is reported without allocating an index in the client."""
+    """Zemble never fails a query: a daemon that will not come up is noted, and this process answers."""
     from zemble import cli
 
-    def _refuse(*args: Any, **kwargs: Any) -> Any:
+    def _unavailable(*args: Any, **kwargs: Any) -> Any:
         raise DaemonUnavailable("not running (ENOENT)")
 
-    monkeypatch.setattr(client, "call", _refuse)
-    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: pytest.fail("must not load locally"))
+    monkeypatch.setattr(client, "call", _unavailable)
+    fake_index = MagicMock()
+    fake_index.filtered.return_value = fake_index
+    fake_index.search.return_value = []
+    monkeypatch.setattr(cli, "_load_index", lambda *args, **kwargs: fake_index)
+    monkeypatch.setattr(cli, "_filtered", lambda index, *args: index)
 
-    with pytest.raises(SystemExit) as error:
-        cli._run_search(str(tmp_project), "anything", 5, [ContentType.CODE], None)
-    assert error.value.code == 1
+    cli._run_search(str(tmp_project), "anything", 5, [ContentType.CODE], None)
     captured = capsys.readouterr()
-    assert "Daemon unavailable, retry" in captured.err
-    assert captured.out == ""
+    assert "daemon unavailable: not running (ENOENT); answering in this process." in captured.err
+    assert '"error": "No results found."' in captured.out, "this process answered"
+    fake_index.search.assert_called_once()
 
 
 def test_cli_search_uses_the_daemon_when_it_answers(

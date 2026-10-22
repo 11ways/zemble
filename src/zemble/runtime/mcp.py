@@ -95,8 +95,11 @@ class StaleAwareFastMCP(FastMCP):
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Sequence[ContentBlock] | dict[str, Any]:
         """Warn once about stale source and refuse missing arguments, then answer the tool call as FastMCP would."""
-        self.before_call(name, arguments)
-        return await super().call_tool(name, arguments)
+        from zemble.daemon.client import request_scope
+
+        with request_scope():
+            self.before_call(name, arguments)
+            return await super().call_tool(name, arguments)
 
 
 def register_status_tool(server: FastMCP) -> None:

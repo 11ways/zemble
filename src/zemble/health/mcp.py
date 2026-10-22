@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Annotated
 
 from pydantic import Field
 
-from zemble.daemon.protocol import CommandOutgrown, DaemonError, failure_message
+from zemble.daemon.protocol import DaemonError, failure_message
 from zemble.health.answers import HealthRequest
 from zemble.health.baseline import BASELINE_RELATIVE_PATH
 from zemble.health.cli import in_process
@@ -106,6 +106,7 @@ def register_health_tool(server: FastMCP) -> None:
         """
         # Imported here: `zemble.mcp` imports this module, so the reverse import can
         # only run once the server is being built.
+        from zemble.daemon import client
         from zemble.mcp import _daemon_call
 
         if is_git_url(resolve_repo(repo)):
@@ -127,12 +128,10 @@ def register_health_tool(server: FastMCP) -> None:
         )
         note = ""
         try:
-            try:
-                payload = await _daemon_call("health", request.to_args(repo))
-            except CommandOutgrown as outgrown:
-                note = f"Note: {outgrown} Answered in the MCP server's process from the stored graph.\n\n"
-                payload = None
+            payload = await _daemon_call("health", request.to_args(repo))
             if payload is None:
+                if (reason := client.granted()) is not None:
+                    note = f"Note: {reason} Answered in the MCP server's process from the stored graph.\n\n"
                 payload = await asyncio.to_thread(in_process, repo, request)
         except DaemonError as error:
             return failure_message(error)

@@ -929,14 +929,14 @@ def test_an_outgrown_daemon_answer_is_read_in_process(
     captured = capsys.readouterr()
     assert exit_info.value.code in (0, None) and asked == ["health"], (exit_info.value.code, asked)
     assert SCORE_DISCLAIMER in captured.out, captured.out[:300]
-    assert str(outgrown) in captured.err and "Answering in this process from the stored graph" in captured.err
+    assert str(outgrown) in captured.err and "answering in this process" in captured.err
 
     # 2. The MCP tool does the same and carries the reason as a note above the report.
-    async def outgrown_call(cmd: str, args: dict[str, Any]) -> Any:
+    def outgrown_call(cmd: str, args: Any = None, **_: Any) -> Any:
         asked.append(f"mcp:{cmd}")
         raise outgrown
 
-    monkeypatch.setattr("zemble.mcp._daemon_call", outgrown_call)
+    monkeypatch.setattr(client, "call", outgrown_call)
     instance = create_server(IndexCache())
     result = asyncio.run(instance.call_tool("health", {"repo": str(health_root), "limit": 3}))
     text = result[0].text

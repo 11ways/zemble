@@ -244,8 +244,10 @@ they were before, are in [the symbol graph doc](graph.md).
 A rebuild never writes into the index answering queries. It builds a new one next to it
 and the swap is a single dict write on the event loop, so an in-flight search keeps
 reading the object it started with and a search that arrives mid-rebuild is answered by
-the index from before it. All roots share one construction slot; memory-intensive
-requests use bounded concurrent read slots, and warm search does not take the construction lock.
+the index from before it. Index loads and rebuilds share one construction slot (`_load_lock`);
+graph construction has its own, and holds the index slot only while it lowers the data limit and
+starts its worker, so no index load waits out a graph build. Memory-intensive requests use
+bounded concurrent read slots, and warm search does not take the construction lock.
 
 Every build lane - a cold build, a stale cache brought up to date, a clone, a watcher
 rebuild - is `ZembleIndex.build`: `write_index` streams the next generation into a
@@ -341,59 +343,58 @@ daemon really needs goes in the env file. Every embedding request reads the prox
 variables at the moment it is made, and a connection that fails through a proxy names that
 proxy in its error, so a dead proxy never reads as a dead server.
 
-## Fallback rules
+## Fallback rules: a query never fails
 
-Daemon-enabled clients never fall back to a local index. The explicit `--no-daemon`
-switch is the only client opt-out. The daemon itself may use shared local library
-code, but that is backend execution, not a client fallback.
+A zemble query always ends in an answer. The client (`client.answer`) asks the daemon until
+it answers, and hands a request the daemon cannot answer to the calling process, for that
+request only. A deliberate refusal is still the answer, never retried or answered here.
 
 - `zemble search`, `find-related`, `stats`, `graph *`, `explain`, `outline` and `signatures`
   go through the client by default, as do their MCP tools.
 - If the socket is absent or dead, the client spawns `python -m zemble.daemon run`
   detached (new session, stdio to the log) and waits up to 10 s for it to answer.
-- Startup failures, disconnects and response timeouts report `Daemon unavailable,
-  retry`. A full waiting room or expired request deadline reports `Daemon busy,
-  retry` with retry information. Clients keep a default 30-second response timeout;
-  the server's default 25-second deadline leaves time to deliver its answer. Shared
-  cold construction may continue so a later retry can use its result.
-- **A refusal is not an outage.** A deliberate, deterministic "no" - any `Refused`, which
-  includes daemon memory admission, a root too broad or holding more source than one build may chunk
-  (`ScopeRefused`) and a bill over the budget (`EmbeddingBudgetExceeded`) - is
-  answered as `{"ok": false, "kind": "refused", "error": ...}` and raises `CommandRefused`
-  (a `CommandFailed`) in the client. Callers surface it instead of falling back: refused
-  work is not an outage. A fallback could allocate unbounded client memory or repeat a
-  full paid build only to reproduce a work/bill refusal. `ErrorKind` in `protocol.py` is the
-  one home for that vocabulary, and an unknown kind from a newer daemon is read as
-  `failed` and reported without fallback; unknown members fail closed.
-  The daemon logs the refusal's own text, and each refusal carries the environment variable
-  that would raise the ceiling it hit (`knob` in the root's `last_error`). `knob` is declared
-  once, on the `Refused` base in `zemble/refusal.py`, and `REFUSAL_TYPES` is that base rather
-  than a hand-maintained union, so a new refusal type is reported here with no second edit and
-  can never reach this handler without the field it reads.
-- **A read the daemon has outgrown is neither.** `health` loads a whole graph's symbols and
-  edge tallies into private memory (measured: 209 MiB on javaweb, 642 MiB on the zenit
-  workspace; `zemble.health.collect.read_estimate_mb` sizes it from the row counts, on the high
-  side). The daemon admits that read against the lower of its budget and its current
-  `RLIMIT_DATA` (lowered while a graph construction runs to what the construction budget leaves
-  of the total, 2048 MiB by default, never under 512 or its own use plus 192), evicting idle
-  indexes first; when it still does not fit, it answers `{"ok": false, "kind": "outgrown",
-  "error": ...}` and the client raises `CommandOutgrown`. Unlike a refusal, the answer is the
-  same from any process: it is read from the stored graph, nothing is built. So the CLI and the
-  MCP tool answer it in their own process from that graph, saying so on stderr or in a note,
-  and a `MemoryError` inside the read reports the same kind. An old client reads the unknown kind
-  as `failed` and reports it without fallback.
-- `--no-daemon` deliberately permits local indexes. MCP accepts it in either
-  `zemble --no-daemon` or `zemble mcp --no-daemon` form; local model loading is lazy.
-- `ZEMBLE_DAEMON=0` alone refuses access and tells the caller to unset it or pass the
-  explicit opt-out. `--embedder`, `--reranker`, `--intent` and confirmation similarly
-  cannot implicitly select local execution: unsupported overrides require the opt-out.
-- MCP keeps an empty local cache and no model while using the daemon. Availability,
-  command, budget and malformed/empty-reply errors do not populate it.
+- **Busy is waited out.** A full waiting room, an expired request deadline, memory that
+  running work holds (`MemoryBusy`) or a graph construction still pending answer `busy`
+  with `retry_after_ms`, and the client asks again, from 0.25 s doubling to 5 s between
+  tries, for as long as it takes. Shared cold construction continues meanwhile, so the next
+  try joins it.
+- **What the daemon cannot answer is answered here.** A read the daemon outgrew
+  (`outgrown`), a daemon still unreachable after three tries (startup failure, disconnect,
+  timeout), a command that fails twice, a malformed reply, and a process that may not use a
+  daemon (`ZEMBLE_DAEMON=0`) become `AnswerHere`: the MCP tool or CLI command answers that
+  request in its own process (`client.answer_here`, scoped to the one tool call by
+  `client.request_scope`). The index it loads for that is borrowed, evicted from the
+  client's cache once loaded, so the client never keeps what the daemon owns
+  ([client-routing.md](client-routing.md)). The CLI says so on stderr.
+- **A refusal is not an outage.** A deliberate, deterministic "no" - a root too broad or
+  holding more source than one build may chunk (`ScopeRefused`) and a bill over the budget
+  (`EmbeddingBudgetExceeded`) - is answered as `{"ok": false, "kind": "refused", "error": ...}`
+  and raises `CommandRefused` in the client, which callers surface: answering it here would
+  refuse identically, or repeat a full paid build to reproduce the same no. `ErrorKind` in
+  `protocol.py` is the one home for that vocabulary; an unknown kind from a newer daemon is
+  read as `failed`, asked again, then answered here. The daemon logs the refusal's own text,
+  and each refusal carries the environment variable that would raise the ceiling it hit
+  (`knob` in the root's `last_error`), declared once on the `Refused` base in
+  `zemble/refusal.py`.
+- **Memory is never a refusal.** Work that does not fit under the lower of the budget and the
+  current `RLIMIT_DATA` (lowered while a graph construction runs to what the construction
+  budget leaves of the total, 2048 MiB by default, never under 512 or its own use plus 192)
+  evicts idle indexes first. When it still does not fit, it is `busy` while a rebuild, a load,
+  a graph job or another request holds memory that will be freed, and `outgrown` when nothing
+  will, as `health` can be (209 MiB of symbols and edge tallies on javaweb, 642 MiB on the
+  zenit workspace; `zemble.health.collect.read_estimate_mb` sizes it from the row counts). A
+  `MemoryError` inside a request is `outgrown` too, and so is a graph construction that has no
+  512 MiB beside what the daemon serves once idle indexes are evicted.
+- `--no-daemon` deliberately permits local indexes, kept in the local cache. MCP accepts it in
+  either `zemble --no-daemon` or `zemble mcp --no-daemon` form; local model loading is lazy.
+  `--embedder`, `--reranker`, `--intent` and confirmation cannot implicitly select local
+  execution: unsupported overrides require the opt-out.
 - New callers send `accepts_busy: true`. Legacy callers receive the known `refused`
   error kind for busy replies, with retry text, because old index clients would
   otherwise treat an unknown `busy` kind as permission to fall back.
 - A request blocks until its index is ready; the first request after a start may still
-  be a cold build. `zemble daemon status` shows a build in progress.
+  be a cold build. `zemble nib-provider` asks the daemon to load nib's project as it starts,
+  so that build starts with the session. `zemble daemon status` shows a build in progress.
 
 ## Measured
 

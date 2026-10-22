@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from zemble.daemon import client as daemon_client
-from zemble.daemon.protocol import CommandFailed, DaemonError, failure_message
+from zemble.daemon.protocol import DaemonError, failure_message
 from zemble.dedup.mcp import register_dupes_tool
 from zemble.evidence.mcp import register_evidence_tools
 from zemble.graph.mcp import register_graph_tools
@@ -53,13 +53,20 @@ _CACHE_MAX_SIZE = CACHE_MAX_SIZE
 
 
 async def _daemon_call(cmd: str, args: dict[str, Any]) -> Any | None:
-    """Answer through the daemon, returning None only for an explicit in-process opt-out."""
+    """Answer through the daemon, or return None for this process to answer.
+
+    None means in-process mode, or a daemon that cannot answer this request (see
+    `daemon_client.answer`): the request is then granted the local work it needs, so it ends in
+    an answer either way. Only a deliberate refusal still raises.
+    """
     if daemon_client.in_process():
         return None
-    result = await asyncio.to_thread(daemon_client.call, cmd, args)
-    if result is None:
-        raise CommandFailed("daemon returned no result")
-    return result
+    try:
+        return await asyncio.to_thread(daemon_client.answer, cmd, args)
+    except daemon_client.AnswerHere as exc:
+        logger.warning("answering %s in this process: %s", cmd, exc)
+        daemon_client.answer_here(str(exc))
+        return None
 
 
 def unsafe_repo_reason(repo: str) -> str | None:
@@ -112,7 +119,7 @@ async def _get_index(
         raise ValueError("Local indexing requires explicit --no-daemon; the daemon owns indexes.")
     await cache.load_embedder_once()
     try:
-        index = await cache.get(repo, content=content, exclude=exclude)
+        key, index = await cache.get_with_key(repo, content=content, exclude=exclude)
     # Every deliberate refusal - scope, work ceiling, spending budget - is an ANSWER an agent
     # has to read and act on, so it travels as its own text. Only a real failure is wrapped in
     # "Failed to index", which is what a money refusal used to be dressed up as.
@@ -120,6 +127,10 @@ async def _get_index(
         raise ValueError(str(exc)) from exc
     except Exception as exc:
         raise ValueError(f"Failed to index {repo!r}: {exc}") from exc
+    # AIDEV-NOTE: a request its daemon could not answer only borrows the index: a client keeping
+    # it would duplicate, past the daemon's budget, what the daemon owns (docs/client-routing.md).
+    if daemon_client.granted() is not None:
+        cache.evict(key)
     filtered = index.filtered(paths, exclude)
     if filtered is None:
         raise ValueError(f"No indexed file under {repo} survives paths={list(paths)} exclude={list(exclude)}")

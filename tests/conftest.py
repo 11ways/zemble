@@ -82,7 +82,14 @@ def no_real_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.Tem
     monkeypatch.setenv("ZEMBLE_CACHE_LOCATION", str(tmp_path_factory.mktemp("zemble-cache")))
     # In-thread socket tests must not change the test runner's process allocation limit.
     monkeypatch.setattr("zemble.daemon.server.allocation_backstop", lambda budget: budget)
+    # A daemon that cannot answer grants local work to the request, which in a test is the whole test: never
+    # let one test's grant reach the next, and never wait between retries.
+    from zemble.daemon import client
+
+    client._answering_here.set(None)
+    monkeypatch.setattr(client, "RETRY_FIRST_SECONDS", 0.0)
     yield
+    client._answering_here.set(None)
     # Checked before monkeypatch restores anything: a `monkeypatch.undo()` inside a test drops this
     # floor too, and the rest of that test then wrote the developer's real cache.
     assert os.environ.get("ZEMBLE_CACHE_LOCATION"), "the test dropped the cache isolation (monkeypatch.undo()?)"

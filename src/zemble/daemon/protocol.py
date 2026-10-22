@@ -63,11 +63,15 @@ def error_kind(raw: object) -> ErrorKind:
 
 
 class DaemonError(Exception):
-    """A daemon error to report, never permission to allocate an index in the client."""
+    """A daemon error; `client.answer` turns all but a refusal into an answer, as this process's own work if need be."""
 
 
 class DaemonUnavailable(DaemonError):
     """The daemon could not be reached, started, or is disabled."""
+
+
+class DaemonDisabled(DaemonUnavailable):
+    """A process that may not use a daemon (ZEMBLE_DAEMON=0, --no-daemon, inside the daemon), which answers itself."""
 
 
 class CommandFailed(DaemonError):

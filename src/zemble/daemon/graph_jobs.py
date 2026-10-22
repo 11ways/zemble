@@ -8,11 +8,12 @@ import os
 import resource
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from zemble.daemon.admission import AdmissionBusy
-from zemble.daemon.memory import MIB, MemoryRefused, private_mb
+from zemble.daemon.memory import MIB, ReadOutgrown, private_mb
 
 TOTAL_MEMORY_ENV = "ZEMBLE_DAEMON_TOTAL_MEMORY_MB"
 GRAPH_MEMORY_ENV = "ZEMBLE_GRAPH_BUILD_MEMORY_MB"
@@ -36,14 +37,21 @@ def serving_reserve_mb(private: float, total_mb: int, build_mb: int) -> float:
 class GraphJobs:
     """Own one construction process and one joined job per canonical graph root."""
 
-    def __init__(self, construction_lock: asyncio.Lock, serving_mb: int) -> None:
+    def __init__(
+        self, index_lock: asyncio.Lock, serving_mb: int, *, make_room: Callable[[float], bool] | None = None
+    ) -> None:
         """Separate total, serving and construction limits, with a four-GiB default total.
 
         A build resolves a hundred files at a time, so a 200k-symbol workspace builds from
         nothing in ~200 MiB; the ceilings leave room for mapping facts files, which reads
         every symbol at once.
+
+        :param index_lock: The daemon's index construction lock, held only while a worker starts.
+        :param make_room: Evicts idle serving stores until the given MiB more fit; whether they do.
         """
-        self.lock = construction_lock
+        self.index_lock = index_lock
+        self.lock = asyncio.Lock()
+        self.make_room = make_room
         self.total_mb = int(os.environ.get(TOTAL_MEMORY_ENV, "4096"))
         self.build_mb = int(os.environ.get(GRAPH_MEMORY_ENV, "2048"))
         if serving_mb <= 0 or not 0 < self.build_mb <= self.total_mb:
@@ -152,39 +160,53 @@ class GraphJobs:
             self.pending.pop(root, None)
 
     async def _build_once(self, root: str) -> None:
-        """Reserve aggregate private memory, reap the worker and restore serving limits on every path."""
+        """Reserve aggregate private memory, reap the worker and restore serving limits on every path.
+
+        AIDEV-NOTE: one worker at a time (`self.lock`). The index construction lock is held only
+        while this process's data limit drops to the serving reserve and the worker starts: no index
+        load or rebuild is mid-allocation when the limit drops, and every one after it is admitted
+        under the lowered limit, so none waits out the build.
+        """
         state = self.states[root]
         started = time.monotonic()
         try:
             async with self.lock:
-                old_soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
-                # AIDEV-NOTE: reserve bounded concurrent read scratch while the worker owns the rest;
-                # summing per-process limits, not RSS alone, bounds the complete construction lifetime.
-                serving_limit = serving_reserve_mb(private_mb(), self.total_mb, self.build_mb)
-                worker_limit = int(min(self.build_mb, self.total_mb - serving_limit))
-                if worker_limit < 512:
-                    raise MemoryRefused("insufficient aggregate graph construction headroom")
-                parent_limit = int(serving_limit * MIB)
-                if old_soft != resource.RLIM_INFINITY:
-                    parent_limit = min(parent_limit, old_soft)
-                resource.setrlimit(resource.RLIMIT_DATA, (parent_limit, hard))
+                async with self.index_lock:
+                    old_soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+                    worker_limit = self._worker_limit()
+                    if worker_limit < 512 and self.make_room is not None and self.make_room(512 + SERVING_SCRATCH_MB):
+                        worker_limit = self._worker_limit()
+                    if worker_limit < 512:
+                        raise ReadOutgrown(
+                            f"graph construction needs 512 MiB beside the {private_mb():.0f} MiB this daemon serves "
+                            f"within {self.total_mb} MiB ({TOTAL_MEMORY_ENV}); answer it in a process of its own."
+                        )
+                    serving_limit = serving_reserve_mb(private_mb(), self.total_mb, self.build_mb)
+                    parent_limit = int(serving_limit * MIB)
+                    if old_soft != resource.RLIM_INFINITY:
+                        parent_limit = min(parent_limit, old_soft)
+                    resource.setrlimit(resource.RLIMIT_DATA, (parent_limit, hard))
+                    try:
+                        self.process = await asyncio.create_subprocess_exec(
+                            sys.executable,
+                            "-m",
+                            "zemble.daemon.graph_worker",
+                            root,
+                            str(worker_limit),
+                            stdin=asyncio.subprocess.PIPE,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            env={
+                                **os.environ,
+                                "OPENBLAS_NUM_THREADS": "1",
+                                "OMP_NUM_THREADS": "1",
+                                "MALLOC_ARENA_MAX": "2",
+                            },
+                        )
+                    except BaseException:
+                        resource.setrlimit(resource.RLIMIT_DATA, (old_soft, hard))
+                        raise
                 try:
-                    self.process = await asyncio.create_subprocess_exec(
-                        sys.executable,
-                        "-m",
-                        "zemble.daemon.graph_worker",
-                        root,
-                        str(worker_limit),
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        env={
-                            **os.environ,
-                            "OPENBLAS_NUM_THREADS": "1",
-                            "OMP_NUM_THREADS": "1",
-                            "MALLOC_ARENA_MAX": "2",
-                        },
-                    )
                     state.update(
                         state="building",
                         pid=self.process.pid,
@@ -195,8 +217,9 @@ class GraphJobs:
                     message = json.dumps({"changed_paths": self.paths.get(root)}).encode()
                     stdout, stderr = await self.process.communicate(message)
                     if self.process.returncode:
+                        # A failure, never a refusal: the client asks again, then answers in its own process.
                         error = stderr.decode()[-2000:]
-                        raise MemoryRefused(f"graph worker failed ({self.process.returncode}): {error}")
+                        raise RuntimeError(f"graph worker failed ({self.process.returncode}): {error}")
                     state.update(json.loads(stdout))
                     self.generations[root] = self.generations.get(root, 0) + 1
                     state["generation"] = self.generations[root]
@@ -229,3 +252,7 @@ class GraphJobs:
             "construction_memory_mb": self.build_mb,
             "jobs": list(self.states.values()),
         }
+
+    def _worker_limit(self) -> int:
+        """The private memory a worker gets now: what the total leaves beside the serving reserve, up to the budget."""
+        return int(min(self.build_mb, self.total_mb - serving_reserve_mb(private_mb(), self.total_mb, self.build_mb)))

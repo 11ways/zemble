@@ -1,4 +1,4 @@
-"""Daemon-enabled clients must never populate a local index cache after an RPC failure."""
+"""Zemble never fails a query, and a daemon-enabled client never keeps an index the daemon owns."""
 
 import asyncio
 import json
@@ -38,57 +38,95 @@ def daemon_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("ZEMBLE_DAEMON_DIR", str(tmp_path / "run"))
 
 
-ERRORS = [
+#: What the daemon cannot answer, so the client answers the request in its own process.
+ANSWERED_HERE = [
     DaemonUnavailable("startup failed"),
     DaemonUnavailable("connection lost: timed out"),
     CommandFailed("malformed message"),
     CommandFailed("unsupported command"),
-    CommandRefused("memory budget refuses this root"),
-    CommandBusy("request execution is occupied"),
+    CommandOutgrown("needs 900 MiB of private memory"),
 ]
+
+MCP_CASES = {
+    "search": {"query": "shape"},
+    "find_related": {"file_path": "auth.py", "line": 1},
+    "explain": {"query": "shape"},
+    "outline": {"target": "auth.py"},
+    "signatures": {"symbol": "authenticate"},
+    "home": {"description": "shape"},
+    "graph_definition": {"symbol": "authenticate"},
+    "graph_callers": {"symbol": "authenticate"},
+}
+
+
+class _AnsweredHere(Exception):
+    """Raised by a stubbed local path, to prove the tool reached it."""
+
+
+def _stub_local_paths(monkeypatch) -> list[str]:
+    """Replace every tool's local path with a stub that records it ran; return the record."""
+    ran: list[str] = []
+
+    def local(name):
+        def run(*args, **kwargs):
+            ran.append(name)
+            raise _AnsweredHere(name)
+
+        return run
+
+    monkeypatch.setattr("zemble.mcp._get_index", local("index"))
+    monkeypatch.setattr("zemble.graph.mcp.answer", local("graph"))
+    monkeypatch.setattr("zemble.evidence.mcp._open", local("open"))
+    monkeypatch.setattr("zemble.home.mcp._here", local("home"))
+    return ran
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("error", ERRORS, ids=lambda error: f"{type(error).__name__}-{error}")
-async def test_all_mcp_index_and_graph_tools_report_errors_without_local_work(
-    daemon_mode, tmp_project, monkeypatch, error
-):
-    """Every daemon-backed tool reports failure without buying vectors, loading indexes or building graphs."""
-    cache = IndexCache()
+@pytest.mark.parametrize("error", ANSWERED_HERE, ids=lambda error: f"{type(error).__name__}-{error}")
+async def test_every_mcp_tool_answers_here_what_its_daemon_cannot(daemon_mode, tmp_project, monkeypatch, error):
+    """Every daemon-backed tool asks again, then answers in its own process, never reporting the error."""
+    asked: list[str] = []
 
-    def fail(*args, **kwargs):
+    def fail(cmd, *args, **kwargs):
+        asked.append(cmd)
         raise error
 
-    def local(*args, **kwargs):
-        pytest.fail("daemon-enabled client performed local work")
-
     monkeypatch.setattr(client, "call", fail)
-    monkeypatch.setattr(cache, "load_embedder_once", local)
-    monkeypatch.setattr(cache, "get", local)
-    monkeypatch.setattr("zemble.graph.mcp.answer", local)
-    monkeypatch.setattr("zemble.evidence.mcp._open", local)
-    monkeypatch.setattr("zemble.home.mcp._here", local)
+    ran = _stub_local_paths(monkeypatch)
+    instance = mcp.create_server(IndexCache())
+    for name, args in MCP_CASES.items():
+        ran.clear()
+        try:
+            await instance.call_tool(name, {**args, "repo": str(tmp_project)})
+        except Exception as raised:  # the stub's exception, wrapped by FastMCP
+            assert "_AnsweredHere" in repr(raised.__cause__) or isinstance(raised.__cause__, _AnsweredHere), raised
+        assert ran, f"{name} answered in its own process"
+    assert asked, "the daemon was asked first"
+
+
+@pytest.mark.anyio
+async def test_every_mcp_tool_waits_out_busy_and_reports_a_refusal(daemon_mode, tmp_project, monkeypatch):
+    """Busy is asked again; a refusal is the answer, reported with no local work."""
+    replies: dict[str, list[Exception]] = {}
+
+    def daemon(cmd, *args, **kwargs):
+        queue = replies.setdefault(cmd, [CommandBusy("occupied"), CommandBusy("occupied")])
+        raise queue.pop(0) if queue else CommandRefused("memory budget refuses this root")
+
+    monkeypatch.setattr(client, "call", daemon)
+    ran = _stub_local_paths(monkeypatch)
+    cache = IndexCache()
     instance = mcp.create_server(cache)
-    cases = {
-        "search": {"query": "shape"},
-        "find_related": {"file_path": "auth.py", "line": 1},
-        "explain": {"query": "shape"},
-        "outline": {"target": "auth.py"},
-        "signatures": {"symbol": "authenticate"},
-        "home": {"description": "shape"},
-        "graph_definition": {"symbol": "authenticate"},
-        "graph_callers": {"symbol": "authenticate"},
-    }
-    for name, args in cases.items():
+    for name, args in MCP_CASES.items():
+        replies.clear()
         result = await instance.call_tool(name, {**args, "repo": str(tmp_project)})
-        assert str(error) in result[0].text, (name, result)
-    assert not cache._tasks and cache.embedder is None
+        assert "memory budget refuses this root" in result[0].text, (name, result)
+    assert not ran and not cache._tasks and cache.embedder is None
 
 
-@pytest.mark.parametrize("error", ERRORS, ids=lambda error: type(error).__name__)
 @pytest.mark.parametrize("command", ["search", "stats", "find-related", "explain", "home", "outline", "signatures"])
-def test_cli_errors_never_load_indexes(daemon_mode, tmp_project, monkeypatch, capsys, error, command):
-    """All query CLI surfaces terminate explicitly after a daemon error."""
+def test_cli_reports_a_refusal_without_loading_indexes(daemon_mode, tmp_project, monkeypatch, capsys, command):
+    """A refusal ends every query CLI command: answering it here would refuse identically."""
     root = str(tmp_project)
     args = {
         "search": ["query", root],
@@ -100,10 +138,10 @@ def test_cli_errors_never_load_indexes(daemon_mode, tmp_project, monkeypatch, ca
         "signatures": [root, "authenticate"],
     }
 
-    def fail(*args, **kwargs):
-        raise error
+    def refuse(*args, **kwargs):
+        raise CommandRefused("memory budget refuses this root")
 
-    monkeypatch.setattr(client, "call", fail)
+    monkeypatch.setattr(client, "call", refuse)
     monkeypatch.setattr(cli, "_load_index", lambda *a, **kw: pytest.fail("local index loaded"))
     import sys
 
@@ -111,29 +149,28 @@ def test_cli_errors_never_load_indexes(daemon_mode, tmp_project, monkeypatch, ca
     with pytest.raises(SystemExit) as raised:
         cli._cli_main()
     assert raised.value.code == 1
-    assert str(error) in capsys.readouterr().err
+    assert "memory budget refuses this root" in capsys.readouterr().err
 
 
 @pytest.mark.anyio
-async def test_disabled_environment_is_not_permission_to_index(daemon_mode, tmp_project, monkeypatch):
-    """ZEMBLE_DAEMON=0 forbids access rather than opting a client into local memory ownership."""
+async def test_a_disabled_environment_answers_here(daemon_mode, tmp_project, monkeypatch):
+    """ZEMBLE_DAEMON=0 leaves the request to this process instead of refusing it."""
     monkeypatch.setenv("ZEMBLE_DAEMON", "0")
-    cache = IndexCache()
-    instance = mcp.create_server(cache)
-    result = await instance.call_tool("search", {"query": "q", "repo": str(tmp_project)})
-    assert "--no-daemon" in result[0].text
-    assert not cache._tasks and cache.embedder is None
+    ran = _stub_local_paths(monkeypatch)
+    with pytest.raises(Exception):  # the stub's exception, wrapped by FastMCP
+        await mcp.create_server(IndexCache()).call_tool("search", {"query": "q", "repo": str(tmp_project)})
+    assert ran == ["index"]
 
 
 @pytest.mark.anyio
-async def test_no_result_is_a_failure_not_a_fallback(daemon_mode, tmp_project, monkeypatch):
-    """A successful but empty legacy RPC response cannot trigger local allocation."""
-    monkeypatch.setattr(client, "call", lambda *a, **kw: None)
-    cache = IndexCache()
-    instance = mcp.create_server(cache)
-    result = await instance.call_tool("search", {"query": "q", "repo": str(tmp_project)})
-    assert "no result" in result[0].text
-    assert not cache._tasks
+async def test_no_result_is_asked_again_then_answered_here(daemon_mode, tmp_project, monkeypatch):
+    """A reply with no result is a failure: asked again, then answered here, never taken for an answer."""
+    asked: list[str] = []
+    monkeypatch.setattr(client, "call", lambda cmd, *a, **kw: asked.append(cmd))
+    ran = _stub_local_paths(monkeypatch)
+    with pytest.raises(Exception):  # the stub's exception, wrapped by FastMCP
+        await mcp.create_server(IndexCache()).call_tool("search", {"query": "q", "repo": str(tmp_project)})
+    assert asked == ["search"] * client.FAILED_TRIES and ran == ["index"]
 
 
 @pytest.mark.anyio
@@ -246,7 +283,7 @@ async def test_long_running_mcp_follows_each_new_daemon_revision(daemon_mode, tm
     [("busy", CommandBusy), ("refused", CommandRefused), ("outgrown", CommandOutgrown), ("future", CommandFailed)],
 )
 def test_error_kinds_never_authorize_fallback(daemon_mode, monkeypatch, kind, exception):
-    """New or unknown daemon errors remain explicit errors on the wire."""
+    """Every daemon error kind is an exception on the wire; `client.answer` alone decides what to do with it."""
     thread = connect_reply(monkeypatch, {"ok": False, "kind": kind, "error": "not admitted"})
     with pytest.raises(exception, match="not admitted"):
         client.call("search", auto_start=False)

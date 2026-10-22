@@ -349,10 +349,9 @@ async def _dispatch(
         remote = await _daemon_call("graph", args)
         if isinstance(remote, dict):
             return remote
-        if remote is not None:
-            return {"error": "Daemon returned an invalid graph payload; no in-process fallback."}
     except DaemonError as error:
         return {"error": failure_message(error)}
+    # In-process mode, a daemon that cannot answer, or a payload it should never send: answer here.
     return await asyncio.to_thread(answer, repo, symbol, method, limit=limit, **kwargs)
 
 

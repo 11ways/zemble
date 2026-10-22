@@ -6,8 +6,8 @@
 be positive. Loads and rebuilds reserve headroom before allocating, evicting idle
 indexes in LRU order. Requests pin their serving roots. A rebuild that cannot fit
 leaves its old generation available, reports the deferral in status, and retains
-one full-rescan bit for a retry after 30 seconds. Initial loads without room return
-a memory refusal, not an in-process fallback.
+one full-rescan bit for a retry after 30 seconds. An initial load without room is `busy`
+while work that will free memory runs, else `outgrown`, which the client answers itself.
 
 The budget counts private memory (`VmData`: heap and private writable mappings), and
 the Linux allocation backstop is `RLIMIT_DATA` at that ceiling, or a stricter inherited
@@ -20,11 +20,12 @@ startup private memory refuses startup with a diagnostic. Detached daemons use o
 thread and at most two glibc arenas; graph extraction uses one worker, not a fleet
 of child interpreters.
 
-Only one construction job runs daemon-wide, including persistence and graph work.
-Memory-intensive requests are serialized instead of multiplying scratch by arbitrary
-client concurrency. Warm searches still answer from an immutable generation during
-an admitted rebuild; ping and status do not wait for it. Graph-backed requests share
-the construction slot because ensuring a graph can build it.
+Index loads and rebuilds run one at a time daemon-wide, including persistence. Graph
+construction has a slot of its own and takes the index slot only while it lowers the data
+limit and starts its worker; loads after that are admitted under the lowered limit. Memory-
+intensive requests are serialized instead of multiplying scratch by arbitrary client
+concurrency. Warm searches still answer from an immutable generation during an admitted
+rebuild; ping and status do not wait for it.
 
 One root has one resident content selection. Code+docs replaces a narrower code
 selection, and subsequent code requests share its chunks, vectors and postings

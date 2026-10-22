@@ -80,9 +80,9 @@ about itself in `.zemble/home.toml`. See [docs/home.md](docs/home.md).
 
 **Warm daemon** (`zemble daemon`). One process per user holding the indexes and the graph
 in RAM, watching the roots it holds and reindexing incrementally. It starts on demand,
-never at login, and exits after 30 idle minutes. Index-backed clients use the daemon
-without automatic local fallback: an outage or busy daemon is a retryable answer,
-not permission to allocate another index. Only explicit `--no-daemon` permits local indexes. See
+never at login, and exits after 30 idle minutes. A query never fails: a busy daemon is waited
+out, and what it cannot answer (a read it outgrew, a daemon that will not start, one that keeps
+failing) is answered in the calling process, which borrows the index rather than keeping it. See
 [docs/daemon.md](docs/daemon.md).
 
 **Pluggable embedders and rerankers**. One spec string selects the embedder
@@ -331,8 +331,8 @@ zemble embed-server gc --dry-run               # on the server host
 `path` defaults to the current directory. The graph and evidence commands exit `0` when
 they answered, `1` when nothing matched and `2` when the name was ambiguous, with the
 candidates on stderr; `zemble home` exits `1` when nothing matched at all.
-`--no-daemon` explicitly answers in the calling process instead. `ZEMBLE_DAEMON=0`
-alone refuses daemon access; it does not authorize local indexes. Unsupported CLI
+`--no-daemon` explicitly answers in the calling process instead, and so does `ZEMBLE_DAEMON=0`;
+a daemon that cannot answer leaves that one command to the calling process, saying so on stderr. Unsupported CLI
 overrides (`--embedder`, `--reranker`, `--intent`, `--yes`) also require `--no-daemon`.
 `zemble savings` reports how many tokens searches saved against reading the matched
 files outright, and `zemble clear index|savings|orphans|all` empties the
