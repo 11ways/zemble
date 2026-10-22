@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS decl_keys (
     symbol_id TEXT, key TEXT, value TEXT, file_path TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified ON symbols(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
 CREATE INDEX IF NOT EXISTS idx_symbols_container ON symbols(container_id);
@@ -980,6 +981,7 @@ _FACTS_STATUS_ADDITIONS = (
     ("parse_buckets", "TEXT"),
     ("error", "TEXT"),
     ("generated_templates", "TEXT"),
+    ("source_digests", "TEXT"),
 )
 
 
@@ -1772,12 +1774,12 @@ def _resolve_pass(
     is written per batch of files, through a lookup that forgets between batches.
     """
     known_files = {row["path"] for row in connection.execute("SELECT path FROM files")}
-    plan = _plan_facts(connection, root, named_changes)
+    plan, parsed = _plan_facts(connection, root, named_changes)
     targets |= plan.invalidated
     targets &= known_files
 
-    _write_facts_symbols_for_read(connection, root, plan)
-    overlay, targets = _map_overlay_for(connection, root, plan, targets, known_files)
+    _write_facts_symbols_for_read(connection, root, plan, set(parsed))
+    overlay, targets = _map_overlay_for(connection, root, plan, targets, known_files, list(parsed.values()))
     stats.reresolved_files = len(targets)
 
     ordered = sorted(targets)
@@ -1861,10 +1863,30 @@ def _target_symbols(connection: sqlite3.Connection, targets: set[str]) -> list[S
 # ---- the facts overlay, incrementally ------------------------------------
 
 
-def _plan_facts(connection: sqlite3.Connection, root: Path, named_changes: Iterable[Path] | None) -> FactsPlan:
-    """Decide which facts files moved, without reading a single one of them."""
+def _plan_facts(
+    connection: sqlite3.Connection, root: Path, named_changes: Iterable[Path] | None
+) -> tuple[FactsPlan, dict[str, FactsFile]]:
+    """Decide which facts files moved from `stat`, then read each moved one once to narrow it to its changed sources.
+
+    :return: The plan, and every facts file read for it with its facts released and its `symbol`
+        facts already written, so neither is parsed again for that.
+    """
     states = _facts_states(connection)
-    return plan_facts(root, _present_facts_files(root, states, named_changes), states)
+    parsed: dict[str, FactsFile] = {}
+
+    def read_changes(relative: str, path: Path, state: FactsFileState) -> frozenset[str] | None:
+        try:
+            loaded = load_facts_file(path, root)
+        except FactsFormatError:
+            # Mapping reads it again and reports why; until then it moved whole.
+            return None
+        _write_facts_symbols(connection, loaded)
+        loaded.release_facts()
+        parsed[relative] = loaded
+        return state.changed_by(loaded)
+
+    plan = plan_facts(root, _present_facts_files(root, states, named_changes), states, read_changes)
+    return plan, parsed
 
 
 def _facts_states(connection: sqlite3.Connection) -> dict[str, FactsFileState]:
@@ -1890,6 +1912,7 @@ def _facts_states(connection: sqlite3.Connection) -> dict[str, FactsFileState]:
                 path: SourceContribution.from_json(payload)
                 for path, payload in json.loads(row["contributions"] or "{}").items()
             },
+            digests=json.loads(row["source_digests"] or "{}"),
         )
     return states
 
@@ -1923,6 +1946,7 @@ def _map_overlay_for(
     plan: FactsPlan,
     targets: set[str],
     known_files: set[str],
+    read: list[FactsFile],
 ) -> tuple[FactsOverlay, set[str]]:
     """Read and map exactly the facts files, and the sources of them, this build depends on.
 
@@ -1930,14 +1954,16 @@ def _map_overlay_for(
     and a second facts file covering one of those templates must then be mapped as well. A
     file that did not move declares what it declared before, so a third round can find nothing.
 
+    :param read: Facts files planning already read; they join the overlay whether or not anything
+        of them is mapped, so their status row records the bytes this build saw.
     :return: The overlay and the target set, grown by what the moved facts files turned out
         to cover.
     """
     request = plan.mapping_request(targets)
     if not request:
-        return FactsOverlay(root=root), targets
+        return FactsOverlay(root=root, files=list(read)), targets
     # The fact edges wait in the scratch database and are read back a batch of files at a time.
-    overlay = FactsOverlay(root=root, edges=OverlayEdges(connection, "scratch"))
+    overlay = FactsOverlay(root=root, files=list(read), edges=OverlayEdges(connection, "scratch"))
     symbols = MappingSymbols.stored(connection)
     declared = StoredDeclaredSymbols(connection, "java")
     map_facts_files(overlay, symbols, request, declared, plan.present)
@@ -1975,7 +2001,9 @@ class StoredDeclaredSymbols:
         return self._cache[ref]
 
 
-def _write_facts_symbols_for_read(connection: sqlite3.Connection, root: Path, plan: FactsPlan) -> None:
+def _write_facts_symbols_for_read(
+    connection: sqlite3.Connection, root: Path, plan: FactsPlan, written: set[str]
+) -> None:
     """Make sure every facts file present on disk has its current `symbol` facts in the table.
 
     A ref written in one facts file can be answered by a `symbol` fact in another, so every
@@ -1983,6 +2011,8 @@ def _write_facts_symbols_for_read(connection: sqlite3.Connection, root: Path, pl
     read - or one written before this table existed - is parsed here too, so the lookup
     speaks for the whole workspace however little of it this build maps. Files are parsed one
     at a time: the mapping that follows parses them again rather than holding them all.
+
+    :param written: Facts files whose `symbol` facts planning already rewrote.
     """
     for relative in sorted(plan.vanished):
         connection.execute("DELETE FROM facts_symbols WHERE facts_file = ?", (relative,))
@@ -1991,7 +2021,7 @@ def _write_facts_symbols_for_read(connection: sqlite3.Connection, root: Path, pl
     # rather than a gap to fill again on every build.
     stored = {row["facts_file"] for row in connection.execute("SELECT DISTINCT facts_file FROM facts_symbols")}
     present = set(plan.present)
-    for relative in sorted((present - stored - set(plan.states)) | (plan.moved & present)):
+    for relative in sorted(((present - stored - set(plan.states)) | (plan.moved & present)) - written):
         try:
             loaded = load_facts_file(plan.present[relative], root, symbols_only=True)
         except FactsFormatError:
@@ -2030,6 +2060,7 @@ _FACTS_STATUS_COLUMNS = (
     "parse_buckets",
     "error",
     "generated_templates",
+    "source_digests",
 )
 _FACTS_STATUS_COLUMNS_SQL = ", ".join(_FACTS_STATUS_COLUMNS)
 _FACTS_STATUS_PLACEHOLDERS = ",".join("?" * len(_FACTS_STATUS_COLUMNS))
@@ -2077,6 +2108,7 @@ def _status_row(loaded: FactsFile, plan: FactsPlan, overlay: FactsOverlay) -> tu
         json.dumps(dict(loaded.parse_buckets)),
         _mapper_error(overlay, loaded.relative_path),
         json.dumps({source: list(entry) for source, entry in sorted(_merged_generated(loaded, plan, overlay).items())}),
+        json.dumps(dict(sorted(loaded.digests.items()))),
     )
 
 
@@ -2168,6 +2200,7 @@ def _error_rows(overlay: FactsOverlay) -> list[tuple]:
                 "{}",
                 "{}",
                 message,
+                "{}",
                 "{}",
             )
         )

@@ -314,5 +314,58 @@ def test_a_facts_file_mapped_in_two_rounds_is_read_again(
     template_facts = _facts_lines(workspace)[1:3]
     _write(workspace, first, "\n".join(json.dumps(line) for line in [header, *tag_facts, *template_facts]) + "\n")
     build_graph(str(workspace), changed_paths=[functions, workspace / first])
-    assert refills == [second], "step 2: the second facts file was parsed again for round two"
+    # The first file is read once by planning, to learn which sources it changed, and its facts
+    # for those are read again to map them; the second is read again for round two.
+    assert refills == [first, second], "step 2: each facts file was parsed again for what it had to map"
     _assert_matches_full_rebuild(workspace, scratch, "step 2 second round")
+
+
+def test_a_rewritten_facts_file_re_resolves_only_the_sources_it_changed(
+    generated_workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compile rewrites its whole facts file; only the sources whose block changed are re-resolved."""
+    from zemble.graph import store
+
+    workspace = generated_workspace
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    header, *template_blocks = _facts_lines(workspace)
+    functions_block = [
+        {"t": "file", "path": FUNCTIONS, "sha256": _sha(workspace, FUNCTIONS)},
+        {"t": "call", "from": RENDER, "to": "java.lang.String#valueOf(java.lang.Object)", "line": 10},
+    ]
+    tpl_block, tag_block = template_blocks[:2], template_blocks[2:]
+    _write_facts(workspace, [header, *functions_block, *tpl_block, *tag_block])
+    build_graph(str(workspace))
+    _assert_matches_full_rebuild(workspace, scratch, "step 0 facts")
+
+    resolved: list[list[str]] = []
+    unstage = store._unstage
+    monkeypatch.setattr(
+        store, "_unstage", lambda connection, paths: resolved.append(list(paths)) or unstage(connection, paths)
+    )
+
+    def refresh() -> list[str]:
+        """Refresh after the facts file moved and return the files that build re-resolved."""
+        resolved.clear()
+        build_graph(str(workspace), changed_paths=[workspace / FACTS])
+        [paths] = resolved
+        return paths
+
+    # 1. The plugin merges blocks in a new order and a new header: nothing anyone said changed.
+    _write_facts(
+        workspace, [{**header, "generated_at": "2026-08-21T09:00:00Z"}, *tag_block, *functions_block, *tpl_block]
+    )
+    assert refresh() == [], "step 1: a reordered facts file re-resolves nothing"
+    _assert_matches_full_rebuild(workspace, scratch, "step 1 reordered")
+
+    # 2. One generated class now calls something else: its template alone is re-resolved.
+    tag_changed = [tag_block[0], {**tag_block[1], "to": LOCALIZED_CONFIG}]
+    _write_facts(workspace, [header, *tag_changed, *functions_block, *tpl_block])
+    assert refresh() == [CARD], "step 2: only the changed source's template is re-resolved"
+    _assert_matches_full_rebuild(workspace, scratch, "step 2 one block changed")
+
+    # 3. A source leaves the facts file: its extracted edges come back, and nothing else moves.
+    _write_facts(workspace, [header, *tag_changed, *tpl_block])
+    assert refresh() == [FUNCTIONS], "step 3: only the dropped source is re-resolved"
+    _assert_matches_full_rebuild(workspace, scratch, "step 3 source dropped")

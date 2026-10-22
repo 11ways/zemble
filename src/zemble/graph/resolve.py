@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Container, Iterable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import PurePosixPath
 
 from zemble.graph.lookup import DeclarationKey, FileContext, SymbolLookup, function_key
@@ -132,8 +133,13 @@ class Resolver:
         return self._same_family(found, file_path) if file_path is not None else found
 
     @staticmethod
+    @lru_cache(maxsize=65536)
     def _family(file_path: str) -> str | None:
-        """The resolution family of a file, from its suffix."""
+        """The resolution family of a file, from its suffix.
+
+        AIDEV-NOTE: memoised because `_same_family` asks it for every candidate of every call;
+        a module's rebuild asked it 16 million times and spent 40% of its time in pathlib.
+        """
         return family_of(detect_language(PurePosixPath(file_path)))
 
     def _same_family(self, symbols: list[Symbol], file_path: str) -> list[Symbol]:

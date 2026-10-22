@@ -195,10 +195,17 @@ At graph build time, inside the resolution pass - before overrides, tests and
 "exercises" edges are derived, so those are derived from the edges the graph
 actually keeps.
 
-A build re-applies facts whenever a facts file appeared, changed or vanished:
-every source file that facts file declares (now, or the last time it was read)
-is re-resolved, even though not one byte of it changed. What each facts file
-contributed last time is kept in the graph's `facts_status` table.
+A build re-applies facts whenever a facts file appeared, changed or vanished. A
+changed file is read once and compared per source against what the last build
+read: every line a facts file writes for a source, plus whether that source is
+still fresh, is hashed into a digest kept in the graph's `facts_status` table, and
+only the sources whose digest differs (or that appeared or left the file) are
+re-resolved. An emitter that rewrites the whole file per compilation therefore
+costs only what it actually changed, as long as it writes an unchanged source's
+lines byte for byte; block order does not matter. A facts file appearing or
+vanishing, or one whose last read predates digests, re-resolves every source it
+declares (now, or the last time it was read). What each facts file contributed
+last time is kept in `facts_status` too.
 
 The daemon watches facts files as well as sources: its ignore rules make an
 exception for anything matching a facts glob, which they would otherwise skip for

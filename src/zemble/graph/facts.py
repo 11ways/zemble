@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import orjson
 
@@ -129,6 +129,8 @@ class SourceFacts:
     fresh: bool
     reason: str = ""
     facts: list[dict] = field(default_factory=list)
+    #: A hash of this source's freshness and every line written for it; empty on a symbols-only read.
+    digest: str = ""
 
 
 class SkipBucket(Enum):
@@ -229,6 +231,11 @@ class FactsFile:
     def fresh_files(self) -> list[str]:
         """The source files whose current content matches what the facts were derived from."""
         return [path for path, source in self.sources.items() if source.fresh]
+
+    @property
+    def digests(self) -> dict[str, str]:
+        """Declared source path -> the digest of what this file says about it."""
+        return {path: source.digest for path, source in self.sources.items()}
 
     @property
     def stale_files(self) -> list[str]:
@@ -507,9 +514,15 @@ def _display_path(root: Path, path: Path) -> str:
 def _read_body(
     lines: Iterable[bytes], loaded: FactsFile, root: Path, facts_root: Path, *, symbols_only: bool = False
 ) -> None:
-    """Group every fact under the source file it was declared for."""
+    """Group every fact under the source file it was declared for, hashing each source's lines.
+
+    AIDEV-NOTE: the digest is what lets a rewritten facts file re-resolve only the sources whose
+    facts changed. The javac plugin copies the block of every source it did not recompile verbatim,
+    so an unchanged source hashes the same however the blocks were reordered around it.
+    """
     current: SourceFacts | None = None
     outside: str | None = None
+    digests = _SourceDigests(enabled=not symbols_only)
     for raw in lines:
         if not raw.strip() or (symbols_only and b'"symbol"' not in raw and b'"file"' not in raw):
             continue
@@ -525,6 +538,7 @@ def _read_body(
         if kind == "file":
             current = _declare_file(payload, loaded, root, facts_root, hashed=not symbols_only)
             outside = str(payload.get("path", "")) if current is None else None
+            digests.add(current, raw)
             continue
         if symbols_only and kind != "symbol":
             continue
@@ -533,6 +547,29 @@ def _read_body(
             _record_unattached(payload, kind, loaded, outside, root, facts_root)
             continue
         target.facts.append(payload)
+        digests.add(target, raw)
+    digests.seal(loaded)
+
+
+class _SourceDigests:
+    """Hash every line a facts file writes for each source; a symbols-only read hashes nothing."""
+
+    def __init__(self, *, enabled: bool) -> None:
+        """Start with no source hashed."""
+        self._enabled = enabled
+        self._hashers: dict[str, Any] = {}
+
+    def add(self, source: SourceFacts | None, raw: bytes) -> None:
+        """Fold one line into its source's hash."""
+        if self._enabled and source is not None:
+            self._hashers.setdefault(source.path, hashlib.blake2b(digest_size=16)).update(raw.strip())
+
+    def seal(self, loaded: FactsFile) -> None:
+        """Give each hashed source its digest, its freshness folded in."""
+        for path, hasher in self._hashers.items():
+            source = loaded.sources[path]
+            hasher.update(b"fresh" if source.fresh else b"stale")
+            source.digest = hasher.hexdigest()
 
 
 def _record_unattached(
@@ -942,7 +979,7 @@ class MappingSymbols:
         def templates() -> list[Symbol]:
             placeholders = ",".join("?" * len(_TEMPLATE_KINDS))
             rows = connection.execute(
-                f"SELECT * FROM symbols WHERE kind IN ({placeholders})",  # noqa: S608 - placeholders only
+                f"SELECT * FROM symbols WHERE kind IN ({placeholders}) ORDER BY rowid",  # noqa: S608 - placeholders only
                 [kind.value for kind in _TEMPLATE_KINDS],
             )
             return [symbol_from_row(row) for row in rows]
@@ -1590,11 +1627,33 @@ class FactsFileState:
     #: Declared source path -> what mapping it contributed, so a build that maps only part of
     #: a facts file can carry the rest of its accounting forward untouched.
     contributions: dict[str, SourceContribution] = field(default_factory=dict)
+    #: Declared source path -> the digest of its facts when last read; empty for a row written
+    #: before digests were kept, which a moved file then answers by re-resolving all it covers.
+    digests: dict[str, str] = field(default_factory=dict)
 
     @property
     def covers(self) -> frozenset[str]:
         """Every source file whose overlay edges this facts file owns."""
         return self.sources | self.template_paths
+
+    def flipped_templates(self, root: Path) -> set[str]:
+        """The templates whose freshness against their generated class changed since the last build."""
+        return {
+            template
+            for generated, (template, was_stale) in self.generated.items()
+            if template and template_is_newer(root, template, generated) != was_stale
+        }
+
+    def changed_by(self, loaded: FactsFile) -> frozenset[str]:
+        """Return the sources whose facts differ in a fresh read of this file, with the templates they reached."""
+        now = loaded.digests
+        changed = {path for path in now.keys() | self.digests.keys() if now.get(path) != self.digests.get(path)}
+        changed |= {self.generated[path][0] for path in changed if path in self.generated and self.generated[path][0]}
+        return frozenset(changed)
+
+
+#: Reads a moved facts file and returns the sources whose facts changed, or None to treat it whole.
+ChangeReader = Callable[[str, Path, FactsFileState], frozenset[str] | None]
 
 
 @dataclass(frozen=True)
@@ -1609,6 +1668,8 @@ class FactsPlan:
     moved: frozenset[str]
     #: Source files whose overlay edges this build must rebuild whatever else it touches.
     invalidated: frozenset[str]
+    #: Moved facts file -> the only sources it changed, when a read could tell; absent ones moved whole.
+    narrowed: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def paths(self) -> list[Path]:
@@ -1619,14 +1680,16 @@ class FactsPlan:
         """Return the source files a moved facts file covers, as the freshly read file says.
 
         Only mapping can tell which templates a generated-source fact reaches, so this is asked
-        after the first round and decides which further files the build must re-resolve.
+        after the first round and decides which further files the build must re-resolve. A
+        narrowed file covers anew only what changed, plus the templates this build mapped onto.
         """
-        return {
-            path
-            for loaded in overlay.files
-            if loaded.relative_path in self.moved
-            for path in (set(loaded.sources) | loaded.template_paths)
-        }
+        covered: set[str] = set()
+        for loaded in overlay.files:
+            if loaded.relative_path not in self.moved:
+                continue
+            changed = self.narrowed.get(loaded.relative_path)
+            covered |= (set(loaded.sources) if changed is None else set(changed)) | loaded.template_paths
+        return covered
 
     @property
     def vanished(self) -> frozenset[str]:
@@ -1636,24 +1699,31 @@ class FactsPlan:
     def mapping_request(self, targets: set[str]) -> MappingRequest:
         """Return, per facts file, the declared sources this build must map from it.
 
-        A file that moved is mapped whole, because its content decides everything about it. A
-        file that did not is asked only for the sources the build is re-resolving: every other
-        source it covers keeps the edges - and the accounting - already stored for it.
+        A file that moved is mapped whole, because its content decides everything about it,
+        unless a read narrowed it to the sources it changed. Any other file is asked only for the
+        sources the build is re-resolving: every other source it covers keeps the edges - and the
+        accounting - already stored for it.
         """
         request: MappingRequest = {}
         for relative in self.present:
             state = self.states.get(relative)
-            if relative in self.moved or state is None:
+            changed = self.narrowed.get(relative)
+            if state is None or (relative in self.moved and changed is None):
                 request[relative] = None
                 continue
-            needed = set(state.sources & targets)
+            needed = set(changed or ()) | ((state.sources | (changed or frozenset())) & targets)
             needed |= {source for source, (template, _) in state.generated.items() if template in targets}
             if needed:
                 request[relative] = needed
         return request
 
 
-def plan_facts(root: Path, present: dict[str, Path], states: dict[str, FactsFileState]) -> FactsPlan:
+def plan_facts(
+    root: Path,
+    present: dict[str, Path],
+    states: dict[str, FactsFileState],
+    read_changes: ChangeReader | None = None,
+) -> FactsPlan:
     """Decide, from `stat` alone, which facts files moved and what that invalidates.
 
     Two things move a facts file: its own bytes and its disappearance. A third thing changes
@@ -1662,9 +1732,13 @@ def plan_facts(root: Path, present: dict[str, Path], states: dict[str, FactsFile
     alone. It is why `template newer than generated source` no longer costs a re-resolution of
     every mapped template on every build: the verdict is recorded per generated source and
     re-decided with two stats.
+
+    :param read_changes: Asked about every moved file whose last read recorded digests, so a
+        rewrite that changed a few sources invalidates those rather than everything it covers.
     """
     moved: set[str] = set()
     invalidated: set[str] = set()
+    narrowed: dict[str, frozenset[str]] = {}
     for relative, path in present.items():
         state = states.get(relative)
         try:
@@ -1676,17 +1750,23 @@ def plan_facts(root: Path, present: dict[str, Path], states: dict[str, FactsFile
             continue
         if (state.mtime_ns, state.size) != (stat.st_mtime_ns, stat.st_size):
             moved.add(relative)
-            invalidated |= state.covers
-            continue
+            changed = read_changes(relative, path, state) if read_changes is not None and state.digests else None
+            if changed is None:
+                invalidated |= state.covers
+                continue
+            narrowed[relative] = changed
+            invalidated |= changed
         # A template whose freshness flipped invalidates that template and nothing else: the
         # facts file itself did not move, so every other source it covers is untouched.
-        invalidated |= {
-            template
-            for generated, (template, was_stale) in state.generated.items()
-            if template and template_is_newer(root, template, generated) != was_stale
-        }
+        invalidated |= state.flipped_templates(root)
     for relative, state in states.items():
         if relative not in present:
             moved.add(relative)
             invalidated |= state.covers
-    return FactsPlan(present=present, states=states, moved=frozenset(moved), invalidated=frozenset(invalidated))
+    return FactsPlan(
+        present=present,
+        states=states,
+        moved=frozenset(moved),
+        invalidated=frozenset(invalidated),
+        narrowed=narrowed,
+    )
