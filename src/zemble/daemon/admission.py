@@ -13,6 +13,10 @@ from zemble.daemon.protocol import CONSTRUCTION_WAIT_SECONDS, DEADLINE_FIELD, Co
 LEGACY_DEADLINE_MS = 25000
 
 
+#: How long a stopping daemon waits for its in-flight reads.
+DRAIN_SECONDS = 30.0
+
+
 class AdmissionBusy(CommandBusy):
     """A bounded admission deadline or queue refused a retryable request."""
 
@@ -69,10 +73,15 @@ class ReadAdmission:
         """Report actual active work rather than just connected clients."""
         return {"slots": self.slots, "queue_limit": self.queue_limit, "active": len(self.active), "queued": self.queued}
 
-    async def drain(self) -> None:
-        """Reap reads before shutdown closes the daemon's resources."""
+    async def drain(self, timeout: float = DRAIN_SECONDS) -> None:
+        """Reap reads before shutdown closes the daemon's resources, giving up on a wedged one after *timeout*.
+
+        AIDEV-NOTE: an unbounded drain kept a daemon that had logged "shutting down" alive for an hour,
+        holding the singleton lock, because one read was stuck on a broken process pool; every client
+        then answered in its own process.
+        """
         if self.active:
-            await asyncio.gather(*self.active, return_exceptions=True)
+            await asyncio.wait(list(self.active), timeout=timeout)
 
 
 def request_deadline(request: dict[str, Any]) -> float:

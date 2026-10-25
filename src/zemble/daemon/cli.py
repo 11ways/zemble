@@ -9,11 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from zemble.daemon import client
 from zemble.daemon.protocol import (
@@ -113,14 +114,31 @@ def _run_foreground(args: argparse.Namespace) -> int:
         logging.basicConfig(level=logging.INFO, handlers=[rotating_log_handler(log_path())])
     else:
         logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, stream=sys.stderr)
+    loop = asyncio.new_event_loop()
+    code = 0
     try:
-        asyncio.run(run(max_indexes=args.max_indexes, idle_minutes=args.idle_minutes, watch=not args.no_watch))
+        loop.run_until_complete(
+            run(max_indexes=args.max_indexes, idle_minutes=args.idle_minutes, watch=not args.no_watch)
+        )
     except (SocketInUse, MemoryRefused) as exc:
         print(str(exc), file=sys.stderr)
-        return EXIT_ERROR
+        code = EXIT_ERROR
     except KeyboardInterrupt:  # pragma: no cover - interactive
-        return 0
-    return 0
+        code = 0
+    _exit_now(code)
+
+
+def _exit_now(code: int) -> NoReturn:
+    """End a stopped daemon process even when a wedged worker thread would keep the interpreter alive.
+
+    AIDEV-NOTE: `asyncio.run` joins the default executor's threads on the way out, with no timeout on
+    3.11; one thread stuck in a broken process pool kept a stopped daemon - and its singleton lock -
+    alive. The daemon has unlinked its socket and released its lock by then, so nothing is lost.
+    """
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
 
 
 def _start() -> int:
