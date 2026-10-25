@@ -51,8 +51,9 @@ the next attempt redid the same work and died the same way, so the graph stopped
 through the existing graph publication protocol, and is reaped before the job completes.
 Watcher changes arriving during construction coalesce into a bounded follow-up pass; the
 watcher waits its refresh out. One worker builds at a time: a root that is no lane (the main
-workspace lanes reuse) gets it before every lane, and a lane first waits out its base's job, so
-it seeds from a current base. A job whose root was removed while queued is dropped without a
+workspace lanes reuse) gets it before every lane, and a lane first waits out its base's job, and
+a base's graph refresh counts from the start of the index pass that will queue it, so the lane
+seeds from a current base. A job whose root was removed while queued is dropped without a
 worker. A full construction queue (eight jobs) refuses only a root
 with nothing to read. `graph_construction.jobs` reports queued/building/ready/failed/cancelled/dropped
 states, worker PID, budget, elapsed/build time and peak worker RSS. Stop closes graph jobs

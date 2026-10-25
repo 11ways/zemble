@@ -1091,6 +1091,32 @@ async def test_a_full_rescan_asked_of_a_running_pass_runs_after_it(
 
 
 @pytest.mark.anyio
+async def test_a_graph_changing_index_pass_announces_its_graph_refresh_before_it_runs(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lanes wait for a base's graph refresh from the moment its index pass starts, not only once it is queued."""
+    daemon = _daemon_with_fake_embedder(watch=False)
+    cache_key, _index = await daemon.index_for({"path": str(tmp_project)})
+    root = str(Path(cache_key[0]).resolve())
+    seen: list[bool] = []
+
+    async def rebuild_once(key: Any, *, java_changed: bool, changed_paths: Any) -> dict[str, Any]:
+        seen.append(root in daemon.graphs.announced)
+        return {"added": 0, "changed": 0, "removed": 0, "ms": 0, "chunks": 1}
+
+    async def refresh_graph(path: str, changed_paths: Any = None) -> int:
+        seen.append(root in daemon.graphs.announced)
+        return 0
+
+    monkeypatch.setattr(daemon, "_rebuild_once", rebuild_once)
+    monkeypatch.setattr(daemon, "_refresh_graph", refresh_graph)
+    await daemon.rebuild(cache_key, java_changed=False, changed_paths=None)
+    await daemon.rebuild(cache_key, java_changed=True, changed_paths=None)
+    assert seen == [False, True, True], "announced through the index pass and the graph refresh, only when java changed"
+    assert root not in daemon.graphs.announced, "settled once the refresh landed"
+
+
+@pytest.mark.anyio
 async def test_a_cold_watched_root_answers_from_its_stored_index_then_catches_up(
     tmp_project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -708,14 +708,18 @@ class Daemon:
                 self.rebuilding.add(cache_key)
                 self._rebuild_scope[cache_key] = changed_paths
                 try:
-                    # A lane overlay's re-plan is a walk and a small delta: it holds no load back.
-                    async with contextlib.nullcontext() if self.cache.base_of(cache_key) else self._load_lock:
-                        result = await self._rebuild_once(
-                            cache_key, java_changed=java_changed, changed_paths=changed_paths
-                        )
-                    if java_changed or cache_key in self._rebuild_graph:
-                        self._rebuild_graph.discard(cache_key)
-                        result["graph_ms"] = await self._refresh_graph(cache_key[0], changed_paths)
+                    # AIDEV-NOTE: announced before the index pass, not when the graph refresh is
+                    # queued after it: a lane job starting meanwhile would seed from the old graph.
+                    graph_follows = java_changed or cache_key in self._rebuild_graph
+                    with self.graphs.refresh_announced(cache_key[0]) if graph_follows else contextlib.nullcontext():
+                        # A lane overlay's re-plan is a walk and a small delta: it holds no load back.
+                        async with contextlib.nullcontext() if self.cache.base_of(cache_key) else self._load_lock:
+                            result = await self._rebuild_once(
+                                cache_key, java_changed=java_changed, changed_paths=changed_paths
+                            )
+                        if java_changed or cache_key in self._rebuild_graph:
+                            self._rebuild_graph.discard(cache_key)
+                            result["graph_ms"] = await self._refresh_graph(cache_key[0], changed_paths)
                 finally:
                     self.rebuilding.discard(cache_key)
                 if cache_key not in self._rebuild_changes:

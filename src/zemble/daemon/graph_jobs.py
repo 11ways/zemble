@@ -11,7 +11,7 @@ import os
 import resource
 import sys
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,8 @@ class GraphJobs:
         self.process: asyncio.subprocess.Process | None = None
         self.paths: dict[str, list[str] | None] = {}
         self.pending: dict[str, set[str] | None] = {}
+        #: Roots whose graph refresh is coming (their index pass runs first); set when it has landed.
+        self.announced: dict[str, asyncio.Event] = {}
 
     async def ensure(
         self, root: str, deadline: float | None, *, refresh: bool = False, changed_paths: Any = None
@@ -277,23 +279,45 @@ class GraphJobs:
         finally:
             state["elapsed_seconds"] = round(time.monotonic() - started, 3)
 
+    @contextlib.contextmanager
+    def refresh_announced(self, root: str) -> Iterator[None]:
+        """Mark *root*'s graph refresh as coming for the block's length, so its lanes wait for it."""
+        key = str(Path(root).resolve())
+        event = asyncio.Event()
+        self.announced[key] = event
+        try:
+            yield
+        finally:
+            if self.announced.get(key) is event:
+                del self.announced[key]
+            event.set()
+
+    async def _base_settled(self, base: str) -> None:
+        """Wait until *base* has no graph job running or queued and no refresh announced."""
+        while True:
+            if (job := self.jobs.get(base)) is not None and not job.done():
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(job)
+            elif (event := self.announced.get(base)) is not None:
+                await event.wait()
+            else:
+                return
+
     @contextlib.asynccontextmanager
     async def _worker_turn(self, root: str, state: dict[str, Any]) -> AsyncIterator[None]:
         """Hold the worker turn for one pass over *root*: a base goes before every lane, a lane after its base's job.
 
         AIDEV-NOTE: a refresh of the main workspace waited minutes behind lane builds in arrival
         order and stalled every graph question there. A lane also waits out its base's whole job,
-        follow-up change sets included: seeded from a stale base it would extract every file the
-        base had not caught up on itself.
+        follow-up change sets and a refresh announced by an index pass still running included:
+        seeded from a stale base it would extract every file the base had not caught up on itself.
 
         :raises FileNotFoundError: When the root was removed before its turn came; no worker starts.
         """
         base = await asyncio.to_thread(_lane_base, root)
         if base is not None:
             state["base"] = base
-            while (job := self.jobs.get(base)) is not None and not job.done():
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(job)
+            await self._base_settled(base)
         async with self._turn(_BASE_FIRST if base is None else _LANE_LAST):
             if not Path(root).is_dir():
                 self.ready.discard(root)

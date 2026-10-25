@@ -125,6 +125,22 @@ async def test_a_queued_job_for_a_removed_root_is_dropped_without_a_worker(worke
 
 
 @pytest.mark.anyio
+async def test_a_lane_waits_for_a_base_refresh_announced_by_a_running_index_pass(workers, workspace):
+    """A lane job starting while its base's index pass runs waits for the graph refresh that pass will queue."""
+    base, lane_a, _ = workspace
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+    with jobs.refresh_announced(base):
+        lane = jobs._start(lane_a, refresh=True, changed_paths=None)
+        await _settle()
+        assert workers.started == [], "the lane must not seed from the base graph the index pass is about to replace"
+        jobs._start(base, refresh=True, changed_paths=["a.java"])
+    await workers.run_in_turn(2)
+    await lane
+    assert workers.started == [base, lane_a]
+    assert base not in jobs.announced
+
+
+@pytest.mark.anyio
 async def test_a_cancelled_waiter_neither_runs_nor_keeps_the_turn(workers, workspace):
     """Cancelling a queued job hands the turn to the next waiter once the running job ends."""
     base, lane_a, lane_b = workspace
