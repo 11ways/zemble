@@ -873,6 +873,9 @@ class Daemon:
             # The watcher waits its refresh out: no client is behind it, and a refresh it gave up on
             # would still run, with this log line claiming it had failed.
             await self.graphs.ensure(root, None, refresh=True, changed_paths=changed_paths)
+        except FileNotFoundError:
+            logger.info("%s is gone; its graph refresh was dropped", root)
+            return None
         except Exception:
             logger.error("The symbol graph for %s is now STALE: its refresh failed", root, exc_info=True)
             return None

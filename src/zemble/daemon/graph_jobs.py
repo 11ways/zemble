@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import heapq
+import itertools
 import json
 import os
 import resource
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +44,19 @@ def _answered_meanwhile(root: str) -> bool:
     return resolve_graph_root(root)[0] != root
 
 
+def _lane_base(root: str) -> str | None:
+    """Return the base workspace whose graph a lane root's graph is seeded from, or None for a root that is no lane."""
+    from zemble.graph.store import graph_present
+    from zemble.lane import find_lane
+
+    found = find_lane(root, graph_present)
+    return str(found[0].base.resolve()) if found is not None else None
+
+
+#: Turn priorities: a root no lane of which it is (a base, or any plain root) goes before every lane.
+_BASE_FIRST, _LANE_LAST = 0, 1
+
+
 class GraphJobs:
     """Own one construction process and one joined job per canonical graph root."""
 
@@ -57,7 +73,10 @@ class GraphJobs:
         :param make_room: Evicts idle serving stores until the given MiB more fit; whether they do.
         """
         self.index_lock = index_lock
-        self.lock = asyncio.Lock()
+        # One worker at a time, handed out by priority, not arrival (`_worker_turn`).
+        self._turns: list[tuple[int, int, asyncio.Future[None]]] = []
+        self._turn_order = itertools.count()
+        self._turn_held = False
         self.make_room = make_room
         self.total_mb = int(os.environ.get(TOTAL_MEMORY_ENV, "4096"))
         self.build_mb = int(os.environ.get(GRAPH_MEMORY_ENV, "2048"))
@@ -177,17 +196,19 @@ class GraphJobs:
             self.pending.pop(root, None)
 
     async def _build_once(self, root: str) -> None:
-        """Reserve aggregate private memory, reap the worker and restore serving limits on every path.
+        """Take a worker turn, then reserve aggregate private memory, reap the worker and restore serving limits.
 
-        AIDEV-NOTE: one worker at a time (`self.lock`). The index construction lock is held only
-        while this process's data limit drops to the serving reserve and the worker starts: no index
-        load or rebuild is mid-allocation when the limit drops, and every one after it is admitted
-        under the lowered limit, so none waits out the build.
+        AIDEV-NOTE: the index construction lock is held only while this process's data limit drops
+        to the serving reserve and the worker starts: no index load or rebuild is mid-allocation
+        when the limit drops, and every one after it is admitted under the lowered limit, so none
+        waits out the build.
+
+        :raises FileNotFoundError: When the root was removed (a lane deleted) before its turn came.
         """
         state = self.states[root]
         started = time.monotonic()
         try:
-            async with self.lock:
+            async with self._worker_turn(root, state):
                 async with self.index_lock:
                     old_soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
                     worker_limit = self._worker_limit()
@@ -249,10 +270,65 @@ class GraphJobs:
                     self.process = None
                     resource.setrlimit(resource.RLIMIT_DATA, (old_soft, hard))
         except BaseException as exc:
-            state.update(state="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", error=str(exc))
+            if state["state"] != "dropped":
+                state.update(state="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
+            state["error"] = str(exc)
             raise
         finally:
             state["elapsed_seconds"] = round(time.monotonic() - started, 3)
+
+    @contextlib.asynccontextmanager
+    async def _worker_turn(self, root: str, state: dict[str, Any]) -> AsyncIterator[None]:
+        """Hold the worker turn for one pass over *root*: a base goes before every lane, a lane after its base's job.
+
+        AIDEV-NOTE: a refresh of the main workspace waited minutes behind lane builds in arrival
+        order and stalled every graph question there. A lane also waits out its base's whole job,
+        follow-up change sets included: seeded from a stale base it would extract every file the
+        base had not caught up on itself.
+
+        :raises FileNotFoundError: When the root was removed before its turn came; no worker starts.
+        """
+        base = await asyncio.to_thread(_lane_base, root)
+        if base is not None:
+            state["base"] = base
+            while (job := self.jobs.get(base)) is not None and not job.done():
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(job)
+        async with self._turn(_BASE_FIRST if base is None else _LANE_LAST):
+            if not Path(root).is_dir():
+                self.ready.discard(root)
+                state["state"] = "dropped"
+                raise FileNotFoundError(f"{root} was removed while its graph job was queued; dropped")
+            yield
+
+    @contextlib.asynccontextmanager
+    async def _turn(self, priority: int) -> AsyncIterator[None]:
+        """Hold the single worker turn; waiters get it lowest priority first, then in arrival order."""
+        if self._turn_held:
+            waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            heapq.heappush(self._turns, (priority, next(self._turn_order), waiter))
+            try:
+                await waiter
+            except BaseException:
+                # Granted and cancelled in the same step: the turn is ours to pass on.
+                if waiter.done() and not waiter.cancelled():
+                    self._pass_turn()
+                raise
+        else:
+            self._turn_held = True
+        try:
+            yield
+        finally:
+            self._pass_turn()
+
+    def _pass_turn(self) -> None:
+        """Hand the turn to the first live waiter, or free it; cancelled waiters stay in the heap until popped."""
+        while self._turns:
+            waiter = heapq.heappop(self._turns)[2]
+            if not waiter.done():
+                waiter.set_result(None)
+                return
+        self._turn_held = False
 
     async def close(self) -> None:
         """Cancel joined jobs and wait for worker teardown before the daemon exits."""
