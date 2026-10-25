@@ -135,6 +135,9 @@ class UnitIndex:
         """Open (creating if needed) the index of a root."""
         folder = root_cache_folder(root)
         folder.mkdir(parents=True, exist_ok=True)
+        from zemble.cache import mark_root
+
+        mark_root(folder, str(root))
         self.path = folder / INDEX_FILE_NAME
         self.signature = signature
         self._connection = sqlite3.connect(self.path, timeout=_BUSY_TIMEOUT_SECONDS)

@@ -82,8 +82,12 @@ def write_metadata(
     capsules: CapsuleOptions,
     exclude: Sequence[str],
     manifest: dict[str, FileManifestEntry],
+    extra: dict[str, object] | None = None,
 ) -> None:
-    """Write the metadata that makes a staged generation a complete, loadable index."""
+    """Write the metadata that makes a staged generation a complete, loadable index.
+
+    :param extra: Further keys a store of another kind (an overlay's delta) records beside these.
+    """
     from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS  # avoid circular import at module level
 
     metadata = {
@@ -97,5 +101,6 @@ def write_metadata(
         "capsules": capsules.key,
         "exclude": list(exclude),
         "files": manifest,
+        **(extra or {}),
     }
     PersistencePath.from_path(directory).metadata.write_bytes(orjson.dumps(metadata))

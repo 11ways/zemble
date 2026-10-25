@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 from array import array
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -100,6 +101,16 @@ class _Frozen:
         return self._ids
 
 
+@dataclass(frozen=True)
+class CorpusStats:
+    """The statistics of a corpus made of several BM25 segments, as seen from one of them."""
+
+    n_docs: int
+    total_doc_length: int
+    #: How many documents of the OTHER segments hold a term.
+    other_frequency: Callable[[str], int]
+
+
 class BM25:
     """A persisted BM25 index, scored straight from its memory-mapped columns.
 
@@ -121,20 +132,38 @@ class BM25:
         """The number of documents, without materializing their IDs."""
         return self._frozen.n_docs
 
+    @property
+    def total_doc_length(self) -> int:
+        """The summed token count of every document, the numerator of the average length."""
+        return self._frozen.total_doc_length
+
+    def document_frequency(self, term: str) -> int:
+        """Return how many documents hold *term*."""
+        frozen = self._frozen
+        term_row = frozen.terms.index_of(term)
+        if term_row is None:
+            return 0
+        return int(frozen.posting_offsets[term_row + 1] - frozen.posting_offsets[term_row])
+
     def get_scores(
-        self, tokens: list[str], weight_mask: npt.NDArray[np.bool_] | None = None
+        self,
+        tokens: list[str],
+        weight_mask: npt.NDArray[np.bool_] | None = None,
+        corpus: CorpusStats | None = None,
     ) -> npt.NDArray[np.float32]:
         """Calculate BM25 scores for a tokenized query.
 
         :param tokens: Tokenized search query.
         :param weight_mask: Optional boolean mask aligned with doc_order.
+        :param corpus: The statistics of a wider corpus this index is one segment of; None scores
+            against this index's own, which is what every unsegmented index does.
         :return: Scores aligned with doc_order.
         """
         frozen = self._frozen
         scores: npt.NDArray[np.float32] = np.zeros(frozen.n_docs, dtype=np.float32)
-        corpus_size = frozen.n_docs
-        if tokens and corpus_size:
-            avgdl = frozen.total_doc_length / corpus_size
+        corpus_size = frozen.n_docs if corpus is None else corpus.n_docs
+        if tokens and frozen.n_docs and corpus_size:
+            avgdl = (frozen.total_doc_length if corpus is None else corpus.total_doc_length) / corpus_size
             for term, query_tf in Counter(tokens).items():
                 term_row = frozen.terms.index_of(term)
                 if term_row is None:
@@ -143,6 +172,8 @@ class BM25:
                 df = int(end - start)
                 if df == 0:
                     continue
+                if corpus is not None:
+                    df += corpus.other_frequency(term)
                 idf = math.log(1 + (corpus_size - df + 0.5) / (df + 0.5))
                 doc_indices = np.asarray(frozen.posting_docs[start:end])
                 tf = np.asarray(frozen.posting_tf[start:end], dtype=np.float64)

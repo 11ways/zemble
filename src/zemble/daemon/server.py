@@ -60,11 +60,13 @@ from zemble.embedding.base import Embedder
 from zemble.graph.facts import matches_facts_glob
 from zemble.index import ZembleIndex
 from zemble.index.chunk_store import ChunkList
-from zemble.index.create import change_set_moves_anything
+from zemble.index.create import change_set_moves_anything, tree_moves_anything
 from zemble.index.files import get_extensions
+from zemble.index.overlay import OverlayIndex, build_overlay, overlay_folder
 from zemble.index.scope import TreeEstimate, estimate_tree, measure_work, require_declared_scope
 from zemble.index.types import PreviousIndex
 from zemble.index_cache import CacheKey, IndexCache, compute_cache_key
+from zemble.lane import Lane, find_lane
 from zemble.refusal import Refused
 from zemble.runtime.identity import identity, status_payload
 from zemble.runtime.memory import release_free_heap
@@ -92,6 +94,11 @@ _IDLE_CHECK_SECONDS = 30.0
 _QUIET_SECONDS = 2.0
 #: The rebuild answer for a root whose watcher saw a change within the quiet window; the watcher runs it later.
 _STILL_CHANGING = "tree still changing"
+#: Hours between two prunes of the caches of roots that are gone; 0 disables the daemon's own pruning.
+PRUNE_HOURS_ENV = "ZEMBLE_DAEMON_PRUNE_HOURS"
+_DEFAULT_PRUNE_HOURS = 6
+#: The first prune waits this long after start, so it never competes with the first requests.
+_PRUNE_FIRST_DELAY_SECONDS = 120.0
 _MAX_CHANGED_PATHS = 4096
 
 
@@ -164,6 +171,17 @@ class ResidentCache(IndexCache):
                 return stored
         return await super()._build_tracked(source, ref, embedder, cache_key, exclude)
 
+    async def _build_overlay_tracked(
+        self, cache_key: CacheKey, lane: Lane, base: ZembleIndex, previous: OverlayIndex | None
+    ) -> OverlayIndex:
+        """Watch the lane before planning it, so an edit made while it is planned is not lost."""
+        self._on_build(cache_key)
+        return await super()._build_overlay_tracked(cache_key, lane, base, previous)
+
+    def _revalidates_overlays(self) -> bool:
+        """A watching daemon re-plans an overlay when its lane or its base moved, never on a query."""
+        return not self.watch_owned
+
     async def _evict_if_stale(self, cache_key: CacheKey) -> None:
         """Leave freshness to the watcher instead of rebuilding a churning tree from a query."""
         if not self.watch_owned:
@@ -234,6 +252,8 @@ def rebuild_index(
         root, changed_paths, content, root, current._manifest, current.exclude
     ):
         return current, {"added": 0, "removed": 0, "changed": 0}
+    if changed_paths is None and not tree_moves_anything(root, content, current._manifest, current.exclude):
+        return current, {"added": 0, "removed": 0, "changed": 0}
     previous = PreviousIndex(
         chunks=current.chunks,
         vectors=current._semantic_index.vectors,
@@ -257,14 +277,19 @@ def rebuild_index(
     gc.collect()
     release_free_heap()
     manifest = written.manifest
-    counts = {
-        "added": len(manifest.keys() - before.keys()),
-        "removed": len(before.keys() - manifest.keys()),
+    counts = manifest_moves(before, manifest)
+    return index, counts
+
+
+def manifest_moves(before: dict[str, Any], after: dict[str, Any]) -> dict[str, int]:
+    """Count the files a new generation added, changed (by modification time) and removed."""
+    return {
+        "added": len(after.keys() - before.keys()),
+        "removed": len(before.keys() - after.keys()),
         "changed": sum(
-            1 for path, entry in manifest.items() if path in before and before[path].mtime_ns != entry.mtime_ns
+            1 for path, entry in after.items() if path in before and before[path].mtime_ns != entry.mtime_ns
         ),
     }
-    return index, counts
 
 
 class Daemon:
@@ -412,11 +437,14 @@ class Daemon:
         The ceiling is the lower of the budget and the data limit, which a running graph construction lowers.
         """
         while private_mb() + reserve_mb > min(self.max_rss_mb, data_limit_mb()):
+            # A base an in-flight lane query reads through is as busy as the lane itself.
+            busy = set(self._query_keys.values())
+            busy |= {base for base in map(self.cache.base_of, busy) if base is not None}
             victim = next(
                 (
                     key
                     for key, _ in self.cache.loaded()
-                    if key != keep and key not in self.rebuilding and key not in self._query_keys.values()
+                    if key != keep and key not in self.rebuilding and key not in busy
                 ),
                 None,
             )
@@ -488,8 +516,13 @@ class Daemon:
         reserve = _BUILD_BASE_MB
         if not is_git_url(path):
             require_declared_scope(Path(path))
+            # A lane loads its base and a small delta: the base's load is the work to reserve for.
+            found = await asyncio.to_thread(
+                find_lane, path, lambda base: self.cache._overlayable(base, content, self.cache.embedder)
+            )
+            measured = str(found[0].base) if found is not None else path
             estimate = await asyncio.to_thread(
-                _load_work, path, content, exclude, self.cache.embedder.model_id, self.cache.loaded_roots(content)
+                _load_work, measured, content, exclude, self.cache.embedder.model_id, self.cache.loaded_roots(content)
             )
             reserve = _work_reserve(estimate)
         if not self._admit(reserve):
@@ -675,7 +708,8 @@ class Daemon:
                 self.rebuilding.add(cache_key)
                 self._rebuild_scope[cache_key] = changed_paths
                 try:
-                    async with self._load_lock:
+                    # A lane overlay's re-plan is a walk and a small delta: it holds no load back.
+                    async with contextlib.nullcontext() if self.cache.base_of(cache_key) else self._load_lock:
                         result = await self._rebuild_once(
                             cache_key, java_changed=java_changed, changed_paths=changed_paths
                         )
@@ -731,6 +765,13 @@ class Daemon:
                 current = next((index for key, index in self.cache.loaded() if key == cache_key), None)
                 if current is None:
                     return {"skipped": "not loaded"}
+                if not Path(cache_key[0]).is_dir():
+                    # A lane or checkout removed from under its watcher: nothing will ever rebuild it.
+                    logger.info("%s is gone; dropping its index", cache_key[0])
+                    self.cache.evict(cache_key)
+                    return {"skipped": "root is gone"}
+                if isinstance(current, OverlayIndex):
+                    return await self._replan_overlay(cache_key, current, started)
                 # AIDEV-NOTE: a rebuild streams its generation to disk, so its private memory is
                 # bounded by what is new, not by the index; RLIMIT_DATA is the backstop if this misses.
                 work = await asyncio.to_thread(
@@ -760,6 +801,9 @@ class Daemon:
                 # The swap is the only step a query could observe, and it is one dict write
                 # on this event loop: an in-flight search keeps answering from the old index.
                 self.cache.replace(cache_key, index, cooldown_seconds=float("inf"))
+                # A lane overlaying this root holds the old generation's rows until it is re-planned.
+                for overlay_key in self.cache.overlays_of(cache_key):
+                    self._note_change(overlay_key, None)
                 if cache_key not in self.cache._tasks:
                     return {"skipped": "evicted during rebuild"}
         finally:
@@ -776,6 +820,37 @@ class Daemon:
             result["ms"],
         )
         index = None
+        self.last_rebuild[cache_key] = result
+        self.last_error.pop(cache_key, None)
+        return result
+
+    async def _replan_overlay(self, cache_key: CacheKey, current: OverlayIndex, started: float) -> dict[str, Any]:
+        """Re-plan a lane overlay on its base's serving generation and swap it in; the caller holds its lock."""
+        base_key = self.cache.base_of(cache_key)
+        base = next((index for key, index in self.cache.loaded() if key == base_key), None)
+        if base is None:
+            self.cache.evict(cache_key)
+            return {"skipped": "base not loaded"}
+        folder = overlay_folder(find_index_from_cache_folder(cache_key[0], cache_key[1]))
+        index = await asyncio.to_thread(build_overlay, current.lane, base, folder, current)
+        counts = manifest_moves(current._manifest, index._manifest)
+        self.cache.replace(cache_key, index, cooldown_seconds=float("inf"))
+        result: dict[str, Any] = {
+            **counts,
+            "ms": round((time.monotonic() - started) * 1000),
+            "chunks": len(index.chunks),
+            "delta_chunks": index.delta_chunks,
+        }
+        logger.info(
+            "re-planned lane %s on %s: %d added, %d changed, %d removed, %d delta chunks in %d ms",
+            cache_key[0],
+            current.lane.base,
+            counts["added"],
+            counts["changed"],
+            counts["removed"],
+            index.delta_chunks,
+            result["ms"],
+        )
         self.last_rebuild[cache_key] = result
         self.last_error.pop(cache_key, None)
         return result
@@ -873,10 +948,13 @@ class Daemon:
                 # AIDEV-NOTE: cold construction waiters own no read permit. A disconnected home
                 # request joins a durable graph job without blocking unrelated warm searches.
                 self.reads.check_room()
+                started = time.monotonic()
                 await self._bounded_prepare(str(command), args, deadline)
+                prepared = time.monotonic()
                 if not self._admit(32):
                     raise self._short_of_memory(32, "This query")
                 result = await self.reads.run(lambda: self._execute_read(handler, args), deadline)
+                _log_timing(str(command), args, prepared - started, time.monotonic() - prepared)
         except TimeoutError:
             return {
                 "id": request_id,
@@ -942,6 +1020,43 @@ class Daemon:
             with contextlib.suppress(OSError):
                 writer.close()
 
+    async def prune_loop(self) -> None:
+        """Drop the cache folders of roots that are gone (removed lanes), at start and every few hours."""
+        hours = _env_int(PRUNE_HOURS_ENV, _DEFAULT_PRUNE_HOURS)
+        if hours <= 0:
+            return
+        await asyncio.sleep(_PRUNE_FIRST_DELAY_SECONDS)
+        while not self.stop_event.is_set():
+            try:
+                await self.prune_gone_roots()
+            except Exception:
+                logger.exception("pruning the cache of roots that are gone failed")
+            await asyncio.sleep(hours * 3600)
+
+    async def prune_gone_roots(self) -> list[str]:
+        """Evict and delete the indexes, overlays and graphs of every root that no longer exists.
+
+        :return: The roots whose caches were removed.
+        """
+        from zemble.cache import resolve_cache_folder
+        from zemble.cache_orphans import ROOT_GONE_KINDS, find_orphans, remove_orphan
+
+        orphans = [
+            orphan
+            for orphan in await asyncio.to_thread(find_orphans, resolve_cache_folder())
+            if orphan.kind in ROOT_GONE_KINDS
+        ]
+        for key in [key for key in self.cache._tasks if not Path(key[0]).exists()]:
+            self.cache.evict(key)
+        removed = []
+        for orphan in orphans:
+            if await asyncio.to_thread(remove_orphan, orphan):
+                removed.append(orphan.detail)
+        if removed:
+            freed = sum(orphan.size for orphan in orphans) / MIB
+            logger.info("pruned the caches of %d root(s) that are gone, %.0f MiB: %s", len(removed), freed, removed)
+        return removed
+
     async def idle_loop(self) -> None:
         """Exit once the daemon has answered nothing for the configured idle window."""
         if self.idle_minutes <= 0:
@@ -997,6 +1112,11 @@ async def _cmd_status(daemon: Daemon, args: dict[str, Any]) -> Any:
                 "rebuilding": cache_key in daemon.rebuilding,
                 "last_rebuild": daemon.last_rebuild.get(cache_key),
                 "last_error": daemon.last_error.get(cache_key),
+                **(
+                    {"overlay_of": index.lane.base.as_posix(), "delta_chunks": index.delta_chunks}
+                    if isinstance(index, OverlayIndex)
+                    else {}
+                ),
             }
         )
     building = [
@@ -1143,6 +1263,23 @@ def _with_graph(root: str, work: Callable[[Any], Any], *, fresh: bool = False) -
         return work(provider)
     finally:
         provider.close()
+
+
+#: A request slower than this is logged at INFO with where its time went; faster ones at DEBUG.
+_SLOW_REQUEST_SECONDS = 1.0
+
+
+def _log_timing(command: str, args: dict[str, Any], prepare: float, run: float) -> None:
+    """Log where one answered request spent its time: waiting for its index or graph, then queueing and computing."""
+    level = logging.INFO if prepare + run >= _SLOW_REQUEST_SECONDS else logging.DEBUG
+    logger.log(
+        level,
+        "request %s %s: index/graph wait %d ms, queue+compute %d ms",
+        command,
+        args.get("path"),
+        round(prepare * 1000),
+        round(run * 1000),
+    )
 
 
 def _root_of(args: dict[str, Any]) -> str:
@@ -1385,12 +1522,14 @@ async def run(max_indexes: int | None = None, idle_minutes: int | None = None, w
     )
     idle_task = asyncio.create_task(daemon.idle_loop())
     prewarm = asyncio.create_task(daemon.cache.load_embedder_once())
+    prune_task = asyncio.create_task(daemon.prune_loop())
     try:
         async with server:
             await daemon.stop_event.wait()
     finally:
         idle_task.cancel()
         prewarm.cancel()
+        prune_task.cancel()
         daemon.shutdown()
         await daemon.graphs.close()
         await daemon.reads.drain()

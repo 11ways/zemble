@@ -197,15 +197,7 @@ def _status(as_json: bool) -> int:
         f"memory_limit {status.get('max_rss_mb', 'not reported')} MiB  idle_limit {status['idle_minutes_limit']}m"
     )
     for entry in status["indexes"]:
-        flags = []
-        if entry["watching"]:
-            flags.append("watching")
-        if entry["rebuilding"]:
-            flags.append("rebuilding")
-        print(
-            f"  {entry['root']} [{','.join(entry['content'])}] {entry['chunks']} chunks, "
-            f"{entry['files']} files, {entry['embedder']}{'  (' + ', '.join(flags) + ')' if flags else ''}"
-        )
+        print(_index_line(entry))
         if entry.get("last_error"):
             print(f"    rebuild refused: {entry['last_error']['refused']}")
     for entry in status["building"]:
@@ -213,6 +205,17 @@ def _status(as_json: bool) -> int:
     for root in status["pending_reindex"]:
         print(f"  {root} pending reindex")
     return 0
+
+
+def _index_line(entry: dict) -> str:
+    """Render one resident index of a status answer as one line."""
+    flags = [flag for flag in ("watching", "rebuilding") if entry[flag]]
+    if entry.get("overlay_of"):
+        flags.append(f"lane of {entry['overlay_of']}, {entry['delta_chunks']} delta chunks")
+    return (
+        f"  {entry['root']} [{','.join(entry['content'])}] {entry['chunks']} chunks, "
+        f"{entry['files']} files, {entry['embedder']}{'  (' + ', '.join(flags) + ')' if flags else ''}"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

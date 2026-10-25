@@ -26,6 +26,8 @@ from zemble.daemon.protocol import (
     CONNECT_TIMEOUT_SECONDS,
     CONSTRUCTION_WAIT_SECONDS,
     DEADLINE_FIELD,
+    DEFAULT_QUERY_WAIT_SECONDS,
+    QUERY_WAIT_ENV,
     REVISION_FIELD,
     START_TIMEOUT_SECONDS,
     CommandBusy,
@@ -35,6 +37,7 @@ from zemble.daemon.protocol import (
     DaemonDisabled,
     DaemonUnavailable,
     ErrorKind,
+    QueryTimedOut,
     decode,
     encode,
     error_kind,
@@ -314,20 +317,24 @@ def call(
 def answer(cmd: str, args: dict[str, Any] | None = None) -> Any:
     """Send one command until the daemon answers it.
 
-    AIDEV-NOTE: zemble never fails a query. Busy is waited out however long it lasts; an
-    unreachable daemon is started again; only what the daemon cannot do at all - a read it
-    outgrew, a daemon that will not come up, one that keeps failing the request, or a daemon
-    this process may not use - becomes AnswerHere, and the caller answers in its own process.
-    A refusal (scope, work ceiling, spending budget) is still raised: it is the answer.
+    AIDEV-NOTE: zemble never fails a query for a reason another try fixes. Busy is waited out for
+    up to `ZEMBLE_QUERY_WAIT_SECONDS` in all (a query used to wait 30+ minutes behind constructions),
+    then reported as `QueryTimedOut`; an unreachable daemon is started again; only what the daemon
+    cannot do at all - a read it outgrew, a daemon that will not come up, one that keeps failing the
+    request, or a daemon this process may not use - becomes AnswerHere, and the caller answers in
+    its own process. A refusal (scope, work ceiling, spending budget) is still raised: it is the answer.
 
     :raises CommandRefused: When the daemon refused the command on purpose.
     :raises AnswerHere: When only this process can answer the request.
     """
     delay = RETRY_FIRST_SECONDS
     tries = {DaemonUnavailable: 0, CommandFailed: 0}
+    budget = query_wait_seconds()
+    deadline = time.monotonic() + budget
     while True:
+        remaining = deadline - time.monotonic()
         try:
-            result = call(cmd, args)
+            result = call(cmd, args, timeout=max(remaining, 1.0))
             if result is not None:
                 return result
             raise CommandFailed("daemon returned no result")
@@ -336,11 +343,28 @@ def answer(cmd: str, args: dict[str, Any] | None = None) -> Any:
         except (DaemonDisabled, CommandOutgrown) as exc:
             raise AnswerHere(str(exc)) from exc
         except CommandBusy as exc:
+            if time.monotonic() + delay >= deadline:
+                raise QueryTimedOut(
+                    f"zemble {cmd}: the daemon is still busy after {budget:.0f} s ({exc}). Its work goes on; "
+                    f"ask again shortly, `zemble daemon status` shows what it is doing, and {QUERY_WAIT_ENV} "
+                    "sets how long a query waits."
+                ) from exc
             logger.info("daemon busy with %s, asking again in %.2f s: %s", cmd, delay, exc)
         except (DaemonUnavailable, CommandFailed) as exc:
             _count_try(tries, exc, cmd)
         time.sleep(delay)
         delay = min(delay * 2, RETRY_LONGEST_SECONDS)
+
+
+def query_wait_seconds() -> float:
+    """Return how long one query may wait for the daemon in all, from `ZEMBLE_QUERY_WAIT_SECONDS`."""
+    raw = os.environ.get(QUERY_WAIT_ENV)
+    try:
+        value = float(raw) if raw else DEFAULT_QUERY_WAIT_SECONDS
+    except ValueError:
+        logger.warning("Ignoring %s=%r: not a number of seconds", QUERY_WAIT_ENV, raw)
+        value = DEFAULT_QUERY_WAIT_SECONDS
+    return value if value > 0 else DEFAULT_QUERY_WAIT_SECONDS
 
 
 def _count_try(tries: dict[type, int], error: DaemonUnavailable | CommandFailed, cmd: str) -> None:

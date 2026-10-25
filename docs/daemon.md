@@ -295,6 +295,16 @@ the last float digits (cosine 0.9996 at worst) when the two were bought separate
 btrfs the borrowed vector rows share the sibling's blocks once its matrix is in the
 block-aligned layout any rebuild writes.
 
+### Lanes: worktrees of an indexed workspace
+
+A lane is a folder whose checkouts are linked worktrees (`git worktree add`) of an indexed
+workspace's checkouts at the same relative paths; the lane root itself need not be a
+repository. It is answered as an overlay of the base's index, never indexed again; see
+`docs/lanes.md`. An overlay takes no `ZEMBLE_DAEMON_MAX_INDEXES` slot, costs its delta in
+memory, is re-planned when its lane or its base moves, and is evicted with its base. A lane's
+first symbol graph is a copy of its base's with only the lane's edits extracted; until it is
+published, the base's graph answers for the lane.
+
 ### On demand, and only on demand
 
 The daemon is started by a zemble command that needs it, never at login, never by a
@@ -330,6 +340,8 @@ output can end up in a backup.
 | `ZEMBLE_DAEMON_QUEUE_LIMIT` | 32 | Waiting-room capacity; excess requests receive retry information. |
 | `ZEMBLE_DAEMON_IDLE_MINUTES` | 30 | Idle shutdown delay; `0` never exits. |
 | `ZEMBLE_DAEMON_DIR` / `ZEMBLE_DAEMON_SOCKET` | unset | Move the runtime directory or the socket itself (tests use this). |
+| `ZEMBLE_QUERY_WAIT_SECONDS` | 180 | How long one query waits for a busy daemon in all, before it reports the wait. |
+| `ZEMBLE_DAEMON_PRUNE_HOURS` | 6 | Hours between the daemon's own prunes of the caches of roots that are gone (first one 2 min after start); `0` disables. |
 
 A socket with a dead owner is detected (connect fails, pidfile pid is gone) and
 removed before a new daemon starts; a pidfile owned by a live process is left alone,
@@ -353,11 +365,12 @@ request only. A deliberate refusal is still the answer, never retried or answere
   go through the client by default, as do their MCP tools.
 - If the socket is absent or dead, the client spawns `python -m zemble.daemon run`
   detached (new session, stdio to the log) and waits up to 10 s for it to answer.
-- **Busy is waited out.** A full waiting room, an expired request deadline, memory that
-  running work holds (`MemoryBusy`) or a graph construction still pending answer `busy`
-  with `retry_after_ms`, and the client asks again, from 0.25 s doubling to 5 s between
-  tries, for as long as it takes. Shared cold construction continues meanwhile, so the next
-  try joins it.
+- **Busy is waited out, within a bound.** A full waiting room, an expired request deadline,
+  memory that running work holds (`MemoryBusy`) or a graph construction still pending answer
+  `busy` with `retry_after_ms`, and the client asks again, from 0.25 s doubling to 5 s between
+  tries, for up to `ZEMBLE_QUERY_WAIT_SECONDS` (180 s) in all; then it reports `QueryTimedOut`
+  naming what the daemon was busy with. Shared cold construction continues meanwhile, so the
+  next query joins it.
 - **What the daemon cannot answer is answered here.** A read the daemon outgrew
   (`outgrown`), a daemon still unreachable after three tries (startup failure, disconnect,
   timeout), a command that fails twice, a malformed reply, and a process that may not use a

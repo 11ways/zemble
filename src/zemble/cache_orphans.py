@@ -16,6 +16,7 @@ from zemble.cache import (
     cache_key,
     covered_variants,
     index_component_files,
+    marked_root,
     remove_index_components,
     stored_variants,
 )
@@ -71,6 +72,12 @@ class OrphanKind(str, Enum):
     INDEX_COVERED = ("index-covered", "index a wider index of the same root covers")
     INDEX_UNDER_ANCESTOR = ("index-under-ancestor", "sub-root index an ancestor's index answers for")
     GRAPH_UNDER_ANCESTOR = ("graph-under-ancestor", "sub-root graph an ancestor's graph answers for")
+    NAMED_ROOT_GONE = ("named-root-gone", "cache folder whose root is gone")
+    UNNAMED_STALE = ("unnamed-stale", "cache folder naming no root, unwritten past --max-age-days")
+
+
+#: The kinds whose root no longer exists: what a daemon prunes on its own, on start and periodically.
+ROOT_GONE_KINDS = frozenset({OrphanKind.INDEX_ROOT_GONE, OrphanKind.GRAPH_ROOT_GONE, OrphanKind.NAMED_ROOT_GONE})
 
 
 @dataclass
@@ -95,10 +102,11 @@ def find_orphans(cache_folder: Path, *, max_age_days: int = DEFAULT_MAX_AGE_DAYS
     oldest = now - max_age_days * _SECONDS_PER_DAY
     orphans: list[Orphan] = []
     doomed: set[Path] = set()
+    logged = logged_roots(cache_folder) if cache_folder.is_dir() else {}
     for entry in sorted(cache_folder.iterdir()) if cache_folder.is_dir() else []:
         if not (entry.is_dir() and KEY_DIR_NAME.match(entry.name)):
             continue
-        orphan = _key_dir_orphan(entry, oldest)
+        orphan = _key_dir_orphan(entry, oldest, logged)
         if orphan is not None:
             orphans.append(orphan)
             doomed.add(entry)
@@ -125,6 +133,8 @@ def remove_orphan(orphan: Orphan) -> bool:
         case (
             OrphanKind.INDEX_ROOT_GONE
             | OrphanKind.GRAPH_ROOT_GONE
+            | OrphanKind.NAMED_ROOT_GONE
+            | OrphanKind.UNNAMED_STALE
             | OrphanKind.GIT_URL_STALE
             | OrphanKind.STAGING_LEFTOVER
         ):
@@ -202,10 +212,10 @@ def _under_ancestor(entry: Path, covered: set[Path]) -> list[Orphan]:
     return orphans
 
 
-def _key_dir_orphan(entry: Path, oldest: float) -> Orphan | None:
-    """Classify one key folder: by its indexes' metadata when it has any, else by its graph."""
+def _key_dir_orphan(entry: Path, oldest: float, logged: dict[str, str]) -> Orphan | None:
+    """Classify one key folder: by its indexes' metadata when it has any, else by its graph or root marker."""
     metadata = _index_metadata(entry)
-    return _index_orphan(entry, metadata, oldest) if metadata else _graph_orphan(entry)
+    return _index_orphan(entry, metadata, oldest) if metadata else _graph_orphan(entry, logged, oldest)
 
 
 def _index_orphan(entry: Path, metadata: list[dict], oldest: float) -> Orphan | None:
@@ -237,21 +247,54 @@ def _index_orphan(entry: Path, metadata: list[dict], oldest: float) -> Orphan | 
     return None
 
 
-def _graph_orphan(entry: Path) -> Orphan | None:
-    """Return the orphan a graph-only key folder is once the root its graph names is gone, else None."""
+def _graph_orphan(entry: Path, logged: dict[str, str], oldest: float) -> Orphan | None:
+    """Return the orphan a key folder without index metadata is once the root naming it is gone, else None.
+
+    Its graph names its root; else its root marker does; else the root the daemon logs served whose key
+    it is - the dupes caches of roots that existed before markers did.
+    """
     graph = entry / "index"
-    if not graph.is_dir():
+    root = graph_root_of(graph) if graph.is_dir() else None
+    if root is not None:
+        if cache_key(root) != entry.name or Path(root).exists():
+            return None
+        return Orphan(OrphanKind.GRAPH_ROOT_GONE, entry, _tree_size(entry), detail=root)
+    named = marked_root(entry) or logged.get(entry.name)
+    if named is None:
+        # Nothing names its root, so nothing can tell whether the root still exists: it goes by age.
+        if not (entry / "index").is_dir() and _newest_write(entry) < oldest:
+            return Orphan(OrphanKind.UNNAMED_STALE, entry, _tree_size(entry))
         return None
-    root = graph_root_of(graph)
-    if root is None or cache_key(root) != entry.name or Path(root).exists():
+    if cache_key(named) != entry.name or Path(named).exists():
         return None
-    return Orphan(OrphanKind.GRAPH_ROOT_GONE, entry, _tree_size(entry), detail=root)
+    return Orphan(OrphanKind.NAMED_ROOT_GONE, entry, _tree_size(entry), detail=named)
+
+
+#: An absolute path as the daemon log writes one: a root it served, watched or rebuilt.
+_LOGGED_PATH = re.compile(r"(?<![\w/])(/[^\s:'\"(),]+)")
+
+
+def logged_roots(cache_folder: Path) -> dict[str, str]:
+    """Map the cache key of every absolute path the daemon logs name to that path.
+
+    The logs are zemble's own record of the roots it served; a key folder nothing else names is
+    recognised by its key appearing here.
+    """
+    found: dict[str, str] = {}
+    for log in sorted(cache_folder.glob("daemon.log*")):
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for path in set(_LOGGED_PATH.findall(text)):
+            found.setdefault(cache_key(path.rstrip(".")), path.rstrip("."))
+    return found
 
 
 def _index_metadata(entry: Path) -> list[dict]:
-    """Return the readable metadata documents of a key folder's index folders; unreadable ones are skipped."""
+    """Return the readable metadata of a key folder's index and overlay folders; unreadable ones are skipped."""
     documents = []
-    for folder in sorted(entry.glob("index*")):
+    for folder in sorted([*entry.glob("index*"), *entry.glob("overlay*")]):
         try:
             document = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -327,6 +370,18 @@ def _size(path: Path) -> int:
         return 0
 
 
+def _newest_write(folder: Path) -> float:
+    """Return when anything under a folder was last written, the folder's own time when it is empty."""
+    newest = folder.stat().st_mtime
+    for directory, _subdirectories, names in os.walk(folder):
+        for name in names:
+            try:
+                newest = max(newest, (Path(directory) / name).stat().st_mtime)
+            except FileNotFoundError:
+                continue
+    return newest
+
+
 def _tree_size(folder: Path) -> int:
     """Return the bytes every file under a folder takes."""
     total = 0
@@ -335,4 +390,12 @@ def _tree_size(folder: Path) -> int:
     return total
 
 
-__all__ = ["DEFAULT_MAX_AGE_DAYS", "Orphan", "OrphanKind", "find_orphans", "remove_orphan"]
+__all__ = [
+    "DEFAULT_MAX_AGE_DAYS",
+    "ROOT_GONE_KINDS",
+    "Orphan",
+    "OrphanKind",
+    "find_orphans",
+    "logged_roots",
+    "remove_orphan",
+]

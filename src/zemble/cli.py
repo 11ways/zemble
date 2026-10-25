@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import warnings
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from enum import Enum
 from importlib.util import find_spec
 from pathlib import Path
@@ -12,12 +12,22 @@ from shutil import rmtree
 from typing import Any, Literal, get_args
 
 from zemble.cache import (
+    cached_index_compatible,
+    covering_content,
+    find_index_from_cache_folder,
     has_cached_index,
     indexed_ancestor_hint,
     resolve_cache_folder,
     resolve_index_root,
 )
-from zemble.cache_orphans import DEFAULT_MAX_AGE_DAYS, KEY_DIR_NAME, OrphanKind, find_orphans, remove_orphan
+from zemble.cache_orphans import (
+    DEFAULT_MAX_AGE_DAYS,
+    KEY_DIR_NAME,
+    ROOT_GONE_KINDS,
+    OrphanKind,
+    find_orphans,
+    remove_orphan,
+)
 from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser, run_embed_status
@@ -30,9 +40,11 @@ from zemble.graph.cli import add_graph_parser, run_graph
 from zemble.health.cli import HEALTH_COMMANDS, add_health_parser, run_health
 from zemble.home.cli import HOME_COMMANDS, add_home_parser, run_home
 from zemble.index import ZembleIndex, resolve_embedder
+from zemble.index.overlay import build_overlay, overlay_folder
 from zemble.index.scope import megabytes
 from zemble.index.types import PersistencePath
 from zemble.installer.agents import AGENTS, IntegrationType
+from zemble.lane import find_lane
 from zemble.refusal import Refused
 from zemble.rerank.registry import RerankerSpecError, load_reranker
 from zemble.runtime.cli import STATUS_COMMANDS, add_status_parser, run_status
@@ -54,7 +66,7 @@ def _cli_dispatch_args(parser: argparse.ArgumentParser) -> frozenset[str]:
     return frozenset(commands | set(parser._option_string_actions))
 
 
-_CLEAR_CHOICE = Literal["all", "index", "savings", "orphans", "embeddings"]
+_CLEAR_CHOICE = Literal["all", "index", "savings", "orphans", "gone", "embeddings"]
 
 #: Subcommands that own their own runner and return an exit code.
 _SUBCOMMAND_RUNNERS = {
@@ -88,7 +100,11 @@ def _build_index(
     """
     if is_git_url(path):
         return ZembleIndex.from_git(path, content=content, embedder=embedder)
-    root, prefix = resolve_index_root(path, resolve_embedder(embedder).model_id, content)
+    model_id = resolve_embedder(embedder).model_id
+    lane = _lane_overlay(path, content, embedder, model_id)
+    if lane is not None:
+        return lane
+    root, prefix = resolve_index_root(path, model_id, content)
     pruned = () if has_cached_index(root, content) else tuple(exclude)
     index = ZembleIndex.from_path(root, content=content, embedder=embedder, exclude=pruned)
     if prefix is None:
@@ -98,6 +114,22 @@ def _build_index(
         return view
     print(f"the {root} index holds nothing under {path}; indexing it on its own", file=sys.stderr)
     return ZembleIndex.from_path(path, content=content, embedder=embedder, exclude=tuple(exclude))
+
+
+def _lane_overlay(path: str, content: list[ContentType], embedder: str | None, model_id: str) -> ZembleIndex | None:
+    """Answer a path inside a lane from its base's index plus the lane's delta, or None outside every lane."""
+    found = find_lane(path, lambda base: cached_index_compatible(base, model_id, content))
+    if found is None:
+        return None
+    lane, prefix = found
+    stored = covering_content(str(lane.base), model_id, content, None, ())
+    base = ZembleIndex.from_path(lane.base, content=stored, embedder=embedder)
+    overlay = build_overlay(lane, base, overlay_folder(find_index_from_cache_folder(str(lane.root), stored)))
+    view = overlay if prefix is None else overlay.subtree(prefix)
+    narrowed = view.for_content(content) if view is not None else None
+    if narrowed is None:
+        raise ValueError(f"No indexed file under {path}")
+    return narrowed
 
 
 def _add_embedder_arg(p: argparse.ArgumentParser) -> None:
@@ -552,9 +584,15 @@ def _clear_savings(cache_folder: Path) -> None:
         print(f"Cleared savings at `{path}`")
 
 
-def _clear_orphans(cache_folder: Path, *, dry_run: bool, max_age_days: int) -> None:
-    """Remove (or with dry_run list) every cache entry nothing will read again, with its size."""
-    orphans = find_orphans(cache_folder, max_age_days=max_age_days)
+def _clear_orphans(
+    cache_folder: Path, *, dry_run: bool, max_age_days: int, kinds: Collection[OrphanKind] | None = None
+) -> None:
+    """Remove (or with dry_run list) every cache entry nothing will read again, or only those of *kinds*, with its size."""
+    orphans = [
+        orphan
+        for orphan in find_orphans(cache_folder, max_age_days=max_age_days)
+        if kinds is None or orphan.kind in kinds
+    ]
     if not orphans:
         print("No orphaned indexes found")
         return
@@ -617,14 +655,16 @@ def _run_clear(
 ) -> None:
     """Run the `clear` subcommand."""
     cache_folder = resolve_cache_folder()
-    if dry_run and clear_type not in ("orphans", "embeddings"):
-        raise SystemExit("--dry-run applies to `clear orphans` and `clear embeddings` only")
+    if dry_run and clear_type not in ("orphans", "gone", "embeddings"):
+        raise SystemExit("--dry-run applies to `clear orphans`, `clear gone` and `clear embeddings` only")
     if clear_type == "index" or clear_type == "all":
         _clear_indexes(cache_folder)
     if clear_type == "savings" or clear_type == "all":
         _clear_savings(cache_folder)
     if clear_type == "orphans":
         _clear_orphans(cache_folder, dry_run=dry_run, max_age_days=max_age_days)
+    if clear_type == "gone":
+        _clear_orphans(cache_folder, dry_run=dry_run, max_age_days=max_age_days, kinds=ROOT_GONE_KINDS)
     if clear_type == "embeddings":
         _clear_embeddings(cache_folder, dry_run=dry_run, grace_days=grace_days)
 
@@ -681,8 +721,9 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=list(get_args(_CLEAR_CHOICE)),
         help=(
             "Type of cache to clear. `orphans` removes entries nothing reads again (roots gone, stale git-URL "
-            "indexes, unused embedder files, retired graph versions, temp leftovers); `embeddings` sweeps "
-            "vectors no index references and VACUUMs."
+            "indexes, unused embedder files, retired graph versions, temp leftovers); `gone` only the caches of "
+            "roots that no longer exist (removed lanes), which the daemon prunes itself every few hours; "
+            "`embeddings` sweeps vectors no index references and VACUUMs."
         ),
     )
     clear_p.add_argument(

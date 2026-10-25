@@ -52,7 +52,7 @@ class PlannedFile:
     count: int
 
 
-def _reused_file(indexed_path: str, previous_entry: FileManifestEntry, mtime_ns: int | None = None) -> PlannedFile:
+def reused_file(indexed_path: str, previous_entry: FileManifestEntry, mtime_ns: int | None = None) -> PlannedFile:
     """Plan a file whose content did not move: its chunks stay in the previous stores.
 
     :param mtime_ns: The file's own modification time, when the previous stores are a sibling
@@ -139,7 +139,7 @@ def plan_files(
                     walked.path, indexed_path, sibling_root, previous_entry, repo_paths, sibling_paths
                 )
             ):
-                planned = _reused_file(indexed_path, previous_entry, mtime_ns)
+                planned = reused_file(indexed_path, previous_entry, mtime_ns)
             else:
                 file_chunks = chunk_source(
                     read_file_text(walked.path),
@@ -191,14 +191,14 @@ def plan_changed_files(
     for indexed_path, previous_entry in manifest.items():
         candidate = touched.pop(indexed_path, None)
         if candidate is None:
-            yield _reused_file(indexed_path, previous_entry)
+            yield reused_file(indexed_path, previous_entry)
             continue
-        planned = _plan_one(candidate, indexed_path, previous_entry, resolved_capsules, repo_paths)
+        planned = plan_file(candidate, indexed_path, previous_entry, resolved_capsules, repo_paths)
         if planned is not None:
             yield planned
 
     for indexed_path in sorted(touched):
-        planned = _plan_one(touched[indexed_path], indexed_path, None, resolved_capsules, repo_paths)
+        planned = plan_file(touched[indexed_path], indexed_path, None, resolved_capsules, repo_paths)
         if planned is not None:
             yield planned
 
@@ -236,7 +236,32 @@ def change_set_moves_anything(
     return False
 
 
-def _plan_one(
+def tree_moves_anything(
+    path: Path,
+    content: Sequence[ContentType],
+    previous_manifest: dict[str, FileManifestEntry],
+    exclude: Sequence[str] = (),
+) -> bool:
+    """Return whether a walking rebuild of *path* would plan anything but reuse: a new, edited or vanished file.
+
+    A full rescan (a watcher's first pass, a coalesced overflow) on a tree at rest otherwise writes a
+    whole generation identical to the one serving - ten seconds on a 250k-chunk lane, for nothing.
+    """
+    seen = 0
+    for walked in walk_entries(path, get_extensions(content), ignore=list(exclude)):
+        try:
+            if get_file_status(walked.path, None, walked.stat) != FileStatus.VALID:
+                continue
+        except OSError:
+            continue
+        entry = previous_manifest.get(walked.relative_path)
+        if entry is None or entry.mtime_ns != walked.stat.st_mtime_ns:
+            return True
+        seen += 1
+    return seen != len(previous_manifest)
+
+
+def plan_file(
     file_path: Path,
     indexed_path: str,
     previous_entry: FileManifestEntry | None,
@@ -250,7 +275,7 @@ def _plan_one(
             return None
         mtime_ns = stat.st_mtime_ns
         if previous_entry is not None and previous_entry.mtime_ns == mtime_ns:
-            return _reused_file(indexed_path, previous_entry)
+            return reused_file(indexed_path, previous_entry)
         file_chunks = chunk_source(
             read_file_text(file_path),
             indexed_path,
@@ -500,6 +525,27 @@ def write_index(
             sibling_root=sibling_root,
         )
     )
+    return write_planned(plan, embedder, target, previous=previous, capsules=resolved_capsules, source=path)
+
+
+def write_planned(
+    plan: Iterable[PlannedFile],
+    embedder: Embedder,
+    target: Path,
+    *,
+    previous: PreviousIndex | None,
+    capsules: CapsuleOptions,
+    source: Path,
+) -> WrittenIndex:
+    """Write the stores of one generation from an already made plan, streaming as `write_index` does.
+
+    The caller has run the scope guards; the bill guard runs here, before any vector is bought.
+
+    :param plan: The files in row order, reused ones naming their rows in *previous*.
+    :param source: The tree the plan describes, named in the error for an empty plan.
+    :raises ValueError: If the plan holds no chunk.
+    """
+    resolved_capsules = capsules
     stores = PersistencePath.from_path(target)
     chunk_writer = ChunkStoreWriter(stores.chunks)
     bm25_writer = BM25Writer(stores.bm25_index, previous.bm25_index if previous is not None else None)
@@ -543,7 +589,7 @@ def write_index(
     copy_reused()
     chunk_writer.finish()
     if not row:
-        raise ValueError(f"No supported files found under {path}.")
+        raise ValueError(f"No supported files found under {source}.")
     bm25_writer.finish()
     symbol_writer.finish()
     embedded = _write_vectors(

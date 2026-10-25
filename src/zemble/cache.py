@@ -119,6 +119,28 @@ def clear_cache(path: str) -> None:
     shutil.rmtree(find_index_from_cache_folder(path).parent, ignore_errors=True)
 
 
+#: The file a key folder names its root in, for stores whose own files do not (the dupes caches).
+ROOT_MARKER = "root"
+
+
+def mark_root(folder: Path, root: str) -> None:
+    """Record which root a key folder belongs to, once, so a prune can tell when that root is gone."""
+    marker = folder / ROOT_MARKER
+    if not marker.exists():
+        try:
+            marker.write_text(root, encoding="utf-8")
+        except OSError:
+            logger.debug("could not mark %s as the cache of %s", folder, root, exc_info=True)
+
+
+def marked_root(folder: Path) -> str | None:
+    """Return the root a key folder's marker names, or None when it has none."""
+    try:
+        return (folder / ROOT_MARKER).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[ContentType], capsule_key: str) -> bool:
     """Return True if the stored metadata is compatible with the requested parameters.
 

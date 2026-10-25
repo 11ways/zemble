@@ -34,6 +34,9 @@ ANSWER_GRACE_SECONDS = 5.0
 #: The request field carrying the caller's deadline; a request without one gets the legacy default.
 DEADLINE_FIELD = "deadline_ms"
 ACCEPTS_BUSY_FIELD = "accepts_busy"
+#: How long `client.answer` waits in all, busy retries included, before it reports the wait instead.
+QUERY_WAIT_ENV = "ZEMBLE_QUERY_WAIT_SECONDS"
+DEFAULT_QUERY_WAIT_SECONDS = 180.0
 
 
 class ErrorKind(StrEnum):
@@ -92,6 +95,14 @@ class CommandBusy(CommandFailed):
 
 class CommandOutgrown(CommandFailed):
     """The daemon could not hold the read in its own process; the caller may read the stored data itself."""
+
+
+class QueryTimedOut(CommandRefused):
+    """The daemon stayed busy past the caller's whole wait (`ZEMBLE_QUERY_WAIT_SECONDS`); its work goes on.
+
+    A refusal in shape only: the caller surfaces it instead of answering in-process, because the
+    process that would answer has to wait for the very construction the daemon is doing.
+    """
 
 
 def failure_message(error: DaemonError) -> str:

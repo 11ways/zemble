@@ -14,6 +14,7 @@ import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import replace
 from itertools import chain
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from zemble.graph.facts import TREE_SITTER_SOURCE
@@ -286,6 +287,8 @@ class SqliteGraphProvider:
                 f"the symbol graph of {path} is format {stored}, this zemble reads format {GRAPH_FORMAT_VERSION}"
             )
         self.traversal_truncated = False
+        #: The folder absolute paths are spelled under when it is not `path`: a lane read through its base's graph.
+        self.display_root: str | None = None
 
     def close(self) -> None:
         """Close the underlying database connection."""
@@ -713,7 +716,7 @@ class SqliteGraphProvider:
 
     def source_files(self) -> list[tuple[str, bool]]:
         """Return the absolute path of every file the graph was built from, and its test-ness, sorted."""
-        root = os.path.realpath(self.path)
+        root = os.path.realpath(self.display_root or self.path)
         rows = self.connection.execute(f"SELECT f.path, {_FILE_IS_TEST} AS is_test FROM files f ORDER BY f.path")  # noqa: S608
         return [(os.path.join(root, row["path"]), _file_is_test(row)) for row in rows]
 
@@ -1024,4 +1027,10 @@ def open_provider(path: str) -> AnyProvider:
     """
     root, prefix = resolve_graph_root(path)
     graph = SqliteGraphProvider(root)
+    if not Path(path).resolve().is_relative_to(Path(root).resolve()):
+        # A lane answered from its base's graph: absolute paths name the lane's files.
+        lane_root = Path(path).resolve()
+        for _ in Path(prefix).parts if prefix else ():
+            lane_root = lane_root.parent
+        graph.display_root = str(lane_root)
     return graph if prefix is None else SubtreeGraphProvider(graph, prefix, path)

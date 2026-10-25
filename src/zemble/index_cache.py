@@ -14,8 +14,10 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from zemble.cache import (
+    cached_index_compatible,
     covering_content,
     exclude_digest,
+    find_index_from_cache_folder,
     get_validated_cache,
     has_cached_index,
     indexed_ancestor_hint,
@@ -25,6 +27,8 @@ from zemble.embedding.base import Embedder
 from zemble.embedding.pricing import EmbeddingBudgetExceeded
 from zemble.embedding.registry import load_embedder
 from zemble.index import ZembleIndex
+from zemble.index.overlay import OverlayIndex, build_overlay, overlay_folder
+from zemble.lane import Lane, find_lane
 from zemble.runtime.memory import release_free_heap
 from zemble.types import ContentType
 from zemble.utils import is_git_url
@@ -88,6 +92,8 @@ class IndexCache:
         self._max_size = max_size
         self._on_evict = on_evict
         self.last_used: dict[CacheKey, float] = {}
+        #: Each resident lane overlay's key -> the key of the base index it overlays.
+        self._lane_bases: dict[CacheKey, CacheKey] = {}
 
     @property
     def embedder(self) -> Embedder | None:
@@ -168,15 +174,30 @@ class IndexCache:
         return index
 
     def evict(self, cache_key: CacheKey) -> None:
-        """Evict one exact index variant from memory."""
+        """Evict one exact index variant from memory, and every lane overlay built on it."""
         existed = self._tasks.pop(cache_key, None) is not None
         self._revalidate_after.pop(cache_key, None)
         self.last_used.pop(cache_key, None)
         self._exclude_by_key.pop(cache_key, None)
+        self._lane_bases.pop(cache_key, None)
         if existed and self._on_evict is not None:
             self._on_evict(cache_key)
+        for overlay in self.overlays_of(cache_key):
+            self.evict(overlay)
         if existed:
             release_free_heap()
+
+    def overlays_of(self, base_key: CacheKey) -> list[CacheKey]:
+        """Return the keys of the resident lane overlays built on a base key."""
+        return [key for key, base in self._lane_bases.items() if base == base_key]
+
+    def base_of(self, cache_key: CacheKey) -> CacheKey | None:
+        """Return the base key a lane overlay's key overlays, or None for an index of its own."""
+        return self._lane_bases.get(cache_key)
+
+    def _full_keys(self) -> list[CacheKey]:
+        """Return the keys of indexes of their own, oldest use first; overlays cost their delta, not a slot."""
+        return [key for key in self._tasks if key not in self._lane_bases]
 
     def loaded(self) -> list[tuple[CacheKey, ZembleIndex]]:
         """Return every key whose index is built and available right now, oldest use first."""
@@ -209,9 +230,12 @@ class IndexCache:
         """Evict a cached local-path entry whose on-disk cache no longer matches its files.
 
         Skipped while inside the cooldown window so repos that are slow to build aren't
-        rebuilt faster than they can be served.
+        rebuilt faster than they can be served. A lane overlay has no index of its own to check:
+        `_get_overlay` revalidates it.
         """
         cached = self._tasks.get(cache_key)
+        if cache_key in self._lane_bases:
+            return
         if (
             cached is None
             or is_git_url(cache_key[0])
@@ -271,6 +295,15 @@ class IndexCache:
         """
         embedder = await self._await_model()
         build_exclude = self._build_exclude(source, content, exclude)
+        if not is_git_url(source):
+            found = await asyncio.to_thread(find_lane, source, lambda base: self._overlayable(base, content, embedder))
+            if found is not None:
+                lane, lane_prefix = found
+                cache_key, overlay = await self._get_overlay(lane, ref, content)
+                view = overlay if lane_prefix is None else overlay.subtree(lane_prefix)
+                if view is None:
+                    raise ValueError(f"No indexed file under {source}")
+                return cache_key, _narrowed(view, content, cache_key)
         root, prefix = await asyncio.to_thread(
             resolve_index_root, source, embedder.model_id, content, None, self.loaded_roots(content)
         )
@@ -328,8 +361,8 @@ class IndexCache:
             embedder = await self._await_model()
             # Re-check after the await: another caller may have populated the entry.
             if cache_key not in self._tasks:
-                if len(self._tasks) >= self._max_size:
-                    self.evict(next(iter(self._tasks)))
+                for victim in self._full_keys()[: max(0, len(self._full_keys()) - self._max_size + 1)]:
+                    self.evict(victim)
                 self._tasks[cache_key] = asyncio.create_task(
                     self._build_tracked(source, ref, embedder, cache_key, exclude)
                 )
@@ -347,3 +380,59 @@ class IndexCache:
             if self._tasks.get(cache_key) is task:
                 self.evict(cache_key)
             raise
+
+    def _overlayable(self, base: str, content: Sequence[ContentType], embedder: Embedder) -> bool:
+        """Return whether a folder holds an index a lane overlay could be built on."""
+        return base in self.loaded_roots(content) or cached_index_compatible(base, embedder.model_id, content)
+
+    def _revalidates_overlays(self) -> bool:
+        """Whether a resident overlay is re-planned on a cooldown; a process that watches lanes does it on change."""
+        return True
+
+    async def _get_overlay(
+        self, lane: Lane, ref: str | None, content: Sequence[ContentType]
+    ) -> tuple[CacheKey, OverlayIndex]:
+        """Return the overlay answering a lane, built on its base's resident index, building it on first access.
+
+        The overlay's key names the lane with the content its base is STORED with, so it answers every
+        request its base can. It is re-planned when its base was rebuilt since, or its cooldown ran out.
+        """
+        base_key, base = await self._get_exact(str(lane.base), ref, content)
+        cache_key = self._compute_cache_key(str(lane.root), None, base_key[1])
+        current = self._tasks.get(cache_key)
+        if current is not None and current.done() and not current.cancelled() and current.exception() is None:
+            overlay = current.result()
+            # A process watching its lanes re-plans an overlay when the lane or its base moved; one
+            # that does not re-plans it here, on the cooldown or as soon as its base was rebuilt.
+            stale = self._revalidates_overlays() and (
+                getattr(overlay, "base", None) is not base
+                or time.monotonic() >= self._revalidate_after.get(cache_key, 0.0)
+            )
+            if stale and isinstance(overlay, OverlayIndex):
+                self._tasks[cache_key] = asyncio.create_task(
+                    self._build_overlay_tracked(cache_key, lane, base, overlay)
+                )
+        elif current is None:
+            self._lane_bases[cache_key] = base_key
+            self._tasks[cache_key] = asyncio.create_task(self._build_overlay_tracked(cache_key, lane, base, None))
+        self._lane_bases[cache_key] = base_key
+        self._tasks.move_to_end(cache_key)
+        self.last_used[cache_key] = time.time()
+        task = self._tasks[cache_key]
+        try:
+            return cache_key, await asyncio.shield(task)
+        except Exception:
+            if self._tasks.get(cache_key) is task:
+                self.evict(cache_key)
+            raise
+
+    async def _build_overlay_tracked(
+        self, cache_key: CacheKey, lane: Lane, base: ZembleIndex, previous: OverlayIndex | None
+    ) -> OverlayIndex:
+        """Plan and compose a lane's overlay in a worker thread, and start its revalidation cooldown."""
+        start = time.monotonic()
+        folder = overlay_folder(find_index_from_cache_folder(str(lane.root), cache_key[1]))
+        overlay = await asyncio.to_thread(build_overlay, lane, base, folder, previous)
+        finished = time.monotonic()
+        self._revalidate_after[cache_key] = finished + max(1.0, (finished - start) * MIN_REVALIDATE_FACTOR)
+        return overlay

@@ -34,6 +34,13 @@ def serving_reserve_mb(private: float, total_mb: int, build_mb: int) -> float:
     return max(private + SERVING_SCRATCH_MB, SERVING_FLOOR_MB, total_mb - build_mb)
 
 
+def _answered_meanwhile(root: str) -> bool:
+    """Return whether another root's graph answers for *root* while its own is built: a lane's base's."""
+    from zemble.graph.store import resolve_graph_root
+
+    return resolve_graph_root(root)[0] != root
+
+
 class GraphJobs:
     """Own one construction process and one joined job per canonical graph root."""
 
@@ -89,17 +96,25 @@ class GraphJobs:
         task = self._start(root, refresh=refresh, changed_paths=changed_paths)
         if task is None or (root in self.ready and not refresh):
             return
+        if not refresh and await asyncio.to_thread(_answered_meanwhile, root):
+            # A lane's first graph is seeded from its base's, which answers for it until then.
+            return
         await self._join(root, task, deadline)
 
     @staticmethod
     async def _graph_root(path: str) -> str:
-        """Resolve a path to the root whose graph answers for it: its own, or a covering ancestor's."""
-        from zemble.graph.store import graph_ancestor, graph_covers
+        """Resolve a path to the root whose graph answers for it: its own, a covering ancestor's, or its lane's."""
+        from zemble.graph.store import graph_ancestor, graph_covers, graph_present
+        from zemble.lane import find_lane
 
         root = str(Path(path).resolve())
         ancestor = await asyncio.to_thread(graph_ancestor, root)
         if ancestor is not None and await asyncio.to_thread(graph_covers, *ancestor):
             root = ancestor[0]
+        elif not await asyncio.to_thread(graph_present, root):
+            found = await asyncio.to_thread(find_lane, root, graph_present)
+            if found is not None:
+                root = str(found[0].root)
         return str(Path(root).resolve())
 
     def _start(self, root: str, *, refresh: bool, changed_paths: Any) -> asyncio.Task[Any] | None:
@@ -114,6 +129,8 @@ class GraphJobs:
                 if root in self.ready and not refresh:
                     return None
                 raise AdmissionBusy("graph construction queue is full")
+            if root not in self.ready and not Path(root).is_dir():
+                raise FileNotFoundError(f"{root} is not a directory (a lane removed?); it has no graph to build")
             self.states[root] = {"root": root, "state": "queued", "queued_at": time.time()}
             # AIDEV-NOTE: refresh replaces a published graph beside its readers, just like
             # an index rebuild. Keeping the old ready generation avoids turning edits into outages.

@@ -53,6 +53,7 @@ from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol
 from zemble.graph.resolve import Resolver
 from zemble.index.file_walker import ignored_prefix, walk_files
 from zemble.index.files import detect_language, get_extensions
+from zemble.lane import LaneComparer, find_lane
 from zemble.languages.catalog import SPECS
 from zemble.languages.metrics import FILE_METRIC_COLUMNS
 from zemble.openfiles import held_open
@@ -1100,11 +1101,18 @@ def graph_covers(root: str, prefix: str) -> bool:
 def resolve_graph_root(path: str) -> tuple[str, str | None]:
     """Route a graph request for a path to the graph that answers it.
 
+    A lane whose own graph is not seeded yet is answered from its base's graph meanwhile: the
+    paths inside both are the same, only the lane's own edits are not in it yet.
+
     :return: The root whose graph to open, and the root-relative prefix to restrict it to (None = all of it).
     """
     ancestor = graph_ancestor(path)
     if ancestor is not None and graph_covers(*ancestor):
         return ancestor
+    if not graph_present(path):
+        found = find_lane(path, graph_present)
+        if found is not None and not graph_present(str(found[0].root)):
+            return str(found[0].base), found[1]
     return path, None
 
 
@@ -1396,6 +1404,9 @@ def _build_locked(
             # Whatever a killed build left is swept now, not only when the next version lands.
             _sweep(folder, pointer)
             current = pointer.current
+        elif not force:
+            # A lane's first graph starts as a copy of its base's: only what the lane changed is extracted.
+            current = _seed_from_lane_base(root, folder)
         stats = _build_into(root, folder, current, force=force, workers=workers, changed_paths=changed_paths)
     except (sqlite3.DatabaseError, GraphStoreCorrupt) as exc:
         if not is_corruption(exc):
@@ -1405,6 +1416,66 @@ def _build_locked(
         stats.rebuilt_from_corruption = True
     stats.duration_seconds = time.perf_counter() - started
     return stats
+
+
+def _seed_from_lane_base(root: Path, folder: Path) -> str | None:
+    """Publish a copy of a lane's base graph as the lane's first version, its unchanged files stamped as the lane's.
+
+    The copy is consistent (sqlite's online backup of a held version), so it is exactly a graph of
+    the base; every file the lane holds byte-for-byte - while the base graph still describes the
+    base's copy - gets the lane file's modification time and size, so the walking refresh that
+    follows extracts only what the lane changed and removes what it lacks, re-resolving those
+    edges through the ordinary incremental path.
+
+    :return: The published version's name, or None when the root is no lane root or its base has no graph.
+    """
+    found = find_lane(root, graph_present)
+    if found is None or found[1] is not None:
+        return None
+    lane = found[0]
+    source = _connect_current(_graph_dir(str(lane.base)))
+    if source is None:
+        return None
+    started = time.perf_counter()
+    name = _next_version(folder)
+    target = folder / name
+    _discard(target)
+    try:
+        destination = sqlite3.connect(target, timeout=_WRITE_TIMEOUT_SECONDS)
+        try:
+            source.backup(destination)
+            stored = {row[0]: (row[1], row[2]) for row in destination.execute("SELECT path, mtime_ns, size FROM files")}
+            comparer = LaneComparer(lane)
+            stamps = []
+            for relative, (mtime_ns, size) in stored.items():
+                try:
+                    base_stat = (lane.base / relative).stat()
+                    lane_stat = (root / relative).stat()
+                except OSError:
+                    continue
+                if (base_stat.st_mtime_ns, base_stat.st_size) == (mtime_ns, size) and comparer.same(relative):
+                    stamps.append((lane_stat.st_mtime_ns, lane_stat.st_size, relative))
+            destination.executemany("UPDATE files SET mtime_ns = ?, size = ? WHERE path = ?", stamps)
+            destination.execute("UPDATE meta SET value = ? WHERE key = 'root'", (str(root),))
+            destination.commit()
+        finally:
+            destination.close()
+    except BaseException:
+        _discard(target)
+        raise
+    finally:
+        source.close()
+    _seal(target)
+    _install(folder, name, None)
+    logger.info(
+        "graph: seeded %s from %s in %.1f s (%d of %d files unchanged)",
+        root,
+        lane.base,
+        time.perf_counter() - started,
+        len(stamps),
+        len(stored),
+    )
+    return name
 
 
 def _build_into(
