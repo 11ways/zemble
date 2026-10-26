@@ -695,37 +695,28 @@ class Daemon:
     async def _run_rebuild(
         self, cache_key: CacheKey, java_changed: bool, changed_paths: Sequence[Path] | None
     ) -> dict[str, Any]:
-        """Own a rebuild until its last phase and release build-only objects before trimming."""
+        """Own a rebuild until its last phase and release build-only objects before trimming.
+
+        AIDEV-NOTE: a graph refresh asked for after this pass took its graph step (the mark is consumed
+        there) runs as a graph-only follow-up: the index pass it joined has nothing left to redo for it,
+        and dropping the mark in `finally` left the graph stale until the next Java edit.
+        """
         result: dict[str, Any] = {}
+        index_due = True
         try:
             while True:
                 if (
-                    cache_key in self._watch_tasks
+                    index_due
+                    and cache_key in self._watch_tasks
                     and time.monotonic() < self._changed_at.get(cache_key, 0) + _QUIET_SECONDS
                 ):
                     _merge_changes(self._watch_changes, cache_key, changed_paths)
                     return {"skipped": _STILL_CHANGING}
-                self.rebuilding.add(cache_key)
-                self._rebuild_scope[cache_key] = changed_paths
-                try:
-                    # AIDEV-NOTE: announced before the index pass, not when the graph refresh is
-                    # queued after it: a lane job starting meanwhile would seed from the old graph.
-                    graph_follows = java_changed or cache_key in self._rebuild_graph
-                    with self.graphs.refresh_announced(cache_key[0]) if graph_follows else contextlib.nullcontext():
-                        # A lane overlay's re-plan is a walk and a small delta: it holds no load back.
-                        async with contextlib.nullcontext() if self.cache.base_of(cache_key) else self._load_lock:
-                            result = await self._rebuild_once(
-                                cache_key, java_changed=java_changed, changed_paths=changed_paths
-                            )
-                        if java_changed or cache_key in self._rebuild_graph:
-                            self._rebuild_graph.discard(cache_key)
-                            result["graph_ms"] = await self._refresh_graph(cache_key[0], changed_paths)
-                finally:
-                    self.rebuilding.discard(cache_key)
-                if cache_key not in self._rebuild_changes:
+                result = await self._run_pass(cache_key, java_changed, changed_paths, result if not index_due else None)
+                follow_up = self._follow_up(cache_key)
+                if follow_up is None:
                     return result
-                changes = self._rebuild_changes.pop(cache_key)
-                changed_paths = None if changes is None else sorted(changes)
+                changed_paths, index_due = follow_up
                 java_changed = True
         except MemoryError as exc:
             traceback.clear_frames(exc.__traceback__)
@@ -754,6 +745,46 @@ class Daemon:
                 # Start the cooldown AFTER collection too; a tiny/refused build must still
                 # serve its LRU generation rather than instantly launching a second build.
                 self.cache._revalidate_after[cache_key] = time.monotonic() + max(1.0, result.get("ms", 0) / 1000 * 3)
+
+    async def _run_pass(
+        self,
+        cache_key: CacheKey,
+        java_changed: bool,
+        changed_paths: Sequence[Path] | None,
+        graph_only: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Run one index pass and its graph step, or only the graph step onto *graph_only*'s result."""
+        self.rebuilding.add(cache_key)
+        self._rebuild_scope[cache_key] = changed_paths
+        try:
+            result = graph_only
+            # AIDEV-NOTE: announced before the index pass, not when the graph refresh is
+            # queued after it: a lane job starting meanwhile would seed from the old graph.
+            graph_follows = java_changed or cache_key in self._rebuild_graph
+            with self.graphs.refresh_announced(cache_key[0]) if graph_follows else contextlib.nullcontext():
+                if result is None:
+                    # A lane overlay's re-plan is a walk and a small delta: it holds no load back.
+                    async with contextlib.nullcontext() if self.cache.base_of(cache_key) else self._load_lock:
+                        result = await self._rebuild_once(
+                            cache_key, java_changed=java_changed, changed_paths=changed_paths
+                        )
+                if graph_follows or cache_key in self._rebuild_graph:
+                    # Consumed BEFORE the refresh: a mark set while it runs asks for one after it.
+                    self._rebuild_graph.discard(cache_key)
+                    result["graph_ms"] = await self._refresh_graph(cache_key[0], changed_paths)
+            return result
+        finally:
+            self.rebuilding.discard(cache_key)
+
+    def _follow_up(self, cache_key: CacheKey) -> tuple[Sequence[Path] | None, bool] | None:
+        """Return what a pass asked for meanwhile still needs: (paths, index pass due), or None when nothing."""
+        if cache_key in self._rebuild_changes:
+            changes = self._rebuild_changes.pop(cache_key)
+            return (None if changes is None else sorted(changes)), True
+        if cache_key in self._rebuild_graph:
+            # Its asker named no path past what this pass indexed: the whole graph is checked.
+            return None, False
+        return None
 
     async def _rebuild_once(
         self, cache_key: CacheKey, *, java_changed: bool, changed_paths: Sequence[Path] | None

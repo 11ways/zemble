@@ -136,6 +136,44 @@ async def test_named_edit_arriving_during_graph_work_is_not_lost(tmp_project: Pa
 
 
 @pytest.mark.anyio
+async def test_graph_refresh_asked_for_after_the_graph_step_follows_the_pass(tmp_project: Path, monkeypatch):
+    """A graph refresh joined after the running pass consumed its mark used to be dropped by its cleanup."""
+    instance = daemon()
+    key, index = await instance.index_for({"path": str(tmp_project)})
+    del index
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    graphs: list[list[Path] | None] = []
+    builds = 0
+    real = server.rebuild_index
+
+    def rebuild(*args):
+        nonlocal builds
+        builds += 1
+        return real(*args)
+
+    async def graph(self, root, changed_paths=None):
+        graphs.append(changed_paths)
+        if len(graphs) == 1:
+            entered.set()
+            await finish.wait()
+        return 1
+
+    monkeypatch.setattr(server, "rebuild_index", rebuild)
+    monkeypatch.setattr(server.Daemon, "_refresh_graph", graph)
+    edited = [tmp_project / "Edited.java"]
+    first = asyncio.create_task(instance.rebuild(key, java_changed=True, changed_paths=edited))
+    await asyncio.wait_for(entered.wait(), 10)
+    joined = asyncio.create_task(instance.rebuild(key, java_changed=True, changed_paths=[]))
+    await asyncio.sleep(0)
+    finish.set()
+    await asyncio.gather(first, joined)
+    assert graphs == [edited, None], "the late refresh ran after the pass, over the whole graph"
+    assert builds == 1, "a graph-only follow-up redoes no index pass"
+    assert not instance._rebuild_graph and not instance._rebuild_tasks
+
+
+@pytest.mark.anyio
 async def test_failed_build_traceback_drops_scratch_before_trimming(tmp_project, monkeypatch):
     """A failed build keeps its diagnostic traceback locations, not its temporary buffers."""
     instance = daemon()
