@@ -232,6 +232,8 @@ why = "forms and CMS never depend on rich text"
 
 # Markdown tables that already DECLARE homes. Backticked names in the home column
 # that resolve to a declared module are read as the home; the rest stays prose.
+# `file` is relative to the root. `home` refuses while it cannot be read (a table that
+# moved without this line); `dupes` reports it as a note and skips the declared lane.
 [[tables]]
 file = "CLAUDE.md"
 capability = "Capability"

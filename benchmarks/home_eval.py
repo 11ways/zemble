@@ -1,6 +1,6 @@
 """Measure `zemble home` against the homes the javaweb workspace already declares.
 
-Ground truth is the capability table in that workspace's CLAUDE.md: every row whose
+Ground truth is the capability table that workspace's `.zemble/home.toml` declares: every row whose
 "Mechanism home" cell names exactly one module. The queries are hand-written
 paraphrases in `benchmarks/local/home_queries.json`, so a row's own wording is not
 what finds it. Each query is answered twice: once with the declared-table lane

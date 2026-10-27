@@ -15,7 +15,7 @@ from enum import Enum
 from math import log
 from typing import Any
 
-from zemble.home.config import HomeConfig, TableSpec
+from zemble.home.config import ConfigError, HomeConfig, TableSpec
 
 #: A cell separator that is not escaped as `\|` inside a code span.
 _CELL_SPLIT = re.compile(r"(?<!\\)\|")
@@ -214,15 +214,15 @@ def row_names_symbol(declared: str, unit_name: str) -> bool:
 def load_rows(config: HomeConfig) -> list[DeclaredRow]:
     """Parse every declared-home table the workspace pointed at.
 
-    A table file that cannot be read is skipped: the config names documentation, and
-    missing documentation must not stop the answer.
+    :raises ConfigError: If a declared table file cannot be read: it moved without its declaration, and answering
+        without it would drop every declared home while still reading as authoritative.
     """
     rows: list[DeclaredRow] = []
     for spec in config.tables:
         try:
             text = (config.root / spec.file).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+        except OSError as error:
+            raise ConfigError(f"declared table {spec.file!r} cannot be read: {error}") from error
         rows.extend(_rows_of(text, spec, config))
     return rows
 

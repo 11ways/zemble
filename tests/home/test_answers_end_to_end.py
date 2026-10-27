@@ -10,7 +10,7 @@ import pytest
 from tests.conftest import FakeEmbedder
 from zemble.graph import SqliteGraphProvider, build_graph
 from zemble.home.answers import build_answer, home_payload
-from zemble.home.config import HomeConfig
+from zemble.home.config import ConfigError, HomeConfig
 from zemble.home.decide import Verdict
 from zemble.index import ZembleIndex
 from zemble.types import ContentType
@@ -168,5 +168,19 @@ def test_a_description_that_matches_nothing(workspace: Path) -> None:
         answer = build_answer(index, graph, HomeConfig.load(workspace), "   ")
         assert answer.verdict is Verdict.UNCERTAIN, "an empty description names no home"
         assert answer.docs == [], "a code-only index has no documentation lane"
+    finally:
+        graph.close()
+
+
+def test_a_declared_table_that_moved_refuses_the_answer(workspace: Path) -> None:
+    """A table moved without its declaration names the file instead of answering without every declared home."""
+    (workspace / "ARCH.md").unlink()
+    index = ZembleIndex.from_path(workspace, embedder=FakeEmbedder())
+    graph = SqliteGraphProvider(str(workspace))
+    try:
+        with pytest.raises(ConfigError, match="declared table 'ARCH.md' cannot be read"):
+            build_answer(index, graph, HomeConfig.load(workspace), "assemble the session cookie")
+        answer = build_answer(index, graph, HomeConfig.load(workspace), "assemble the cookie", use_tables=False)
+        assert answer.verdict is not None, "the lane that reads no table still answers"
     finally:
         graph.close()

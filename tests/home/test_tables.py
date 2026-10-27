@@ -5,7 +5,9 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-from zemble.home.config import HomeConfig, TableSpec
+import pytest
+
+from zemble.home.config import ConfigError, HomeConfig, TableSpec
 from zemble.home.tables import load_rows, match_rows, symbol_names
 
 _CONFIG_BODY = """
@@ -87,13 +89,13 @@ def test_matching_a_description_against_declared_rows(tmp_path: Path) -> None:
     assert match_rows(rows, "the of a") == [], "a description with no meaningful words matches nothing"
 
 
-def test_a_table_file_that_is_missing_is_skipped(tmp_path: Path) -> None:
-    """Documentation that moved must not stop the answer."""
-    (tmp_path / ".zemble").mkdir()
-    (tmp_path / ".zemble" / "home.toml").write_text(textwrap.dedent(_CONFIG_BODY).strip() + "\n", encoding="utf-8")
-    config = HomeConfig.load(tmp_path)
+def test_a_table_file_that_vanishes_after_the_load_is_loud(tmp_path: Path) -> None:
+    """Documentation that moved never silently drops every declared home from the answer."""
+    config = _workspace(tmp_path)
     assert config.tables == (TableSpec("ARCH.md", "Capability", "Mechanism home", "Consumers (thin wiring)"),)
-    assert load_rows(config) == [], "a missing table file yields no rows and no exception"
+    (tmp_path / "ARCH.md").unlink()
+    with pytest.raises(ConfigError, match="declared table 'ARCH.md' cannot be read"):
+        load_rows(config)
 
 
 def test_reading_the_symbol_names_a_row_writes_in_backticks() -> None:
