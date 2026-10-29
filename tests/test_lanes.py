@@ -366,3 +366,31 @@ def test_a_query_stops_waiting_for_a_busy_daemon(monkeypatch: pytest.MonkeyPatch
         client.answer("home", {"path": "/x"})
     assert time.monotonic() - started < 3, "the wait is bounded"
     assert calls and all(timeout is not None and timeout <= 1.0 for timeout in calls), "each try carries the deadline"
+
+
+def test_a_lanes_unit_index_reads_its_bases_rows_and_keeps_only_its_delta(workspace: Path) -> None:
+    """A lane's first focused dupes extracts only what the base's unit index lacks (2026-10-29: 6+ minutes cold)."""
+    from zemble.dedup.unitcache import INDEX_FILE_NAME, FileRow, UnitIndex, root_cache_folder
+
+    # 1. The base holds rows for two files; a lane mirrors the base's layout.
+    base = UnitIndex(workspace, "sig")
+    base.store([FileRow(path="alpha/src/shared.py", digest="d-shared", failed=False),
+                FileRow(path="alpha/src/edited.py", digest="d-original", failed=False)])
+    base.close()
+    base_bytes = (root_cache_folder(workspace) / INDEX_FILE_NAME).read_bytes()
+    lane = _lane(workspace, "lane-units")
+
+    # 2. The lane takes the base's row of an unchanged file, and none of a file it edited.
+    index = UnitIndex(lane, "sig")
+    found = index.load({"alpha/src/shared.py": "d-shared", "alpha/src/edited.py": "d-edited"})
+    assert sorted(found) == ["alpha/src/shared.py"], "THE ASSERTION -- the base's unchanged row serves the lane"
+
+    # 3. The lane stores its delta in its own index; the base's file is never written.
+    index.store([FileRow(path="alpha/src/edited.py", digest="d-edited", failed=False)])
+    assert sorted(index.load({"alpha/src/shared.py": "d-shared", "alpha/src/edited.py": "d-edited"})) == [
+        "alpha/src/edited.py", "alpha/src/shared.py"]
+    index.close()
+    assert (root_cache_folder(workspace) / INDEX_FILE_NAME).read_bytes() == base_bytes, "the base is read-only"
+
+    # 4. A root outside every lane reads only its own rows.
+    assert UnitIndex(workspace, "sig").load({"alpha/src/edited.py": "d-edited"}) == {}

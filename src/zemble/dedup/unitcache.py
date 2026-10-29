@@ -128,8 +128,24 @@ def root_cache_folder(root: Path) -> Path:
     return resolve_cache_folder() / cache_key(str(root))
 
 
+def _base_index_path(root: Path) -> Path | None:
+    """Return the unit index file of the base workspace a lane root mirrors, or None outside every lane."""
+    from zemble.lane import find_lane
+
+    found = find_lane(root, lambda base: (root_cache_folder(Path(base)) / INDEX_FILE_NAME).is_file())
+    if found is None or found[1] is not None:
+        return None
+    return root_cache_folder(found[0].base) / INDEX_FILE_NAME
+
+
 class UnitIndex:
-    """The sqlite file of one root's rows, for one extraction signature."""
+    """The sqlite file of one root's rows, for one extraction signature.
+
+    AIDEV-NOTE: a lane root (a folder of worktrees of an indexed base, `zemble.lane`) also reads its base's
+    rows: a row is valid for one path's exact content, and a lane keeps the base's layout, so a base row whose
+    digest matches the lane's file is the row the lane would extract. Only the misses are extracted and stored
+    in the lane's own (small) index; the base's file is opened read-only and never written.
+    """
 
     def __init__(self, root: Path, signature: str) -> None:
         """Open (creating if needed) the index of a root."""
@@ -147,28 +163,31 @@ class UnitIndex:
             self._connection.execute(
                 "INSERT OR REPLACE INTO signatures (signature, day) VALUES (?, ?)", (signature, today())
             )
+        self.base_path = _base_index_path(root)
 
     def close(self) -> None:
         """Close the connection."""
         self._connection.close()
 
     def load(self, wanted: Mapping[str, str]) -> dict[str, FileRow]:
-        """Return the rows whose path and content digest both match.
+        """Return the rows whose path and content digest both match, the lane's own first, then its base's.
 
         :param wanted: Content digest by root-relative path.
         :return: The matching rows by path; a changed or unknown file is simply absent.
         """
-        found: dict[str, FileRow] = {}
-        cursor = self._connection.execute(
-            "SELECT path, digest, failed, hashes, bodies FROM files WHERE signature = ?", (self.signature,)
-        )
-        for path, digest, failed, hashes, bodies in cursor:
-            if wanted.get(path) != digest:
-                continue
-            found[path] = FileRow(
-                path=path, digest=digest, failed=bool(failed), hashes=hashes, bodies=tuple(pickle.loads(bodies))
-            )
+        found = _matching_rows(self._connection, self.signature, wanted)
+        if self.base_path is not None:
+            missing = {path: digest for path, digest in wanted.items() if path not in found}
+            if missing:
+                base = sqlite3.connect(f"file:{self.base_path}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_SECONDS)
+                try:
+                    found.update(_matching_rows(base, self.signature, missing))
+                except sqlite3.DatabaseError:
+                    pass
+                finally:
+                    base.close()
         return found
+
 
     def store(self, rows: Iterable[FileRow]) -> None:
         """Write rows, replacing each path's previous one."""
@@ -199,6 +218,26 @@ class UnitIndex:
                 "DELETE FROM files WHERE signature IN (SELECT signature FROM signatures WHERE day < ?)", (stale,)
             )
             self._connection.execute("DELETE FROM signatures WHERE day < ?", (stale,))
+
+
+def _matching_rows(connection: sqlite3.Connection, signature: str, wanted: Mapping[str, str]) -> dict[str, FileRow]:
+    """Read one signature's rows of the wanted paths whose stored digest is the wanted one."""
+    connection.execute("CREATE TEMP TABLE IF NOT EXISTS wanted (path TEXT PRIMARY KEY)")
+    connection.execute("DELETE FROM wanted")
+    connection.executemany("INSERT OR IGNORE INTO wanted (path) VALUES (?)", ((path,) for path in wanted))
+    found: dict[str, FileRow] = {}
+    cursor = connection.execute(
+        "SELECT path, digest, failed, hashes, bodies FROM files"
+        " WHERE signature = ? AND path IN (SELECT path FROM wanted)",
+        (signature,),
+    )
+    for path, digest, failed, hashes, bodies in cursor:
+        if wanted.get(path) != digest:
+            continue
+        found[path] = FileRow(
+            path=path, digest=digest, failed=bool(failed), hashes=hashes, bodies=tuple(pickle.loads(bodies))
+        )
+    return found
 
 
 __all__ = [

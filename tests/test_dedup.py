@@ -1927,6 +1927,53 @@ def test_a_focused_run_reads_the_unit_index(tmp_path: Path) -> None:
     assert _wire(gone.classes) == _wire(cold.classes), "step 4: the deleted copy is gone again"
 
 
+def test_a_lanes_focused_run_reads_its_bases_unit_index(tmp_path: Path) -> None:
+    """A lane of an indexed workspace parses only the files it changed; the answer is the base's."""
+    from tests.conftest import git
+
+    base = (tmp_path / "ws").resolve()
+    repo = base / "alpha"
+    (repo / "src").mkdir(parents=True)
+    for source in (FIXTURES / "src").iterdir():
+        (repo / "src" / source.name).write_text(source.read_text())
+    (repo / "src" / "LogicD.java").write_text(_LOGIC_D)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "initial")
+    focus = ("alpha/src/LogicA.java",)
+    options = DupeOptions(kinds=tuple(CloneKind), logic_threshold=0.5, focus=focus)
+
+    def extracted(report) -> str:
+        return next(note for note in report.notes if note.startswith("focus:"))
+
+    # 1. The base's focused run builds the base's unit index.
+    warmed = find_duplication(base, options, embedder=BagOfWordsEmbedder())
+    files = warmed.analyzed_files
+
+    # 2. A new lane holding a worktree of the repo extracts nothing: every row is the base's.
+    lane = (tmp_path / "lane").resolve()
+    lane.mkdir()
+    git(repo, "worktree", "add", "-q", "--detach", str(lane / "alpha"))
+    first = find_duplication(lane, options, embedder=BagOfWordsEmbedder())
+    assert f"0 of {files} file(s) extracted" in extracted(first), "step 2: a lane reads its base's rows"
+    assert _wire(first.classes) == _wire(warmed.classes), "step 2: the lane gets the base's answer"
+
+    # 3. A file the lane changed is extracted (and only that one), and its new copy is compared.
+    (lane / "alpha" / "src" / "LogicE.java").write_text(_LOGIC_D.replace("LogicD", "LogicE"))
+    edited = find_duplication(lane, options, embedder=BagOfWordsEmbedder())
+    assert f"1 of {files + 1} file(s) extracted" in extracted(edited), "step 3: only the lane's new file is parsed"
+    joined = [clone for clone in edited.classes if any(m.startswith("alpha/src/LogicE.java:") for m in _members(clone))]
+    assert joined, "step 3: the lane's new copy joins a class with the focus"
+
+    # 4. The base's index is never written by a lane run.
+    from zemble.dedup.unitcache import INDEX_FILE_NAME, root_cache_folder
+
+    base_index = root_cache_folder(base) / INDEX_FILE_NAME
+    before = base_index.stat().st_mtime_ns
+    find_duplication(lane, options, embedder=BagOfWordsEmbedder())
+    assert base_index.stat().st_mtime_ns == before, "step 4: the base's index stays untouched"
+
+
 def test_a_partial_scan_never_calls_an_ignore_entry_stale(tmp_path: Path) -> None:
     """An entry whose class lies outside a --paths or --focus scan matched nothing there; that is not stale."""
     workspace = _focus_workspace(tmp_path)
