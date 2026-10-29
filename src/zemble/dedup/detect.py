@@ -28,12 +28,11 @@ from zemble.dedup.reimplements import (
 from zemble.dedup.settings import ShapeSettings
 from zemble.dedup.structure import MAX_SKELETON_DISTANCE, check_pair
 from zemble.dedup.unitcache import (
-    VECTOR_FOLDER_NAME,
     FileRow,
     UnitIndex,
     content_digest,
     extraction_signature,
-    root_cache_folder,
+    vector_mirror_folder,
 )
 from zemble.dedup.units import FileUnits, extract_file
 from zemble.dedup.vocabulary import vocabulary_classes
@@ -521,9 +520,9 @@ def _text_vectors(
     ``EmbeddingBudgetExceeded`` on a remote embedder whose bill is over budget.
 
     AIDEV-NOTE: an embedding SERVER keeps no local copy, and reading 57k vectors back from one took
-    22 s on 2026-10-09; the per-root mirror (`unitcache.VECTOR_FOLDER_NAME`, the same sqlite store the
-    embedding cache uses) is what lets a focused run answer in seconds. An embedder that already
-    caches locally is used as it is.
+    22 s on 2026-10-09; the per-root mirror (`unitcache.vector_mirror_folder`, a lane's being its base's,
+    the same sqlite store the embedding cache uses) is what lets a focused run answer in seconds. An
+    embedder that already caches locally is used as it is.
     """
     from zemble.embedding.cache import CachingEmbedder
     from zemble.embedding.pricing import require_affordable_bill
@@ -537,7 +536,7 @@ def _text_vectors(
         require_affordable_bill(embedder, texts)
         vectors = embedder.embed_documents(texts)
         return _BodyVectors(vectors, embedder.model_id, time.perf_counter() - started, len(texts))
-    folder = root_cache_folder(root) / VECTOR_FOLDER_NAME
+    folder = vector_mirror_folder(root)
     mirror = CachingEmbedder(embedder, embedder.model_id, folder)
     try:
         missing = mirror.cache.pending(texts, embedder.dimensions)

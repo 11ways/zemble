@@ -1957,6 +1957,7 @@ def test_a_lanes_focused_run_reads_its_bases_unit_index(tmp_path: Path) -> None:
     first = find_duplication(lane, options, embedder=BagOfWordsEmbedder())
     assert f"0 of {files} file(s) extracted" in extracted(first), "step 2: a lane reads its base's rows"
     assert _wire(first.classes) == _wire(warmed.classes), "step 2: the lane gets the base's answer"
+    assert any("0 not mirrored yet" in note for note in first.notes), "step 2: the lane reads the base's vectors"
 
     # 3. A file the lane changed is extracted (and only that one), and its new copy is compared.
     (lane / "alpha" / "src" / "LogicE.java").write_text(_LOGIC_D.replace("LogicD", "LogicE"))

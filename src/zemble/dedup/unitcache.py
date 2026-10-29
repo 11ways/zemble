@@ -128,14 +128,25 @@ def root_cache_folder(root: Path) -> Path:
     return resolve_cache_folder() / cache_key(str(root))
 
 
-def _base_index_path(root: Path) -> Path | None:
-    """Return the unit index file of the base workspace a lane root mirrors, or None outside every lane."""
+def lane_base(root: Path) -> Path | None:
+    """Return the base workspace whose dupes caches a lane root reads, or None for a root that is no lane."""
     from zemble.lane import find_lane
 
     found = find_lane(root, lambda base: (root_cache_folder(Path(base)) / INDEX_FILE_NAME).is_file())
     if found is None or found[1] is not None:
         return None
-    return root_cache_folder(found[0].base) / INDEX_FILE_NAME
+    return found[0].base
+
+
+def _base_index_path(root: Path) -> Path | None:
+    """Return the unit index file of the base workspace a lane root mirrors, or None outside every lane."""
+    base = lane_base(root)
+    return None if base is None else root_cache_folder(base) / INDEX_FILE_NAME
+
+
+def vector_mirror_folder(root: Path) -> Path:
+    """Return the body-vector mirror a root reads and fills: its base's for a lane, as vectors key on text alone."""
+    return root_cache_folder(lane_base(root) or root) / VECTOR_FOLDER_NAME
 
 
 class UnitIndex:
@@ -248,5 +259,7 @@ __all__ = [
     "UnitIndex",
     "content_digest",
     "extraction_signature",
+    "lane_base",
     "root_cache_folder",
+    "vector_mirror_folder",
 ]
