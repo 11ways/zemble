@@ -199,7 +199,6 @@ class UnitIndex:
                     base.close()
         return found
 
-
     def store(self, rows: Iterable[FileRow]) -> None:
         """Write rows, replacing each path's previous one."""
         payload = [
