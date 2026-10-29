@@ -394,3 +394,25 @@ def test_a_lanes_unit_index_reads_its_bases_rows_and_keeps_only_its_delta(worksp
 
     # 4. A root outside every lane reads only its own rows.
     assert UnitIndex(workspace, "sig").load({"alpha/src/edited.py": "d-edited"}) == {}
+
+
+def test_a_lanes_extracted_rows_heal_its_bases_index_for_shared_content(workspace: Path) -> None:
+    """After an extractor change (new signature) the first lane run refills the base's rows of unchanged files."""
+    from zemble.dedup.unitcache import FileRow, UnitIndex, content_digest
+
+    # 1. The base's index exists, but holds nothing for the new signature.
+    UnitIndex(workspace, "old").close()
+    lane = _lane(workspace, "lane-heal")
+    shared = content_digest((workspace / "alpha/src/shared.py").read_bytes())
+
+    # 2. The lane stores one row whose content the base shares and one the lane edited.
+    index = UnitIndex(lane, "new")
+    index.store([FileRow(path="alpha/src/shared.py", digest=shared, failed=False),
+                 FileRow(path="alpha/src/edited.py", digest="d-lane-edit", failed=False)])
+    index.close()
+
+    # 3. The base now answers the shared file under the new signature, and never the lane's edit.
+    base = UnitIndex(workspace, "new")
+    found = base.load({"alpha/src/shared.py": shared, "alpha/src/edited.py": "d-lane-edit"})
+    base.close()
+    assert sorted(found) == ["alpha/src/shared.py"], "THE ASSERTION -- only content the base holds reaches its index"

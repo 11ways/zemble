@@ -138,12 +138,6 @@ def lane_base(root: Path) -> Path | None:
     return found[0].base
 
 
-def _base_index_path(root: Path) -> Path | None:
-    """Return the unit index file of the base workspace a lane root mirrors, or None outside every lane."""
-    base = lane_base(root)
-    return None if base is None else root_cache_folder(base) / INDEX_FILE_NAME
-
-
 def vector_mirror_folder(root: Path) -> Path:
     """Return the body-vector mirror a root reads and fills: its base's for a lane, as vectors key on text alone."""
     return root_cache_folder(lane_base(root) or root) / VECTOR_FOLDER_NAME
@@ -154,8 +148,9 @@ class UnitIndex:
 
     AIDEV-NOTE: a lane root (a folder of worktrees of an indexed base, `zemble.lane`) also reads its base's
     rows: a row is valid for one path's exact content, and a lane keeps the base's layout, so a base row whose
-    digest matches the lane's file is the row the lane would extract. Only the misses are extracted and stored
-    in the lane's own (small) index; the base's file is opened read-only and never written.
+    digest matches the lane's file is the row the lane would extract. Misses are extracted and stored in the
+    lane's own (small) index, and also in the base's wherever the base's own file has that exact content, so a
+    signature change (any edit to the extractor's code) is healed by whichever root runs first.
     """
 
     def __init__(self, root: Path, signature: str) -> None:
@@ -174,7 +169,8 @@ class UnitIndex:
             self._connection.execute(
                 "INSERT OR REPLACE INTO signatures (signature, day) VALUES (?, ?)", (signature, today())
             )
-        self.base_path = _base_index_path(root)
+        self.base_root = lane_base(root)
+        self.base_path = None if self.base_root is None else root_cache_folder(self.base_root) / INDEX_FILE_NAME
 
     def close(self) -> None:
         """Close the connection."""
@@ -200,19 +196,29 @@ class UnitIndex:
         return found
 
     def store(self, rows: Iterable[FileRow]) -> None:
-        """Write rows, replacing each path's previous one."""
-        payload = [
-            (row.path, self.signature, row.digest, int(row.failed), row.hashes, pickle.dumps(list(row.bodies)))
-            for row in rows
-        ]
-        if not payload:
+        """Write rows, replacing each path's previous one; a lane also hands its base the rows of shared content."""
+        rows = list(rows)
+        _write_rows(self._connection, self.signature, rows)
+        if self.base_root is None or self.base_path is None:
             return
-        with self._connection:
-            self._connection.executemany(
-                "INSERT OR REPLACE INTO files (path, signature, digest, failed, hashes, bodies)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                payload,
-            )
+        shared = []
+        for row in rows:
+            try:
+                if content_digest((self.base_root / row.path).read_bytes()) == row.digest:
+                    shared.append(row)
+            except OSError:
+                continue
+        if not shared:
+            return
+        base = sqlite3.connect(self.base_path, timeout=_BUSY_TIMEOUT_SECONDS)
+        try:
+            with base:
+                base.execute(
+                    "INSERT OR REPLACE INTO signatures (signature, day) VALUES (?, ?)", (self.signature, today())
+                )
+            _write_rows(base, self.signature, shared)
+        finally:
+            base.close()
 
     def retain(self, paths: Iterable[str]) -> None:
         """Drop this signature's rows of every file a whole-root walk no longer finds, and unused extractions."""
@@ -248,6 +254,20 @@ def _matching_rows(connection: sqlite3.Connection, signature: str, wanted: Mappi
             path=path, digest=digest, failed=bool(failed), hashes=hashes, bodies=tuple(pickle.loads(bodies))
         )
     return found
+
+
+def _write_rows(connection: sqlite3.Connection, signature: str, rows: Sequence[FileRow]) -> None:
+    """Write rows of one signature, replacing each path's previous one."""
+    payload = [
+        (row.path, signature, row.digest, int(row.failed), row.hashes, pickle.dumps(list(row.bodies))) for row in rows
+    ]
+    if not payload:
+        return
+    with connection:
+        connection.executemany(
+            "INSERT OR REPLACE INTO files (path, signature, digest, failed, hashes, bodies) VALUES (?, ?, ?, ?, ?, ?)",
+            payload,
+        )
 
 
 __all__ = [
