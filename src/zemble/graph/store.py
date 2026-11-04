@@ -22,6 +22,7 @@ from functools import partial
 from pathlib import Path
 
 from zemble.cache import find_index_from_cache_folder
+from zemble.graph import overlay as lane_overlay
 from zemble.graph.facts import (
     TREE_SITTER_SOURCE,
     FactsFile,
@@ -51,9 +52,9 @@ from zemble.graph.lookup import (
 )
 from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol
 from zemble.graph.resolve import Resolver
-from zemble.index.file_walker import ignored_prefix, walk_files
+from zemble.index.file_walker import ignored_prefix, walk_entries
 from zemble.index.files import detect_language, get_extensions
-from zemble.lane import LaneComparer, find_lane
+from zemble.lane import Lane, LaneComparer, find_lane, lane_scope
 from zemble.languages.catalog import SPECS
 from zemble.languages.metrics import FILE_METRIC_COLUMNS
 from zemble.openfiles import held_open
@@ -127,6 +128,7 @@ _BATCH_FILES = 100
 #: The disposable database a build stages its unresolved and resolved edges in, beside the
 #: store it writes; named like every other build leftover so `zemble clear orphans` finds it.
 _SCRATCH_NAME = "graph-scratch.building-{pid}"
+_SCRATCH_FILE = re.compile(r"graph-scratch\.building-(\d+)")
 _MAX_FILE_BYTES = 2_000_000
 
 #: The `files` columns holding a file's measurements, one per `FileMetrics` field.
@@ -209,6 +211,10 @@ class GraphStats:
     rebuilt_from_corruption: bool = False
     #: Whether this build rewrote the whole store because deletes had left too much of it free.
     compacted: bool = False
+    #: Re-resolved files a lane's overlay left to its base, because they came out exactly as the base's.
+    restored_files: int = 0
+    #: Seconds until a lane's overlay answered with the lane's own files, before its dependents were re-resolved.
+    published_seconds: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-ready view of the build statistics."""
@@ -228,6 +234,8 @@ class GraphStats:
             "duration_seconds": round(self.duration_seconds, 3),
             "rebuilt_from_corruption": self.rebuilt_from_corruption,
             "compacted": self.compacted,
+            "restored_files": self.restored_files,
+            "published_seconds": None if self.published_seconds is None else round(self.published_seconds, 3),
         }
 
 
@@ -266,25 +274,25 @@ def connect(path: str) -> sqlite3.Connection:
 
 
 class _HeldConnection(sqlite3.Connection):
-    """A read-only connection that owns the shared lock keeping its version file on disk."""
+    """A read-only connection that owns the shared locks keeping its version files on disk."""
 
-    _hold: int | None = None
+    _holds: tuple[int, ...] = ()
 
     def close(self) -> None:
-        """Close the connection, then release the version it held."""
+        """Close the connection, then release the versions it held."""
         try:
             super().close()
         finally:
             self._release()
 
     def _release(self) -> None:
-        """Drop the shared lock; the writer may retire the version from now on."""
-        hold, self._hold = self._hold, None
-        if hold is not None:
+        """Drop the shared locks; the writers may retire the versions from now on."""
+        holds, self._holds = self._holds, ()
+        for hold in holds:
             os.close(hold)
 
     def __del__(self) -> None:
-        """Release the version of a connection nobody closed."""
+        """Release the versions of a connection nobody closed."""
         self._release()
 
 
@@ -309,9 +317,62 @@ def _connect_current(folder: Path) -> sqlite3.Connection | None:
             os.close(hold)
             raise
         assert isinstance(connection, _HeldConnection)
-        connection._hold = hold
-        return connection
+        connection._holds = (hold,)
+        try:
+            if not lane_overlay.is_overlay(connection):
+                lane_overlay.install_readers(connection)
+                return connection
+            return _layered_for_reading(connection)
+        except BaseException:
+            # A malformed store fails here; its hold must go with it, or the writer can never retire it.
+            connection.close()
+            raise
     raise GraphStoreCorrupt(f"graph pointer in {folder} kept naming retired versions")
+
+
+def _layered_for_reading(connection: _HeldConnection) -> sqlite3.Connection | None:
+    """Present a lane's overlay over the base version it was built on, or the base alone once that version is gone.
+
+    The base's current graph answering meanwhile is what a lane got before it had a graph at all;
+    the daemon rebuilds the overlay on the new version (`graph_stale`).
+    """
+    recorded = lane_overlay.recorded_base(connection)
+    assert recorded is not None
+    base_folder = graph_folder(recorded[0])
+    hold = _attach_base(connection, base_folder, recorded[1], lane_overlay.Mode.READ)
+    if hold is not None:
+        connection._holds = (*connection._holds, hold)
+        return connection
+    connection.close()
+    logger.info("graph: the base version a lane overlay was built on is gone; reading %s meanwhile", recorded[0])
+    return _connect_current(base_folder)
+
+
+def _attach_base(
+    connection: sqlite3.Connection, base_folder: Path, version: str, mode: lane_overlay.Mode
+) -> int | None:
+    """Attach a held base version under an overlay and install the layered views, or None when it is gone.
+
+    :return: The descriptor holding the base version, which the caller releases after the connection.
+    """
+    if not version:
+        return None
+    hold = _hold_version(base_folder, version)
+    if hold is None:
+        return None
+    try:
+        _attach(connection, base_folder, version, mode)
+    except BaseException:
+        os.close(hold)
+        raise
+    return hold
+
+
+def _attach(connection: sqlite3.Connection, base_folder: Path, version: str, mode: lane_overlay.Mode) -> None:
+    """Attach a base version the caller holds, read-only, and install the layered views over it."""
+    uri = f"{(base_folder / version).resolve().as_uri()}?mode=ro"
+    connection.execute(f"ATTACH DATABASE ? AS {lane_overlay.BASE_SCHEMA}", (uri,))
+    lane_overlay.install(connection, mode)
 
 
 def _hold_version(folder: Path, name: str) -> int | None:
@@ -362,7 +423,8 @@ def open_db(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
         )
         connection.row_factory = sqlite3.Row
         return connection
-    connection = sqlite3.connect(db_path, timeout=_WRITE_TIMEOUT_SECONDS)
+    # A URI, so an overlay can attach its base read-only (`_attach_base`); the same file either way.
+    connection = sqlite3.connect(db_path.resolve().as_uri(), uri=True, timeout=_WRITE_TIMEOUT_SECONDS)
     connection.row_factory = sqlite3.Row
     _apply_durability(connection)
     connection.executescript(_SCHEMA)
@@ -948,16 +1010,21 @@ def insert_edges(connection: sqlite3.Connection, edges: Iterable[Edge]) -> None:
 
 def _publish_resolved(connection: sqlite3.Connection) -> None:
     """Copy a build's resolved edges out of the scratch database into `edge_rows`, interning their endpoints."""
+    # Unqualified on purpose: an overlay's build connection presents `refs` and `edge_rows` as its
+    # layered views, so a text its base interned keeps the base's key (`zemble.graph.overlay`).
     for column in ("src_id", "dst_id", "file_path"):
         connection.execute(
-            f"INSERT OR IGNORE INTO main.refs (text) SELECT {column} FROM scratch.resolved "  # noqa: S608
+            f"INSERT OR IGNORE INTO refs (text) SELECT {column} FROM scratch.resolved "  # noqa: S608
             f"WHERE {column} IS NOT NULL"
         )
+    # Scalar lookups, not joins: over an overlay's layered `refs` a join is expanded per side or, on a
+    # LEFT JOIN's right, materialized whole; a lookup by text is one index probe per table either way.
     connection.execute(
-        "INSERT INTO main.edge_rows SELECT s.key, d.key, r.dst_name, r.kind, r.line, r.resolution, "
-        "r.candidate_count, r.arity, r.receiver, r.receiver_type, r.is_new, f.key, r.source, r.origin_ref "
-        "FROM scratch.resolved r JOIN main.refs s ON s.text = r.src_id LEFT JOIN main.refs d ON d.text = r.dst_id "
-        "JOIN main.refs f ON f.text = r.file_path ORDER BY r.rowid"
+        "INSERT INTO edge_rows SELECT (SELECT key FROM refs WHERE text = r.src_id), "
+        "(SELECT key FROM refs WHERE text = r.dst_id), r.dst_name, r.kind, r.line, r.resolution, "
+        "r.candidate_count, r.arity, r.receiver, r.receiver_type, r.is_new, "
+        "(SELECT key FROM refs WHERE text = r.file_path), r.source, r.origin_ref "
+        "FROM scratch.resolved r ORDER BY r.rowid"
     )
 
 
@@ -1266,25 +1333,27 @@ class _Scan:
     scanned: int = 0
 
 
-def _scan(root: Path) -> _Scan:
-    """Walk the workspace, splitting extractable files from everything the graph has no reader for."""
+def _scan(root: Path, restamp: Callable[[str, os.stat_result], tuple[int, int]] | None = None) -> _Scan:
+    """Walk the workspace, splitting extractable files from everything the graph has no reader for.
+
+    :param restamp: The stamp to record for a file instead of its own, given its relative path and stat.
+    """
     scan = _Scan()
-    for file_path in walk_files(root, extensions=get_extensions((ContentType.CODE,))):
+    # The walk already knows each file's relative path and stat: computing them again cost a lane's
+    # scan seconds of `Path.relative_to` over its 19k files.
+    for walked in walk_entries(root, extensions=get_extensions((ContentType.CODE,))):
         scan.scanned += 1
+        file_path, stat = walked.path, walked.stat
         suffix = file_path.suffix.lower()
         if extractor_for(file_path) is None:
             scan.skipped[detect_language(file_path) or suffix] += 1
             continue
-        try:
-            stat = file_path.stat()
-        except OSError:
-            continue
         if stat.st_size > _MAX_FILE_BYTES:
             scan.skipped[f"{suffix} (too large)"] += 1
             continue
-        relative = file_path.relative_to(root).as_posix()
+        relative = walked.relative_path
         scan.jobs.append((str(file_path), relative))
-        scan.stamps[relative] = (stat.st_mtime_ns, stat.st_size)
+        scan.stamps[relative] = restamp(relative, stat) if restamp is not None else (stat.st_mtime_ns, stat.st_size)
     return scan
 
 
@@ -1396,6 +1465,8 @@ def _build_locked(
     """Run one build for the writer-lock holder, rebuilding from source when the store is unreadable."""
     started = time.perf_counter()
     workers = workers if workers is not None else DEFAULT_WORKERS
+    _sweep_dead_scratch(folder)
+    lane = _lane_rooted_at(root)
     try:
         # A forced build rebuilds from source, so a legacy store is not worth copying first.
         pointer = _read_pointer(folder) if force else _locked_pointer(folder)
@@ -1404,78 +1475,321 @@ def _build_locked(
             # Whatever a killed build left is swept now, not only when the next version lands.
             _sweep(folder, pointer)
             current = pointer.current
-        elif not force:
-            # A lane's first graph starts as a copy of its base's: only what the lane changed is extracted.
-            current = _seed_from_lane_base(root, folder)
-        stats = _build_into(root, folder, current, force=force, workers=workers, changed_paths=changed_paths)
+        if lane is not None:
+            stats = _build_overlay(root, folder, lane, current, force=force, workers=workers, changed=changed_paths)
+        else:
+            stats = _build_into(root, folder, current, force=force, workers=workers, changed_paths=changed_paths)
     except (sqlite3.DatabaseError, GraphStoreCorrupt) as exc:
         if not is_corruption(exc):
             raise
         logger.error("graph store in %s is malformed (%s); rebuilding it from source", folder, exc)
-        stats = _build_into(root, folder, None, force=True, workers=workers, changed_paths=None)
+        if lane is not None:
+            stats = _build_overlay(root, folder, lane, None, force=True, workers=workers, changed=None)
+        else:
+            stats = _build_into(root, folder, None, force=True, workers=workers, changed_paths=None)
         stats.rebuilt_from_corruption = True
     stats.duration_seconds = time.perf_counter() - started
     return stats
 
 
-def _seed_from_lane_base(root: Path, folder: Path) -> str | None:
-    """Publish a copy of a lane's base graph as the lane's first version, its unchanged files stamped as the lane's.
-
-    The copy is consistent (sqlite's online backup of a held version), so it is exactly a graph of
-    the base; every file the lane holds byte-for-byte - while the base graph still describes the
-    base's copy - gets the lane file's modification time and size, so the walking refresh that
-    follows extracts only what the lane changed and removes what it lacks, re-resolving those
-    edges through the ordinary incremental path.
-
-    :return: The published version's name, or None when the root is no lane root or its base has no graph.
-    """
+def _lane_rooted_at(root: Path) -> Lane | None:
+    """Return the lane *root* is the root of, when its base has a graph to overlay, else None."""
     found = find_lane(root, graph_present)
-    if found is None or found[1] is not None:
+    if found is None or found[1] is not None or found[0].base.resolve() == root:
         return None
-    lane = found[0]
-    source = _connect_current(_graph_dir(str(lane.base)))
-    if source is None:
-        return None
-    started = time.perf_counter()
-    name = _next_version(folder)
-    target = folder / name
-    _discard(target)
+    return found[0]
+
+
+def _held_base(base_folder: Path) -> tuple[str, int] | None:
+    """Hold the base's current graph version: its name and the descriptor, or None when it has no graph."""
+    for _ in range(_HOLD_ATTEMPTS):
+        pointer = _readable_pointer(base_folder)
+        if pointer is None:
+            return None
+        hold = _hold_version(base_folder, pointer.current)
+        if hold is not None:
+            return pointer.current, hold
+    raise GraphStoreCorrupt(f"graph pointer in {base_folder} kept naming retired versions")
+
+
+def _version_meta(db_path: Path) -> dict[str, str]:
+    """Read one version's metadata without migrating or writing anything."""
+    connection = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=_READ_TIMEOUT_SECONDS)
     try:
-        destination = sqlite3.connect(target, timeout=_WRITE_TIMEOUT_SECONDS)
-        try:
-            source.backup(destination)
-            stored = {row[0]: (row[1], row[2]) for row in destination.execute("SELECT path, mtime_ns, size FROM files")}
-            comparer = LaneComparer(lane)
-            stamps = []
-            for relative, (mtime_ns, size) in stored.items():
-                try:
-                    base_stat = (lane.base / relative).stat()
-                    lane_stat = (root / relative).stat()
-                except OSError:
-                    continue
-                if (base_stat.st_mtime_ns, base_stat.st_size) == (mtime_ns, size) and comparer.same(relative):
-                    stamps.append((lane_stat.st_mtime_ns, lane_stat.st_size, relative))
-            destination.executemany("UPDATE files SET mtime_ns = ?, size = ? WHERE path = ?", stamps)
-            destination.execute("UPDATE meta SET value = ? WHERE key = 'root'", (str(root),))
-            destination.commit()
-        finally:
-            destination.close()
-    except BaseException:
-        _discard(target)
-        raise
+        return {str(key): str(value) for key, value in connection.execute("SELECT key, value FROM meta")}
     finally:
-        source.close()
-    _seal(target)
-    _install(folder, name, None)
-    logger.info(
-        "graph: seeded %s from %s in %.1f s (%d of %d files unchanged)",
-        root,
-        lane.base,
-        time.perf_counter() - started,
-        len(stamps),
-        len(stored),
+        connection.close()
+
+
+def _overlay_of(meta: dict[str, str], base: Path, version: str, base_meta: dict[str, str]) -> bool:
+    """Return whether a version is an overlay built on exactly this base version and build of it."""
+    return (
+        meta.get(lane_overlay.META_BASE) == str(base)
+        and meta.get(lane_overlay.META_BASE_VERSION) == version
+        and meta.get(lane_overlay.META_BASE_BUILT_AT) == base_meta.get("built_at")
+        and meta.get("format_version") == str(GRAPH_FORMAT_VERSION)
     )
-    return name
+
+
+def graph_stale(path: str) -> bool:
+    """Return whether a lane root's graph must be rebuilt before it answers for the lane again.
+
+    True for a lane graph that is no overlay (one an older zemble copied whole), and for an
+    overlay whose base has moved: another version, or the same one refreshed in place. Such an
+    overlay still answers meanwhile; it is rebuilt from scratch, which costs the lane's own edits.
+    """
+    root = Path(path).expanduser().resolve()
+    folder = graph_folder(str(root))
+    try:
+        pointer = _read_pointer(folder)
+        if pointer is None:
+            return False
+        meta = _version_meta(folder / pointer.current)
+        recorded = meta.get(lane_overlay.META_BASE)
+        if not recorded:
+            return _lane_rooted_at(root) is not None
+        base_folder = graph_folder(recorded)
+        base_pointer = _read_pointer(base_folder)
+        if base_pointer is None:
+            return False
+        return not _overlay_of(
+            meta, Path(recorded), base_pointer.current, _version_meta(base_folder / base_pointer.current)
+        )
+    except (sqlite3.Error, GraphStoreCorrupt, OSError):
+        return True
+
+
+def _build_overlay(
+    root: Path,
+    folder: Path,
+    lane: Lane,
+    current: str | None,
+    *,
+    force: bool,
+    workers: int,
+    changed: Iterable[Path] | None,
+) -> GraphStats:
+    """Build a lane's graph as an overlay of its base's current graph version (`zemble.graph.overlay`).
+
+    An overlay made on this very base version and build of it is refreshed in place, from the
+    change set when one is named; anything else - no overlay yet, a whole graph an older zemble
+    copied, a base that moved, a forced build - starts a new overlay, which extracts exactly the
+    files the lane changed or added. The base's files outside the checkouts the lane holds are
+    never copied, extracted or removed.
+
+    Two passes: the first resolves the lane's own files and publishes them, so the lane answers
+    with its edits at once; the second re-resolves the files that wrote a name those moved, which
+    can be thousands for one added `get()`. The names the second pass owes are recorded in the
+    overlay before the first is published, so a worker stopped between them leaves its next
+    refresh to finish the job.
+    """
+    started = time.perf_counter()
+    base_folder = _graph_dir(str(lane.base))
+    held = _held_base(base_folder)
+    if held is None:
+        return _build_into(root, folder, current, force=force, workers=workers, changed_paths=changed)
+    base_version, base_hold = held
+    try:
+        base_meta = _version_meta(base_folder / base_version)
+        if base_meta.get("format_version") != str(GRAPH_FORMAT_VERSION):
+            # Its rows lack what the views name; the base's own next build migrates it.
+            logger.warning("graph: the base graph of %s is format %s; building the lane whole", root, base_meta)
+            return _build_into(root, folder, current, force=force, workers=workers, changed_paths=changed)
+        base = lane.base.resolve()
+        meta = _version_meta(folder / current) if current is not None else {}
+        reuse = current is not None and not force and _overlay_of(meta, base, base_version, base_meta)
+        owed = Owed.from_json(meta.get(lane_overlay.META_PENDING)) if reuse else Owed()
+        name = current if reuse and current is not None else _next_version(folder)
+        target = folder / name
+        if not reuse:
+            _discard(target)
+        stats = GraphStats(root=str(root))
+        try:
+            connection = _open_overlay(target, base_folder, base_version)
+            try:
+                if not reuse:
+                    _record_base(connection, lane, base, base_version, base_meta)
+                named = list(changed) if changed is not None and reuse else None
+                scan = _first_overlay_scan(root, lane, connection, named, fresh=not reuse)
+                stats.files_scanned = scan.scanned
+                stats.skipped_by_language = dict(scan.skipped)
+                owed = owed | _run_build(
+                    connection,
+                    root,
+                    scan,
+                    stats,
+                    force=False,
+                    workers=workers,
+                    named_changes=named,
+                    facts_home=base,
+                    defer_dependents=True,
+                )
+                _owe(connection, owed)
+            finally:
+                connection.commit()
+                connection.close()
+        except BaseException:
+            if not reuse:
+                _discard(target)
+            raise
+        if not reuse:
+            _install(folder, name, current)
+        logger.info(
+            "graph: lane %s on %s: %d extracted, %d removed, %d resolved, %d own symbols; %d moved names owed",
+            root,
+            base,
+            stats.extracted_files,
+            stats.removed_files,
+            stats.reresolved_files,
+            stats.symbols,
+            len(owed.names),
+        )
+        stats.published_seconds = time.perf_counter() - started
+        if owed:
+            _resolve_owed(
+                connection_to=lambda: _open_overlay(target, base_folder, base_version),
+                stats=stats,
+                root=root,
+                scan=scan,
+                named=named,
+                base=base,
+                owed=owed,
+                workers=workers,
+            )
+    finally:
+        os.close(base_hold)
+    stats.compacted = _compact_if_drifted(folder, name)
+    return stats
+
+
+def _first_overlay_scan(
+    root: Path, lane: Lane, connection: sqlite3.Connection, named: list[Path] | None, *, fresh: bool
+) -> _Scan:
+    """The scan an overlay pass builds from: the change set's, or the lane's walk, whose scope a new overlay records."""
+    if named is not None:
+        return _scan_changed(root, named, _stored_stamps(connection))
+    scan, walked = _overlay_scan(root, lane, connection)
+    if fresh:
+        lane_overlay.record_hidden(connection, lane_scope(lane).holds, walked)
+        connection.commit()
+    return scan
+
+
+def _resolve_owed(
+    *,
+    connection_to: Callable[[], sqlite3.Connection],
+    stats: GraphStats,
+    root: Path,
+    scan: _Scan,
+    named: list[Path] | None,
+    base: Path,
+    owed: Owed,
+    workers: int,
+) -> None:
+    """Re-resolve the files that wrote a name an overlay's first pass moved, then record that it owes none."""
+    dependents = GraphStats(root=str(root))
+    connection = connection_to()
+    try:
+        _run_build(
+            connection,
+            root,
+            scan,
+            dependents,
+            force=False,
+            workers=workers,
+            named_changes=named,
+            facts_home=base,
+            owed=owed,
+        )
+        _owe(connection, Owed())
+    finally:
+        connection.commit()
+        connection.close()
+    stats.reresolved_files += dependents.reresolved_files
+    stats.restored_files += dependents.restored_files
+    stats.symbols, stats.edges = dependents.symbols, dependents.edges
+    stats.resolution_counts, stats.facts = dependents.resolution_counts, dependents.facts
+    logger.info(
+        "graph: lane %s: %d dependent file(s) re-resolved, %d of them left to the base unchanged",
+        root,
+        dependents.reresolved_files,
+        dependents.restored_files,
+    )
+
+
+def _open_overlay(target: Path, base_folder: Path, base_version: str) -> sqlite3.Connection:
+    """Open an overlay version for writing, with its base attached and the build's layered views installed."""
+    connection = open_db(target)
+    try:
+        connection.executescript(lane_overlay.OVERLAY_SCHEMA)
+        connection.commit()
+        _attach(connection, base_folder, base_version, lane_overlay.Mode.BUILD)
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def _record_base(
+    connection: sqlite3.Connection, lane: Lane, base: Path, base_version: str, base_meta: dict[str, str]
+) -> None:
+    """Record which base version, and which build of it, a new overlay is made on."""
+    connection.executemany(
+        "INSERT OR REPLACE INTO main.meta (key, value) VALUES (?, ?)",
+        [
+            (lane_overlay.META_BASE, str(base)),
+            (lane_overlay.META_BASE_VERSION, base_version),
+            (lane_overlay.META_BASE_BUILT_AT, base_meta.get("built_at", "")),
+            (lane_overlay.META_SCOPE, json.dumps(sorted(pair.prefix for pair in lane.repos))),
+        ],
+    )
+    connection.commit()
+
+
+def _owe(connection: sqlite3.Connection, owed: Owed) -> None:
+    """Record what the overlay's second pass has yet to resolve, or that it owes nothing."""
+    if owed:
+        connection.execute(
+            "INSERT OR REPLACE INTO main.meta (key, value) VALUES (?, ?)", (lane_overlay.META_PENDING, owed.to_json())
+        )
+    else:
+        connection.execute("DELETE FROM main.meta WHERE key = ?", (lane_overlay.META_PENDING,))
+
+
+def _overlay_scan(root: Path, lane: Lane, connection: sqlite3.Connection) -> tuple[_Scan, set[str]]:
+    """Walk a lane, stamping every file it holds byte-for-byte as its base's so only its edits count as changed.
+
+    The base's files outside the lane's checkouts join the scan with their stored stamps: they are
+    part of the world the lane resolves against, never removed. A base file the lane's checkouts
+    lack is left out, which is what makes the build remove it.
+
+    :return: The scan, and the relative paths the lane's own walk found.
+    """
+    stored = _stored_stamps(connection)
+    owned = lane_overlay.owned_files(connection)
+    comparer = LaneComparer(lane)
+    scope = lane_scope(lane)
+
+    def restamp(relative: str, stat: os.stat_result) -> tuple[int, int]:
+        own = (stat.st_mtime_ns, stat.st_size)
+        stamp = stored.get(relative)
+        if relative in owned or stamp is None:
+            return own
+        try:
+            base_stat = (lane.base / relative).stat()
+        except OSError:
+            return own
+        if (base_stat.st_mtime_ns, base_stat.st_size) == stamp and comparer.same(relative):
+            return stamp
+        return own
+
+    scan = _scan(root, restamp)
+    walked = set(scan.stamps)
+    for relative, stamp in stored.items():
+        if relative not in walked and not scope.holds(relative):
+            scan.jobs.append((str(lane.base / relative), relative))
+            scan.stamps[relative] = stamp
+    return scan, walked
 
 
 def _build_into(
@@ -1496,6 +1810,9 @@ def _build_into(
     refresh; its WAL makes that safe against a kill and invisible to readers until it commits.
     A None `current` also drops the version it replaced, which is how a corrupt one goes.
     """
+    if current is not None and not force and lane_overlay.is_overlay_file(folder / current):
+        # A lane's overlay whose lane lost its base's graph: what it holds is no graph on its own.
+        force = True
     name = current if current is not None and not force else _next_version(folder)
     whole = name != current
     target = folder / name
@@ -1567,8 +1884,19 @@ def _run_build(
     force: bool,
     workers: int,
     named_changes: list[Path] | None,
-) -> None:
-    """Do the two-pass build inside an open connection, a batch of files at a time."""
+    facts_home: Path | None = None,
+    defer_dependents: bool = False,
+    owed: Owed | None = None,
+) -> Owed:
+    """Do the two-pass build inside an open connection, a batch of files at a time.
+
+    :param defer_dependents: Resolve only the files that changed, from their source alone: the files
+        that wrote a name those moved, and the compiler facts of every file, are left to a later pass,
+        which gets them back.
+    :param owed: What an earlier pass deferred, resolved by this one.
+    :return: What this pass deferred.
+    """
+    owed = owed if owed is not None else Owed()
     known = _stored_stamps(connection)
     changed = [job for job in scan.jobs if force or known.get(job[1]) != scan.stamps[job[1]]]
     removed = sorted(set(known) - set(scan.stamps))
@@ -1591,20 +1919,70 @@ def _run_build(
                 for name, ids in _index_extractions(batch).items():
                     after.setdefault(name, set()).update(ids)
 
-        targets = (
-            set(touched) if everything else set(touched) | _dependent_files(connection, _moved_names(before, after))
-        )
+        moved = owed.names if everything else _moved_names(before, after) | owed.names
+        fresh = {job[1] for job in changed}
+        if defer_dependents:
+            deferred, targets = Owed(names=moved, files=fresh | owed.files), set(touched)
+        else:
+            deferred = Owed()
+            targets = set(touched) | owed.files
+            if not everything:
+                targets |= _dependent_files(connection, moved)
         targets &= set(scan.stamps)
-        _resolve_pass(connection, {job[1] for job in changed}, targets, root, stats, named_changes, workers)
+        sources = {relative: Path(absolute) for absolute, relative in scan.jobs}
+        _resolve_pass(
+            connection,
+            fresh,
+            targets,
+            root,
+            stats,
+            named_changes,
+            workers,
+            sources,
+            facts_home,
+            facts=not defer_dependents,
+        )
     _write_meta(connection, root)
     _write_coverage(connection, stats.skipped_by_language)
-    stats.symbols = connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
-    stats.measured_callables = connection.execute("SELECT COUNT(*) FROM symbol_metrics").fetchone()[0]
-    stats.edges = connection.execute("SELECT COUNT(*) FROM edge_rows").fetchone()[0]
+    # The rows this store holds: for a lane's overlay, its own, not its base's beneath them.
+    stats.symbols = connection.execute("SELECT COUNT(*) FROM main.symbols").fetchone()[0]
+    stats.measured_callables = connection.execute("SELECT COUNT(*) FROM main.symbol_metrics").fetchone()[0]
+    stats.edges = connection.execute("SELECT COUNT(*) FROM main.edge_rows").fetchone()[0]
     stats.resolution_counts = {
         row["resolution"]: row["n"]
-        for row in connection.execute("SELECT resolution, COUNT(*) AS n FROM edge_rows GROUP BY resolution")
+        for row in connection.execute("SELECT resolution, COUNT(*) AS n FROM main.edge_rows GROUP BY resolution")
     }
+    return deferred
+
+
+#: The facts plan of a pass that leaves compiler facts to a later one.
+_NO_FACTS = FactsPlan(present={}, states={}, moved=frozenset(), invalidated=frozenset())
+
+
+@dataclass
+class Owed:
+    """What a first pass over a lane's overlay left its second: moved names and the files to map facts onto."""
+
+    names: set[str] = field(default_factory=set)
+    files: set[str] = field(default_factory=set)
+
+    def __bool__(self) -> bool:
+        """Whether anything is owed."""
+        return bool(self.names or self.files)
+
+    def __or__(self, other: Owed) -> Owed:
+        """Both debts together."""
+        return Owed(self.names | other.names, self.files | other.files)
+
+    def to_json(self) -> str:
+        """The debt as the overlay's meta records it."""
+        return json.dumps({"names": sorted(self.names), "files": sorted(self.files)})
+
+    @classmethod
+    def from_json(cls, text: str | None) -> Owed:
+        """Read a recorded debt; nothing recorded owes nothing."""
+        raw = json.loads(text) if text else {}
+        return cls(set(raw.get("names", ())), set(raw.get("files", ())))
 
 
 @contextmanager
@@ -1636,8 +2014,23 @@ def _scratch(connection: sqlite3.Connection) -> Iterator[None]:
     else:
         connection.commit()
     finally:
-        connection.execute("DETACH DATABASE scratch")
-        path.unlink(missing_ok=True)
+        # AIDEV-NOTE: a worker stopped mid-statement fails this DETACH ("query aborted"), and the
+        # unlink after it never ran: four such builds left 9 to 15 GB scratch files each behind.
+        try:
+            connection.execute("DETACH DATABASE scratch")
+        finally:
+            path.unlink(missing_ok=True)
+
+
+def _sweep_dead_scratch(folder: Path) -> None:
+    """Delete the scratch databases of builds whose process is gone; the caller holds the writer lock."""
+    from zemble.daemon.protocol import process_alive
+
+    for entry in os.listdir(folder):
+        match = _SCRATCH_FILE.fullmatch(entry)
+        if match is not None and int(match.group(1)) != os.getpid() and not process_alive(int(match.group(1))):
+            logger.info("graph: removing %s, left by a build that is gone", folder / entry)
+            (folder / entry).unlink(missing_ok=True)
 
 
 def _stage(connection: sqlite3.Connection, edges: Iterable[Edge], table: str = "pending") -> None:
@@ -1671,7 +2064,7 @@ def _unstage(connection: sqlite3.Connection, paths: Sequence[str]) -> None:
     for chunk in _chunks(paths):
         placeholders = ",".join("?" * len(chunk))
         connection.execute(
-            f"INSERT INTO scratch.pending SELECT * FROM main.edges "  # noqa: S608
+            f"INSERT INTO scratch.pending SELECT * FROM edges "  # noqa: S608
             f"WHERE file_path IN ({placeholders}) AND kind NOT IN ({derived})",
             [*chunk, *_DERIVED_KINDS],
         )
@@ -1812,7 +2205,12 @@ def _insert_extractions(
         f"VALUES ({', '.join('?' * (5 + len(FILE_METRIC_COLUMNS)))})",
         file_rows,
     )
-    connection.executemany("INSERT OR REPLACE INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", symbol_rows)
+    connection.executemany(
+        "INSERT OR REPLACE INTO symbols (id, kind, name, qualified_name, file_path, start_line, end_line, "
+        "container_id, modifiers, annotations, signature, is_test, param_types, annotation_args, doc_lines) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        symbol_rows,
+    )
     connection.executemany(
         "INSERT OR REPLACE INTO symbol_metrics (symbol_id, lines, statements, complexity, nesting) VALUES (?,?,?,?,?)",
         metric_rows,
@@ -1831,6 +2229,10 @@ def _resolve_pass(
     stats: GraphStats,
     named_changes: Iterable[Path] | None,
     workers: int,
+    sources: dict[str, Path],
+    facts_home: Path | None,
+    *,
+    facts: bool = True,
 ) -> None:
     """Run pass 2 for the target files against the whole workspace symbol table, a batch at a time.
 
@@ -1845,7 +2247,8 @@ def _resolve_pass(
     is written per batch of files, through a lookup that forgets between batches.
     """
     known_files = {row["path"] for row in connection.execute("SELECT path FROM files")}
-    plan, parsed = _plan_facts(connection, root, named_changes)
+    # Without facts the plan is empty: nothing moved, nothing is mapped, no status row is written.
+    plan, parsed = _plan_facts(connection, root, named_changes, facts_home) if facts else (_NO_FACTS, {})
     targets |= plan.invalidated
     targets &= known_files
 
@@ -1855,7 +2258,7 @@ def _resolve_pass(
 
     ordered = sorted(targets)
     _unstage(connection, ordered)
-    _recover_extracted_edges(connection, root, plan, overlay, targets - fresh, workers)
+    _recover_extracted_edges(connection, plan, overlay, targets - fresh, workers, sources)
 
     lookup = SqliteLookup(connection)
     resolver = Resolver(lookup)
@@ -1886,6 +2289,8 @@ def _resolve_pass(
         derived += resolver.derive_exercises(pending)
         _stage(connection, pending + derived, table="resolved")
         lookup.release()
+    if lane_overlay.is_overlay(connection):
+        stats.restored_files += lane_overlay.restore_unchanged(connection)
     _publish_resolved(connection)
     _write_facts_status(connection, overlay, plan)
     stats.facts = _facts_stats(connection)
@@ -1898,11 +2303,11 @@ def _file_of_edge(edge: Edge) -> str:
 
 def _recover_extracted_edges(
     connection: sqlite3.Connection,
-    root: Path,
     plan: FactsPlan,
     overlay: FactsOverlay,
     stored_targets: set[str],
     workers: int,
+    sources: dict[str, Path],
 ) -> None:
     """Re-extract the target files whose facts coverage may have changed, staging their edges a batch at a time.
 
@@ -1912,7 +2317,11 @@ def _recover_extracted_edges(
     files is the only honest answer; a moved facts file can cover thousands of them.
     """
     changed_coverage = (plan.invalidated | plan.moved_coverage(overlay)) & stored_targets
-    jobs = [(str(root / path), path) for path in sorted(changed_coverage) if extractor_for(root / path) is not None]
+    jobs = [
+        (str(sources[path]), path)
+        for path in sorted(changed_coverage)
+        if path in sources and extractor_for(sources[path]) is not None
+    ]
     for batch in _extracted_batches(jobs, workers):
         rereads = sorted({extraction.file_path for extraction in batch})
         for chunk in _chunks(rereads):
@@ -1935,7 +2344,7 @@ def _target_symbols(connection: sqlite3.Connection, targets: set[str]) -> list[S
 
 
 def _plan_facts(
-    connection: sqlite3.Connection, root: Path, named_changes: Iterable[Path] | None
+    connection: sqlite3.Connection, root: Path, named_changes: Iterable[Path] | None, facts_home: Path | None
 ) -> tuple[FactsPlan, dict[str, FactsFile]]:
     """Decide which facts files moved from `stat`, then read each moved one once to narrow it to its changed sources.
 
@@ -1947,16 +2356,22 @@ def _plan_facts(
 
     def read_changes(relative: str, path: Path, state: FactsFileState) -> frozenset[str] | None:
         try:
-            loaded = load_facts_file(path, root)
+            loaded = load_facts_file(path, root, relative_path=relative)
         except FactsFormatError:
             # Mapping reads it again and reports why; until then it moved whole.
             return None
-        _write_facts_symbols(connection, loaded)
+        changed = state.changed_by(loaded)
+        if changed:
+            # Each source's facts lines are hashed whole, `symbol` facts included: a file whose every
+            # source hashes as before already has exactly its `symbol` facts stored. A lane's own build
+            # rewrites every facts file its base has, and rewriting them all cost it minutes.
+            _write_facts_symbols(connection, loaded)
         loaded.release_facts()
         parsed[relative] = loaded
-        return state.changed_by(loaded)
+        return changed
 
-    plan = plan_facts(root, _present_facts_files(root, states, named_changes), states, read_changes)
+    present = _present_facts_files(root, states, named_changes, facts_home)
+    plan = plan_facts(root, present, states, read_changes)
     return plan, parsed
 
 
@@ -1989,7 +2404,7 @@ def _facts_states(connection: sqlite3.Connection) -> dict[str, FactsFileState]:
 
 
 def _present_facts_files(
-    root: Path, states: dict[str, FactsFileState], named_changes: Iterable[Path] | None
+    root: Path, states: dict[str, FactsFileState], named_changes: Iterable[Path] | None, facts_home: Path | None
 ) -> dict[str, Path]:
     """Find the workspace's facts files, walking the tree only when nobody named the changes.
 
@@ -1997,17 +2412,25 @@ def _present_facts_files(
     which costs more than the whole refresh it precedes. A caller that named its change set
     already promised to name every path that moved, facts files included - the daemon's
     watcher does exactly that - so the graph's own record plus that change set is the answer.
+
+    :param facts_home: Where a facts file the graph knows of and the root lacks is read instead: a
+        lane's base, whose build wrote facts the lane's identical sources are still described by.
     """
     if named_changes is None:
-        return {path.relative_to(root).as_posix(): path for path in discover_facts_files(root)}
-    present = {relative: root / relative for relative in states if (root / relative).is_file()}
-    for candidate in named_changes:
-        try:
-            relative = candidate.relative_to(root).as_posix()
-        except ValueError:
-            continue
-        if candidate.is_file() and matches_facts_glob(root, candidate):
-            present[relative] = candidate
+        present = {path.relative_to(root).as_posix(): path for path in discover_facts_files(root)}
+    else:
+        present = {relative: root / relative for relative in states if (root / relative).is_file()}
+        for candidate in named_changes:
+            try:
+                relative = candidate.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if candidate.is_file() and matches_facts_glob(root, candidate):
+                present[relative] = candidate
+    if facts_home is not None:
+        for relative in states:
+            if relative not in present and (facts_home / relative).is_file():
+                present[relative] = facts_home / relative
     return present
 
 
@@ -2094,7 +2517,7 @@ def _write_facts_symbols_for_read(
     present = set(plan.present)
     for relative in sorted(((present - stored - set(plan.states)) | (plan.moved & present)) - written):
         try:
-            loaded = load_facts_file(plan.present[relative], root, symbols_only=True)
+            loaded = load_facts_file(plan.present[relative], root, relative_path=relative, symbols_only=True)
         except FactsFormatError:
             # Mapping reports it; the rows a previous read wrote stay until the file is readable.
             continue

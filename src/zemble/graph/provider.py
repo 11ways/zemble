@@ -242,7 +242,10 @@ def _metrics_from_row(row: sqlite3.Row) -> CallableMetrics:
 _FILE_METRICS = ", ".join(FILE_METRIC_COLUMNS)
 
 #: Whether a `files f` row is test code: any symbol it declares is (the extractors' own verdict).
-_FILE_IS_TEST = "(SELECT MAX(s.is_test) FROM symbols s WHERE s.file_path = f.path)"
+#: EXISTS, not MAX: an aggregate over a lane overlay's layered `symbols` would be materialized whole.
+_FILE_IS_TEST = "EXISTS (SELECT 1 FROM symbols s WHERE s.file_path = f.path AND s.is_test)"
+#: Whether an `edge_refs e` row's source symbol is test code; a scalar lookup for the same reason.
+_SOURCE_IS_TEST = "COALESCE((SELECT s.is_test FROM symbols s WHERE s.id = e.src_id), 0)"
 
 
 def _file_is_test(row: sqlite3.Row) -> bool:
@@ -642,13 +645,11 @@ class SqliteGraphProvider:
         Sources are counted wherever they live: a caller outside the prefix still calls.
         """
         kinds_where, kinds_parameters = _kinds_clause("e.kind", kinds)
-        under, under_parameters = _under("d.text", prefix)
+        under, under_parameters = _under("e.dst_id", prefix)
         query = (
-            "SELECT d.text AS dst_id, e.kind, e.resolution, COALESCE(s.is_test, 0) AS from_test, "
-            "COUNT(DISTINCT e.src) AS sources "
-            "FROM edge_rows e JOIN refs d ON d.key = e.dst JOIN refs r ON r.key = e.src "
-            "LEFT JOIN symbols s ON s.id = r.text "
-            f"WHERE {kinds_where} AND {under} "  # noqa: S608
+            f"SELECT e.dst_id, e.kind, e.resolution, {_SOURCE_IS_TEST} AS from_test, "  # noqa: S608
+            "COUNT(DISTINCT e.src) AS sources FROM edge_refs e "
+            f"WHERE e.dst IS NOT NULL AND {kinds_where} AND {under} "
             "GROUP BY e.dst, e.kind, e.resolution, from_test"
         )
         return [
@@ -669,13 +670,11 @@ class SqliteGraphProvider:
         counted wherever they live.
         """
         kinds_where, kinds_parameters = _kinds_clause("e.kind", kinds)
-        under, under_parameters = _under("d.text", prefix)
+        under, under_parameters = _under("e.dst_id", prefix)
         query = (
-            "SELECT d.text AS dst_id, COALESCE(s.container_id, r.text) AS owner_id, e.resolution, "
-            "COALESCE(s.is_test, 0) AS from_test, COUNT(DISTINCT e.src) AS sources "
-            "FROM edge_rows e JOIN refs d ON d.key = e.dst JOIN refs r ON r.key = e.src "
-            "LEFT JOIN symbols s ON s.id = r.text "
-            f"WHERE {kinds_where} AND {under} "  # noqa: S608
+            "SELECT e.dst_id, COALESCE((SELECT s.container_id FROM symbols s WHERE s.id = e.src_id), e.src_id) "  # noqa: S608
+            f"AS owner_id, e.resolution, {_SOURCE_IS_TEST} AS from_test, COUNT(DISTINCT e.src) AS sources "
+            f"FROM edge_refs e WHERE e.dst IS NOT NULL AND {kinds_where} AND {under} "
             "GROUP BY e.dst, owner_id, e.resolution, from_test"
         )
         for row in self.connection.execute(query, kinds_parameters + under_parameters):
@@ -690,13 +689,13 @@ class SqliteGraphProvider:
         receiver itself or the receiver's last dotted segment (`Str`, `com.x.Str`). A receiver is chained
         when it is itself a call's result (its text holds a parenthesis: `builder.add(x).named(y)`).
         """
-        under, under_parameters = _under("r.text", prefix)
+        under, under_parameters = _under("e.src_id", prefix)
         query = (
-            "SELECT r.text AS src_id, d.text AS dst_id, e.resolution, e.receiver IS NULL AS bare, "
+            "SELECT e.src_id, e.dst_id, e.resolution, e.receiver IS NULL AS bare, "
             "instr(COALESCE(e.receiver, ''), '(') > 0 AS chained, COUNT(*) AS calls "
-            "FROM edge_rows e JOIN refs r ON r.key = e.src JOIN refs d ON d.key = e.dst "
-            "WHERE e.kind = ? AND COALESCE(e.is_new, 0) = 0 AND NOT (e.receiver_type IS NOT NULL AND "
-            "(e.receiver = e.receiver_type "
+            "FROM edge_refs e "
+            "WHERE e.dst IS NOT NULL AND e.kind = ? AND COALESCE(e.is_new, 0) = 0 AND NOT (e.receiver_type IS NOT NULL "
+            "AND (e.receiver = e.receiver_type "
             "OR substr(e.receiver, -length(e.receiver_type) - 1) = '.' || e.receiver_type)) "
             f"AND {under} "  # noqa: S608
             "GROUP BY e.src, e.dst, e.resolution, bare, chained"
@@ -746,12 +745,11 @@ class SqliteGraphProvider:
     def file_dependencies(self, kinds: Sequence[EdgeKind], *, prefix: str = "") -> list[FileDependency]:
         """Count the resolved edges from each file under a prefix into each other file, by kind and resolution."""
         kinds_where, kinds_parameters = _kinds_clause("e.kind", kinds)
-        under, under_parameters = _under("f.text", prefix)
+        under, under_parameters = _under("e.file_path", prefix)
         query = (
-            "SELECT f.text AS source_path, substr(d.text, 1, instr(d.text, '#') - 1) AS target_path, "
-            "e.kind, e.resolution, COUNT(*) AS edges "
-            "FROM edge_rows e JOIN refs f ON f.key = e.file JOIN refs d ON d.key = e.dst "
-            f"WHERE {kinds_where} AND {under} "  # noqa: S608
+            "SELECT e.file_path AS source_path, substr(e.dst_id, 1, instr(e.dst_id, '#') - 1) AS target_path, "
+            "e.kind, e.resolution, COUNT(*) AS edges FROM edge_refs e "
+            f"WHERE e.dst IS NOT NULL AND {kinds_where} AND {under} "  # noqa: S608
             "GROUP BY e.file, target_path, e.kind, e.resolution"
         )
         return [

@@ -194,6 +194,33 @@ def describe_lane(root: Path, base: Path) -> Lane:
     return Lane(root=root, base=base, repos=tuple(pairs))
 
 
+@dataclass(frozen=True)
+class LaneScope:
+    """Which of its base's files a lane holds: those of the base's checkouts the lane has a worktree of."""
+
+    held: frozenset[str]
+    #: Every checkout of the base, as base-relative prefixes ("" for the base root), longest first.
+    checkouts: tuple[str, ...]
+
+    def holds(self, relative: str) -> bool:
+        """Return whether a base-relative path is the lane's: its innermost base checkout is one the lane holds.
+
+        A path under no checkout of the base (a plain file at a root that is no repository) is
+        the lane's; the lane's own walk then says whether it kept that file.
+        """
+        for prefix in self.checkouts:
+            if not prefix or relative.startswith(f"{prefix}/"):
+                return prefix in self.held
+        return True
+
+
+def lane_scope(lane: Lane) -> LaneScope:
+    """Return the part of its base a lane holds, from the base's checkouts and the lane's matched ones."""
+    checkouts = [directory.relative_to(lane.base).as_posix() for directory in _checkouts_below(lane.base)]
+    prefixes = sorted(("" if prefix == "." else prefix for prefix in checkouts), key=len, reverse=True)
+    return LaneScope(held=frozenset(pair.prefix for pair in lane.repos), checkouts=tuple(prefixes))
+
+
 def _git(directory: Path, *arguments: str) -> list[str]:
     """Run one git command in *directory* and return its NUL-separated output records."""
     completed = subprocess.run(
@@ -245,6 +272,8 @@ class LaneComparer:
     _prefixes: list[str] = field(default_factory=list)
     _lane_paths: RepoRelativePaths = field(default_factory=RepoRelativePaths)
     _base_paths: RepoRelativePaths = field(default_factory=RepoRelativePaths)
+    #: Whether files of a lane-relative directory get the same capsule path in the lane and the base.
+    _same_capsule_dirs: dict[str, bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Collect every matched checkout's git state once, in parallel."""
@@ -266,7 +295,7 @@ class LaneComparer:
     def same(self, relative: str) -> bool:
         """Return whether the lane's file at a lane-relative path has exactly the base's bytes and capsule path."""
         lane_file, base_file = self.lane.root / relative, self.lane.base / relative
-        if self._lane_paths.path_for(lane_file, relative) != self._base_paths.path_for(base_file, relative):
+        if not self._same_capsule_dir(relative.rpartition("/")[0]):
             return False
         held = self._repo_of(relative)
         if held is not None:
@@ -278,6 +307,21 @@ class LaneComparer:
         except OSError:
             return False
 
+    def _same_capsule_dir(self, directory: str) -> bool:
+        """Return whether every file of a lane-relative directory has one capsule path in both trees.
+
+        A capsule path is the file's git root's name plus its path below that root, so two files of
+        one directory agree or differ together: one probe name answers for the whole directory.
+        """
+        found = self._same_capsule_dirs.get(directory)
+        if found is None:
+            probe = f"{directory}/_" if directory else "_"
+            found = self._lane_paths.path_for(self.lane.root / probe, probe) == self._base_paths.path_for(
+                self.lane.base / probe, probe
+            )
+            self._same_capsule_dirs[directory] = found
+        return found
+
     def partition(self, relatives: Iterable[str]) -> tuple[list[str], list[str]]:
         """Split lane-relative paths into those the base holds unchanged and those that differ."""
         same: list[str] = []
@@ -287,4 +331,14 @@ class LaneComparer:
         return same, differing
 
 
-__all__ = ["DISCOVERY_DEPTH", "Lane", "LaneComparer", "RepoPair", "describe_lane", "find_lane", "main_worktree"]
+__all__ = [
+    "DISCOVERY_DEPTH",
+    "Lane",
+    "LaneComparer",
+    "LaneScope",
+    "RepoPair",
+    "describe_lane",
+    "find_lane",
+    "lane_scope",
+    "main_worktree",
+]

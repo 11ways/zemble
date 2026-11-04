@@ -78,6 +78,8 @@ class OrphanKind(str, Enum):
 
 #: The kinds whose root no longer exists: what a daemon prunes on its own, on start and periodically.
 ROOT_GONE_KINDS = frozenset({OrphanKind.INDEX_ROOT_GONE, OrphanKind.GRAPH_ROOT_GONE, OrphanKind.NAMED_ROOT_GONE})
+#: What a build whose process is gone left behind: a daemon sweeps these at start and on every prune.
+DEAD_WRITER_KINDS = frozenset({OrphanKind.TEMP_LEFTOVER, OrphanKind.STAGING_LEFTOVER})
 
 
 @dataclass
@@ -352,13 +354,17 @@ def _temp_leftovers(cache_folder: Path, doomed: set[Path], now: float) -> list[O
 
 
 def _left_by_a_live_writer(path: Path, pid: str | None, now: float) -> bool:
-    """Return whether a leftover may still belong to a running writer: its process lives, or it is recent."""
+    """Return whether a leftover may still belong to a running writer: its process lives, or it is recent.
+
+    A leftover named after its process is its writer's while that process lives and never after,
+    however young: a graph build killed mid-refresh leaves a scratch file of up to 15 GB.
+    """
     try:
         modified = path.stat().st_mtime
     except FileNotFoundError:
         return True
-    if pid is not None and process_alive(int(pid)):
-        return True
+    if pid is not None:
+        return process_alive(int(pid))
     return now - modified < _TEMP_MIN_AGE_SECONDS
 
 
@@ -391,6 +397,7 @@ def _tree_size(folder: Path) -> int:
 
 
 __all__ = [
+    "DEAD_WRITER_KINDS",
     "DEFAULT_MAX_AGE_DAYS",
     "ROOT_GONE_KINDS",
     "Orphan",

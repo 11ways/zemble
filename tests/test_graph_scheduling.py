@@ -155,3 +155,40 @@ async def test_a_cancelled_waiter_neither_runs_nor_keeps_the_turn(workers, works
     await asyncio.gather(*list(jobs.jobs.values()), return_exceptions=True)
     assert workers.started == [base, lane_b]
     assert jobs.states[lane_a]["state"] == "cancelled"
+
+
+@pytest.mark.anyio
+async def test_a_ready_lane_whose_base_moved_is_rebuilt_in_the_background(workers, workspace, monkeypatch):
+    """A lane overlay whose base moved answers at once and is rebuilt behind the answer, once however often asked."""
+    from zemble.graph import store
+
+    _base, lane_a, _ = workspace
+    stale = {lane_a: True}
+    monkeypatch.setattr(store, "graph_stale", lambda root: stale.get(root, False))
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+    jobs.ready.add(lane_a)
+    await jobs.ensure(lane_a, None)
+    await jobs.ensure(lane_a, None)
+    await workers.started_count(1)
+    stale[lane_a] = False
+    await workers.run_in_turn(1)
+    await asyncio.gather(*list(jobs.jobs.values()))
+    await jobs.ensure(lane_a, None)
+    await _settle()
+    assert workers.started == [lane_a], "one rebuild for a stale overlay, none once it is fresh"
+
+
+@pytest.mark.anyio
+async def test_a_root_that_is_no_lane_is_checked_once_and_never_rebuilt_for_a_base(workers, workspace, monkeypatch):
+    """The base workspace answers every graph question without a staleness check after its first."""
+    from zemble.graph import store
+
+    base, _lane_a, _ = workspace
+    checked: list[str] = []
+    monkeypatch.setattr(store, "graph_stale", lambda root: checked.append(root) or True)
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+    jobs.ready.add(base)
+    for _ in range(3):
+        await jobs.ensure(base, None)
+        await _settle()
+    assert checked == [] and base in jobs._not_lanes and not workers.started, "no lane, no staleness, no rebuild"

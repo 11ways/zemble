@@ -240,6 +240,23 @@ async def test_rebuild_defers_without_allocating_and_old_generation_survives(tmp
 
 
 @pytest.mark.anyio
+async def test_a_tree_past_the_work_limit_is_refused_at_once_never_deferred_for_memory(tmp_project, monkeypatch):
+    """Work the build would refuse is refused before admission, so it is never retried as a memory deferral."""
+    from zemble.index.scope import WORK_LIMIT_ENV
+
+    instance = daemon()
+    key, index = await instance.index_for({"path": str(tmp_project)})
+    for number in range(30):
+        (tmp_project / f"dump_{number}.py").write_text("x = 1\n" * 15_000, encoding="utf-8")
+    monkeypatch.setenv(WORK_LIMIT_ENV, "1")
+    monkeypatch.setattr(instance, "_admit", lambda *args, **kwargs: pytest.fail("admission asked for refused work"))
+    result = await instance.rebuild(key)
+    assert "deferred" not in result and result["knob"] == WORK_LIMIT_ENV, f"refused with its ceiling, got {result}"
+    assert "may chunk" in result["refused"], "and the reason the build would give"
+    assert instance.cache.loaded()[0][1] is index, "the serving generation is untouched"
+
+
+@pytest.mark.anyio
 async def test_a_request_during_a_build_joins_it_instead_of_reserving_another_load(tmp_project, monkeypatch):
     """Once the request that started a build gave up, the next one waits for that build, not for headroom."""
     (tmp_project / "src").mkdir()

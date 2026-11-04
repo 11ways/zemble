@@ -448,7 +448,8 @@ the indexed lookup.
 **The build itself is batched**, so its memory follows a batch, not the workspace.
 Changed files are extracted `_BATCH_FILES` (100) at a time; their symbols go into
 the store and their unresolved edges into a scratch database beside it
-(`graph-scratch.building-<pid>`, attached for the build and deleted after). The
+(`graph-scratch.building-<pid>`, attached for the build and deleted after, also when the
+build fails; a dead build's is swept by the next build of that graph and by the daemon). The
 stored edges of every other file to re-resolve move there too. The supertype edges
 of all targets are then resolved and indexed at once - a call chain can climb
 through any of them - and everything else is resolved, derived and staged a batch at

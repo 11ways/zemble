@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -575,3 +576,50 @@ def test_a_lookup_keeps_its_answers_until_they_pass_the_budget(
         assert again is not circle and again == circle, "step 3: past the budget the answer is read anew"
     finally:
         connection.close()
+
+
+class _DetachFails(sqlite3.Connection):
+    """A connection whose DETACH fails the way an interrupted worker's does."""
+
+    def execute(self, sql, *parameters):  # type: ignore[override]
+        if sql.startswith("DETACH"):
+            raise sqlite3.OperationalError("query aborted")
+        return super().execute(sql, *parameters)
+
+
+def test_a_failed_build_leaves_no_scratch_and_the_next_one_sweeps_a_dead_builds(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
+) -> None:
+    """Scratch goes even when DETACH fails, and a dead build's scratch is swept by the next build."""
+    import subprocess
+
+    from zemble.graph import store
+
+    # 1. A build stopped mid-statement fails its DETACH too; its scratch file is still removed.
+    db_path = tmp_path / "graph-1.sqlite"
+    connection = sqlite3.connect(db_path, factory=_DetachFails)
+    connection.row_factory = sqlite3.Row
+    connection.executescript(store._SCHEMA)
+    scratch = tmp_path / store._SCRATCH_NAME.format(pid=os.getpid())
+    with pytest.raises(sqlite3.OperationalError, match="query aborted"):
+        with store._scratch(connection):
+            assert scratch.is_file(), "1: the scratch database exists while the build runs"
+            raise RuntimeError("worker stopped")
+    connection.close()
+    assert not scratch.exists(), "1: and is gone after the build failed"
+
+    # 2. The scratch file of a build whose process is gone is swept by the next build; a live one's is kept.
+    workspace = tmp_path / "ws"
+    shutil.copytree(graph_fixture_root, workspace)
+    build_graph(str(workspace))
+    folder = store.graph_folder(str(workspace))
+    exited = subprocess.Popen(["true"])
+    exited.wait()
+    dead = folder / store._SCRATCH_NAME.format(pid=exited.pid)
+    live = folder / store._SCRATCH_NAME.format(pid=1)
+    dead.write_bytes(b"x" * 64)
+    live.write_bytes(b"x")
+    build_graph(str(workspace))
+    assert not dead.exists(), "2: a dead build's scratch is swept"
+    assert live.exists(), "2: a live process's is kept"
+    live.unlink()

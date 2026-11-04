@@ -198,7 +198,11 @@ private memory on the 177,780-chunk zenit workspace, measured phase by phase:
 | Build from nothing | not measured (> 2 GiB) | 283 MiB |
 
 Admission reserves 192 MiB plus three bytes per byte of new source, measured against the
-stored manifest of the root that will answer, not the whole tree.
+stored manifest of the root that will answer, not the whole tree. Work past the work limit
+(`ZEMBLE_INDEX_WORK_LIMIT_MB`) is refused before admission is asked: deferred for memory
+instead, it was retried every 28 s for good and the refusal naming the cause never surfaced
+(the zenit workspace walking its own lanes, 750 MB of source, a 2.4 GiB reserve under a 2 GiB
+ceiling while a graph worker ran).
 
 The symbol graph had the same shape: a build held every extraction and, past 400 target
 files, the whole symbol table. It now extracts and resolves 100 files at a time through a

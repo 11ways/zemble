@@ -63,7 +63,13 @@ from zemble.index.chunk_store import ChunkList
 from zemble.index.create import change_set_moves_anything, tree_moves_anything
 from zemble.index.files import get_extensions
 from zemble.index.overlay import OverlayIndex, build_overlay, overlay_folder
-from zemble.index.scope import TreeEstimate, estimate_tree, measure_work, require_declared_scope
+from zemble.index.scope import (
+    TreeEstimate,
+    estimate_tree,
+    measure_work,
+    require_affordable_work,
+    require_declared_scope,
+)
 from zemble.index.types import PreviousIndex
 from zemble.index_cache import CacheKey, IndexCache, compute_cache_key
 from zemble.lane import Lane, find_lane
@@ -819,11 +825,16 @@ class Daemon:
                     Path(cache_key[0]),
                 )
                 reserve = _work_reserve(work)
-                if not self._admit(reserve, keep=cache_key):
-                    result = {"deferred": "memory budget", "reserve_mb": round(reserve), "knob": MEMORY_ENV}
-                    self.last_error[cache_key] = {"refused": f"Rebuild deferred by {MEMORY_ENV}", **result}
-                    return result
                 try:
+                    # AIDEV-NOTE: refused BEFORE admission, never deferred: a tree past the work limit
+                    # was "deferred by ZEMBLE_DAEMON_MAX_RSS_MB" and retried every 28 s for good (the
+                    # zenit workspace walking its own lanes: 750 MB of source, a 2.4 GiB reserve under a
+                    # 2 GiB ceiling), so the build that would have said why never ran.
+                    require_affordable_work(work, Path(cache_key[0]), current.embedder)
+                    if not self._admit(reserve, keep=cache_key):
+                        result = {"deferred": "memory budget", "reserve_mb": round(reserve), "knob": MEMORY_ENV}
+                        self.last_error[cache_key] = {"refused": f"Rebuild deferred by {MEMORY_ENV}", **result}
+                        return result
                     index, counts = await asyncio.to_thread(rebuild_index, current, cache_key, changed_paths)
                 except REFUSAL_TYPES as exc:
                     # Nothing was chunked, embedded or swapped, so the index that was serving
@@ -1059,10 +1070,14 @@ class Daemon:
                 writer.close()
 
     async def prune_loop(self) -> None:
-        """Drop the cache folders of roots that are gone (removed lanes), at start and every few hours."""
+        """Sweep dead builds' leftovers at start; drop the caches of gone roots soon after, and both every few hours."""
         hours = _env_int(PRUNE_HOURS_ENV, _DEFAULT_PRUNE_HOURS)
         if hours <= 0:
             return
+        try:
+            await self.prune_gone_roots(roots=False)
+        except Exception:
+            logger.exception("sweeping what dead builds left in the cache failed")
         await asyncio.sleep(_PRUNE_FIRST_DELAY_SECONDS)
         while not self.stop_event.is_set():
             try:
@@ -1071,28 +1086,29 @@ class Daemon:
                 logger.exception("pruning the cache of roots that are gone failed")
             await asyncio.sleep(hours * 3600)
 
-    async def prune_gone_roots(self) -> list[str]:
-        """Evict and delete the indexes, overlays and graphs of every root that no longer exists.
+    async def prune_gone_roots(self, *, roots: bool = True) -> list[str]:
+        """Delete what dead builds left behind and, unless told not to, every gone root's indexes, overlays and graphs.
 
-        :return: The roots whose caches were removed.
+        :param roots: Whether gone roots go too; leftovers always do.
+        :return: What was removed: gone roots, and the paths of leftovers.
         """
         from zemble.cache import resolve_cache_folder
-        from zemble.cache_orphans import ROOT_GONE_KINDS, find_orphans, remove_orphan
+        from zemble.cache_orphans import DEAD_WRITER_KINDS, ROOT_GONE_KINDS, find_orphans, remove_orphan
 
+        kinds = DEAD_WRITER_KINDS | (ROOT_GONE_KINDS if roots else frozenset())
         orphans = [
-            orphan
-            for orphan in await asyncio.to_thread(find_orphans, resolve_cache_folder())
-            if orphan.kind in ROOT_GONE_KINDS
+            orphan for orphan in await asyncio.to_thread(find_orphans, resolve_cache_folder()) if orphan.kind in kinds
         ]
-        for key in [key for key in self.cache._tasks if not Path(key[0]).exists()]:
-            self.cache.evict(key)
+        if roots:
+            for key in [key for key in self.cache._tasks if not Path(key[0]).exists()]:
+                self.cache.evict(key)
         removed = []
         for orphan in orphans:
             if await asyncio.to_thread(remove_orphan, orphan):
-                removed.append(orphan.detail)
+                removed.append(orphan.detail or str(orphan.target))
         if removed:
             freed = sum(orphan.size for orphan in orphans) / MIB
-            logger.info("pruned the caches of %d root(s) that are gone, %.0f MiB: %s", len(removed), freed, removed)
+            logger.info("pruned %d gone root(s) and dead builds' leftovers, %.0f MiB: %s", len(removed), freed, removed)
         return removed
 
     async def idle_loop(self) -> None:

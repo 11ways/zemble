@@ -375,15 +375,26 @@ def require_affordable_scope(
     if confirmed() or work_limit_bytes() <= 0:
         return TreeEstimate(root=resolved, files=0, bytes=0, children=())
     estimate = measure_work(measured_root, content, exclude, previous_manifest, changed, display_root)
+    return require_affordable_work(estimate, resolved, embedder)
+
+
+def require_affordable_work(estimate: TreeEstimate, root: Path, embedder: Embedder) -> TreeEstimate:
+    """Refuse a measured build past the work limit, exactly as `require_affordable_scope` would.
+
+    :return: The estimate, when nothing refused it.
+    :raises OversizedRootRefused: If the measurement exceeds the work limit and nothing confirmed it.
+    """
+    if confirmed() or work_limit_bytes() <= 0:
+        return estimate
     refusal = work_refusal(estimate)
     if refusal is None:
         return estimate
     reason, knob = refusal
     family = embedder_family(embedder)
     raise OversizedRootRefused(
-        f"Refusing to index {resolved} with {family or 'the configured embedder'}: {reason}\n"
+        f"Refusing to index {root} with {family or 'the configured embedder'}: {reason}\n"
         f"{estimate.breakdown()}\n"
-        f"{remedies(resolved, knob)}",
+        f"{remedies(root, knob)}",
         knob,
     )
 

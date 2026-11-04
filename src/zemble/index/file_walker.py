@@ -213,6 +213,37 @@ def _root_spec(root: Path, ignore: Sequence[str] | None = None) -> IgnoreSpec:
     )
 
 
+def is_duplicate_worktree(root: Path | str, directory: Path | str) -> bool:
+    """Return whether a directory below a walk root is a linked worktree of a checkout the root already holds.
+
+    AIDEV-NOTE: a lane parked inside its own base (`<workspace>/lanes/<name>/<checkout>`) is the base's
+    checkouts again. Walked into the base it made the zenit workspace's index refuse its 180 MB work
+    ceiling (721 of 750 MB were lanes) and its graph refresh extract every lane, filling the disk with
+    scratch. The rule is git's own fact (the worktree's `commondir`), never a folder name; a lane is
+    indexed as its own root, where its checkouts' main worktrees lie outside and nothing is skipped.
+    """
+    from zemble.lane import main_worktree
+
+    directory = Path(directory)
+    if not (directory / ".git").is_file():
+        return False
+    main = main_worktree(directory)
+    if main is None:
+        return False
+    resolved_root = Path(root).resolve()
+    return main != directory.resolve() and (main == resolved_root or resolved_root in main.parents)
+
+
+def duplicate_worktree_prefix(root: Path, relative_path: str) -> str | None:
+    """Return the root-relative directory holding a path that `is_duplicate_worktree` keeps out of the walk, or None."""
+    segments = [segment for segment in relative_path.split("/") if segment]
+    for depth in range(1, len(segments)):
+        prefix = "/".join(segments[:depth])
+        if is_duplicate_worktree(root, root / prefix):
+            return prefix
+    return None
+
+
 def ignored_prefix(root: Path, relative_path: str, ignore: Sequence[str] | None = None) -> str | None:
     """Return the path prefix that keeps a root-relative path out of the walk, or None.
 
@@ -245,6 +276,8 @@ def ignored_prefix(root: Path, relative_path: str, ignore: Sequence[str] | None 
         is_ignored, _bypasses = _is_ignored(walked, index < len(segments) - 1, specs)
         if is_ignored:
             return walked
+        if index < len(segments) - 1 and is_duplicate_worktree(root, f"{directory}/{segment}"):
+            return walked
         directory = f"{directory}/{segment}"
     return None
 
@@ -275,8 +308,10 @@ def _walk(
     relative_path: str,
     inherited_specs: list[IgnoreSpec],
     extensions: frozenset[str],
+    root: str | None = None,
 ) -> Iterator[WalkedFile]:
     """Recursive function for walking files under a directory."""
+    root = directory if root is None else root
     loaded = _load_ignore_for_dir(directory)
     if loaded is not None:
         inherited_specs = [
@@ -293,6 +328,11 @@ def _walk(
     with os.scandir(directory) as scan:
         entries = sorted(scan, key=lambda entry: entry.name)
 
+    # The entries are already listed, so only a directory holding a `.git` file costs a look.
+    if relative_path and any(entry.name == ".git" and entry.is_file() for entry in entries):
+        if is_duplicate_worktree(root, directory):
+            return
+
     for entry in entries:
         # Don't follow symlinks
         if entry.is_symlink():
@@ -304,6 +344,6 @@ def _walk(
             continue
 
         if is_dir:
-            yield from _walk(entry.path, child_relative, inherited_specs, extensions)
+            yield from _walk(entry.path, child_relative, inherited_specs, extensions, root)
         elif entry.is_file() and (found or os.path.splitext(entry.name)[1].lower() in extensions):
             yield WalkedFile(path=Path(entry.path), relative_path=child_relative, stat=entry.stat())

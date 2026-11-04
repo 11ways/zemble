@@ -212,8 +212,10 @@ def test_index_cache_serves_a_lane_as_an_overlay_outside_the_slot_count(
     asyncio.run(journey())
 
 
-def test_lane_graph_is_seeded_from_the_base_graph(graph_fixture_root: Path, graph_cache: Path, tmp_path: Path) -> None:
-    """A lane reads its base's graph until its own is seeded; the seed extracts only the lane's edits."""
+def test_lane_graph_is_an_overlay_of_the_base_graph(
+    graph_fixture_root: Path, graph_cache: Path, tmp_path: Path
+) -> None:
+    """A lane reads its base's graph until its own exists; its own extracts and stores only the lane's edits."""
     from zemble.graph import SqliteGraphProvider, build_graph
     from zemble.graph.provider import open_provider
     from zemble.graph.store import resolve_graph_root
@@ -235,7 +237,7 @@ def test_lane_graph_is_seeded_from_the_base_graph(graph_fixture_root: Path, grap
     finally:
         provider.close()
 
-    # 2. The lane's first build copies the base's graph and extracts only the edited file.
+    # 2. The lane's first build extracts only the edited file and stores only its rows over the base's.
     point = lane / "core/src/main/java/com/example/core/Point.java"
     text = point.read_text(encoding="utf-8")
     point.write_text(
@@ -243,7 +245,7 @@ def test_lane_graph_is_seeded_from_the_base_graph(graph_fixture_root: Path, grap
     )
     seeded = build_graph(str(lane))
     assert seeded.extracted_files == 1, "2: only the lane's edit is extracted"
-    assert seeded.symbols == base.symbols + 1, "2: and the graph holds the base's symbols plus the new one"
+    assert 0 < seeded.symbols < base.symbols, "2: the overlay holds the edited file's symbols, not the base's"
     assert resolve_graph_root(str(lane)) == (str(lane), None), "2: the lane now answers from its own graph"
     lane_graph = SqliteGraphProvider(str(lane))
     try:
@@ -374,8 +376,12 @@ def test_a_lanes_unit_index_reads_its_bases_rows_and_keeps_only_its_delta(worksp
 
     # 1. The base holds rows for two files; a lane mirrors the base's layout.
     base = UnitIndex(workspace, "sig")
-    base.store([FileRow(path="alpha/src/shared.py", digest="d-shared", failed=False),
-                FileRow(path="alpha/src/edited.py", digest="d-original", failed=False)])
+    base.store(
+        [
+            FileRow(path="alpha/src/shared.py", digest="d-shared", failed=False),
+            FileRow(path="alpha/src/edited.py", digest="d-original", failed=False),
+        ]
+    )
     base.close()
     base_bytes = (root_cache_folder(workspace) / INDEX_FILE_NAME).read_bytes()
     lane = _lane(workspace, "lane-units")
@@ -388,7 +394,9 @@ def test_a_lanes_unit_index_reads_its_bases_rows_and_keeps_only_its_delta(worksp
     # 3. The lane stores its delta in its own index; the base's file is never written.
     index.store([FileRow(path="alpha/src/edited.py", digest="d-edited", failed=False)])
     assert sorted(index.load({"alpha/src/shared.py": "d-shared", "alpha/src/edited.py": "d-edited"})) == [
-        "alpha/src/edited.py", "alpha/src/shared.py"]
+        "alpha/src/edited.py",
+        "alpha/src/shared.py",
+    ]
     index.close()
     assert (root_cache_folder(workspace) / INDEX_FILE_NAME).read_bytes() == base_bytes, "the base is read-only"
 
@@ -407,8 +415,12 @@ def test_a_lanes_extracted_rows_heal_its_bases_index_for_shared_content(workspac
 
     # 2. The lane stores one row whose content the base shares and one the lane edited.
     index = UnitIndex(lane, "new")
-    index.store([FileRow(path="alpha/src/shared.py", digest=shared, failed=False),
-                 FileRow(path="alpha/src/edited.py", digest="d-lane-edit", failed=False)])
+    index.store(
+        [
+            FileRow(path="alpha/src/shared.py", digest=shared, failed=False),
+            FileRow(path="alpha/src/edited.py", digest="d-lane-edit", failed=False),
+        ]
+    )
     index.close()
 
     # 3. The base now answers the shared file under the new signature, and never the lane's edit.
@@ -416,3 +428,35 @@ def test_a_lanes_extracted_rows_heal_its_bases_index_for_shared_content(workspac
     found = base.load({"alpha/src/shared.py": shared, "alpha/src/edited.py": "d-lane-edit"})
     base.close()
     assert sorted(found) == ["alpha/src/shared.py"], "THE ASSERTION -- only content the base holds reaches its index"
+
+
+@pytest.mark.anyio
+async def test_a_daemon_sweeps_what_dead_builds_left_at_start_and_on_every_prune(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead build's scratch is swept at daemon start, however young, and a live build's is kept."""
+    from zemble.cache import resolve_cache_folder
+    from zemble.graph.store import build_graph, graph_folder
+
+    build_graph(str(workspace))
+    folder = graph_folder(str(workspace))
+    exited = subprocess.Popen(["true"])
+    exited.wait()
+    dead = folder / f"graph-scratch.building-{exited.pid}"
+    live = folder / f"graph-scratch.building-{os.getpid()}"
+    dead.write_bytes(b"x" * 64)
+    live.write_bytes(b"x")
+    assert resolve_cache_folder() in folder.parents
+    daemon = _daemon()
+    monkeypatch.setattr(server, "_PRUNE_FIRST_DELAY_SECONDS", 3600.0)
+    loop = asyncio.create_task(daemon.prune_loop())
+    try:
+        for _ in range(500):
+            if not dead.exists():
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        loop.cancel()
+    assert not dead.exists(), "the start sweep removed a dead build's scratch"
+    assert live.exists(), "and kept a live one's"
+    assert str(workspace) not in await daemon.prune_gone_roots(), "a live root is kept by the full prune"

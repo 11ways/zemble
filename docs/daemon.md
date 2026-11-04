@@ -306,8 +306,10 @@ workspace's checkouts at the same relative paths; the lane root itself need not 
 repository. It is answered as an overlay of the base's index, never indexed again; see
 `docs/lanes.md`. An overlay takes no `ZEMBLE_DAEMON_MAX_INDEXES` slot, costs its delta in
 memory, is re-planned when its lane or its base moves, and is evicted with its base. A lane's
-first symbol graph is a copy of its base's with only the lane's edits extracted; until it is
-published, the base's graph answers for the lane.
+symbol graph is an overlay too: a small store of the lane's own rows over its base's graph,
+rebuilt in the background on the lane's next graph question once its base moved; until it is
+published, the base's graph answers for the lane. A lane parked inside its base
+(`<workspace>/lanes/<name>`) is never walked, watched or indexed as part of the base.
 
 ### On demand, and only on demand
 
@@ -345,7 +347,7 @@ output can end up in a backup.
 | `ZEMBLE_DAEMON_IDLE_MINUTES` | 30 | Idle shutdown delay; `0` never exits. |
 | `ZEMBLE_DAEMON_DIR` / `ZEMBLE_DAEMON_SOCKET` | unset | Move the runtime directory or the socket itself (tests use this). |
 | `ZEMBLE_QUERY_WAIT_SECONDS` | 180 | How long one query waits for a busy daemon in all, before it reports the wait. |
-| `ZEMBLE_DAEMON_PRUNE_HOURS` | 6 | Hours between the daemon's own prunes of the caches of roots that are gone (first one 2 min after start); `0` disables. |
+| `ZEMBLE_DAEMON_PRUNE_HOURS` | 6 | Hours between the daemon's own prunes of the caches of roots that are gone (first one 2 min after start), and of what dead builds left (scratch databases, staging folders, temp files whose writer is gone: at start too); `0` disables. |
 
 A socket with a dead owner is detected (connect fails, pidfile pid is gone) and
 removed before a new daemon starts; a pidfile owned by a live process is left alone,

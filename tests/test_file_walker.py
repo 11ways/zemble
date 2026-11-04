@@ -212,3 +212,38 @@ def test_walk_files_skips_symlinks(tmp_path: Path) -> None:
     # Symlink-based paths are absent
     assert "wrapper/src/linked/mod.py" not in found
     assert "link_to_original.py" not in found
+
+
+def test_a_lane_parked_inside_its_base_is_its_own_root_never_the_bases(tmp_path: Path) -> None:
+    """A linked worktree of a checkout the root holds is skipped by every walk of the root, and walked as its own."""
+    import subprocess
+
+    from tests.conftest import git
+    from zemble.daemon.watch import IgnoreRules
+    from zemble.graph.facts import discover_facts_files, matches_facts_glob
+    from zemble.index.file_walker import ignored_prefix
+
+    workspace = (tmp_path / "ws").resolve()
+    _touch(workspace / "alpha/src/a.py")
+    _touch(workspace / "alpha/build/zemble/facts-compileJava.jsonl", "{}\n")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(workspace / "alpha")], check=True)
+    git(workspace / "alpha", "add", "src")
+    git(workspace / "alpha", "commit", "-q", "-m", "initial")
+    lane = workspace / "lanes" / "one"
+    git(workspace / "alpha", "worktree", "add", "-q", "--detach", str(lane / "alpha"))
+    _touch(lane / "alpha/src/lane_only.py")
+    _touch(lane / "alpha/build/zemble/facts-compileJava.jsonl", "{}\n")
+
+    walked = {path.relative_to(workspace).as_posix() for path in walk_files(workspace, [".py"])}
+    assert walked == {"alpha/src/a.py"}, "the base's walk leaves its lane out"
+    assert ignored_prefix(workspace, "lanes/one/alpha/src/lane_only.py") == "lanes/one/alpha", "a named path too"
+    assert ignored_prefix(workspace, "alpha/src/a.py") is None, "the base's own checkout is walked"
+    rules = IgnoreRules(workspace, [".py"], always=lambda path: matches_facts_glob(workspace, path))
+    assert not rules.matches(lane / "alpha/src/lane_only.py"), "the base's watcher ignores a lane's edit"
+    assert not rules.matches(lane / "alpha/build/zemble/facts-compileJava.jsonl"), "and a lane's facts file"
+    assert rules.matches(workspace / "alpha/src/a.py"), "but not its own"
+    facts = [path.relative_to(workspace).as_posix() for path in discover_facts_files(workspace)]
+    assert facts == ["alpha/build/zemble/facts-compileJava.jsonl"], "the facts walk leaves the lane out"
+
+    own = {path.relative_to(lane).as_posix() for path in walk_files(lane, [".py"])}
+    assert own == {"alpha/src/a.py", "alpha/src/lane_only.py"}, "the lane walked as its own root holds its files"

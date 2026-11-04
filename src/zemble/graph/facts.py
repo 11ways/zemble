@@ -41,7 +41,7 @@ from zemble.graph.model import (
     SymbolKind,
 )
 from zemble.graph.signature import same_parameters, simple_type_name
-from zemble.index.file_walker import ignored_prefix
+from zemble.index.file_walker import duplicate_worktree_prefix, ignored_prefix, is_duplicate_worktree
 
 logger = logging.getLogger(__name__)
 
@@ -368,10 +368,7 @@ def _walk_for_globs(root: Path, patterns: Sequence[list[str]]) -> Iterator[Path]
     stack: list[tuple[Path, list[set[int]]]] = [(root, [_closure({0}, pattern) for pattern in patterns])]
     while stack:
         directory, states = stack.pop()
-        try:
-            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
-        except OSError:
-            continue
+        entries = _walked_entries(root, directory)
         for entry in entries:
             if entry.is_dir(follow_symlinks=False):
                 if entry.name in _SKIPPED_DIRS:
@@ -384,6 +381,18 @@ def _walk_for_globs(root: Path, patterns: Sequence[list[str]]) -> Iterator[Path]
                     if len(pattern) in _closure(_advance(state, entry.name, pattern), pattern):
                         yield Path(entry.path)
                         break
+
+
+def _walked_entries(root: Path, directory: Path) -> list[os.DirEntry[str]]:
+    """List a directory the facts walk descends into: nothing for an unreadable one or a lane inside the root."""
+    try:
+        entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+    except OSError:
+        return []
+    if directory != root and any(entry.name == ".git" and entry.is_file() for entry in entries):
+        if is_duplicate_worktree(root, directory):
+            return []
+    return entries
 
 
 def discover_facts_files(root: Path) -> list[Path]:
@@ -402,6 +411,8 @@ def matches_facts_glob(root: Path, path: Path) -> bool:
     try:
         relative = path.resolve().relative_to(root.resolve())
     except ValueError:
+        return False
+    if duplicate_worktree_prefix(root, relative.as_posix()) is not None:
         return False
     segments = relative.as_posix().split("/")
     for pattern in (_segments(pattern) for pattern in globs):
@@ -468,17 +479,23 @@ def _relative_to_workspace(root: Path, facts_root: Path, declared: str) -> str |
     return _cached_relative(str(root), str(facts_root), declared)
 
 
-def load_facts_file(path: Path, root: Path, *, symbols_only: bool = False) -> FactsFile:
+def load_facts_file(
+    path: Path, root: Path, *, relative_path: str | None = None, symbols_only: bool = False
+) -> FactsFile:
     """Read one facts file and decide which of its source files are still fresh.
 
     :param path: The facts file to read.
-    :param root: The workspace root every source path is reported relative to.
+    :param root: The workspace root every source path is reported relative to, and hashed under.
+    :param relative_path: Where the file stands in the workspace, when it is read from another
+        folder holding the same tree (a lane reads its base's): its paths are then resolved against
+        that folder and named, and their sources hashed, under *root*.
     :param symbols_only: Keep only the `symbol` facts and leave every source's freshness
         undecided, which is all the graph's `symbol` table needs: no source is hashed, and a
         line that cannot be a `file` or `symbol` fact is never parsed.
     :return: The parsed file, with per-source freshness already decided unless `symbols_only`.
     :raises FactsFormatError: If the header is missing, unreadable or of another version.
     """
+    home = root if relative_path is None else facts_home_of(path, relative_path)
     try:
         # Read line by line: a facts file is tens of megabytes, and its parsed facts weigh enough.
         with path.open("rb") as handle:
@@ -492,15 +509,22 @@ def load_facts_file(path: Path, root: Path, *, symbols_only: bool = False) -> Fa
             stat = os.fstat(handle.fileno())
             loaded = FactsFile(
                 path=path,
-                relative_path=_display_path(root, path),
+                relative_path=relative_path if relative_path is not None else _display_path(root, path),
                 header=header,
                 mtime_ns=stat.st_mtime_ns,
                 size=stat.st_size,
             )
-            _read_body(handle, loaded, root, facts_root, symbols_only=symbols_only)
+            _read_body(handle, loaded, home, facts_root, symbols_only=symbols_only, hash_root=root)
     except OSError as error:
         raise FactsFormatError(f"{path}: cannot be read") from error
     return loaded
+
+
+def facts_home_of(path: Path, relative_path: str) -> Path:
+    """Return the folder a facts file stands in at *relative_path*: the path with that suffix taken off."""
+    resolved = path.resolve()
+    depth = len(Path(relative_path).parts)
+    return Path(*resolved.parts[: len(resolved.parts) - depth])
 
 
 def _display_path(root: Path, path: Path) -> str:
@@ -512,7 +536,13 @@ def _display_path(root: Path, path: Path) -> str:
 
 
 def _read_body(
-    lines: Iterable[bytes], loaded: FactsFile, root: Path, facts_root: Path, *, symbols_only: bool = False
+    lines: Iterable[bytes],
+    loaded: FactsFile,
+    root: Path,
+    facts_root: Path,
+    *,
+    symbols_only: bool = False,
+    hash_root: Path | None = None,
 ) -> None:
     """Group every fact under the source file it was declared for, hashing each source's lines.
 
@@ -536,7 +566,9 @@ def _read_body(
             loaded.unknown_kinds[str(kind)] += 1
             continue
         if kind == "file":
-            current = _declare_file(payload, loaded, root, facts_root, hashed=not symbols_only)
+            current = _declare_file(
+                payload, loaded, root, facts_root, hashed=not symbols_only, hash_root=hash_root or root
+            )
             outside = str(payload.get("path", "")) if current is None else None
             digests.add(current, raw)
             continue
@@ -597,7 +629,7 @@ def _record_unattached(
 
 
 def _declare_file(
-    payload: dict, loaded: FactsFile, root: Path, facts_root: Path, *, hashed: bool = True
+    payload: dict, loaded: FactsFile, root: Path, facts_root: Path, *, hashed: bool = True, hash_root: Path
 ) -> SourceFacts | None:
     """Handle a `file` line: resolve its path and, unless told not to, hash the current content."""
     declared = str(payload.get("path", ""))
@@ -606,7 +638,7 @@ def _declare_file(
         loaded.outside_root += 1
         return None
     expected = str(payload.get("sha256", ""))
-    actual = file_sha256(root / relative) if hashed else None
+    actual = file_sha256(hash_root / relative) if hashed else None
     if not hashed:
         source = SourceFacts(path=relative, declared_sha256=expected, fresh=False, reason="freshness not checked")
     elif actual is None:
@@ -1262,7 +1294,7 @@ def map_facts_files(
         if loaded is None:
             if relative not in paths:
                 continue
-            loaded = _parse(overlay, paths[relative])
+            loaded = _parse(overlay, paths[relative], relative)
             if loaded is None:
                 continue
             overlay.files.append(loaded)
@@ -1280,10 +1312,10 @@ def map_facts_files(
         loaded.release_facts()
 
 
-def _parse(overlay: FactsOverlay, path: Path) -> FactsFile | None:
+def _parse(overlay: FactsOverlay, path: Path, relative_path: str) -> FactsFile | None:
     """Parse one facts file, recording why when it cannot be read."""
     try:
-        return load_facts_file(path, overlay.root)
+        return load_facts_file(path, overlay.root, relative_path=relative_path)
     except FactsFormatError as error:
         overlay.errors.append((_display_path(overlay.root, path), str(error)))
         logger.warning("Ignoring facts file: %s", error)
@@ -1292,7 +1324,7 @@ def _parse(overlay: FactsOverlay, path: Path) -> FactsFile | None:
 
 def _refill(overlay: FactsOverlay, loaded: FactsFile, chosen: list[SourceFacts]) -> bool:
     """Parse a released facts file again for the facts of some of its sources."""
-    again = _parse(overlay, loaded.path)
+    again = _parse(overlay, loaded.path, loaded.relative_path)
     if again is None:
         return False
     for source in chosen:
@@ -1758,7 +1790,7 @@ def plan_facts(
             invalidated |= changed
         # A template whose freshness flipped invalidates that template and nothing else: the
         # facts file itself did not move, so every other source it covers is untouched.
-        invalidated |= state.flipped_templates(root)
+        invalidated |= state.flipped_templates(facts_home_of(path, relative))
     for relative, state in states.items():
         if relative not in present:
             moved.add(relative)

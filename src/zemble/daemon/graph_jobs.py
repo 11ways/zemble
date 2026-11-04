@@ -91,6 +91,10 @@ class GraphJobs:
         self.pending: dict[str, set[str] | None] = {}
         #: Roots whose graph refresh is coming (their index pass runs first); set when it has landed.
         self.announced: dict[str, asyncio.Event] = {}
+        #: Roots whose staleness is being checked off the event loop, so one check runs per root at a time.
+        self._stale_checks: set[str] = set()
+        #: Roots found to be no lane: a lane is a lane for good, so they are never checked again.
+        self._not_lanes: set[str] = set()
 
     async def ensure(
         self, root: str, deadline: float | None, *, refresh: bool = False, changed_paths: Any = None
@@ -104,10 +108,12 @@ class GraphJobs:
         """
         from zemble.graph.store import graph_exists
 
-        if str(Path(root).resolve()) in self.ready and not refresh:
+        if (key := str(Path(root).resolve())) in self.ready and not refresh:
+            self._follow_base(key)
             return
         root = await self._graph_root(root)
         if root in self.ready and not refresh:
+            self._follow_base(root)
             return
         if root not in self.ready and await asyncio.to_thread(graph_exists, root):
             # AIDEV-NOTE: a refresh of a large, busy workspace (javac facts rewritten by every build)
@@ -121,6 +127,33 @@ class GraphJobs:
             # A lane's first graph is seeded from its base's, which answers for it until then.
             return
         await self._join(root, task, deadline)
+
+    def _follow_base(self, root: str) -> None:
+        """Rebuild a ready lane overlay whose base moved, in the background; the published one answers meanwhile.
+
+        A base refresh does not touch its lanes: an idle lane costs nothing, and the lane asked
+        about next is rebuilt then, from its own edits (`zemble.graph.store.graph_stale`).
+        """
+        if root in self._not_lanes or root in self._stale_checks:
+            return
+        if (job := self.jobs.get(root)) is not None and not job.done():
+            return
+        self._stale_checks.add(root)
+
+        async def check() -> None:
+            from zemble.graph.store import graph_stale
+
+            try:
+                if await asyncio.to_thread(_lane_base, root) is None:
+                    self._not_lanes.add(root)
+                elif await asyncio.to_thread(graph_stale, root) and root not in self.jobs:
+                    with contextlib.suppress(AdmissionBusy, FileNotFoundError):
+                        self._start(root, refresh=True, changed_paths=None)
+            finally:
+                self._stale_checks.discard(root)
+
+        task = asyncio.create_task(check())
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
 
     @staticmethod
     async def _graph_root(path: str) -> str:
