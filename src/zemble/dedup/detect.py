@@ -246,7 +246,8 @@ def _run_batches(
         for batch in batches:
             yield from worker((batch, extract_options))
         return
-    with pooled(count, context) as pool:
+    # Never more workers than batches: a fork pool starts every worker at once, each a copy of this process.
+    with pooled(min(count, len(batches)), context) as pool:
         for results in pool.map(worker, ((batch, extract_options) for batch in batches)):
             yield from results
 
@@ -307,7 +308,12 @@ class _Indexed:
 
 
 def _indexed_scan(root: Path, options: DupeOptions, scan: _Scan, extract_options: dict[str, object]) -> _Indexed:
-    """Read every scanned file's row from the unit index, extracting (and storing) only the changed ones."""
+    """Read every scanned file's row from the unit index, extracting (and storing) only the changed ones.
+
+    AIDEV-NOTE: the misses are extracted BEFORE any row is read. Pool workers are forked from this process, and
+    once it holds the workspace's unpickled rows (~1 GB for the zenit workspace) each worker that runs a while
+    copies a growing share of them (measured: +0.2 GB per worker over a 0.96 GB parent).
+    """
     digests: dict[str, str] = {}
     for absolute, relative in scan.jobs:
         try:
@@ -316,10 +322,17 @@ def _indexed_scan(root: Path, options: DupeOptions, scan: _Scan, extract_options
             continue
     index = UnitIndex(root, extraction_signature(extract_options))
     try:
-        found = index.load(digests)
-        misses = [job for job in scan.jobs if job[1] not in found]
+        known = index.known(digests)
+        misses = [job for job in scan.jobs if job[1] not in known]
         fresh = list(_run_batches(_extract_row_batch, misses, extract_options, options.jobs))
         index.store(row for row in fresh if row.digest)
+        found = index.load({path: digests[path] for path in known})
+        # A row another run replaced or pruned between the two reads is extracted after all.
+        late = [job for job in scan.jobs if job[1] in known and job[1] not in found]
+        if late:
+            raced = list(_run_batches(_extract_row_batch, late, extract_options, options.jobs))
+            index.store(row for row in raced if row.digest)
+            fresh.extend(raced)
         if not options.paths:
             index.retain(relative for _, relative in scan.jobs)
     finally:

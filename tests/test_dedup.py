@@ -1927,6 +1927,76 @@ def test_a_focused_run_reads_the_unit_index(tmp_path: Path) -> None:
     assert _wire(gone.classes) == _wire(cold.classes), "step 4: the deleted copy is gone again"
 
 
+def test_a_focused_run_parses_its_misses_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workers are forked from this process, so the misses are parsed while it holds no rows; a raced row is parsed."""
+    from zemble.dedup import detect
+    from zemble.dedup.unitcache import UnitIndex
+
+    workspace = _focus_workspace(tmp_path)
+    options = DupeOptions(kinds=(CloneKind.EXACT, CloneKind.RENAMED), focus=("src/LogicA.java",))
+    warm = find_duplication(workspace, options)
+    files = warm.analyzed_files
+    events: list[object] = []
+    real_load, real_batches = UnitIndex.load, detect._run_batches
+
+    def load(index, wanted):
+        events.append("load")
+        return real_load(index, wanted)
+
+    def batches(worker, jobs, *rest):
+        if worker is detect._extract_row_batch:
+            events.append(sorted(relative for _, relative in jobs))
+        return real_batches(worker, jobs, *rest)
+
+    monkeypatch.setattr(UnitIndex, "load", load)
+    monkeypatch.setattr(detect, "_run_batches", batches)
+
+    # 1. A new file is extracted before the index hands back a single row.
+    (workspace / "src" / "LogicE.java").write_text(_LOGIC_D.replace("LogicD", "LogicE"))
+    find_duplication(workspace, options)
+    assert events[:2] == [["src/LogicE.java"], "load"], "step 1: THE ASSERTION -- misses first, rows after"
+
+    # 2. A row another run replaced between the two reads is extracted after all, and the answer is unchanged.
+    (workspace / "src" / "LogicE.java").unlink()
+    events.clear()
+
+    def raced_load(index, wanted):
+        return {path: row for path, row in real_load(index, wanted).items() if path != "src/LogicB.java"}
+
+    monkeypatch.setattr(UnitIndex, "load", raced_load)
+    raced = find_duplication(workspace, options)
+    assert ["src/LogicB.java"] in events, "step 2: the raced file is parsed"
+    assert any(f"1 of {files} file(s) extracted" in note for note in raced.notes), "step 2: and only that one"
+    assert _wire(raced.classes) == _wire(warm.classes), "step 2: the same classes"
+
+
+def test_a_pool_never_starts_more_workers_than_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fork pool starts all its workers at once, so two files never cost eight copies of this process."""
+    import contextlib
+
+    from zemble.dedup import detect
+
+    started: list[int] = []
+
+    class Inline:
+        """A pool that maps in this process."""
+
+        map = staticmethod(map)
+
+    @contextlib.contextmanager
+    def pooled(workers, context):
+        started.append(workers)
+        yield Inline()
+
+    monkeypatch.setattr(detect, "pool_context", lambda: object())
+    monkeypatch.setattr(detect, "pooled", pooled)
+    jobs = [(str(path), path.name) for path in sorted((FIXTURES / "src").glob("*.java"))[:2]]
+    extract = detect._extract_options(DupeOptions(), include_text=True, shapes=False)
+    rows = list(detect._run_batches(detect._extract_row_batch, jobs, extract, 8))
+    assert [row.path for row in rows] == [name for _, name in jobs], "setup: both files extracted, in order"
+    assert started == [2], "THE ASSERTION -- one worker per batch, not eight"
+
+
 def test_a_lanes_focused_run_reads_its_bases_unit_index(tmp_path: Path) -> None:
     """A lane of an indexed workspace parses only the files it changed; the answer is the base's."""
     from tests.conftest import git

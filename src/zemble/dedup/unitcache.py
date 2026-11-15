@@ -19,10 +19,11 @@ import hashlib
 import json
 import pickle
 import sqlite3
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
+from typing import TypeVar
 
 from zemble.dedup.model import Unit
 from zemble.embedding.cache import today
@@ -39,6 +40,8 @@ _GRAMMAR_PACKAGES = ("tree-sitter", "semble-grammars")
 UNUSED_SIGNATURE_DAYS = 7
 #: Seconds a writer waits for another process's transaction.
 _BUSY_TIMEOUT_SECONDS = 30.0
+#: What one read of matching rows answers per path: a whole row, or only its digest.
+_Read = TypeVar("_Read")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -182,13 +185,21 @@ class UnitIndex:
         :param wanted: Content digest by root-relative path.
         :return: The matching rows by path; a changed or unknown file is simply absent.
         """
-        found = _matching_rows(self._connection, self.signature, wanted)
+        return self._read_both(wanted, _matching_rows)
+
+    def known(self, wanted: Mapping[str, str]) -> set[str]:
+        """Return the wanted paths `load` would answer, without reading (or unpickling) any row's units."""
+        return set(self._read_both(wanted, _matching_digests))
+
+    def _read_both(self, wanted: Mapping[str, str], read: Callable[..., dict[str, _Read]]) -> dict[str, _Read]:
+        """Read the matches of the wanted paths from this index, then the misses from a lane's base."""
+        found = read(self._connection, self.signature, wanted)
         if self.base_path is not None:
             missing = {path: digest for path, digest in wanted.items() if path not in found}
             if missing:
                 base = sqlite3.connect(f"file:{self.base_path}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_SECONDS)
                 try:
-                    found.update(_matching_rows(base, self.signature, missing))
+                    found.update(read(base, self.signature, missing))
                 except sqlite3.DatabaseError:
                     pass
                 finally:
@@ -236,24 +247,33 @@ class UnitIndex:
             self._connection.execute("DELETE FROM signatures WHERE day < ?", (stale,))
 
 
-def _matching_rows(connection: sqlite3.Connection, signature: str, wanted: Mapping[str, str]) -> dict[str, FileRow]:
-    """Read one signature's rows of the wanted paths whose stored digest is the wanted one."""
+def _matching(
+    connection: sqlite3.Connection, signature: str, wanted: Mapping[str, str], columns: str
+) -> Iterator[tuple]:
+    """Yield one signature's rows of the wanted paths whose stored digest is the wanted one: path, digest, columns."""
     connection.execute("CREATE TEMP TABLE IF NOT EXISTS wanted (path TEXT PRIMARY KEY)")
     connection.execute("DELETE FROM wanted")
     connection.executemany("INSERT OR IGNORE INTO wanted (path) VALUES (?)", ((path,) for path in wanted))
-    found: dict[str, FileRow] = {}
     cursor = connection.execute(
-        "SELECT path, digest, failed, hashes, bodies FROM files"
-        " WHERE signature = ? AND path IN (SELECT path FROM wanted)",
+        f"SELECT path, digest{columns} FROM files WHERE signature = ? AND path IN (SELECT path FROM wanted)",
         (signature,),
     )
-    for path, digest, failed, hashes, bodies in cursor:
-        if wanted.get(path) != digest:
-            continue
-        found[path] = FileRow(
-            path=path, digest=digest, failed=bool(failed), hashes=hashes, bodies=tuple(pickle.loads(bodies))
-        )
-    return found
+    for row in cursor:
+        if wanted.get(row[0]) == row[1]:
+            yield row
+
+
+def _matching_rows(connection: sqlite3.Connection, signature: str, wanted: Mapping[str, str]) -> dict[str, FileRow]:
+    """Read one signature's rows of the wanted paths whose stored digest is the wanted one."""
+    return {
+        path: FileRow(path=path, digest=digest, failed=bool(failed), hashes=hashes, bodies=tuple(pickle.loads(bodies)))
+        for path, digest, failed, hashes, bodies in _matching(connection, signature, wanted, ", failed, hashes, bodies")
+    }
+
+
+def _matching_digests(connection: sqlite3.Connection, signature: str, wanted: Mapping[str, str]) -> dict[str, str]:
+    """Read the paths (with their digests) of the rows `_matching_rows` would read, and nothing else."""
+    return {path: digest for path, digest in _matching(connection, signature, wanted, "")}
 
 
 def _write_rows(connection: sqlite3.Connection, signature: str, rows: Sequence[FileRow]) -> None:
