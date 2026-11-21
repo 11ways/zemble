@@ -127,7 +127,7 @@ def test_every_writer_keeps_the_count_equal_to_a_scan(tmp_path: Path) -> None:
         with cache._lock:
             cache._connection.execute("UPDATE used SET day = day - 400")
         cache.close()
-        [report] = collect_unused(tmp_path, grace_days=1, dry_run=False)
+        [report] = collect_unused(tmp_path, grace_days=8, dry_run=False)
         assert report.swept > 0
         cache = EmbeddingCache(FAMILY, tmp_path)
         check("step 6 gc")

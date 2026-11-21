@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from zemble.chunking.capsule import embedding_text
-from zemble.embedding.cache import connect_cache, family_slug, stamps_since, text_hash, today
+from zemble.embedding.cache import STAMP_REFRESH_DAYS, connect_cache, family_slug, stamps_since, text_hash, today
 from zemble.embedding.registry import cached_family
 from zemble.index.chunk_store import load_chunks
 from zemble.openfiles import holders
@@ -21,6 +21,22 @@ from zemble.openfiles import holders
 #: what only ever lived in memory: benchmark variants, `dupes --kind logic` bodies, a build
 #: whose index is not saved yet.
 DEFAULT_GRACE_DAYS = 14
+#: The shortest grace period a collection accepts: a vector in daily use can show a stamp up to
+#: `STAMP_REFRESH_DAYS - 1` days old, so a grace no longer than the refresh window would sweep it.
+MIN_GRACE_DAYS = STAMP_REFRESH_DAYS + 1
+
+
+def require_grace(grace_days: int) -> None:
+    """Refuse a grace period a fresh-but-unrewritten stamp could fall outside of.
+
+    :raises ValueError: If `grace_days` is not longer than the stamp refresh window.
+    """
+    if grace_days < MIN_GRACE_DAYS:
+        raise ValueError(
+            f"a grace period of {grace_days} day(s) could sweep vectors in daily use: a stamp is only rewritten "
+            f"once it is {STAMP_REFRESH_DAYS} days old, so the grace period must be at least {MIN_GRACE_DAYS} days"
+        )
+
 
 #: Rough per-row cost of the key, the row header and the `used` stamp beside the vector bytes.
 _ROW_OVERHEAD_BYTES = 100
@@ -180,10 +196,12 @@ def collect_embeddings(cache_folder: Path, *, grace_days: int, dry_run: bool) ->
     process mid-build would buy back what was swept.
 
     :param cache_folder: The zemble cache folder.
-    :param grace_days: Keep an unreferenced vector used (stored or served) within this many days; 0 keeps none.
+    :param grace_days: Keep an unreferenced vector used (stored or served) within this many days.
+    :raises ValueError: If the grace period is not longer than the stamp refresh window.
     :param dry_run: Report what would go, writing nothing.
     :return: One report per cache file, in name order.
     """
+    require_grace(grace_days)
     directory = cache_folder / "embeddings"
     users = indexes_by_family(cache_folder)
     reports: list[EmbeddingSweep] = []
@@ -219,10 +237,12 @@ def collect_unused(directory: Path, *, grace_days: int, dry_run: bool) -> list[E
     so the use stamps it writes on every serve are the only evidence of what is still wanted.
 
     :param directory: The folder holding the per-family sqlite files.
-    :param grace_days: Keep a vector stored or served within this many days; 0 keeps none.
+    :param grace_days: Keep a vector stored or served within this many days.
+    :raises ValueError: If the grace period is not longer than the stamp refresh window.
     :param dry_run: Report what would go, writing nothing.
     :return: One report per cache file, in name order.
     """
+    require_grace(grace_days)
     reports: list[EmbeddingSweep] = []
     for path in sorted(directory.glob("*.sqlite")) if directory.is_dir() else []:
         report = EmbeddingSweep(path=path, size_before=file_size(path), cutoff_day=today() - grace_days)

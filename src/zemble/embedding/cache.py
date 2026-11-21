@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS cache_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL
 #: and counts as used that day, never as unused forever: an unknown age fails closed.
 STAMPS_SINCE_KEY = "used_stamps_since"
 
+#: Days a use stamp stays fresh: one younger than this is never rewritten, so a vector in daily use
+#: costs one stamp write a week rather than one a day, and may show a stamp up to this minus one
+#: days old. A garbage collection's grace period must be longer (`zemble.embedding.gc`).
+STAMP_REFRESH_DAYS = 7
+
+#: The upsert every stamping path shares: a new hash gets today, an existing stamp only once it is stale.
+_STAMP_UPSERT_CONFLICT = (
+    f"ON CONFLICT(text_sha256) DO UPDATE SET day = excluded.day WHERE day <= excluded.day - {STAMP_REFRESH_DAYS}"
+)
+
 #: `cache_meta` keys of the vector count a file keeps of itself. TRACKED is moved by triggers on
 #: every row added or removed since they were installed; BASE is COUNT(*) minus TRACKED, read
 #: once from one snapshot. That difference never changes after the triggers exist, so the stored
@@ -371,17 +381,17 @@ class EmbeddingCache:
             )
 
     def _held_wanted(self, dims: int) -> list[tuple[str, int]]:
-        """Return each `wanted` digest held at `dims` or wider, with 1 when it is stamped today already."""
+        """Return each `wanted` digest held at `dims` or wider, with 1 when its stamp is still fresh."""
         return self._connection.execute(
-            "SELECT w.digest, EXISTS (SELECT 1 FROM used u WHERE u.text_sha256 = w.digest AND u.day >= ?) "
+            "SELECT w.digest, EXISTS (SELECT 1 FROM used u WHERE u.text_sha256 = w.digest AND u.day > ?) "
             "FROM wanted w WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.text_sha256 = w.digest AND e.dims >= ?)",
-            (today(), dims),
+            (today() - STAMP_REFRESH_DAYS, dims),
         ).fetchall()
 
     def _stamp_stale(self, digests: list[str]) -> None:
-        """Stamp today held digests a read found unstamped today, in a write transaction of their own.
+        """Stamp today held digests a read found without a fresh stamp, in a write transaction of their own.
 
-        Nothing is written, and the writer never taken, when the read found every one stamped today.
+        Nothing is written, and the writer never taken, when the read found every stamp fresh.
         The upsert re-checks that each is held, so a vector deleted since the read gets no stamp.
         """
         if not digests:
@@ -390,8 +400,7 @@ class EmbeddingCache:
         with _transaction(self._connection):
             self._connection.executemany(
                 "INSERT INTO used (text_sha256, day) SELECT ?1, ?2 "
-                "WHERE EXISTS (SELECT 1 FROM embeddings WHERE text_sha256 = ?1) "
-                "ON CONFLICT(text_sha256) DO UPDATE SET day = excluded.day WHERE day < excluded.day",
+                "WHERE EXISTS (SELECT 1 FROM embeddings WHERE text_sha256 = ?1) " + _STAMP_UPSERT_CONFLICT,
                 [(digest, day) for digest in digests],
             )
 
@@ -517,11 +526,10 @@ class EmbeddingCache:
             self.stamp_held(distinct)
 
     def _stamp(self, digests: set[str]) -> None:
-        """Write today's stamp for these hashes inside the caller's write transaction; one at today stays unwritten."""
+        """Stamp these hashes inside the caller's write transaction: a new one today, a fresh one left unwritten."""
         day = today()
         self._connection.executemany(
-            "INSERT INTO used (text_sha256, day) VALUES (?, ?) "
-            "ON CONFLICT(text_sha256) DO UPDATE SET day = excluded.day WHERE day < excluded.day",
+            "INSERT INTO used (text_sha256, day) VALUES (?, ?) " + _STAMP_UPSERT_CONFLICT,
             [(digest, day) for digest in digests],
         )
 

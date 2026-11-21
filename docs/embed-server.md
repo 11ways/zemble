@@ -102,7 +102,11 @@ vectors again, so the `used` stamp (the last day a vector was used) is the serve
 evidence of what is still wanted. Three things write it: storing a vector (`documents`, `store`),
 serving one (`documents`), and a `covered` hit, since a pre-flight only asks about the chunks of
 a live tree. A lookup stamps after its read, in a write transaction of its own, so it never pins
-a WAL snapshot, and a hash already stamped today takes no writer lock at all.
+a WAL snapshot. Every stamping path shares one refresh window (`STAMP_REFRESH_DAYS`, 7, in
+`zemble.embedding.cache`): a new hash is stamped today, but an existing stamp is rewritten only
+once it is 7 days old, so a vector in daily use costs one stamp write a week and a lookup whose
+stamps are all fresh takes no writer lock at all. A vector in use can therefore show a stamp up
+to 6 days old, and both collections refuse a grace period under 8 days.
 
 Each client also reports what its saved indexes hold: the daemon, 10 minutes after it starts and
 then every `ZEMBLE_DAEMON_REFERENCED_HOURS` (6; `0` disables), sends the server the text hash of
@@ -115,8 +119,10 @@ the next day. `zemble embed-server report [--force]` sends the report by hand.
 
 Measured 2026-11-21 on aeor: the client's 38 saved indexes and overlays of `voyage-4-lite` hold
 3.35M chunks, 0.96M distinct hashes, read and hashed in 27 s with 57 MB of private memory; on a
-synthetic 4M-vector server file a 10,000-hash batch costs ~3 s the first time that day (about
-1.2 s of it the lookup, the rest writing the stamps) and ~0.14 s again the same day.
+synthetic 4M-vector server file a 10,000-hash batch whose stamps are 1-6 days old (inside the
+window) costs 0.13-0.14 s warm and 2.2 s with the page cache evicted, all of it reads and no
+writer; with stamps 10 days old it costs 0.95 s warm and 3.0 s cold, the difference being the
+stamp writes.
 
 ## Garbage collection
 
@@ -125,7 +131,8 @@ zemble embed-server gc --dry-run          # on the server host
 zemble embed-server gc                    # stop the server first; VACUUM needs the file alone
 ```
 
-It keeps every vector used within `--grace-days` (180 by default, against 14 on a client) and
+It keeps every vector used within `--grace-days` (180 by default, against 14 on a client, at
+least 8 because of the refresh window, else it refuses with exit code 1) and
 sweeps the rest. Then it VACUUMs, but only when the disk can hold it: in WAL mode VACUUM copies
 the live pages into a temp database (in `SQLITE_TMPDIR`, else `TMPDIR`, else `/var/tmp`) and
 then writes the whole rebuilt file through the WAL before the file shrinks, so it needs about

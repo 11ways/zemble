@@ -559,10 +559,10 @@ def _text_vectors(
     finally:
         mirror.cache.close()
     if oversized:
-        from zemble.embedding.gc import collect_unused
+        from zemble.embedding.gc import MIN_GRACE_DAYS, collect_unused
 
-        # Every vector this run read was stamped today, so a one-day grace keeps them all.
-        collect_unused(folder, grace_days=1, dry_run=False)
+        # Every vector this run read now has a fresh stamp, so the shortest accepted grace keeps them all.
+        collect_unused(folder, grace_days=MIN_GRACE_DAYS, dry_run=False)
     return _BodyVectors(vectors, embedder.model_id, time.perf_counter() - started, len(missing))
 
 

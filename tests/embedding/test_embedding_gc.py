@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 import subprocess
@@ -20,13 +21,15 @@ from zemble.chunking.capsule import embedding_text
 from zemble.cli import _cli_main
 from zemble.embedding.cache import (
     JOURNAL_SIZE_LIMIT_BYTES,
+    STAMP_REFRESH_DAYS,
     STAMPS_SINCE_KEY,
     CachingEmbedder,
     EmbeddingCache,
     text_hash,
     today,
 )
-from zemble.embedding.gc import collect_embeddings
+from zemble.embedding.gc import MIN_GRACE_DAYS, collect_embeddings, collect_unused
+from zemble.embedding.server_cli import run_embed_server
 from zemble.index.chunk_store import save_chunks
 from zemble.types import Chunk
 
@@ -138,7 +141,7 @@ def test_lookups_stamp_only_held_vectors_and_a_day_s_repeat_takes_no_writer(tmp_
     assert cache.stamp_held([narrow, wide, unknown]) == 2
     assert days() == {narrow: today(), wide: today()}, "step 2: no row for an unknown hash"
 
-    # 3. A repeat the same day never asks for the writer: another connection holds it and nothing waits.
+    # 3. A repeat while the stamp is fresh never asks for the writer: another connection holds it and nothing waits.
     other = sqlite3.connect(cache.path, isolation_level=None)
     other.execute("BEGIN IMMEDIATE")
     cache._connection.execute("PRAGMA busy_timeout = 50")
@@ -149,7 +152,43 @@ def test_lookups_stamp_only_held_vectors_and_a_day_s_repeat_takes_no_writer(tmp_
     finally:
         other.execute("ROLLBACK")
         other.close()
+
+    # 4. A stamp inside the refresh window is left alone by every stamping path; one past it is refreshed.
+    _set(cache.path, "UPDATE used SET day = ? WHERE text_sha256 = ?", today() - 3, narrow)
+    _set(cache.path, "UPDATE used SET day = ? WHERE text_sha256 = ?", today() - STAMP_REFRESH_DAYS - 1, wide)
+    try:
+        cache.covered([narrow, wide], 8, stamp=True)
+        assert days() == {narrow: today() - 3, wide: today()}, "step 4: covered keeps today-3, refreshes today-8"
+        _set(cache.path, "UPDATE used SET day = ? WHERE text_sha256 = ?", today() - STAMP_REFRESH_DAYS - 1, wide)
+        cache.stamp_held([narrow, wide])
+        assert days() == {narrow: today() - 3, wide: today()}, "step 4: so does a referenced report"
+        _set(cache.path, "UPDATE used SET day = ? WHERE text_sha256 = ?", today() - STAMP_REFRESH_DAYS - 1, wide)
+        cache.put_many([(narrow, 8, np.ones(8, dtype=np.float32)), (wide, 16, np.ones(16, dtype=np.float32))])
+        assert days() == {narrow: today() - 3, wide: today()}, "step 4: and storing again"
+    finally:
         cache.close()
+
+
+def test_a_grace_period_inside_the_refresh_window_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A vector in daily use can show a stamp REFRESH-1 days old, so no collection accepts a grace that short."""
+    EmbeddingCache(_FAMILY, tmp_path / "data").close()
+    for grace in (0, STAMP_REFRESH_DAYS):
+        with pytest.raises(ValueError, match="grace period must be at least"):
+            collect_unused(tmp_path / "data", grace_days=grace, dry_run=True)
+        with pytest.raises(ValueError, match="grace period must be at least"):
+            collect_embeddings(resolve_cache_folder(), grace_days=grace, dry_run=False)
+    assert collect_unused(tmp_path / "data", grace_days=MIN_GRACE_DAYS, dry_run=True)[0].refused is None
+
+    # Both command lines refuse it with a non-zero exit.
+    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--grace-days", "3"])
+    with pytest.raises(SystemExit) as refused:
+        _cli_main()
+    assert "at least" in str(refused.value.code), "the client gc names the minimum"
+    args = argparse.Namespace(embed_server_action="gc", data_dir=tmp_path / "data", grace_days=3, dry_run=False)
+    assert run_embed_server(args) == 1
+    assert "at least" in capsys.readouterr().err
 
 
 def test_a_collection_keeps_references_and_recent_use_and_sweeps_the_rest(tmp_path: Path, holder) -> None:
@@ -224,26 +263,27 @@ def test_a_disk_without_room_for_vacuum_keeps_the_sweep_and_skips_vacuum(
     path = cache.path
     cache.put_many([(text_hash(f"padding {i}"), _DIMS, _vector()) for i in range(200)])
     cache.close()
+    _set(path, "UPDATE used SET day = ?", today() - 40)
     # The temp database lands beside the file, so both of VACUUM's copies are needed on one disk.
     monkeypatch.setenv("SQLITE_TMPDIR", str(path.parent))
     free = {"bytes": 10**12}
     monkeypatch.setattr("zemble.embedding.gc.shutil.disk_usage", lambda place: SimpleNamespace(free=free["bytes"]))
 
     # 1. With room, a dry run reports the free pages the file already has and no VACUUM note.
-    [dry] = collect_embeddings(cache_folder, grace_days=0, dry_run=True)
+    [dry] = collect_embeddings(cache_folder, grace_days=MIN_GRACE_DAYS, dry_run=True)
     assert dry.vacuum_short is None and dry.free_page_bytes >= 0, "step 1: room enough"
 
     # 2. With a few bytes free, the dry run predicts the skip and both copies are counted on the one disk.
     free["bytes"] = 1000
-    [dry] = collect_embeddings(cache_folder, grace_days=0, dry_run=True)
+    [dry] = collect_embeddings(cache_folder, grace_days=MIN_GRACE_DAYS, dry_run=True)
     assert dry.vacuum_short is not None and dry.vacuum_short.where == path.parent, "step 2: the skip is predicted"
-    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--dry-run", "--grace-days", "0"])
+    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--dry-run", "--grace-days", "8"])
     _cli_main()
     out = capsys.readouterr().out
     assert "VACUUM would be skipped: needs ~" in out and "free pages new vectors fill" in out, out
 
     # 3. A real run deletes and checkpoints, skips VACUUM, and says so.
-    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--grace-days", "0"])
+    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--grace-days", "8"])
     _cli_main()
     out = capsys.readouterr().out
     assert "VACUUM skipped: needs ~" in out and "freed pages are reused by new vectors" in out, out
@@ -258,7 +298,7 @@ def test_a_disk_without_room_for_vacuum_keeps_the_sweep_and_skips_vacuum(
     assert freelist * page_size > 200 * _DIMS * 4 * 0.9, "step 3: the swept pages stay as free pages, unvacuumed"
 
     # 4. The estimate is the live pages, free ones aside, with a margin, once per copy on the one disk.
-    [last] = collect_embeddings(cache_folder, grace_days=0, dry_run=False)
+    [last] = collect_embeddings(cache_folder, grace_days=MIN_GRACE_DAYS, dry_run=False)
     assert last.vacuum_short is not None
     assert last.vacuum_short.needed == 2 * int((page_count - freelist) * page_size * 1.1), "step 4"
 
@@ -272,7 +312,8 @@ def test_an_overlay_keeps_its_own_chunks_vectors(tmp_path: Path) -> None:
     lane_only = text_hash(embedding_text(make_chunk("def lane_only(): pass")))
     cache.put_many([(lane_only, _DIMS, _vector()), (text_hash("dead"), _DIMS, _vector())])
     cache.close()
-    [report] = collect_embeddings(cache_folder, grace_days=0, dry_run=False)
+    _set(cache.path, "UPDATE used SET day = ?", today() - 40)
+    [report] = collect_embeddings(cache_folder, grace_days=MIN_GRACE_DAYS, dry_run=False)
     assert (report.indexes, report.swept) == (2, 1), "the overlay counts as a user of the family"
     assert _digests(report.path) == {lane_only}, "and its chunk's vector is kept"
 
@@ -297,11 +338,17 @@ def test_an_unrecorded_age_fails_closed(tmp_path: Path) -> None:
     [dry] = collect_embeddings(cache_folder, grace_days=14, dry_run=True)
     assert (dry.swept, dry.stamps_since) == (0, None), "step 2: nothing old enough to prove unused"
 
-    # 3. A real run opens it with stamps from today: still nothing goes, until the grace period is waived.
+    # 3. A real run opens it with stamps from today: still nothing goes, and no grace short enough to sweep
+    #    vectors in use is accepted.
     [real] = collect_embeddings(cache_folder, grace_days=14, dry_run=False)
     assert (real.swept, real.stamps_since) == (0, today()), "step 3: stamps began today"
-    [waived] = collect_embeddings(cache_folder, grace_days=0, dry_run=False)
-    assert waived.swept == 5 and _digests(path) == set(), "step 3: with no grace the unreferenced ones go"
+    with pytest.raises(ValueError):
+        collect_embeddings(cache_folder, grace_days=0, dry_run=False)
+
+    # 4. Once the stamps began long enough ago, the unstamped, unreferenced ones go.
+    _set(path, "UPDATE cache_meta SET value = ? WHERE key = ?", str(today() - 100), STAMPS_SINCE_KEY)
+    [aged] = collect_embeddings(cache_folder, grace_days=14, dry_run=False)
+    assert aged.swept == 5 and _digests(path) == set(), "step 4: the unreferenced ones go"
 
 
 def test_collection_leaves_unused_files_and_refuses_an_unreadable_index(tmp_path: Path) -> None:
@@ -312,7 +359,7 @@ def test_collection_leaves_unused_files_and_refuses_an_unreadable_index(tmp_path
     EmbeddingCache(_FAMILY, cache_folder / "embeddings").close()
     (folder / "chunks" / "chunks.json").write_text("not json")
 
-    reports = {report.path.name: report for report in collect_embeddings(cache_folder, grace_days=0, dry_run=False)}
+    reports = {report.path.name: report for report in collect_embeddings(cache_folder, grace_days=14, dry_run=False)}
     assert "clear orphans" in (reports["voyage-voyage-code-4.sqlite"].refused or ""), "an unused file is not swept"
     assert "unreadable" in (reports["voyage-voyage-4-lite.sqlite"].refused or ""), "an unreadable index refuses"
 
@@ -326,16 +373,17 @@ def test_clear_embeddings_on_the_command_line(
     cache = EmbeddingCache(_FAMILY, cache_folder / "embeddings")
     cache.put_many([(text_hash(f"padding {i}"), _DIMS, _vector()) for i in range(50)])
     cache.close()
+    _set(cache.path, "UPDATE used SET day = ?", today() - 40)
 
     # 1. The dry run names the counts, the grace period and what it would free, and sweeps nothing.
-    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--dry-run", "--grace-days", "0"])
+    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--dry-run", "--grace-days", "8"])
     _cli_main()
     out = capsys.readouterr().out
     assert "50 unreferenced; 50 of those last used on" in out and "would free about" in out, out
     assert len(_digests(cache.path)) == 50, "step 1: nothing swept"
 
     # 2. The real run sweeps them and reports the size it went from and to.
-    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--grace-days", "0"])
+    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--grace-days", "8"])
     _cli_main()
     out = capsys.readouterr().out
     assert " -> " in out and _digests(cache.path) == set(), out

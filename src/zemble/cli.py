@@ -31,7 +31,7 @@ from zemble.cache_orphans import (
 from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser, run_embed_status
-from zemble.embedding.gc import DEFAULT_GRACE_DAYS, collect_embeddings, day_text, vacuum_note
+from zemble.embedding.gc import DEFAULT_GRACE_DAYS, MIN_GRACE_DAYS, collect_embeddings, day_text, vacuum_note
 from zemble.embedding.pricing import CONFIRM_ENV, EmbeddingBudgetExceeded, confirmed
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.embedding.server_cli import EMBED_SERVER_COMMANDS, add_embed_server_parser, run_embed_server
@@ -657,7 +657,10 @@ def _clear_orphans(
 
 def _clear_embeddings(cache_folder: Path, *, dry_run: bool, grace_days: int) -> None:
     """Sweep (or with dry_run size up) the embedding vectors no index references and nobody used lately."""
-    reports = collect_embeddings(cache_folder, grace_days=grace_days, dry_run=dry_run)
+    try:
+        reports = collect_embeddings(cache_folder, grace_days=grace_days, dry_run=dry_run)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     if not reports:
         print(f"No embedding cache found in `{cache_folder / 'embeddings'}`")
         return
@@ -784,7 +787,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--grace-days",
         type=int,
         default=DEFAULT_GRACE_DAYS,
-        help=f"`embeddings`: keep unreferenced vectors used within this many days, 0 for none (default: {DEFAULT_GRACE_DAYS}).",
+        help=f"`embeddings`: keep unreferenced vectors used within this many days, at least {MIN_GRACE_DAYS} "
+        f"(default: {DEFAULT_GRACE_DAYS}).",
     )
     clear_p.add_argument(
         "--max-age-days",
