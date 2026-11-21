@@ -1,11 +1,17 @@
 import logging
+import subprocess
+import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from semble_grammars import UnsupportedPlatformError
 
-from zemble.chunking.chunking import Chunk, chunk_lines, chunk_source
-from zemble.chunking.core import ChunkBoundary, _cached_get_parser, chunk
+from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS, Chunk, chunk_lines, chunk_source
+from zemble.chunking.core import ChunkBoundary, _cached_get_parser, chunk, chunk_with_tree
+from zemble.index.files import detect_language, read_file_text
+
+_REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -164,3 +170,63 @@ def test_chunker_deep_string(caplog: pytest.LogCaptureFixture) -> None:
         assert chunks is not None
         assert len(caplog.records) == 1
         assert "Recursion depth exceeded in chunk." in caplog.records[0].message
+
+
+def _counted_lines(source: str, language: str | None) -> list[tuple[int, int]]:
+    """The (start, end) line of every chunk as chunk_source numbered them by counting newlines in each prefix."""
+    if not source.strip():
+        return []
+    boundaries = None
+    if language is not None:
+        parsed = chunk_with_tree(source, language, _DESIRED_CHUNK_LENGTH_CHARS)
+        if parsed is not None:
+            boundaries = parsed[0]
+    if boundaries is None:
+        boundaries = chunk_lines(source, _DESIRED_CHUNK_LENGTH_CHARS)
+    lines = []
+    for boundary in boundaries:
+        end_index = max(boundary.end - 1, boundary.start)
+        lines.append((source[: boundary.start].count("\n") + 1, source[:end_index].count("\n") + 1))
+    return lines
+
+
+_MULTIBYTE = 'name = "caf\u00e9 \u4e2d\u6587 \U0001f600"\n# \u00fcber \u2603\n'
+
+#: Sources whose line numbering a running index could plausibly get wrong; offsets are characters.
+_EDGE_CASES = [
+    ("", "python"),
+    ("\n\n\n", "python"),
+    ("x = 1", "python"),
+    ("def f():\n    return 1", "python"),
+    ("def f():\r\n    return 1\r\n\r\nclass A:\r\n    pass\r\n" * 40, "python"),
+    ("one\rtwo\rthree\r" * 300, None),
+    ("\n\n\ndef late():\n    pass\n" * 60, "python"),
+    ((_MULTIBYTE + "def g():\n    return '\u00e9'\n\n") * 80, "python"),
+    ((_MULTIBYTE * 200).rstrip("\n"), None),
+    (('class A {\n    String s = "\u00e9\u4e2d\U0001f600";\n}\n') * 60, "java"),
+    ("line without end " * 400, None),
+]
+
+
+def test_chunk_lines_equal_the_newline_count_over_the_repo_and_edge_cases() -> None:
+    """Every chunk's start and end line is the newline count of its prefix, over this repo's files and odd texts."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "src", "tests", "javac-facts"], cwd=_REPO, capture_output=True, text=True, check=True
+    ).stdout.split()
+    sources = [(read_file_text(_REPO / name), detect_language(Path(name))) for name in tracked] + _EDGE_CASES
+    assert len(sources) > 300 and any(language == "java" for _, language in sources)
+    chunks = 0
+    for source, language in sources:
+        found = [(chunk.start_line, chunk.end_line) for chunk in chunk_source(source, "f", language)]
+        assert found == _counted_lines(source, language)
+        chunks += len(found)
+    assert chunks > 3000
+
+
+def test_numbering_a_large_files_chunks_is_linear() -> None:
+    """A 2.9 MB file chunks in seconds: numbering each chunk by counting its whole prefix took 16 s."""
+    source = "".join(f"def f{i}(x):\n    return x + {i}\n\n" for i in range(80000))
+    started = time.perf_counter()
+    chunks = chunk_source(source, "big.py", "python")
+    assert time.perf_counter() - started < 8.0
+    assert len(chunks) > 1000

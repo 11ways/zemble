@@ -3,6 +3,7 @@ from dataclasses import replace
 
 from zemble.chunking.capsule import CapsuleLevel, CapsuleOptions, FileContext, capsule
 from zemble.chunking.core import chunk_lines, chunk_with_tree
+from zemble.lines import LineIndex
 from zemble.types import Chunk
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ def chunk_source(
         else None
     )
 
+    lines = LineIndex(source)
     chunks: list[Chunk] = []
     for boundary in chunk_boundaries:
         # Clamp to start_index so zero-length chunks don't produce an off-by-one.
@@ -57,8 +59,8 @@ def chunk_source(
         built = Chunk(
             content=text,
             file_path=file_path,
-            start_line=source[: boundary.start].count("\n") + 1,
-            end_line=source[:end_index].count("\n") + 1,
+            start_line=lines.line_of(boundary.start),
+            end_line=lines.line_of(end_index),
             language=language,
         )
         if file_context is not None:

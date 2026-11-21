@@ -14,8 +14,9 @@ Both the capsule builder (`zemble.chunking.capsule`) and the graph extractor
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
 from dataclasses import dataclass, field
+
+from zemble.lines import LineIndex
 
 #: `{# ... #}` and `{#- ... -#}` template comments. Blanked before anything else is scanned.
 _COMMENT = re.compile(r"\{#.*?#\}", re.DOTALL)
@@ -201,15 +202,6 @@ def _blank_code_comments(text: str) -> str:
     return _CODE_COMMENT.sub(lambda match: _blank(match.group(0)), text)
 
 
-def _line_starts(source: str) -> list[int]:
-    """Return the offset every 1-based line starts at."""
-    offsets = [0]
-    for index, character in enumerate(source):
-        if character == "\n":
-            offsets.append(index + 1)
-    return offsets
-
-
 def _statement_regions(source: str) -> list[tuple[int, int]]:
     """Return the interior span of every `{% ... %}` statement.
 
@@ -252,13 +244,13 @@ class _Scanner:
     def __init__(self, source: str) -> None:
         """Prepare a scanner over a template's text."""
         self.source = _blank_styles(_blank_comments(source))
-        self.starts = _line_starts(self.source)
-        self.facts = TemplateFacts(line_count=len(self.starts))
+        self.lines = LineIndex(self.source)
+        self.facts = TemplateFacts(line_count=self.lines.line_count)
         self._open_blocks: list[tuple[str, int]] = []
 
     def line_of(self, offset: int) -> int:
         """Return the 1-based line an offset falls on."""
-        return bisect_right(self.starts, offset)
+        return self.lines.line_of(offset)
 
     def run(self) -> TemplateFacts:
         """Scan the template and return its facts."""
