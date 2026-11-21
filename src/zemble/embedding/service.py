@@ -21,9 +21,11 @@ from typing import Any
 import numpy as np
 
 from zemble.embedding.base import Embedder, EmbeddingMatrix, semantic_weight_bonus
-from zemble.embedding.cache import CachingEmbedder, EmbeddingCache, text_hash
-from zemble.embedding.gc import file_size
+from zemble.embedding.cache import CachingEmbedder, EmbeddingCache, text_hash, today
+from zemble.embedding.gc import day_text, file_size
+from zemble.embedding.pricing import estimate_tokens
 from zemble.embedding.registry import EmbedderSpecError, build_provider, cached_family
+from zemble.embedding.spend import SpendKind, SpendLedger
 from zemble.rerank.base import Reranker
 from zemble.rerank.registry import HOSTED_SCHEMES, RerankerSpecError, build_hosted_reranker, split_reranker_spec
 
@@ -36,6 +38,12 @@ _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 #: Lookup batches the side stamper may have waiting; beyond them a lookup's stamps are dropped, the
 #: daily referenced report being what keeps an index's vectors alive anyway.
 _STAMP_QUEUE_BATCHES = 64
+
+#: Days of purchases the status report carries: a month, so a monthly bill can be traced back.
+SPEND_REPORT_DAYS = 31
+
+#: The label a purchase is counted under when no client key named one (an in-process caller).
+UNLABELLED = "-"
 
 
 class SpecNotServed(ValueError):
@@ -131,6 +139,7 @@ class EmbeddingService:
         self._stamp_queue: queue.Queue[tuple[str, list[str]]] = queue.Queue(maxsize=_STAMP_QUEUE_BATCHES)
         self._stamp_worker: threading.Thread | None = None
         self._referenced_gate = threading.Lock()
+        self.spend = SpendLedger(directory)
 
     @property
     def families(self) -> list[str]:
@@ -171,11 +180,12 @@ class EmbeddingService:
             "semantic_weight_bonus": semantic_weight_bonus(embedder.inner),
         }
 
-    def documents(self, spec: str, texts: list[str]) -> EmbeddingMatrix:
+    def documents(self, spec: str, texts: list[str], label: str = UNLABELLED) -> EmbeddingMatrix:
         """Return document vectors, buying only what no cache holds and no other request is buying.
 
         :param spec: The client's embedder spec.
         :param texts: The texts to embed.
+        :param label: The client key's label the purchase is counted under.
         :return: A float32 matrix with L2-normalized rows, in input order.
         """
         embedder = self.embedder(spec)
@@ -189,11 +199,13 @@ class EmbeddingService:
         while unresolved:
             mine, waits = self._claim(embedder.family, dims, unresolved)
             if mine:
+                wanted = [texts[positions[digest][0]] for digest in mine]
                 try:
-                    bought = embedder.embed_documents([texts[positions[digest][0]] for digest in mine])
+                    bought = embedder.embed_documents(wanted)
                 finally:
                     self._release(embedder.family, dims, mine)
                 self._count("documents_missed", len(mine))
+                self.spend.add(label, embedder.family, SpendKind.DOCUMENTS, len(wanted), estimate_tokens(wanted))
                 for row, digest in enumerate(mine):
                     result[positions[digest]] = bought[row]
             for event in waits.values():
@@ -249,11 +261,13 @@ class EmbeddingService:
                 if event is not None:
                     event.set()
 
-    def queries(self, spec: str, texts: list[str]) -> EmbeddingMatrix:
+    def queries(self, spec: str, texts: list[str], label: str = UNLABELLED) -> EmbeddingMatrix:
         """Return query vectors; a query is never stored, so an asymmetric model stays honest."""
         embedder = self.embedder(spec)
         self._count("queries", len(texts))
-        return embedder.embed_queries(texts)
+        vectors = embedder.embed_queries(texts)
+        self.spend.add(label, embedder.family, SpendKind.QUERIES, len(texts), estimate_tokens(texts))
+        return vectors
 
     def covered(self, spec: str, digests: list[str], probe: bool) -> tuple[set[str], int | None]:
         """Return which text hashes are already paid for, and the width that was judged.
@@ -346,12 +360,13 @@ class EmbeddingService:
         self._count("stored", added)
         return added
 
-    def rerank(self, spec: str, query: str, passages: list[str]) -> list[float]:
+    def rerank(self, spec: str, query: str, passages: list[str], label: str = UNLABELLED) -> list[float]:
         """Score passages with a served reranker.
 
         :param spec: The client's reranker spec.
         :param query: The search query.
         :param passages: The candidate passages.
+        :param label: The client key's label the purchase is counted under.
         :return: One score per passage.
         :raises SpecNotServed: If the spec is not one this service serves.
         """
@@ -368,13 +383,19 @@ class EmbeddingService:
                 reranker = self._build_reranker(spec)
                 self._rerankers[spec] = reranker
         self._count("rerank_passages", len(passages))
-        return reranker.score(query, passages)
+        scores = reranker.score(query, passages)
+        # A reranker bills the query once per passage it is scored against.
+        self.spend.add(
+            label, spec, SpendKind.RERANK, len(passages), estimate_tokens([query] * len(passages) + passages)
+        )
+        return scores
 
     def status(self) -> dict[str, Any]:
-        """Report what the service holds and what it has done since it started.
+        """Report what the service holds, what it has done since it started, and what it bought lately.
 
         A family's ``vectors`` is the count its file keeps, read without a scan; it is None, with
         ``counting`` true, while the one-time first count of a file from before that count runs.
+        ``spend`` is persisted, so it spans restarts: one row per day, client label, model and kind.
         """
         families = []
         for family in self.families:
@@ -407,7 +428,18 @@ class EmbeddingService:
             "referenced_held": self.counters.referenced_held,
             "referenced_busy": self.counters.referenced_busy,
             "stamps_dropped": self.counters.stamps_dropped,
+            "spend": [
+                {
+                    "day": day_text(row.day),
+                    "label": row.label,
+                    "model": row.model,
+                    "kind": row.kind.value,
+                    "texts": row.texts,
+                    "tokens": row.tokens,
+                }
+                for row in self.spend.since(today() - SPEND_REPORT_DAYS + 1)
+            ],
         }
 
 
-__all__ = ["EmbeddingService", "ServiceBusy", "SpecNotServed", "build_reranker"]
+__all__ = ["SPEND_REPORT_DAYS", "UNLABELLED", "EmbeddingService", "ServiceBusy", "SpecNotServed", "build_reranker"]

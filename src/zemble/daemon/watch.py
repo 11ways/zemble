@@ -27,7 +27,7 @@ from zemble.index.file_walker import (
     _load_ignore_for_dir,
     _prefilter,
     _prepare,
-    duplicate_worktree_prefix,
+    duplicate_tree_prefix,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ class IgnoreRules:
             relative = path.relative_to(self.root).as_posix()
         except ValueError:
             relative = None
-        if relative is not None and duplicate_worktree_prefix(self.root, relative) is not None:
+        if relative is not None and duplicate_tree_prefix(self.root, relative) is not None:
             # A lane parked inside this root is its own root; its edits are never this root's.
             return False
         if self.always is not None and self.always(path):

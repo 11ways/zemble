@@ -13,6 +13,7 @@ import socket
 import sys
 import threading
 from pathlib import Path
+from typing import Any
 
 from zemble.embedding.cache import cache_root, family_slug, read_rows
 from zemble.embedding.gc import day_text, vacuum_note
@@ -206,7 +207,35 @@ def _check() -> int:
         f"{status.get('referenced_reported', 0)} referenced hashes reported "
         f"({status.get('referenced_held', 0)} held)"
     )
+    _print_spend(status.get("spend", []))
     return 0
+
+
+def _print_spend(rows: list[dict[str, Any]]) -> None:
+    """Print what the server bought per day and client key, then each key's total over the window."""
+    from zemble.embedding.pricing import estimate_cost, format_usd, price_per_million
+    from zemble.embedding.service import SPEND_REPORT_DAYS
+
+    if not rows:
+        print(f"  bought in the last {SPEND_REPORT_DAYS} days: nothing")
+        return
+    print(f"  bought in the last {SPEND_REPORT_DAYS} days (tokens estimated from characters):")
+    totals: dict[str, float] = {}
+    unpriced: set[str] = set()
+    for row in rows:
+        cost = estimate_cost(int(row["tokens"]), price_per_million(str(row["model"])))
+        if cost is None:
+            unpriced.add(row["label"])
+        else:
+            totals[row["label"]] = totals.get(row["label"], 0.0) + cost
+        money = "price unknown" if cost is None else f"~{format_usd(cost)}"
+        print(
+            f"    {row['day']} {row['label']}: {row['kind']} {row['texts']} texts, "
+            f"~{row['tokens']} tokens of {row['model']}, {money}"
+        )
+    for label in sorted({row["label"] for row in rows}):
+        extra = " plus unpriced purchases" if label in unpriced else ""
+        print(f"    total {label}: ~{format_usd(totals.get(label, 0.0))}{extra}")
 
 
 def _push(args: argparse.Namespace) -> int:

@@ -188,6 +188,46 @@ def test_a_second_overlay_reuses_the_previous_delta(workspace: Path, mock_embedd
     assert third.plan.differing == ["alpha/src/added.py"], "a reverted file is the base's again"
 
 
+def test_a_lane_parked_in_a_repository_workspace_buys_nothing_its_base_holds(
+    tmp_path: Path, mock_embedder: FakeEmbedder
+) -> None:
+    """The zenit-dev layout: a workspace repository, `lanes/<name>/` holding worktrees plus copies of its root files."""
+    root = (tmp_path / "ws").resolve()
+    _repo(root / "alpha", ALPHA)
+    tools = {"tools/helper.py": "def workspace_tool_helper():\n    return 'root file'\n"}
+    (root / ".gitignore").write_text("*\n!.gitignore\n!tools/\n!tools/*.py\n", encoding="utf-8")
+    (root / ".zembleignore").write_text("!/[a-z]*/\n", encoding="utf-8")
+    _repo(root, tools)
+    lane = root / "lanes" / "one"
+    git(root / "alpha", "worktree", "add", "-q", "--detach", str(lane / "alpha"))
+    (lane / "tools").mkdir()
+    (lane / "tools/helper.py").write_text(tools["tools/helper.py"], encoding="utf-8")
+    (lane / ".run").mkdir()
+    (lane / ".run/state.py").write_text("RUN_STATE_OF_THE_LANE = 1\n", encoding="utf-8")
+
+    # 1. The base indexes its own files only, none of the lane parked in it.
+    base = ZembleIndex.from_path(root, embedder=mock_embedder)
+    assert sorted(base.indexed_paths()) == [
+        "alpha/src/edited.py",
+        "alpha/src/removed.py",
+        "alpha/src/shared.py",
+        "tools/helper.py",
+    ]
+
+    # 2. The lane's copy of a root file is the base's, its run state is ignored as the base root ignores it.
+    mock_embedder.document_calls.clear()
+    overlay = _overlay(lane, mock_embedder)
+    assert overlay.plan.differing == [] and _embedded(mock_embedder) == [], "2: nothing the base holds is bought"
+    assert "tools/helper.py" in overlay.indexed_paths() and ".run/state.py" not in overlay.indexed_paths(), "2"
+
+    # 3. An edited root-file copy embeds under the base's capsule path, never one naming the lane.
+    (lane / "tools/helper.py").write_text("def workspace_tool_helper():\n    return 'lane edit'\n", encoding="utf-8")
+    edited = _overlay(lane, mock_embedder)
+    assert edited.plan.differing == ["tools/helper.py"], "3: only the edit is the delta"
+    [text] = [text for text in _embedded(mock_embedder) if "lane edit" in text]
+    assert text.startswith("ws/tools/helper.py "), "3: named as the base names its twin"
+
+
 def test_index_cache_serves_a_lane_as_an_overlay_outside_the_slot_count(
     workspace: Path, mock_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
 ) -> None:

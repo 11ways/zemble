@@ -134,18 +134,23 @@ class CapsuleOptions:
 
 
 class RepoRelativePaths:
-    """Maps an indexed file to ``<repo directory name>/<path inside that repo>``.
+    """Maps an indexed file to ``<repository name>/<path inside that repo>``.
 
     The capsule's first segment is embedded text, so it must not depend on which root the
     index was built from: the same file indexed as part of a workspace and as its own repo
     has to produce the same bytes, or the content-hashed embedding cache misses for the
     whole sub-tree. The nearest ancestor holding a ``.git`` entry is the anchor, and it is
     cached per directory because a build asks about every file in the tree.
+
+    AIDEV-NOTE: a linked worktree is named by its MAIN worktree's directory, never its own: a
+    worktree checked out as ``worktrees/<task>`` otherwise embeds every file under a name of its
+    own, and each such worktree re-bought its whole repository (7M tokens per worktree measured).
     """
 
     def __init__(self) -> None:
-        """Start with an empty per-directory git-root cache."""
+        """Start with empty per-directory git-root and per-root name caches."""
         self._roots: dict[Path, Path | None] = {}
+        self._names: dict[Path, str] = {}
 
     def path_for(self, absolute: Path, fallback: str) -> str:
         """Return the capsule path for a file, or *fallback* when it is in no git repository.
@@ -161,7 +166,18 @@ class RepoRelativePaths:
             inside = absolute.relative_to(root).as_posix()
         except ValueError:  # pragma: no cover - path_for is always called with a file under its own parent
             return fallback
-        return f"{root.name}/{inside}"
+        return f"{self._repository_name(root)}/{inside}"
+
+    def _repository_name(self, root: Path) -> str:
+        """Return the name a checkout's files are embedded under: its main worktree's directory name."""
+        name = self._names.get(root)
+        if name is None:
+            from zemble.lane import main_worktree
+
+            main = main_worktree(root)
+            name = main.name if main is not None and main.name else root.name
+            self._names[root] = name
+        return name
 
     def _git_root(self, directory: Path) -> Path | None:
         """Return the nearest ancestor of *directory* (inclusive) holding a ``.git`` entry."""

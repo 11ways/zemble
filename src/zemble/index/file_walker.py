@@ -183,7 +183,12 @@ def walk_files(root: Path, extensions: Sequence[str], ignore: Sequence[str] | No
         yield walked.path
 
 
-def walk_entries(root: Path, extensions: Sequence[str], ignore: Sequence[str] | None = None) -> Iterator[WalkedFile]:
+def walk_entries(
+    root: Path,
+    extensions: Sequence[str],
+    ignore: Sequence[str] | None = None,
+    mirrored_root: Path | None = None,
+) -> Iterator[WalkedFile]:
     """Yield files under root matching extensions, with their root-relative paths.
 
     Directories matching DEFAULT_IGNORED_DIRS plus any names in ignore are always
@@ -192,11 +197,17 @@ def walk_entries(root: Path, extensions: Sequence[str], ignore: Sequence[str] | 
     :param root: Root directory to walk.
     :param extensions: List of file extensions to match.
     :param ignore: Additional patterns to ignore.
+    :param mirrored_root: A directory whose ignore files apply at *root* before root's own, for a
+        root that is a copy of that directory's layout (a lane root that is no checkout).
     :yield: Each matching file and its path relative to root.
     :ytype: WalkedFile
     """
     extensions_set = frozenset(extensions)
-    yield from _walk(str(root), "", [_root_spec(root, ignore)], extensions_set)
+    specs = [_root_spec(root, ignore)]
+    loaded = _load_ignore_for_dir(str(mirrored_root)) if mirrored_root is not None else None
+    if loaded is not None:
+        specs.append(IgnoreSpec(base=root, spec=loaded[0], patterns=loaded[1], prefilter=loaded[2], base_offset=0))
+    yield from _walk(str(root), "", specs, extensions_set)
 
 
 def _root_spec(root: Path, ignore: Sequence[str] | None = None) -> IgnoreSpec:
@@ -234,13 +245,113 @@ def is_duplicate_worktree(root: Path | str, directory: Path | str) -> bool:
     return main != directory.resolve() and (main == resolved_root or resolved_root in main.parents)
 
 
-def duplicate_worktree_prefix(root: Path, relative_path: str) -> str | None:
-    """Return the root-relative directory holding a path that `is_duplicate_worktree` keeps out of the walk, or None."""
+def is_parked_lane(root: Path | str, directory: Path | str, entries: Sequence[os.DirEntry[str]] | None = None) -> bool:
+    """Return whether a directory below a walk root, no checkout itself, is a lane root of a tree the root holds.
+
+    It is one when a checkout at most `zemble.lane.DISCOVERY_DEPTH` levels below it is a linked worktree
+    whose main worktree sits at the same relative spot under a folder the root holds, the layout
+    `zemble.lane` pairs a lane with its base by.
+
+    AIDEV-NOTE: the lane's OWN files are the base's again too, not only its checkouts: zenit-dev copies
+    the workspace's root files (2,294 changelog entries) into every `lanes/<name>/`, plus its run state
+    and a Maven repository. Walked into the base they were bought once per lane under a lane-named
+    capsule and again on every rewrite. Direct children cost one stat each; a child that is no checkout
+    is listed once more, for a lane holding only `apps/<name>` checkouts.
+
+    :param root: The walk root.
+    :param directory: The directory to judge.
+    :param entries: Its listing, when the caller already has one.
+    """
+    resolved_root = Path(root).resolve()
+    if entries is None:
+        entries = _listing(directory)
+    folders = [entry for entry in entries if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False)]
+    plain: list[os.DirEntry[str]] = []
+    for entry in folders:
+        dot_git = Path(entry.path) / ".git"
+        if not os.path.lexists(dot_git):
+            plain.append(entry)
+        elif dot_git.is_file() and _mirrors_base(resolved_root, Path(entry.path), (entry.name,)):
+            return True
+    for entry in plain:
+        for inner in _listing(entry.path):
+            if inner.name.startswith(".") or not inner.is_dir(follow_symlinks=False):
+                continue
+            if (Path(inner.path) / ".git").is_file() and _mirrors_base(
+                resolved_root, Path(inner.path), (entry.name, inner.name)
+            ):
+                return True
+    return False
+
+
+def _listing(directory: Path | str) -> list[os.DirEntry[str]]:
+    """List a directory, nothing when it cannot be read."""
+    try:
+        with os.scandir(directory) as scan:
+            return list(scan)
+    except OSError:
+        return []
+
+
+def _mirrors_base(resolved_root: Path, checkout: Path, spot: tuple[str, ...]) -> bool:
+    """Return whether a linked worktree's main sits at the same relative *spot* under a folder the root holds."""
+    from zemble.lane import main_worktree
+
+    main = main_worktree(checkout)
+    if main is None or main.parts[-len(spot) :] != spot:
+        return False
+    base = Path(*main.parts[: -len(spot)])
+    return base == resolved_root or resolved_root in base.parents
+
+
+def _holds_checkouts(directory: Path | str, entries: Sequence[os.DirEntry[str]] | None = None) -> bool:
+    """Return whether a directory has a checkout directly below it: only then can a lane of it be parked inside."""
+    if entries is None:
+        entries = _listing(directory)
+    return any(
+        not entry.name.startswith(".")
+        and entry.is_dir(follow_symlinks=False)
+        and os.path.lexists(os.path.join(entry.path, ".git"))
+        for entry in entries
+    )
+
+
+def _descends(
+    root: Path | str, directory: str, lanes_possible: bool, entries: Sequence[os.DirEntry[str]] | None = None
+) -> bool | None:
+    """Return None when a walk of root never descends below a directory, else whether a lane root may lie below it.
+
+    A parked lane root sits outside the root's nested checkouts, under a root holding checkouts, so it is
+    looked for only there: a plain repository and the inside of every checkout cost no look at all.
+
+    :param root: The walk root.
+    :param directory: A directory strictly below the root.
+    :param lanes_possible: Whether the root holds checkouts and no directory between it and this one is one.
+    :param entries: The directory's listing, when the caller already has one.
+    """
+    if entries is None:
+        git_entry = Path(directory) / ".git"
+        has_git, git_file = os.path.lexists(git_entry), git_entry.is_file()
+    else:
+        dot_git = next((entry for entry in entries if entry.name == ".git"), None)
+        has_git, git_file = dot_git is not None, dot_git is not None and dot_git.is_file()
+    if git_file and is_duplicate_worktree(root, directory):
+        return None
+    if lanes_possible and not has_git and is_parked_lane(root, directory, entries):
+        return None
+    return lanes_possible and not has_git
+
+
+def duplicate_tree_prefix(root: Path, relative_path: str) -> str | None:
+    """Return the root-relative directory holding a path that the walk skips as a lane or worktree copy, or None."""
     segments = [segment for segment in relative_path.split("/") if segment]
+    lanes_possible = len(segments) > 1 and _holds_checkouts(root)
     for depth in range(1, len(segments)):
         prefix = "/".join(segments[:depth])
-        if is_duplicate_worktree(root, root / prefix):
+        descends = _descends(root, str(root / prefix), lanes_possible)
+        if descends is None:
             return prefix
+        lanes_possible = descends
     return None
 
 
@@ -259,6 +370,7 @@ def ignored_prefix(root: Path, relative_path: str, ignore: Sequence[str] | None 
     segments = [segment for segment in relative_path.split("/") if segment]
     directory = str(root)
     walked = ""
+    lanes_possible = len(segments) > 1 and _holds_checkouts(root)
     for index, segment in enumerate(segments):
         loaded = _load_ignore_for_dir(directory)
         if loaded is not None:
@@ -276,8 +388,11 @@ def ignored_prefix(root: Path, relative_path: str, ignore: Sequence[str] | None 
         is_ignored, _bypasses = _is_ignored(walked, index < len(segments) - 1, specs)
         if is_ignored:
             return walked
-        if index < len(segments) - 1 and is_duplicate_worktree(root, f"{directory}/{segment}"):
-            return walked
+        if index < len(segments) - 1:
+            descends = _descends(root, f"{directory}/{segment}", lanes_possible)
+            if descends is None:
+                return walked
+            lanes_possible = descends
         directory = f"{directory}/{segment}"
     return None
 
@@ -309,8 +424,12 @@ def _walk(
     inherited_specs: list[IgnoreSpec],
     extensions: frozenset[str],
     root: str | None = None,
+    lanes_possible: bool | None = None,
 ) -> Iterator[WalkedFile]:
-    """Recursive function for walking files under a directory."""
+    """Recursive function for walking files under a directory.
+
+    :param lanes_possible: Whether a parked lane root may lie here (see `_descends`); None at the root.
+    """
     root = directory if root is None else root
     loaded = _load_ignore_for_dir(directory)
     if loaded is not None:
@@ -328,10 +447,14 @@ def _walk(
     with os.scandir(directory) as scan:
         entries = sorted(scan, key=lambda entry: entry.name)
 
-    # The entries are already listed, so only a directory holding a `.git` file costs a look.
-    if relative_path and any(entry.name == ".git" and entry.is_file() for entry in entries):
-        if is_duplicate_worktree(root, directory):
+    if not relative_path:
+        lanes_possible = _holds_checkouts(directory, entries)
+    else:
+        # The entries are already listed, so only a `.git` file or a folder outside every checkout costs a look.
+        descends = _descends(root, directory, bool(lanes_possible), entries)
+        if descends is None:
             return
+        lanes_possible = descends
 
     for entry in entries:
         # Don't follow symlinks
@@ -344,6 +467,6 @@ def _walk(
             continue
 
         if is_dir:
-            yield from _walk(entry.path, child_relative, inherited_specs, extensions, root)
+            yield from _walk(entry.path, child_relative, inherited_specs, extensions, root, lanes_possible)
         elif entry.is_file() and (found or os.path.splitext(entry.name)[1].lower() in extensions):
             yield WalkedFile(path=Path(entry.path), relative_path=child_relative, stat=entry.stat())

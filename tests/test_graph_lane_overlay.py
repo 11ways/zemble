@@ -381,7 +381,7 @@ ADDED_DEPRECATED = ADDED.replace(
 
 @pytest.fixture
 def parked(tmp_path: Path, graph_cache: Path) -> tuple[Path, Path, Path]:
-    """A lane parked inside its base (`<base>/lanes/lane`) whose root holds a build tool's files the base walks."""
+    """A lane parked inside its base (`<base>/lanes/lane`) whose root holds build tool files the base never walks."""
     workspace = (tmp_path / "ws").resolve()
     for name, files in WORKSPACE.items():
         _repo(workspace / name, files)
@@ -392,7 +392,7 @@ def parked(tmp_path: Path, graph_cache: Path) -> tuple[Path, Path, Path]:
     lane.mkdir(parents=True)
     for name in HELD:
         git(workspace / name, "worktree", "add", "-q", "--detach", str(lane / name))
-    # What zenit-dev writes at a lane's root, outside every checkout: the base's walk keeps these.
+    # What zenit-dev writes at a lane's root, outside every checkout: the lane's, never the base's.
     (lane / ".zenit-dev").mkdir()
     (lane / ".zenit-dev/gradle-init.gradle").write_text("allprojects {\n}\n", encoding="utf-8")
     (lane / ".zenit-dev/lane.json").write_text('{"name": "lane"}\n', encoding="utf-8")
@@ -406,13 +406,13 @@ def parked(tmp_path: Path, graph_cache: Path) -> tuple[Path, Path, Path]:
 def test_a_lane_parked_inside_its_base_is_its_own_overlay_never_a_sub_tree_of_the_base(
     parked: tuple[Path, Path, Path], graph_cache: Path
 ) -> None:
-    """The base's graph holds the lane root's own files; the lane is still answered as a lane, not as that sub-tree."""
+    """The base's graph holds none of the lane root's own files; the lane is answered as a lane, never a sub-tree."""
     from zemble.cache_orphans import OrphanKind, find_orphans
     from zemble.graph.cli import ensure_graph
     from zemble.graph.store import graph_covers, graph_present
 
     workspace, lane, reference = parked
-    assert graph_covers(str(workspace), "lanes/lane"), "the base's graph holds a file under the lane root"
+    assert not graph_covers(str(workspace), "lanes/lane"), "the base's graph holds no file under the lane root"
 
     # 1. Before its overlay exists the base's graph answers for the lane whole, not as the lane root's sub-tree.
     assert resolve_graph_root(str(lane)) == (str(workspace), None), "1: the lane is a lane of its base"
@@ -463,9 +463,9 @@ async def test_a_fresh_lane_parked_inside_its_warm_base_answers_architectural_li
     def request(path: Path, **args: object) -> dict:
         return {"id": 1, "cmd": "architectural", "args": {"path": str(path), **args}, "accepts_busy": True}
 
-    # 0. The base is warm with every content type and holds the lane roots' own files.
+    # 0. The base is warm with every content type and holds none of the lane roots' own files.
     base_key, base = await daemon.index_for({"path": str(workspace), "content": every})
-    assert base.subtree("lanes/lane") is not None and base.subtree("lanes/fresh") is not None, "0: lane files"
+    assert base.subtree("lanes/lane") is None and base.subtree("lanes/fresh") is None, "0: no lane files"
 
     # 1. A fresh lane's first question answers from its overlay, never as the base's sub-tree of its root.
     answered_fresh = await daemon.handle(request(fresh))

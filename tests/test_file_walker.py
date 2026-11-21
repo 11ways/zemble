@@ -215,7 +215,7 @@ def test_walk_files_skips_symlinks(tmp_path: Path) -> None:
 
 
 def test_a_lane_parked_inside_its_base_is_its_own_root_never_the_bases(tmp_path: Path) -> None:
-    """A linked worktree of a checkout the root holds is skipped by every walk of the root, and walked as its own."""
+    """A lane parked in its base, worktrees and the lane's own files alike, is skipped by every walk of the base."""
     import subprocess
 
     from tests.conftest import git
@@ -226,6 +226,7 @@ def test_a_lane_parked_inside_its_base_is_its_own_root_never_the_bases(tmp_path:
     workspace = (tmp_path / "ws").resolve()
     _touch(workspace / "alpha/src/a.py")
     _touch(workspace / "alpha/build/zemble/facts-compileJava.jsonl", "{}\n")
+    _touch(workspace / "tools/helper.py")
     subprocess.run(["git", "init", "-q", "-b", "main", str(workspace / "alpha")], check=True)
     git(workspace / "alpha", "add", "src")
     git(workspace / "alpha", "commit", "-q", "-m", "initial")
@@ -233,17 +234,40 @@ def test_a_lane_parked_inside_its_base_is_its_own_root_never_the_bases(tmp_path:
     git(workspace / "alpha", "worktree", "add", "-q", "--detach", str(lane / "alpha"))
     _touch(lane / "alpha/src/lane_only.py")
     _touch(lane / "alpha/build/zemble/facts-compileJava.jsonl", "{}\n")
+    # The lane's own files: a copy of the base's root files and its run state.
+    _touch(lane / "tools/helper.py")
+    _touch(lane / ".run/state.py")
+    # A folder of main checkouts is no lane: nothing in it is a linked worktree.
+    subprocess.run(["git", "init", "-q", "-b", "main", str(workspace / "apps/beta")], check=True)
+    _touch(workspace / "apps/beta/b.py")
+    git(workspace / "apps/beta", "add", "b.py")
+    git(workspace / "apps/beta", "commit", "-q", "-m", "initial")
+    # A lane holding only an `apps/<name>` checkout is a lane too.
+    git(workspace / "apps/beta", "worktree", "add", "-q", "--detach", str(workspace / "lanes/two/apps/beta"))
+    _touch(workspace / "lanes/two/tools/helper.py")
 
     walked = {path.relative_to(workspace).as_posix() for path in walk_files(workspace, [".py"])}
-    assert walked == {"alpha/src/a.py"}, "the base's walk leaves its lane out"
-    assert ignored_prefix(workspace, "lanes/one/alpha/src/lane_only.py") == "lanes/one/alpha", "a named path too"
+    assert walked == {"alpha/src/a.py", "apps/beta/b.py", "tools/helper.py"}, "the base's walk leaves its lane out"
+    assert ignored_prefix(workspace, "lanes/one/alpha/src/lane_only.py") == "lanes/one", "a named path too"
+    assert ignored_prefix(workspace, "lanes/one/tools/helper.py") == "lanes/one", "and the lane's own files"
+    assert ignored_prefix(workspace, "lanes/two/tools/helper.py") == "lanes/two", "whatever depth its checkouts sit at"
     assert ignored_prefix(workspace, "alpha/src/a.py") is None, "the base's own checkout is walked"
+    assert ignored_prefix(workspace, "apps/beta/b.py") is None, "and a folder of its checkouts"
     rules = IgnoreRules(workspace, [".py"], always=lambda path: matches_facts_glob(workspace, path))
     assert not rules.matches(lane / "alpha/src/lane_only.py"), "the base's watcher ignores a lane's edit"
+    assert not rules.matches(lane / "tools/helper.py"), "and a rewrite of the lane's own files"
     assert not rules.matches(lane / "alpha/build/zemble/facts-compileJava.jsonl"), "and a lane's facts file"
     assert rules.matches(workspace / "alpha/src/a.py"), "but not its own"
     facts = [path.relative_to(workspace).as_posix() for path in discover_facts_files(workspace)]
     assert facts == ["alpha/build/zemble/facts-compileJava.jsonl"], "the facts walk leaves the lane out"
 
     own = {path.relative_to(lane).as_posix() for path in walk_files(lane, [".py"])}
-    assert own == {"alpha/src/a.py", "alpha/src/lane_only.py"}, "the lane walked as its own root holds its files"
+    assert own == {"alpha/src/a.py", "alpha/src/lane_only.py", "tools/helper.py", ".run/state.py"}, (
+        "the lane walked as its own root holds its files"
+    )
+    (workspace / ".gitignore").write_text("*\n!tools/\n!tools/*.py\n", encoding="utf-8")
+    (workspace / ".zembleignore").write_text("!/[a-z]*/\n", encoding="utf-8")
+    mirrored = {path.relative_path for path in walk_entries(lane, [".py"], mirrored_root=workspace)}
+    assert mirrored == {"alpha/src/a.py", "alpha/src/lane_only.py", "tools/helper.py"}, (
+        "walked as a copy of the base root, the base root's ignore files keep its run state out"
+    )

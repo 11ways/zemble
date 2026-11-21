@@ -41,7 +41,7 @@ from zemble.graph.model import (
     SymbolKind,
 )
 from zemble.graph.signature import same_parameters, simple_type_name
-from zemble.index.file_walker import duplicate_worktree_prefix, ignored_prefix, is_duplicate_worktree
+from zemble.index.file_walker import duplicate_tree_prefix, ignored_prefix, is_duplicate_worktree
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +412,7 @@ def matches_facts_glob(root: Path, path: Path) -> bool:
         relative = path.resolve().relative_to(root.resolve())
     except ValueError:
         return False
-    if duplicate_worktree_prefix(root, relative.as_posix()) is not None:
+    if duplicate_tree_prefix(root, relative.as_posix()) is not None:
         return False
     segments = relative.as_posix().split("/")
     for pattern in (_segments(pattern) for pattern in globs):

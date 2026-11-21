@@ -194,6 +194,41 @@ def describe_lane(root: Path, base: Path) -> Lane:
     return Lane(root=root, base=base, repos=tuple(pairs))
 
 
+def mirrored_root(lane: Lane) -> Path | None:
+    """Return the base root whose ignore files a lane's walk honours, or None for a lane root that is a checkout.
+
+    A lane root that is no checkout is a copy of the base root's layout, so the base root's ignore
+    files say what of it is indexed: without them its run state and Maven repository were indexed,
+    and every rewrite of them was bought again.
+    """
+    return None if _git_dir_entry(lane.root) is not None else lane.base
+
+
+class LaneRelativePaths(RepoRelativePaths):
+    """Capsule paths for a lane's files: a file no checkout of the lane holds is named as the base names its twin.
+
+    Such a file sits in the lane root's plain folders, whose nearest repository is one above the lane
+    (the workspace repository itself), so its own name carried `lanes/<name>/` and differed per lane.
+    """
+
+    def __init__(self, lane: Lane) -> None:
+        """Name files of *lane*."""
+        super().__init__()
+        self._lane = lane
+        self._base_paths = RepoRelativePaths()
+
+    def path_for(self, absolute: Path, fallback: str) -> str:
+        """Return the capsule path for a lane file, the base's for one outside every lane checkout."""
+        root = self._git_root(absolute.parent)
+        if root is not None and (root == self._lane.root or not self._lane.root.is_relative_to(root)):
+            return super().path_for(absolute, fallback)
+        try:
+            twin = self._lane.base / absolute.relative_to(self._lane.root)
+        except ValueError:
+            return super().path_for(absolute, fallback)
+        return self._base_paths.path_for(twin, fallback)
+
+
 @dataclass(frozen=True)
 class LaneScope:
     """Which of its base's files a lane holds: those of the base's checkouts the lane has a worktree of."""
@@ -270,13 +305,14 @@ class LaneComparer:
     lane: Lane
     _states: dict[str, _RepoState | None] = field(default_factory=dict)
     _prefixes: list[str] = field(default_factory=list)
-    _lane_paths: RepoRelativePaths = field(default_factory=RepoRelativePaths)
+    _lane_paths: RepoRelativePaths = field(init=False)
     _base_paths: RepoRelativePaths = field(default_factory=RepoRelativePaths)
     #: Whether files of a lane-relative directory get the same capsule path in the lane and the base.
     _same_capsule_dirs: dict[str, bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Collect every matched checkout's git state once, in parallel."""
+        self._lane_paths = LaneRelativePaths(self.lane)
         with ThreadPoolExecutor(max_workers=_GIT_WORKERS) as pool:
             states = list(pool.map(_repo_state, self.lane.repos))
         self._states = {pair.prefix: state for pair, state in zip(self.lane.repos, states, strict=True)}
@@ -335,10 +371,12 @@ __all__ = [
     "DISCOVERY_DEPTH",
     "Lane",
     "LaneComparer",
+    "LaneRelativePaths",
     "LaneScope",
     "RepoPair",
     "describe_lane",
     "find_lane",
     "lane_scope",
     "main_worktree",
+    "mirrored_root",
 ]

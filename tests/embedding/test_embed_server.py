@@ -23,15 +23,16 @@ from zemble.chunking.capsule import embedding_text
 from zemble.daemon import server as daemon_server
 from zemble.embedding import server as http_server
 from zemble.embedding.cache import EmbeddingCache, cache_root, text_hash, today
-from zemble.embedding.gc import collect_unused
+from zemble.embedding.gc import collect_unused, day_text
 from zemble.embedding.http import EmbeddingRequestError
-from zemble.embedding.pricing import EmbeddingBudgetExceeded, require_affordable_bill
+from zemble.embedding.pricing import EmbeddingBudgetExceeded, estimate_tokens, require_affordable_bill
 from zemble.embedding.referenced import REPORTED_FILE, REPORTED_TODAY, FamilyReport, distinct_batches, report_referenced
 from zemble.embedding.registry import build_embedder
 from zemble.embedding.served import ServerClient, ServerEmbedder, ServerReranker
 from zemble.embedding.server import KeyRing, add_key, make_server
 from zemble.embedding.server_cli import run_embed_server
 from zemble.embedding.service import EmbeddingService
+from zemble.embedding.spend import SpendKind, SpendLedger
 from zemble.embedding.wire import DOCUMENTS_PER_REQUEST, REFERENCED_ROUTE, SERVER_ENV, SERVER_KEY_ENV, server_settings
 from zemble.rerank.registry import load_reranker
 
@@ -161,8 +162,8 @@ def served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_backoff: None) ->
     yield from _serve(tmp_path, monkeypatch, FakeProvider())
 
 
-def test_server_journey(served: Running) -> None:
-    """Two clients share one cache: each text is bought once, queries never stored, reranks proxied."""
+def test_server_journey(served: Running, capsys: pytest.CaptureFixture[str]) -> None:
+    """Two clients share one cache: each text is bought once, queries never stored, reranks proxied, spend kept."""
     provider = served.provider
 
     # 1. With a server configured, the registry builds a client embedder whose identity is the provider's own.
@@ -211,6 +212,27 @@ def test_server_journey(served: Running) -> None:
     assert status["documents_missed"] == 4
     assert status["queries"] == 1 and status["rerank_passages"] == 2
 
+    # 10. What was bought is counted per day, client key and kind, with estimated tokens.
+    day = day_text(today())
+    # Each purchase is estimated as it was bought: alpha and beta together, then gamma, then delta.
+    bought_tokens = sum(estimate_tokens(batch) for batch in (["alpha", "beta"], ["gamma"], ["delta"]))
+    spend = {
+        (row["day"], row["label"], row["model"], row["kind"]): (row["texts"], row["tokens"]) for row in status["spend"]
+    }
+    assert spend == {
+        (day, "test-client", FAMILY, "documents"): (4, bought_tokens),
+        (day, "test-client", FAMILY, "queries"): (1, estimate_tokens(["only a query"])),
+        (day, "test-client", RERANKER, "rerank"): (2, estimate_tokens(["q", "q", "a", "abc"])),
+    }, "step 10: a served text, a duplicate and a refused family cost nothing; every purchase is counted"
+
+    # 11. The ledger survives a restart, and `check` shows it with the documented price.
+    restarted = EmbeddingService(served.service.directory, [SPEC], [RERANKER], provider=lambda spec: provider)
+    assert restarted.status()["spend"] == status["spend"], "step 11: the ledger is persisted"
+    assert run_embed_server(argparse.Namespace(embed_server_action="check")) == 0
+    out = capsys.readouterr().out
+    assert f"{day} test-client: documents 4 texts" in out and f"{day} test-client: rerank 2 texts" in out, out
+    assert "total test-client: ~$0.0000002 plus unpriced purchases" in out, out
+
 
 def test_a_request_spanning_several_batches_keeps_its_order(served: Running) -> None:
     """Texts sent in several requests come back as one matrix in input order."""
@@ -256,6 +278,8 @@ def test_concurrent_buyers_pay_once(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         assert not errors, errors
         assert sorted(running.provider.bought()) == sorted(texts), "every text must be bought exactly once"
         assert len(results) == 3
+        [row] = running.service.spend.since(today())
+        assert (row.texts, row.tokens) == (6, estimate_tokens(texts)), "the ledger counts each text once too"
 
 
 def test_a_failed_purchase_is_reported_once_and_releases_its_claim(
@@ -270,6 +294,8 @@ def test_a_failed_purchase_is_reported_once_and_releases_its_claim(
         # The failed claim was released: the next request buys the text instead of waiting forever.
         embedder.embed_documents(["alpha"])
         assert running.provider.bought() == ["alpha"]
+        [row] = running.service.spend.since(today())
+        assert row.texts == 1, "a failed purchase is never counted as spend"
 
 
 def test_the_bill_guard_asks_the_server(served: Running, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -378,9 +404,10 @@ def test_server_gc_sweeps_only_what_nobody_used(tmp_path: Path) -> None:
     with cache._lock:
         cache._connection.execute("UPDATE used SET day = day - 400 WHERE text_sha256 = ?", (text_hash("stale"),))
     cache.close()
+    SpendLedger(directory).add("host", FAMILY, SpendKind.DOCUMENTS, 2, 2)
 
     dry = collect_unused(directory, grace_days=180, dry_run=True)
-    assert [(report.rows, report.swept) for report in dry] == [(2, 1)]
+    assert [(report.rows, report.swept) for report in dry] == [(2, 1)], "the spend ledger is no vector cache"
     swept = collect_unused(directory, grace_days=180, dry_run=False)
     assert swept[0].refused is None and swept[0].swept == 1
     remaining = EmbeddingCache(FAMILY, directory)
@@ -538,10 +565,10 @@ def test_referenced_report_journey(
     # 4. A server older than the route answers 404: logged once, the day recorded, nothing raised.
     original = http_server._route
 
-    def old_route(service: EmbeddingService, route: str, payload: dict) -> dict:
+    def old_route(service: EmbeddingService, route: str, payload: dict, label: str) -> dict:
         if route == REFERENCED_ROUTE:
             raise http_server._HttpError(404, f"unknown route {route}")
-        return original(service, route, payload)
+        return original(service, route, payload, label)
 
     monkeypatch.setattr(http_server, "_route", old_route)
     tomorrow = today() + 1

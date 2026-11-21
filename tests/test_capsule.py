@@ -371,3 +371,33 @@ def test_the_capsule_path_is_repo_relative_not_index_root_relative(tmp_path: Pat
     loose_root = workspace / "loose"
     loose_from_itself = next(iter(plan_files(loose_root, display_root=loose_root)))
     assert loose_from_itself.chunks[0].context.startswith("notes.py "), "and it stays root-relative there"
+
+
+def test_a_linked_worktree_embeds_its_files_under_its_main_checkouts_name(tmp_path: Path) -> None:
+    """A worktree checked out under a task name embeds its main checkout's bytes, so nothing is bought twice."""
+    import subprocess
+
+    from tests.conftest import git
+    from zemble.index.create import plan_files
+    from zemble.types import ContentType
+
+    main = tmp_path / "basalt"
+    (main / "src").mkdir(parents=True)
+    (main / "src" / "Greeter.java").write_text("public class Greeter {\n    void greet() {}\n}\n", encoding="utf-8")
+    (main / "README.md").write_text("# basalt\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True)
+    git(main, "add", "-A")
+    git(main, "commit", "-q", "-m", "initial")
+    worktree = tmp_path / "worktrees" / "replay-measure"
+    git(main, "worktree", "add", "-q", "--detach", str(worktree))
+
+    def contexts(root: Path) -> dict[str, list[str]]:
+        return {
+            planned.indexed_path: [c.context for c in planned.chunks]
+            for planned in plan_files(root, (ContentType.CODE, ContentType.DOCS), display_root=root)
+        }
+
+    ours, theirs = contexts(worktree), contexts(main)
+    assert ours == theirs, "every capsule of the worktree is its main checkout's, top-level files included"
+    assert theirs["README.md"][0].startswith("basalt/README.md"), "a top-level file too"
+    assert theirs["src/Greeter.java"][0].startswith("basalt/src/Greeter.java "), "named by the main checkout"

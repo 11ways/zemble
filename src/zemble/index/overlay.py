@@ -24,7 +24,6 @@ import numpy as np
 import numpy.typing as npt
 import orjson
 
-from zemble.chunking.capsule import RepoRelativePaths
 from zemble.embedding.base import Embedder
 from zemble.index.bm25 import BM25, CorpusStats
 from zemble.index.chunk_store import ChunkList, file_paths_of, languages_of
@@ -37,7 +36,7 @@ from zemble.index.index import ZembleIndex
 from zemble.index.scope import require_declared_scope
 from zemble.index.symbols import SymbolDefinitions
 from zemble.index.types import FileManifestEntry, PersistencePath, PreviousIndex
-from zemble.lane import Lane, LaneComparer
+from zemble.lane import Lane, LaneComparer, LaneRelativePaths, mirrored_root
 from zemble.types import Chunk
 
 logger = logging.getLogger(__name__)
@@ -240,7 +239,10 @@ def plan_overlay(lane: Lane, base: ZembleIndex) -> OverlayPlan:
     comparer = LaneComparer(lane)
     manifest = base._manifest  # noqa: SLF001
     plan = OverlayPlan()
-    for walked in walk_entries(lane.root, get_extensions(base.storage_content), ignore=list(base.exclude)):
+    walk = walk_entries(
+        lane.root, get_extensions(base.storage_content), ignore=list(base.exclude), mirrored_root=mirrored_root(lane)
+    )
+    for walked in walk:
         try:
             if get_file_status(walked.path, None, walked.stat) != FileStatus.VALID:
                 continue
@@ -312,7 +314,7 @@ def _write_delta(
     embedder: Embedder = base.embedder
     capsules = base._capsules  # noqa: SLF001
     prior = _delta_previous(prior_delta)
-    repo_paths = RepoRelativePaths()
+    repo_paths = LaneRelativePaths(lane)
     planned: list[PlannedFile] = []
     for relative in sorted(differing):
         entry = prior.manifest.get(relative) if prior is not None else None

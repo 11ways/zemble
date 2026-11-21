@@ -39,7 +39,9 @@ ZEMBLE_EMBED_SERVER_KEY=<the key add-key printed>
 
 Then `zemble daemon restart` (a running daemon read its environment when it started) and
 restart MCP processes that run without the daemon. `zemble embed-server check` shows what the
-server holds and what it did since it started.
+server holds, what it did since it started, and what it bought from its providers over the last
+31 days per day and client key label (texts and estimated tokens per model and kind, kept in
+`spend.db` beside the cache files, so a restart does not reset it).
 
 With a server configured, a paid embedder spec builds a `ServerEmbedder` and a `voyage:`
 reranker builds a `ServerReranker`. The client needs no provider key and keeps no vector
@@ -173,7 +175,7 @@ one home of every route and limit both sides share).
 | `POST /v1/describe` | `spec` | `model_id`, `dimensions`, `family`, `semantic_weight_bonus` |
 | `POST /v1/store` | `spec`, `rows` of `[text sha256, dims, base64 vector]` | `added` |
 | `POST /v1/rerank` | `spec`, `query`, `passages` | `scores` |
-| `GET /v1/status` | - | families (`vectors`, `counting`, `bytes`), counters since start |
+| `GET /v1/status` | - | families (`vectors`, `counting`, `bytes`), counters since start, `spend` (per day, label, model, kind) |
 | `GET /v1/health` | - | `ok`, `version` (no key needed) |
 
 ## Measured

@@ -166,15 +166,15 @@ def _rows(payload: dict[str, Any]) -> list[tuple[str, int, bytes]]:
     return rows
 
 
-def _route(service: EmbeddingService, route: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Answer one authenticated POST."""
+def _route(service: EmbeddingService, route: str, payload: dict[str, Any], label: str) -> dict[str, Any]:
+    """Answer one authenticated POST; what it buys is counted under the key's label."""
     if route == DOCUMENTS_ROUTE:
         texts = _texts(payload)
-        vectors = service.documents(_spec(payload), texts)
+        vectors = service.documents(_spec(payload), texts, label)
         return {"rows": len(texts), "dimensions": int(vectors.shape[1]), "vectors": encode_vectors(vectors)}
     if route == QUERIES_ROUTE:
         texts = _texts(payload)
-        vectors = service.queries(_spec(payload), texts)
+        vectors = service.queries(_spec(payload), texts, label)
         return {"rows": len(texts), "dimensions": int(vectors.shape[1]), "vectors": encode_vectors(vectors)}
     if route == COVERED_ROUTE:
         covered, width = service.covered(_spec(payload), _texts(payload, "digests"), bool(payload.get("probe")))
@@ -189,7 +189,7 @@ def _route(service: EmbeddingService, route: str, payload: dict[str, Any]) -> di
         query = payload.get("query")
         if not isinstance(query, str):
             raise ValueError("'query' must be a string")
-        return {"scores": service.rerank(_spec(payload), query, _texts(payload, "passages"))}
+        return {"scores": service.rerank(_spec(payload), query, _texts(payload, "passages"), label)}
     raise _HttpError(HTTPStatus.NOT_FOUND, f"unknown route {route}")
 
 
@@ -235,7 +235,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             self._authenticate()
             payload = self._payload()
-            self._answer(HTTPStatus.OK, _route(self.server.service, self.path, payload))
+            self._answer(HTTPStatus.OK, _route(self.server.service, self.path, payload, self.label))
         except _HttpError as exc:
             self._answer(exc.status, {"error": str(exc)})
         except SpecNotServed as exc:
