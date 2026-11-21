@@ -199,11 +199,15 @@ class Architecture:
         reach = self.reach(copy, api)
         return not reach.usable and reach is not Reachability.UNKNOWN
 
-    def preference(self, copy: Unit, api: Unit, score: float) -> tuple[int, int, float]:
-        """The order an API is preferred in as a copy's original: callable, then most core, then best evidenced."""
+    def preference(self, copy: Unit, api: Unit, score: float) -> tuple[int, tuple[int, bool, int, str], float]:
+        """The order an API is preferred in as a copy's original: callable, then most core, then best evidenced.
+
+        AIDEV-NOTE: "most core" is the whole `core` key, the place in the module included: two twins of one copy
+        score alike, and their float32 cosines differed by 6e-8, which let noise, not the path, pick the original.
+        """
         reach = self.reach(copy, api)
         callable_order = 0 if reach.usable else 2 if self.blocked(copy, api) else 1
-        return callable_order, self.core(api)[0], -score
+        return callable_order, self.core(api), -score
 
 
 def reimplementation_candidates(shaped: Sequence[Unit]) -> list[Unit]:
@@ -641,7 +645,7 @@ class _Originals:
         """Each copy's original: callable, a standard call, bound to the same constants, most core, best evidenced."""
         copies = self.candidates
 
-        def order(index: int, verdict: _Copy) -> tuple[int, bool, bool, int, float]:
+        def order(index: int, verdict: _Copy) -> tuple[int, bool, bool, tuple[int, bool, int, str], float]:
             copy, api = copies[index], copies[verdict.api]
             callable_order, core, score = self.architecture.preference(copy, api, verdict.score)
             standard = _identity(api) in self.roots

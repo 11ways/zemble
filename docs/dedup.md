@@ -158,9 +158,10 @@ Each class is one API and the bodies that redo it, copies first and the API last
 - **The original, by architecture**: of every API a copy matches, the original is the one in the most core
   module the copy's module may depend on (`reimplements.Architecture`, read from the scanned root's
   `.zemble/home.toml` through `HomeConfig`: `order` ranks, the dependency graph and `[[forbidden]]` decide
-  reach). Preference: reachable (direct or transitive), then reach unknown, then the most core module, then
-  the best evidence. Of two public bodies the one in the more core module is the home and never a copy;
-  inside one module, a `common` source set and then the shallower path decide as before. A copy whose
+  reach). Preference: reachable (direct or transitive), then reach unknown, then the most core module and,
+  inside one module, a `common` source set and then the shallower path, then the best evidence (until
+  2026-11-21 the evidence came before the path, so two twins of one copy, scoring alike, were told apart by
+  float noise). Of two public bodies the one in the more core module is the home and never a copy. A copy whose
   every matched API lives in a module its module may not depend on (forbidden or unreachable), or in a
   source set its own cannot read (a `server` API for `common` code), has no original to call and is not
   reported (until 2026-10-10 it was, as `... no original to call`). Without a `home.toml` every body ranks
