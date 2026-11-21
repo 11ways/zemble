@@ -74,6 +74,13 @@ async def _settle() -> None:
         await asyncio.sleep(0)
 
 
+async def _waiting_for_turn(jobs: GraphJobs, count: int) -> None:
+    """Wait until *count* jobs wait for the worker turn: each first asks off the loop whether it is a lane."""
+    async with asyncio.timeout(2):
+        while sum(not waiter.done() for _priority, _order, waiter in jobs._turns) < count:
+            await asyncio.sleep(0.001)
+
+
 @pytest.mark.anyio
 async def test_a_base_refresh_jumps_ahead_of_queued_lane_jobs(workers, workspace):
     """A base refresh queued after a lane job runs before it: the main workspace never waits out the lanes."""
@@ -82,9 +89,9 @@ async def test_a_base_refresh_jumps_ahead_of_queued_lane_jobs(workers, workspace
     jobs._start(lane_a, refresh=True, changed_paths=None)
     await workers.started_count(1)
     jobs._start(lane_b, refresh=True, changed_paths=None)
-    await _settle()
+    await _waiting_for_turn(jobs, 1)
     jobs._start(base, refresh=True, changed_paths=None)
-    await _settle()
+    await _waiting_for_turn(jobs, 2)
     await workers.run_in_turn(3)
     await asyncio.gather(*list(jobs.jobs.values()))
     assert workers.started == [lane_a, base, lane_b]
