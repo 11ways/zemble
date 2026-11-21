@@ -43,6 +43,26 @@ _TEMPLATE_SUFFIX = ".hwk"
 _NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]")
 
 
+@lru_cache(maxsize=65536)
+def _language(file_path: str) -> str | None:
+    """The language of a workspace-relative file, from its suffix.
+
+    AIDEV-NOTE: memoised, like `_family`: resolution asks it per edge, never per file, and a
+    235-file pull's refresh spent 1.2 s of 37 s re-deriving it from pathlib.
+    """
+    return detect_language(PurePosixPath(file_path))
+
+
+@lru_cache(maxsize=65536)
+def _test_source(file_path: str) -> bool:
+    """Whether a workspace-relative file is test source: a test directory or a test file name.
+
+    AIDEV-NOTE: memoised because `derive_exercises` asks it for every resolved edge; the same
+    refresh spent 4.3 s of 37 s (12%) answering it again for each edge of one file.
+    """
+    return is_test_path(file_path) or is_test_file(file_path)
+
+
 @dataclass
 class _Match:
     """One resolution outcome."""
@@ -140,7 +160,7 @@ class Resolver:
         AIDEV-NOTE: memoised because `_same_family` asks it for every candidate of every call;
         a module's rebuild asked it 16 million times and spent 40% of its time in pathlib.
         """
-        return family_of(detect_language(PurePosixPath(file_path)))
+        return family_of(_language(file_path))
 
     def _same_family(self, symbols: list[Symbol], file_path: str) -> list[Symbol]:
         """Keep the symbols a file may resolve into: those of its own language family.
@@ -210,7 +230,7 @@ class Resolver:
         imported = context.imports.explicit.get(name)
         if imported is not None:
             exact = self._lookup_qualified(imported, TYPE_KINDS, context.file_path)
-            if exact or detect_language(PurePosixPath(context.file_path)) == _STRICT_IMPORT_LANGUAGE:
+            if exact or _language(context.file_path) == _STRICT_IMPORT_LANGUAGE:
                 # A Java import names exactly one type. If it is not in the workspace it is a
                 # JDK or third-party type, and falling back to a same-named workspace type
                 # would be wrong, not merely imprecise.
@@ -552,7 +572,7 @@ class Resolver:
             if edge.dst_id is None or edge.kind in (EdgeKind.TESTS, EdgeKind.EXERCISES):
                 continue
             source_path = _file_of(edge.src_id)
-            if not is_test_path(source_path) and not is_test_file(source_path):
+            if not _test_source(source_path):
                 # `is_test` is a path fact (a test directory, or a test file name), so a
                 # non-test path can never hold a test symbol: deciding it from the id alone
                 # spares a lookup per resolved edge.
