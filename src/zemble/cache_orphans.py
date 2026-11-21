@@ -23,9 +23,9 @@ from zemble.cache import (
 from zemble.daemon.protocol import process_alive
 from zemble.embedding.gc import indexes_by_family, last_activity
 from zemble.graph.store import (
+    answering_ancestor,
     graph_covers,
     graph_files,
-    graph_present,
     graph_root_of,
     remove_graph,
     retired_graph_files,
@@ -203,14 +203,11 @@ def _under_ancestor(entry: Path, covered: set[Path]) -> list[Orphan]:
     graph = entry / "index"
     root = graph_root_of(graph) if graph.is_dir() else None
     if root is not None and Path(root).is_dir() and cache_key(root) == entry.name:
-        for ancestor in Path(root).parents:
-            if graph_present(str(ancestor)) and graph_covers(
-                str(ancestor), Path(root).relative_to(ancestor).as_posix()
-            ):
-                files = tuple(graph_files(graph))
-                detail = f"{root} (answered from {ancestor})"
-                orphans.append(Orphan(OrphanKind.GRAPH_UNDER_ANCESTOR, graph, sum(map(_size, files)), files, detail))
-                break
+        ancestor = answering_ancestor(Path(root))
+        if ancestor is not None and graph_covers(*ancestor):
+            files = tuple(graph_files(graph))
+            detail = f"{root} (answered from {ancestor[0]})"
+            orphans.append(Orphan(OrphanKind.GRAPH_UNDER_ANCESTOR, graph, sum(map(_size, files)), files, detail))
     return orphans
 
 

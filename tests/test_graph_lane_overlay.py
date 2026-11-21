@@ -16,6 +16,7 @@ from zemble.graph import SqliteGraphProvider, build_graph
 from zemble.graph.facts import TREE_SITTER_SOURCE
 from zemble.graph.model import EdgeKind
 from zemble.graph.store import connect, graph_db_path, graph_stale, resolve_graph_root
+from zemble.types import ContentType
 
 BASE = """package core;
 
@@ -344,3 +345,121 @@ def test_a_lane_answers_with_its_edits_before_its_dependents_and_a_stopped_pass_
         assert overlay.META_PENDING not in provider.meta(), "2: and owes nothing more"
     finally:
         provider.close()
+
+
+#: A lane edit that adds a documented migration: the architectural channel's evidence.
+ADDED_DEPRECATED = ADDED.replace(
+    "\n}\n",
+    "\n    /** @deprecated use {@link #sum(Base)} instead. */\n"
+    "    @Deprecated\n"
+    "    public int total(Base base) { return sum(base); }\n}\n",
+)
+
+
+@pytest.fixture
+def parked(tmp_path: Path, graph_cache: Path) -> tuple[Path, Path, Path]:
+    """A lane parked inside its base (`<base>/lanes/lane`) whose root holds a build tool's files the base walks."""
+    workspace = (tmp_path / "ws").resolve()
+    for name, files in WORKSPACE.items():
+        _repo(workspace / name, files)
+    _write_facts(workspace)
+    reference = (tmp_path / "reference").resolve()
+    shutil.copytree(workspace, reference, symlinks=True)
+    lane = workspace / "lanes" / "lane"
+    lane.mkdir(parents=True)
+    for name in HELD:
+        git(workspace / name, "worktree", "add", "-q", "--detach", str(lane / name))
+    # What zenit-dev writes at a lane's root, outside every checkout: the base's walk keeps these.
+    (lane / ".zenit-dev").mkdir()
+    (lane / ".zenit-dev/gradle-init.gradle").write_text("allprojects {\n}\n", encoding="utf-8")
+    (lane / ".zenit-dev/lane.json").write_text('{"name": "lane"}\n', encoding="utf-8")
+    for root in (lane, reference):
+        _lane_edits(root)
+        (root / "core/src/main/java/core/Added.java").write_text(ADDED_DEPRECATED, encoding="utf-8")
+    build_graph(str(workspace))
+    return workspace, lane, reference
+
+
+def test_a_lane_parked_inside_its_base_is_its_own_overlay_never_a_sub_tree_of_the_base(
+    parked: tuple[Path, Path, Path], graph_cache: Path
+) -> None:
+    """The base's graph holds the lane root's own files; the lane is still answered as a lane, not as that sub-tree."""
+    from zemble.cache_orphans import OrphanKind, find_orphans
+    from zemble.graph.cli import ensure_graph
+    from zemble.graph.store import graph_covers, graph_present
+
+    workspace, lane, reference = parked
+    assert graph_covers(str(workspace), "lanes/lane"), "the base's graph holds a file under the lane root"
+
+    # 1. Before its overlay exists the base's graph answers for the lane whole, not as the lane root's sub-tree.
+    assert resolve_graph_root(str(lane)) == (str(workspace), None), "1: the lane is a lane of its base"
+
+    # 2. Ensuring the lane's graph builds the lane's overlay, which then answers like a whole graph of the edits.
+    ensure_graph(str(lane), allow_daemon=False)
+    assert graph_present(str(lane)), "2: the lane has a graph of its own"
+    assert resolve_graph_root(str(lane)) == (str(lane), None), "2: and answers from it"
+    build_graph(str(reference))
+    assert _answers(lane) == _answers(reference), "2: what a whole graph with the lane's edits answers"
+
+    # 3. A sub-path of the lane is a sub-tree of the lane's graph.
+    assert resolve_graph_root(str(lane / "core")) == (str(lane), "core"), "3: a lane sub-path is the lane's"
+
+    # 4. The lane's graph is no orphan answered from the base, so a prune keeps it.
+    orphans = [orphan for orphan in find_orphans(graph_cache) if orphan.kind is OrphanKind.GRAPH_UNDER_ANCESTOR]
+    assert not orphans, "4: the lane's graph is kept"
+
+
+def _candidates(payload: dict) -> set[tuple]:
+    """The candidates among the lane's checkouts as comparable (evidence kind, member files and names) rows.
+
+    A lane's graph hides the checkouts it does not hold, so a counterpart there is the whole graph's alone.
+    """
+    return {
+        (candidate["evidence_kind"], tuple((m["file_path"], m["name"]) for m in candidate["members"]))
+        for candidate in payload["candidates"]
+        if all(_in_scope(member["file_path"]) for member in candidate["members"])
+    }
+
+
+@pytest.mark.anyio
+async def test_a_fresh_lane_parked_inside_its_warm_base_answers_architectural_like_a_whole_graph(
+    parked: tuple[Path, Path, Path],
+) -> None:
+    """A push hook's architectural ask of a fresh lane answers (never fails) and, once built, what the edits answer."""
+    from tests.test_lanes import _daemon
+
+    workspace, lane, reference = parked
+    # A lane created a minute ago: one worktree and the build tool's state file, nothing the base's code index holds.
+    fresh = workspace / "lanes" / "fresh"
+    (fresh / ".zenit-dev").mkdir(parents=True)
+    git(workspace / "core", "worktree", "add", "-q", "--detach", str(fresh / "core"))
+    (fresh / ".zenit-dev/lane.properties").write_text("name=fresh\n", encoding="utf-8")
+    daemon = _daemon()
+    every = [content.value for content in ContentType]
+
+    def request(path: Path, **args: object) -> dict:
+        return {"id": 1, "cmd": "architectural", "args": {"path": str(path), **args}, "accepts_busy": True}
+
+    # 0. The base is warm with every content type and holds the lane roots' own files.
+    base_key, base = await daemon.index_for({"path": str(workspace), "content": every})
+    assert base.subtree("lanes/lane") is not None and base.subtree("lanes/fresh") is not None, "0: lane files"
+
+    # 1. A fresh lane's first question answers from its overlay, never as the base's sub-tree of its root.
+    answered_fresh = await daemon.handle(request(fresh))
+    assert answered_fresh["ok"], f"1: a fresh lane answers its first question: {answered_fresh.get('error')}"
+    lane_key, _served = await daemon.index_for({"path": str(lane)})
+    assert lane_key[0] == str(lane) and daemon.cache.base_of(lane_key) == base_key, "1: served by the lane's overlay"
+    first = await daemon.handle(request(lane))
+    assert first["ok"], f"1: {first.get('error')}"
+    job = daemon.graphs.jobs.get(str(lane))
+    assert job is not None or str(lane) in daemon.graphs.ready, "1: the lane's own graph is built, not the base's"
+    if job is not None:
+        await job
+
+    # 2. Once its overlay is published the lane answers what a whole graph of its edits answers.
+    answered = await daemon.handle(request(lane))
+    expected = await daemon.handle(request(reference, paths=list(HELD)))
+    assert answered["ok"] and expected["ok"], (answered.get("error"), expected.get("error"))
+    assert _candidates(answered["result"]), "2: the lane's documented migration is a candidate"
+    assert _candidates(answered["result"]) == _candidates(expected["result"]), "2: as a whole graph answers"
+    await daemon.graphs.close()

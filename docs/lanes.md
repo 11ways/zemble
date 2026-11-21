@@ -53,7 +53,13 @@ Until a lane's first overlay is published, the base's graph answers for the lane
 
 A lane parked inside its own base (`<workspace>/lanes/<name>`) is the base's checkouts again: the
 base's walk, watcher and facts discovery skip every linked worktree of a checkout the base holds
-(`zemble.index.file_walker.is_duplicate_worktree`), so it is indexed only as its own root.
+(`zemble.index.file_walker.is_duplicate_worktree`), so it is indexed only as its own root. The
+lane root's own files outside its checkouts (a build tool's `.zenit-dev/`) are still walked by the
+base, so the base's index and graph hold a few files under the lane's path. A lane answers for its
+paths before any ancestor does all the same: `IndexCache.lane_of` and the daemon's warm and joined
+lookups never serve a lane as a sub-tree of its base's index, and `zemble.graph.store.answering_ancestor`
+never routes it to its base's graph as a sub-tree (which answered no symbol and never built the
+lane's overlay); the prune keeps the lane's graph for the same reason.
 
 ## Daemon
 

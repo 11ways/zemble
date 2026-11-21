@@ -1160,8 +1160,21 @@ def graph_ancestor(path: str) -> tuple[str, str] | None:
     resolved = Path(path).expanduser().resolve()
     if not resolved.is_dir() or graph_present(str(resolved)):
         return None
+    return answering_ancestor(resolved)
+
+
+def answering_ancestor(resolved: Path) -> tuple[str, str] | None:
+    """Return the nearest strict ancestor with a graph and the prefix under it, never one above *resolved*'s lane.
+
+    AIDEV-NOTE: the base's walk keeps a parked lane root's own files (`<base>/lanes/<name>/.zenit-dev/`),
+    so `graph_covers` holds for the lane; read as that sub-tree it answers no symbol and its overlay is
+    never built. The lane answers for its paths, as `IndexCache.lane_of` does for the index.
+    """
     for ancestor in resolved.parents:
         if graph_present(str(ancestor)):
+            found = find_lane(resolved, graph_present)
+            if found is not None and not ancestor.is_relative_to(found[0].root):
+                return None
             return str(ancestor), resolved.relative_to(ancestor).as_posix()
     return None
 

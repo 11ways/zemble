@@ -295,15 +295,14 @@ class IndexCache:
         """
         embedder = await self._await_model()
         build_exclude = self._build_exclude(source, content, exclude)
-        if not is_git_url(source):
-            found = await asyncio.to_thread(find_lane, source, lambda base: self._overlayable(base, content, embedder))
-            if found is not None:
-                lane, lane_prefix = found
-                cache_key, overlay = await self._get_overlay(lane, ref, content)
-                view = overlay if lane_prefix is None else overlay.subtree(lane_prefix)
-                if view is None:
-                    raise ValueError(f"No indexed file under {source}")
-                return cache_key, _narrowed(view, content, cache_key)
+        found = await asyncio.to_thread(self.lane_of, source, content, embedder)
+        if found is not None:
+            lane, lane_prefix = found
+            cache_key, overlay = await self._get_overlay(lane, ref, content)
+            view = overlay if lane_prefix is None else overlay.subtree(lane_prefix)
+            if view is None:
+                raise ValueError(f"No indexed file under {source}")
+            return cache_key, _narrowed(view, content, cache_key)
         root, prefix = await asyncio.to_thread(
             resolve_index_root, source, embedder.model_id, content, None, self.loaded_roots(content)
         )
@@ -380,6 +379,18 @@ class IndexCache:
             if self._tasks.get(cache_key) is task:
                 self.evict(cache_key)
             raise
+
+    def lane_of(
+        self, source: str, content: Sequence[ContentType], embedder: Embedder
+    ) -> tuple[Lane, str | None] | None:
+        """Return the lane a local path is in, over a base this cache can overlay, and its prefix; blocking.
+
+        A lane answers for its paths before any ancestor index that holds files under it (a lane
+        parked inside its base, whose walk keeps the lane root's own files) does.
+        """
+        if is_git_url(source):
+            return None
+        return find_lane(source, lambda base: self._overlayable(base, content, embedder))
 
     def _overlayable(self, base: str, content: Sequence[ContentType], embedder: Embedder) -> bool:
         """Return whether a folder holds an index a lane overlay could be built on."""

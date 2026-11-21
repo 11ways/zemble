@@ -73,7 +73,7 @@ from zemble.index.scope import (
 )
 from zemble.index.types import PreviousIndex
 from zemble.index_cache import CacheKey, IndexCache, compute_cache_key
-from zemble.lane import Lane, find_lane
+from zemble.lane import Lane
 from zemble.refusal import Refused
 from zemble.runtime.identity import identity, status_payload
 from zemble.runtime.memory import release_free_heap
@@ -399,6 +399,11 @@ class Daemon:
         exclude = _patterns(args.get("exclude"))
         await self.cache.load_embedder_once()
         warm = self._warm_for(path, ref, content)
+        if warm is not None and warm[0][0] != compute_cache_key(path, ref, content)[0]:
+            # A sub-tree view of an ancestor; a lane parked inside its warm base is the lane's, never that view.
+            found = await asyncio.to_thread(self.cache.lane_of, path, content, self.cache.embedder)
+            if found is not None and not Path(warm[0][0]).is_relative_to(found[0].root):
+                warm = None
         if warm is not None and not self.watch_enabled:
             await self.cache._evict_if_stale(warm[0])
             if warm[0] not in self.cache._tasks:
@@ -515,7 +520,8 @@ class Daemon:
                     exclude = self.cache._exclude_by_key.get(key, ())
                     self.cache.evict(key)
                     break
-        joined = await self._join_build(requested[0], path, content)
+        found = await asyncio.to_thread(self.cache.lane_of, path, content, self.cache.embedder)
+        joined = await self._join_build(requested[0], path, content, None if found is None else found[0].root)
         if joined is not None:
             return joined
         gc.collect()
@@ -524,9 +530,6 @@ class Daemon:
         if not is_git_url(path):
             require_declared_scope(Path(path))
             # A lane loads its base and a small delta: the base's load is the work to reserve for.
-            found = await asyncio.to_thread(
-                find_lane, path, lambda base: self.cache._overlayable(base, content, self.cache.embedder)
-            )
             measured = str(found[0].base) if found is not None else path
             estimate = await asyncio.to_thread(
                 _load_work, measured, content, exclude, self.cache.embedder.model_id, self.cache.loaded_roots(content)
@@ -537,15 +540,18 @@ class Daemon:
         return await self.cache.get_with_key(path, ref=ref, content=content, exclude=exclude)
 
     async def _join_build(
-        self, requested: str, path: str, content: tuple[ContentType, ...]
+        self, requested: str, path: str, content: tuple[ContentType, ...], lane_root: Path | None
     ) -> tuple[CacheKey, ZembleIndex] | None:
         """Wait for an in-flight build of a covering root instead of reserving a second load of it.
 
         That build was admitted when it started; a request arriving after its first waiter gave
         up would otherwise ask for the same headroom again and be refused by the build's own use.
+        A root above *lane_root* never covers a path of that lane.
         """
         for key in [key for key in self.cache._tasks if self.cache.is_building(key)]:
             if not set(content) <= set(key[1]):
+                continue
+            if lane_root is not None and not Path(key[0]).is_relative_to(lane_root):
                 continue
             if key[0] == requested:
                 prefix = None
