@@ -1,7 +1,7 @@
 """One slow end-to-end journey over a real Java workspace.
 
-Skipped unless the javaweb checkout is present. Every fact asserted here was read
-out of the source first; they are not guesses about what the graph might find.
+Skipped unless the zenit checkout of the zenit workspace is present. Every fact asserted here was
+read out of the source first; they are not guesses about what the graph might find.
 """
 
 import os
@@ -9,14 +9,15 @@ from pathlib import Path
 
 import pytest
 
+from zemble.graph.model import CallBinding
 from zemble.graph.provider import SqliteGraphProvider
 from zemble.graph.store import build_graph
 
-ZENIT = Path(os.environ.get("ZEMBLE_TEST_ZENIT_ROOT", "/home/skerit/projects/javaweb/zenit"))
+ZENIT = Path(os.environ.get("ZEMBLE_TEST_ZENIT_ROOT", Path.home() / "projects/zenit-workspace/zenit"))
 
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not ZENIT.is_dir(), reason="the javaweb workspace is not checked out here"),
+    pytest.mark.skipif(not ZENIT.is_dir(), reason="the zenit workspace's zenit checkout is not here"),
 ]
 
 
@@ -46,7 +47,7 @@ def _files(hits) -> set[str]:
 
 
 def test_real_workspace_journey(zenit_graph: SqliteGraphProvider) -> None:
-    """Six facts read out of the zenit source, answered by the graph."""
+    """Seven facts read out of the zenit source, answered by the graph."""
     # 1. Pagination arithmetic: PageWindow.of is called by the record source handler
     #    and by the static data provider.
     page_window = zenit_graph.definition("PageWindow.of")
@@ -74,10 +75,10 @@ def test_real_workspace_journey(zenit_graph: SqliteGraphProvider) -> None:
     users = _files(zenit_graph.callers(named[0].id))
     assert {"Themes.java", "Timezones.java", "Disclosures.java"} <= users, "step 4: all three preferences are found"
 
-    # 5. Text helpers: Slugs is used by the sluggable behaviour and by the dev tunnel boot.
-    slugs = [symbol for symbol in zenit_graph.definition("Slugs") if symbol.kind.value == "class"]
-    referencing = _files(zenit_graph.references(slugs[0].id))
-    assert {"SluggableBehaviour.java", "DevTunnelBoot.java"} <= referencing, "step 5: both users are found"
+    # 5. Former slugs: FormerSlugModel is used by the sluggable behaviour and by its journey test.
+    former = [symbol for symbol in zenit_graph.definition("FormerSlugModel") if symbol.kind.value == "class"]
+    referencing = _files(zenit_graph.references(former[0].id))
+    assert {"SluggableBehaviour.java", "FormerSlugsJourneyTest.java"} <= referencing, "step 5: both users are found"
 
     # 6. Test edges: SluggableBehaviourTest is found as the test of SluggableBehaviour.
     behaviour = [
@@ -86,3 +87,17 @@ def test_real_workspace_journey(zenit_graph: SqliteGraphProvider) -> None:
     assert "SluggableBehaviourTest.java" in _files(zenit_graph.tests_of(behaviour[0].id)), (
         "step 6: the naming-based test edge is found"
     )
+
+    # 7. Callers through a supertype: ContentStore, DerivedFiles and RemoteJobs delete through the StorageAdapter
+    #    interface, so they are callers of LocalDiskStorageAdapter.delete bound through StorageAdapter.delete;
+    #    the adapter's own test calls it directly, and the interface method answers that test as its overrider's.
+    (delete,) = zenit_graph.definition("LocalDiskStorageAdapter.delete")
+    (declared,) = zenit_graph.definition("StorageAdapter.delete")
+    hits = zenit_graph.callers(delete.id)
+    inherited = [hit for hit in hits if hit.binding is CallBinding.OVERRIDDEN]
+    assert {"ContentStore.java", "DerivedFiles.java", "RemoteJobs.java"} <= _files(inherited), "step 7: inherited"
+    assert {hit.through.id for hit in inherited} == {declared.id}, "step 7: each through StorageAdapter.delete"
+    assert "LocalDiskStorageAdapterTest.java" in _files(h for h in hits if h.binding is CallBinding.DIRECT), "step 7"
+    overriders = [hit for hit in zenit_graph.callers(declared.id) if hit.binding is CallBinding.OVERRIDER]
+    assert "LocalDiskStorageAdapterTest.java" in _files(overriders), "step 7: the other direction"
+    assert {hit.through.id for hit in overriders} >= {delete.id}, "step 7: through the adapter's override"
