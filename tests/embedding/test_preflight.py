@@ -264,14 +264,15 @@ def test_cli_embed_status(
 def test_cli_embed_status_missing_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A missing root exits non-zero with the message on stderr."""
+    """A missing root is a usage error, its message one line on stderr."""
     from zemble.cli import _cli_main
 
-    monkeypatch.setattr(sys, "argv", ["zemble", "embed-status", str(tmp_path / "absent")])
+    absent = tmp_path / "absent"
+    monkeypatch.setattr(sys, "argv", ["zemble", "embed-status", str(absent)])
     with pytest.raises(SystemExit) as raised:
         _cli_main()
-    assert raised.value.code == 1, "a missing root is an error"
-    assert "does not exist" in capsys.readouterr().err, "and it says why"
+    assert raised.value.code == 2, "a missing root is a usage error"
+    assert capsys.readouterr().err == f"zemble embed-status: error: {absent} is not a directory\n", "and it says why"
 
 
 def test_embed_status_estimates_a_dupes_run(tmp_path: Path, paid_embedder: PricedEmbedder) -> None:

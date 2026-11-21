@@ -46,8 +46,8 @@ def test_embedding_confirmation_requires_no_daemon(monkeypatch: pytest.MonkeyPat
 @pytest.mark.parametrize(
     "argv, expected_in_output",
     [
-        (["zemble", "search", "query text", "/some/path"], ["query text", '"score": 100']),
-        (["zemble", "search", "nothing", "/some/path", "--top-k", "3"], ["No results found"]),
+        (["zemble", "search", "query text", "."], ["query text", '"score": 100']),
+        (["zemble", "search", "nothing", ".", "--top-k", "3"], ["No results found"]),
     ],
 )
 def test_cli_search(
@@ -131,7 +131,7 @@ def test_cli_find_related(
     fake_index.indexed_paths.return_value = ["src/bar.py"]
     fake_index.find_related.return_value = [SearchResult(chunk=chunk, score=0.8)] if scenario == "with_results" else []
     file_path = "elsewhere/bar.py" if scenario == "unknown_chunk" else "src/bar.py"
-    monkeypatch.setattr(sys, "argv", ["zemble", "find-related", file_path, "1", "/some/path"])
+    monkeypatch.setattr(sys, "argv", ["zemble", "find-related", file_path, "1", "."])
     with patch("zemble.cli.ZembleIndex.from_path", return_value=fake_index):
         if expected_exit_code is None:
             _cli_main()
@@ -164,7 +164,7 @@ def test_main_dispatches_to_cli(
     chunk = make_chunk("def foo(): pass", "src/foo.py")
     fake_index = MagicMock()
     fake_index.search.return_value = [SearchResult(chunk=chunk, score=0.9)]
-    monkeypatch.setattr(sys, "argv", ["zemble", "search", "query text", "/some/path"])
+    monkeypatch.setattr(sys, "argv", ["zemble", "search", "query text", "."])
     with patch("zemble.cli.ZembleIndex.from_path", return_value=fake_index):
         main()
     assert "query text" in capsys.readouterr().out
@@ -174,7 +174,7 @@ def test_main_dispatches_to_cli(
     ("argv", "expected_stdout", "expect_system_exit"),
     [
         (["zemble", "--help"], "find-related", True),
-        (["zemble", "search", "query", "/some/path"], "query", False),
+        (["zemble", "search", "query", "."], "query", False),
     ],
 )
 def test_cli_entrypoint_works_without_mcp_installed(
@@ -225,13 +225,14 @@ def test_mcp_main_exits_with_message_when_extras_missing(
 def test_cli_path_not_found(
     command: str, argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """index, search, and find-related exit 1 with a friendly message when the path does not exist."""
+    """The search and find-related commands refuse a missing path as a usage error, before building anything."""
     monkeypatch.setattr(sys, "argv", argv)
-    with patch("zemble.cli._build_index", side_effect=FileNotFoundError("Path does not exist: /no/such/path")):
+    with patch("zemble.cli._build_index") as build:
         with pytest.raises(SystemExit) as exc_info:
             _cli_main()
-    assert exc_info.value.code == 1
-    assert "Path does not exist" in capsys.readouterr().err
+    assert exc_info.value.code == 2
+    assert capsys.readouterr().err == f"zemble {command}: error: /no/such/path is not a directory\n"
+    build.assert_not_called()
 
 
 def test_include_text_files_cli_deprecated(
@@ -242,7 +243,7 @@ def test_include_text_files_cli_deprecated(
     chunk = make_chunk("def foo(): pass", "src/foo.py")
     fake_index = MagicMock()
     fake_index.search.return_value = [SearchResult(chunk=chunk, score=0.9)]
-    monkeypatch.setattr(sys, "argv", ["zemble", "search", "query", "/some/path", "--include-text-files"])
+    monkeypatch.setattr(sys, "argv", ["zemble", "search", "query", ".", "--include-text-files"])
     with patch("zemble.cli.ZembleIndex.from_path", return_value=fake_index):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -271,7 +272,7 @@ def test_cli_content_argument(
     chunk = make_chunk("def foo(): pass", "src/foo.py")
     fake_index = MagicMock()
     fake_index.search.return_value = [SearchResult(chunk=chunk, score=0.9)]
-    monkeypatch.setattr(sys, "argv", ["zemble", "search", "query", "/some/path", *argv_content])
+    monkeypatch.setattr(sys, "argv", ["zemble", "search", "query", ".", *argv_content])
     with patch("zemble.cli.ZembleIndex.from_path", return_value=fake_index) as mock_from_path:
         _cli_main()
     assert list(mock_from_path.call_args.kwargs["content"]) == expected
@@ -492,7 +493,7 @@ def test_cli_search_filters_the_results(monkeypatch: pytest.MonkeyPatch, capsys:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["zemble", "search", "query", "/some/path", "--paths", "src", "--exclude", "vendor/", "*.min.js"],
+        ["zemble", "search", "query", ".", "--paths", "src", "--exclude", "vendor/", "*.min.js"],
     )
     with patch("zemble.cli.ZembleIndex.from_path", return_value=fake_index):
         _cli_main()
@@ -709,3 +710,63 @@ def test_a_subcommand_is_classified_by_what_it_declares_never_by_what_it_spells(
     declare_no_root(both)
     with pytest.raises(ValueError, match="only one can be true"):
         root_use(both)
+
+
+def _argv_naming(words: tuple[str, ...], subparser: argparse.ArgumentParser, root: str, other: str) -> list[str]:
+    """An invocation of a leaf with every positional filled: `root` for the tree, `other` for the rest."""
+    from zemble.cli import ROOT_ARGUMENT_MARKER
+
+    argv = ["zemble", *words]
+    for action in subparser._actions:
+        if action.option_strings:
+            continue
+        if getattr(action, ROOT_ARGUMENT_MARKER, False):
+            argv.append(root)
+        elif action.type is int:
+            argv.append("1")
+        else:
+            argv.append(str(action.choices[0]) if action.choices else other)
+    return argv
+
+
+def test_a_root_that_is_no_directory_is_a_one_line_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Every command naming a tree refuses a path that is not a directory before it runs, and spots a swap."""
+    from zemble.cli import RootUse, root_use
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a_file.txt").write_text("not a tree\n")
+    leaves = _leaf_commands(_build_parser())
+    rooted = {words: parser for words, parser in leaves.items() if root_use(parser) is RootUse.NAMES_A_ROOT}
+    assert ("graph", "callers") in rooted and ("search",) in rooted and ("dupes",) in rooted
+
+    # 1. A missing path and a file are refused alike, in one line, with argparse's status.
+    for words, subparser in sorted(rooted.items()):
+        for bad in ("a_file.txt", "NoSuchSymbol"):
+            monkeypatch.setattr(sys, "argv", _argv_naming(words, subparser, bad, "word"))
+            with pytest.raises(SystemExit) as exited:
+                _cli_main()
+            err = capsys.readouterr().err
+            assert exited.value.code == 2, f"step 1: {words} {bad!r} exited {exited.value.code}: {err}"
+            assert err == f"{subparser.prog}: error: {bad} is not a directory\n", f"step 1: {words}: {err!r}"
+
+    # 2. Swapped `path symbol`: the path is no directory but the other positional is, so say so.
+    monkeypatch.setattr(sys, "argv", ["zemble", "graph", "callers", "Widget.render", str(tmp_path)])
+    with pytest.raises(SystemExit) as exited:
+        _cli_main()
+    assert exited.value.code == 2
+    assert capsys.readouterr().err == (
+        "zemble graph callers: error: Widget.render is not a directory; did you swap path and symbol?\n"
+    )
+
+
+def test_a_git_url_passes_only_where_the_root_takes_one() -> None:
+    """`search` and its siblings index a git URL; a graph query has no such lane, so a URL is no directory to it."""
+    from zemble.cli import require_root_directories
+
+    url = "https://github.com/example/repo.git"
+    require_root_directories(_build_parser().parse_args(["search", "query", url]))
+    with pytest.raises(SystemExit) as exited:
+        require_root_directories(_build_parser().parse_args(["graph", "callers", url, "Widget"]))
+    assert exited.value.code == 2

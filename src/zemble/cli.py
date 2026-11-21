@@ -321,17 +321,58 @@ class RootUse(Enum):
     UNDECLARED = "undeclared"
 
 
-def add_root_arg(parser: argparse.ArgumentParser, name: str = "path", **kwargs: Any) -> argparse.Action:
+#: Marks a root argument that also takes a remote git URL, which a build clones instead of walking.
+GIT_URL_MARKER = "zemble_root_takes_git_url"
+
+#: The namespace attribute naming the leaf parser that declared the root arguments to check.
+_ROOT_PARSER_DEST = "zemble_root_parser"
+
+
+def add_root_arg(
+    parser: argparse.ArgumentParser, name: str = "path", *, git_url: bool = False, **kwargs: Any
+) -> argparse.Action:
     """Declare the argument naming the tree a subcommand works on.
 
     :param parser: The subcommand's own parser.
     :param name: What this subcommand calls it; free to differ, the marker is what is read.
+    :param git_url: Whether a remote git URL is a tree here too; elsewhere it is refused like any non-directory.
     :param **kwargs: Passed straight through to ``add_argument``.
     :return: The declared action, marked as naming a filesystem root.
     """
     action = parser.add_argument(name, **kwargs)
     setattr(action, ROOT_ARGUMENT_MARKER, True)
+    setattr(action, GIT_URL_MARKER, git_url)
+    parser.set_defaults(**{_ROOT_PARSER_DEST: parser})
     return action
+
+
+def require_root_directories(args: argparse.Namespace) -> None:
+    """Exit with a one-line usage error, status 2, when a parsed root argument names no directory.
+
+    It runs before any runner: a daemon reads a root that is no directory as a lane removed and fails with a
+    traceback. When another positional is a directory, the two were most likely given in the wrong order.
+
+    :raises SystemExit: With status 2 on the first root that is neither a directory nor an accepted git URL.
+    """
+    parser = getattr(args, _ROOT_PARSER_DEST, None)
+    if parser is None:
+        return
+    positionals = [action for action in parser._actions if not action.option_strings]
+    for action in parser._actions:
+        value = getattr(args, action.dest, None)
+        if not getattr(action, ROOT_ARGUMENT_MARKER, False) or not isinstance(value, str):
+            continue
+        if Path(value).expanduser().is_dir() or (getattr(action, GIT_URL_MARKER, False) and is_git_url(value)):
+            continue
+        swapped = [
+            other.dest
+            for other in positionals
+            if other is not action
+            and isinstance(getattr(args, other.dest, None), str)
+            and Path(getattr(args, other.dest)).expanduser().is_dir()
+        ]
+        hint = f"; did you swap {action.dest} and {swapped[0]}?" if swapped else ""
+        parser.exit(2, f"{parser.prog}: error: {value} is not a directory{hint}\n")
 
 
 def declare_no_root(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -680,7 +721,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     search_p = sub.add_parser("search", help="Search a codebase.")
     search_p.add_argument("query", help="Natural language or code query.")
-    add_root_arg(search_p, nargs="?", default=".", help="Local path or git URL (default: current directory).")
+    add_root_arg(
+        search_p, nargs="?", default=".", git_url=True, help="Local path or git URL (default: current directory)."
+    )
     search_p.add_argument("-k", "--top-k", type=int, default=5, help="Number of results (default: 5).")
     search_p.add_argument(
         "--max-snippet-lines",
@@ -702,14 +745,18 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_daemon_arg(search_p)
 
     stats_p = sub.add_parser("stats", help="Show what an index contains, including its embedder and dimensions.")
-    add_root_arg(stats_p, nargs="?", default=".", help="Local path or git URL (default: current directory).")
+    add_root_arg(
+        stats_p, nargs="?", default=".", git_url=True, help="Local path or git URL (default: current directory)."
+    )
     _add_content_args(stats_p)
     _add_embedder_arg(stats_p)
     _add_confirm_arg(stats_p)
     _add_daemon_arg(stats_p)
 
     index_p = sub.add_parser("index", help="Build a folder's index, or bring it up to date, and report what it holds.")
-    add_root_arg(index_p, nargs="?", default=".", help="Local path or git URL (default: current directory).")
+    add_root_arg(
+        index_p, nargs="?", default=".", git_url=True, help="Local path or git URL (default: current directory)."
+    )
     _add_content_args(index_p)
     _add_embedder_arg(index_p)
     _add_confirm_arg(index_p)
@@ -748,7 +795,9 @@ def _build_parser() -> argparse.ArgumentParser:
     related_p = sub.add_parser("find-related", help="Find code similar to a specific location.")
     related_p.add_argument("file_path", help="File path as shown in search results.")
     related_p.add_argument("line", type=int, help="Line number (1-indexed).")
-    add_root_arg(related_p, nargs="?", default=".", help="Local path or git URL (default: current directory).")
+    add_root_arg(
+        related_p, nargs="?", default=".", git_url=True, help="Local path or git URL (default: current directory)."
+    )
     related_p.add_argument("-k", "--top-k", type=int, default=5, help="Number of results (default: 5).")
     related_p.add_argument(
         "--max-snippet-lines",
@@ -807,6 +856,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _cli_main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+    require_root_directories(args)
 
     if getattr(args, "no_daemon", False):
         from zemble.daemon import client
