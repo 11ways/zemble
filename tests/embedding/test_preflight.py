@@ -9,7 +9,8 @@ import pytest
 
 from tests.embedding.test_pricing import PricedEmbedder
 from zemble.chunking.capsule import embedding_text
-from zemble.embedding.cache import CachingEmbedder, EmbeddingCache, text_hash
+from zemble.embedding.cache import CachingEmbedder, EmbeddingCache
+from zemble.embedding.keys import text_hash
 from zemble.embedding.preflight import embed_status
 from zemble.embedding.registry import ResolvedEmbedder
 from zemble.index import ScopeRefused, ZembleIndex

@@ -22,6 +22,7 @@ from typing import Any
 import orjson
 
 from zemble.embedding.http import EmbeddingRequestError
+from zemble.embedding.keys import KEY_PATTERN
 from zemble.embedding.service import EmbeddingService, ServiceBusy, SpecNotServed
 from zemble.embedding.wire import (
     AUTH_HEADER,
@@ -143,6 +144,16 @@ def _texts(payload: dict[str, Any], field: str = "texts") -> list[str]:
     return value
 
 
+def _keys(payload: dict[str, Any], count: int) -> list[str] | None:
+    """Read the optional cache keys a request carries beside its texts or digests, one per item."""
+    if payload.get("keys") is None:
+        return None
+    keys = _texts(payload, "keys")
+    if len(keys) != count or any(not KEY_PATTERN.match(key) for key in keys):
+        raise ValueError(f"'keys' must hold one sha256 hex digest per item ({count})")
+    return keys
+
+
 def _spec(payload: dict[str, Any]) -> str:
     """Read the spec a request names."""
     spec = payload.get("spec")
@@ -170,17 +181,22 @@ def _route(service: EmbeddingService, route: str, payload: dict[str, Any], label
     """Answer one authenticated POST; what it buys is counted under the key's label."""
     if route == DOCUMENTS_ROUTE:
         texts = _texts(payload)
-        vectors = service.documents(_spec(payload), texts, label)
+        vectors = service.documents(_spec(payload), texts, label, _keys(payload, len(texts)))
         return {"rows": len(texts), "dimensions": int(vectors.shape[1]), "vectors": encode_vectors(vectors)}
     if route == QUERIES_ROUTE:
         texts = _texts(payload)
         vectors = service.queries(_spec(payload), texts, label)
         return {"rows": len(texts), "dimensions": int(vectors.shape[1]), "vectors": encode_vectors(vectors)}
     if route == COVERED_ROUTE:
-        covered, width = service.covered(_spec(payload), _texts(payload, "digests"), bool(payload.get("probe")))
+        digests = _texts(payload, "digests")
+        covered, width = service.covered(
+            _spec(payload), digests, bool(payload.get("probe")), _keys(payload, len(digests))
+        )
         return {"covered": sorted(covered), "dimensions": width}
     if route == REFERENCED_ROUTE:
-        return {"held": service.referenced(_spec(payload), _texts(payload, "digests"))}
+        digests = _texts(payload, "digests")
+        held, rekeyed = service.referenced(_spec(payload), digests, _keys(payload, len(digests)))
+        return {"held": held, "rekeyed": rekeyed}
     if route == DESCRIBE_ROUTE:
         return service.describe(_spec(payload))
     if route == STORE_ROUTE:

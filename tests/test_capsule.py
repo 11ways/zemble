@@ -1,3 +1,4 @@
+import pickle
 import textwrap
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from zemble.chunking.capsule import (
 )
 from zemble.chunking.chunking import _DESIRED_CHUNK_LENGTH_CHARS
 from zemble.chunking.core import chunk_with_tree
+from zemble.embedding.keys import cache_key, legacy_key, text_hash
 from zemble.index import ZembleIndex
 from zemble.types import Chunk
 
@@ -215,6 +217,34 @@ def test_embedding_text_prefixes_the_capsule() -> None:
     with_context = Chunk(content="body", file_path="a.java", start_line=1, end_line=1, context="a.java a java")
     assert embedding_text(with_context) == "a.java a java\nbody"
     assert embedding_text(Chunk(content="body", file_path="a.java", start_line=1, end_line=1)) == "body"
+
+
+def _captioned(context: str, content: str = "body") -> str:
+    """The embedding text of a chunk carrying this capsule."""
+    return embedding_text(Chunk(content=content, file_path="x", start_line=1, end_line=1, context=context))
+
+
+def test_a_chunk_keys_by_its_embedding_text_without_the_path() -> None:
+    """The provider still reads the path, but the cache key leaves it out: one chunk under any path is one key."""
+    lane = _captioned("lane/basalt/src/B.java lane basalt src b java | package p | class B")
+    clone = _captioned("copy/lib/C.java copy lib c java | package p | class B")
+    assert lane.startswith("lane/basalt/src/B.java") and clone.startswith("copy/lib/C.java"), "the text keeps the path"
+    assert cache_key(lane) == cache_key(clone) != text_hash(lane), "the key does not"
+    assert legacy_key(lane) == text_hash(lane), "the key an older zemble stored it under stays known"
+    assert cache_key(_captioned("lane/basalt/src/B.java b | package q | class B")) != cache_key(lane), "rest splits"
+    assert cache_key(_captioned("lane/basalt/src/B.java b | package p | class B", "other")) != cache_key(lane)
+    assert cache_key(_captioned("a.py a py")) == cache_key(_captioned("b/c.py b c py")) != text_hash("body"), (
+        "a path-only capsule keys apart from the bare content"
+    )
+    assert pickle.loads(pickle.dumps(lane)).key == lane.key, "a key survives a process boundary"
+
+
+@pytest.mark.parametrize("text", ["plain query", "a.java a java | package p\nbody", "", "x | y | z\n\nw"])
+def test_a_text_without_a_capsule_keys_by_its_whole_text(text: str) -> None:
+    """Queries, dupes bodies and capsule-less chunks key by exactly their whole text: nothing is ever stripped."""
+    assert cache_key(text) == text_hash(text) and legacy_key(text) is None
+    plain = embedding_text(Chunk(content=text, file_path="a.java", start_line=1, end_line=1))
+    assert plain == text and cache_key(plain) == text_hash(text)
 
 
 @pytest.mark.parametrize(

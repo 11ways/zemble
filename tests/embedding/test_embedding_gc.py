@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,10 +26,10 @@ from zemble.embedding.cache import (
     STAMPS_SINCE_KEY,
     CachingEmbedder,
     EmbeddingCache,
-    text_hash,
     today,
 )
 from zemble.embedding.gc import MIN_GRACE_DAYS, collect_embeddings, collect_unused
+from zemble.embedding.keys import cache_key, text_hash
 from zemble.embedding.server_cli import run_embed_server
 from zemble.index.chunk_store import save_chunks
 from zemble.types import Chunk
@@ -320,6 +321,31 @@ def test_an_overlay_keeps_its_own_chunks_vectors(tmp_path: Path) -> None:
     [report] = collect_embeddings(cache_folder, grace_days=MIN_GRACE_DAYS, dry_run=False)
     assert (report.indexes, report.swept) == (2, 1), "the overlay counts as a user of the family"
     assert _digests(report.path) == {lane_only}, "and its chunk's vector is kept"
+
+
+def test_a_collection_moves_an_old_whole_text_key_to_its_path_free_key_first(tmp_path: Path) -> None:
+    """A vector an index saved before path-free keys references survives under its key; the stale old row goes."""
+    cache_folder = tmp_path / "cache"
+    chunk = replace(make_chunk("def moved(): pass"), context="repo/src/module.py repo src module py | def moved")
+    _index(cache_folder, "a" * 64, [chunk])
+    text = embedding_text(chunk)
+    cache = EmbeddingCache(_FAMILY, cache_folder / "embeddings")
+    cache.put_many([(text_hash(text), _DIMS, _vector())])
+    cache.close()
+    _set(cache.path, "UPDATE used SET day = ?", today() - 40)
+
+    # 1. A dry run writes nothing.
+    [dry] = collect_embeddings(cache_folder, grace_days=MIN_GRACE_DAYS, dry_run=True)
+    assert dry.rekeyed == 0 and _digests(cache.path) == {text_hash(text)}, "step 1"
+
+    # 2. A real run copies the vector to the key the index now references, then sweeps the stale old row.
+    [report] = collect_embeddings(cache_folder, grace_days=MIN_GRACE_DAYS, dry_run=False)
+    assert (report.rekeyed, report.referenced, report.swept) == (1, 1, 1), "step 2"
+    assert _digests(cache.path) == {cache_key(text)}, "step 2: the vector lives on under its path-free key"
+
+    # 3. Again: nothing left to copy or sweep.
+    [again] = collect_embeddings(cache_folder, grace_days=MIN_GRACE_DAYS, dry_run=False)
+    assert (again.rekeyed, again.swept) == (0, 0), "step 3"
 
 
 def test_an_unrecorded_age_fails_closed(tmp_path: Path) -> None:

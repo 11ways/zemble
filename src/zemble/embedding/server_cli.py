@@ -294,7 +294,8 @@ def _report(args: argparse.Namespace) -> int:
             continue
         print(
             f"{report.family}: {report.sent} distinct hashes from {report.indexes} index(es) reported to "
-            f"{client.settings.url}, {report.held} held there{unreadable}"
+            f"{client.settings.url}, {report.held} held there, {report.rekeyed} copied to their path-free key"
+            f"{unreadable}"
         )
     return 0
 

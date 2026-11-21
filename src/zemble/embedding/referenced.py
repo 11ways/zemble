@@ -3,6 +3,10 @@
 An index that is only ever loaded never asks the server for its vectors again, so without this
 report a vector in daily use ages on the server like a dead one and its `gc` sweeps it. Stamps
 have day granularity, so each family is reported at most once a day per server.
+
+The same report migrates the server to path-free keys: each chunk travels as its whole-text hash
+and its cache key, and the server copies a vector held only under the hash to the key, buying
+nothing. Saved indexes store no key, so none is rebuilt.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import numpy as np
 import numpy.typing as npt
 
 from zemble.embedding.cache import today
-from zemble.embedding.gc import index_digests, saved_indexes
+from zemble.embedding.gc import index_keys, saved_indexes
 from zemble.embedding.http import EmbeddingRequestError
 from zemble.embedding.registry import cached_family
 from zemble.embedding.served import ServerClient
@@ -48,6 +52,8 @@ class FamilyReport:
     indexes: int
     sent: int = 0
     held: int = 0
+    #: Vectors the server copied from a whole-text key to their path-free key.
+    rekeyed: int = 0
     unreadable: int = 0
     #: Why nothing was sent today, or None when the report ran.
     skipped: str | None = None
@@ -102,7 +108,9 @@ def _report_locked(cache_folder: Path, client: ServerClient, *, force: bool) -> 
         else:
             try:
                 for batch in distinct_batches(folders, REFERENCED_DIGESTS_PER_REQUEST, report):
-                    report.held += client.referenced(spec, batch)
+                    held, rekeyed = client.referenced(spec, [digest for digest, _key in batch], [k for _d, k in batch])
+                    report.held += held
+                    report.rekeyed += rekeyed
                     report.sent += len(batch)
             except EmbeddingRequestError as exc:
                 if exc.status == HTTPStatus.NOT_FOUND:
@@ -120,22 +128,22 @@ def _report_locked(cache_folder: Path, client: ServerClient, *, force: bool) -> 
     return reports
 
 
-def distinct_batches(folders: Iterable[Path], size: int, report: FamilyReport) -> Iterator[list[str]]:
-    """Yield the text hashes of these indexes in batches of `size`, a hash an earlier index held never again.
+def distinct_batches(folders: Iterable[Path], size: int, report: FamilyReport) -> Iterator[list[tuple[str, str]]]:
+    """Yield the ``(whole-text hash, cache key)`` pairs of these indexes in batches of `size`, each hash once.
 
     The roots and lanes of one workspace share most of their chunks, so the hashes already sent are
-    kept, as 32 raw bytes each in one sorted array rather than as a set of strings. A hash repeated
-    inside one index may go twice; the server's stamp is idempotent. An index that cannot be read
-    is counted in `report.unreadable` and passed over.
+    kept, as 32 raw bytes each in one sorted array rather than as a set of strings; a hash names its
+    text, so it names its key too. A hash repeated inside one index may go twice; the server's stamp is
+    idempotent. An index that cannot be read is counted in `report.unreadable` and passed over.
     """
     sent: npt.NDArray[np.bytes_] = np.empty(0, dtype="S32")
-    pending: list[str] = []
+    pending: list[tuple[str, str]] = []
     for folder in folders:
         fresh: list[npt.NDArray[np.bytes_]] = []
-        chunk: list[str] = []
+        chunk: list[tuple[str, str]] = []
         try:
-            for digest in index_digests(folder):
-                chunk.append(digest)
+            for pair in index_keys(folder):
+                chunk.append(pair)
                 if len(chunk) == size:
                     pending.extend(_unsent(chunk, sent, fresh))
                     chunk = []
@@ -157,17 +165,21 @@ def distinct_batches(folders: Iterable[Path], size: int, report: FamilyReport) -
         yield pending
 
 
-def _unsent(digests: list[str], sent: npt.NDArray[np.bytes_], fresh: list[npt.NDArray[np.bytes_]]) -> list[str]:
-    """Return the digests of one slice not in `sent` nor repeated in it, in order, and add their keys to `fresh`."""
-    if not digests:
+def _unsent(
+    pairs: list[tuple[str, str]], sent: npt.NDArray[np.bytes_], fresh: list[npt.NDArray[np.bytes_]]
+) -> list[tuple[str, str]]:
+    """Return the pairs of one slice whose hash is neither in `sent` nor repeated, in order; add those to `fresh`."""
+    if not pairs:
         return []
-    keys, first = np.unique(np.frombuffer(bytes.fromhex("".join(digests)), dtype="S32"), return_index=True)
+    keys, first = np.unique(
+        np.frombuffer(bytes.fromhex("".join(digest for digest, _key in pairs)), dtype="S32"), return_index=True
+    )
     if len(sent):
         position = np.minimum(np.searchsorted(sent, keys), len(sent) - 1)
         unseen = sent[position] != keys
         keys, first = keys[unseen], first[unseen]
     fresh.append(keys)
-    return [digests[index] for index in sorted(first)]
+    return [pairs[index] for index in sorted(first)]
 
 
 def _read_state(path: Path) -> dict[str, dict[str, int]]:

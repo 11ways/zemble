@@ -153,8 +153,10 @@ embedding server instead; see [the embedding server doc](embed-server.md).
 
 ## The capsule path is repo-relative
 
-The cache is keyed by the text a chunk is embedded as, and that text starts with the
-chunk's context capsule, whose first segment is a path. That path is therefore **not**
+The cache is keyed by the text a chunk is embedded as WITHOUT its capsule's leading path
+segment (`zemble.embedding.keys`, see [the embedding server doc](embed-server.md)), so a lane,
+a clone or a moved file is one vector. The provider still reads the path, which is therefore
+**not**
 index-root-relative: for a file inside a git working tree it is
 `<git-root directory name>/<path inside that repo>`, resolved from the nearest ancestor
 holding a `.git` entry and cached per directory. Outside any git repository it falls back

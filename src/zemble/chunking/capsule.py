@@ -16,6 +16,7 @@ from pathlib import Path
 
 from tree_sitter import Node
 
+from zemble.embedding.keys import keyed_text
 from zemble.hwk import TemplateFacts, scan
 from zemble.types import Chunk
 
@@ -462,5 +463,11 @@ def capsule_without_path(context: str) -> str:
 
 
 def embedding_text(chunk: Chunk) -> str:
-    """Return the text a chunk is embedded as: its capsule, then its content."""
-    return f"{chunk.context}\n{chunk.content}" if chunk.context else chunk.content
+    """Return the text a chunk is embedded as: its capsule, then its content, keyed without the capsule's path.
+
+    AIDEV-NOTE: the path stays in the text the provider reads but never in the cache key, so the same
+    file under a lane, a clone or a new name is one vector, bought once (`zemble.embedding.keys`).
+    """
+    if not chunk.context:
+        return chunk.content
+    return keyed_text(f"{chunk.context}\n{chunk.content}", f"{capsule_without_path(chunk.context)}\n{chunk.content}")

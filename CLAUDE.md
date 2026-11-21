@@ -95,7 +95,8 @@ overwrite each other. Never tune on individual eval queries.
   have one home, `zemble.embedding.wire`.
 - Caches: `~/.cache/zemble/` (indexes, `embeddings/*.sqlite`, `javac-facts/`,
   `daemon.log`); daemon socket `$XDG_RUNTIME_DIR/zemble/daemon.sock`. The embedding
-  cache is keyed by chunk text + dims: changing capsule text means a full re-embed.
+  cache is keyed by chunk text minus the capsule's path segment + dims (`zemble.embedding.keys`,
+  the one key function): changing other capsule text means a full re-embed, a path never does.
   Each vector carries a last-used day (`used` table); `zemble clear embeddings` keeps
   what any index references or used within the grace period, `zemble clear orphans`
   the rest of the cache's dead weight. Never probe a live sqlite file by opening and

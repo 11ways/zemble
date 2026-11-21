@@ -72,6 +72,42 @@ already paid for is not paid for again. With `--remove-local` a file is deleted 
 every one of its rows was accepted, and only when no process holds it open (restart the
 daemon first). That deletion is the disk this saves per machine.
 
+## One key per chunk, wherever it lives
+
+A vector is stored under its chunk's cache key, `zemble.embedding.keys.cache_key`: the sha256 of
+the embedding text WITHOUT the capsule's leading path segment (content plus the rest of the
+capsule: package, type chain, signature, imports), under a fixed domain prefix. The path stays in
+the text the provider reads; it is only left out of the key. So the same file in a lane, a linked
+worktree, a full clone, or under a new name is one key and one purchase. `embedding_text` builds
+the key once, next to the text, as an `EmbeddingText` (a `str` carrying `.key`); every buyer,
+report and lookup reads it through `cache_key`, and a text without a capsule (a query, a `dupes`
+body, a chunk indexed with capsules off) keys by its whole text exactly as before. Inside one
+request the copies of one key take one provider slot, and the first copy is the text bought.
+
+Keys moved on 2026-11-21; before, a vector was keyed by its whole text (the "legacy key").
+Nothing that stores a key had to change: a saved index stores chunks and vectors, never keys, so
+every index keeps loading and answering exactly as it did, and no index is rebuilt or
+re-embedded. Old vectors move to their new key without a purchase in three ways:
+
+- Lazily, wherever a vector is read: a lookup that misses the key tries the legacy key, serves
+  that vector and copies it under the key (`EmbeddingCache.adopt`). The same fallback answers
+  `covered` and the bill guard, so a host that has not migrated yet is never billed or refused
+  for what it already paid.
+- On the server, by the daily referenced report below: it sends each chunk's legacy key AND key,
+  and the server copies every vector it holds only under the legacy key (`rekey_rows`).
+- In a local cache file, by `zemble clear embeddings`, which copies before it sweeps.
+
+A copy is two key-index probes; the vector row is read only when the copy is due, so a pair
+already migrated costs no row read, and nothing ever scans the file. The old rows are left as
+ordinary vectors: no index references them any more, so `gc` sweeps them once their grace period
+has passed.
+
+Rollout: the server first, then every client. Both directions are compatible on the wire (an older
+server ignores `keys` and keeps keying by whole texts; a newer one keys an older client's texts by
+whole text, its legacy key), but only an upgraded server copies and serves by key, so clients
+upgraded first save nothing until it is. While an older client remains, a text it asks for that
+a newer client bought under the key alone is bought once more, so upgrade the clients promptly.
+
 ## How one text is bought once
 
 Requests are answered on a thread each. A documents request looks every text up first; the
@@ -121,10 +157,12 @@ Each client also reports what its saved indexes hold: the daemon, a random time 
 for the default 30, or 10 to 60 minutes when it never exits idle; until that first report has run,
 and while any report runs, the daemon does not exit idle; a failed report lets it exit and the
 next start reports again) and then every
-`ZEMBLE_DAEMON_REFERENCED_HOURS` (6; `0` disables), sends the server the text hash of every chunk
-of every saved index and lane overlay of a paid family (`POST /v1/referenced`, 2,000 hashes per
-request, each distinct hash once). The server stamps the ones it holds on the side connection
-and never creates a stamp for a hash it does not. It stamps one report batch at a time, server
+`ZEMBLE_DAEMON_REFERENCED_HOURS` (6; `0` disables), sends the server every chunk of every saved
+index and lane overlay of a paid family (`POST /v1/referenced`, 2,000 per request, each distinct
+text once) as its whole-text hash (`digests`) and its cache key (`keys`). The server first copies
+a vector held only under the hash to the key, then stamps the keys it holds, both on the side
+connection, in transactions of 250, and never creates a stamp or a row for a hash it does not
+hold. It stamps one report batch at a time, server
 wide; a batch arriving meanwhile gets `503` with `Retry-After: 2`, and the client waits with a
 growing pause (up to 60 s, up to 30 minutes in all) and resumes with the same batch. On one host
 the daemon and `zemble embed-server report [--force]` share an exclusive lock
@@ -132,7 +170,16 @@ the daemon and `zemble embed-server report [--force]` share an exclusive lock
 goes once a day per server, and its day is written to
 `~/.cache/zemble/embed-server-referenced.json` as soon as that family is done, so a restart does
 not resend. A server older than the route answers 404: the client logs it once and tries again
-the next day.
+the next day. A server older than keys ignores `keys` and stamps the hashes, which is what it
+keys by; `report` prints, and the daemon logs, how many vectors were copied to their key.
+
+Migration measured 2026-11-21 on aeor (read only): the 38 saved indexes and overlays of
+`voyage-4-lite` hold 3,209,800 chunks, 911,686 distinct whole texts and 728,375 distinct keys: 183,311
+vectors (20.1%, ~39M of ~225M estimated tokens) that a lane, clone or rename bought again before. The report
+is 456 requests, the same count as every day before, read and hashed in 34 s. On a synthetic
+1M-vector, 4.7 GB server file (warm), a 2,000-pair request that copies takes 0.15 s, holding the
+writer 10 ms per 250-pair transaction (16 ms at worst); the same request once migrated takes 0.05 s.
+Every copy adds a row until `gc` sweeps the old one: ~728k rows, ~3 GB, for the server's grace period.
 
 Measured 2026-11-21 on aeor: the client's 38 saved indexes and overlays of `voyage-4-lite` hold
 3.35M chunks, 0.96M distinct hashes, read and hashed in 27 s with 57 MB of private memory. On a
@@ -168,10 +215,10 @@ one home of every route and limit both sides share).
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `POST /v1/documents` | `spec`, `texts` | `rows`, `dimensions`, `vectors` |
+| `POST /v1/documents` | `spec`, `texts`, optional `keys` (one cache key per text) | `rows`, `dimensions`, `vectors` |
 | `POST /v1/queries` | `spec`, `texts` | `rows`, `dimensions`, `vectors` |
-| `POST /v1/covered` | `spec`, `digests`, `probe` | `covered`, `dimensions` (hits are stamped) |
-| `POST /v1/referenced` | `spec`, `digests` | `held` (the held ones are stamped) |
+| `POST /v1/covered` | `spec`, `digests` (whole-text hashes), optional `keys`, `probe` | `covered` (of `digests`), `dimensions` (hits are stamped) |
+| `POST /v1/referenced` | `spec`, `digests`, optional `keys` | `held`, `rekeyed` (held ones are stamped, legacy-only ones copied first) |
 | `POST /v1/describe` | `spec` | `model_id`, `dimensions`, `family`, `semantic_weight_bonus` |
 | `POST /v1/store` | `spec`, `rows` of `[text sha256, dims, base64 vector]` | `added` |
 | `POST /v1/rerank` | `spec`, `query`, `passages` | `scores` |

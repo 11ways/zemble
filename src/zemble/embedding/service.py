@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import queue
-import re
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -21,8 +20,9 @@ from typing import Any
 import numpy as np
 
 from zemble.embedding.base import Embedder, EmbeddingMatrix, semantic_weight_bonus
-from zemble.embedding.cache import CachingEmbedder, EmbeddingCache, text_hash, today
+from zemble.embedding.cache import CachingEmbedder, EmbeddingCache, today
 from zemble.embedding.gc import day_text, file_size
+from zemble.embedding.keys import KEY_PATTERN, EmbeddingText, cache_key, legacy_key
 from zemble.embedding.pricing import estimate_tokens
 from zemble.embedding.registry import EmbedderSpecError, build_provider, cached_family
 from zemble.embedding.spend import SpendKind, SpendLedger
@@ -30,9 +30,6 @@ from zemble.rerank.base import Reranker
 from zemble.rerank.registry import HOSTED_SCHEMES, RerankerSpecError, build_hosted_reranker, split_reranker_spec
 
 logger = logging.getLogger(__name__)
-
-#: A stored vector's key: a sha256 hex digest.
-_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
 #: Lookup batches the side stamper may have waiting; beyond them a lookup's stamps are dropped, the
@@ -87,6 +84,8 @@ class _Counters:
     #: Text hashes clients reported their saved indexes reference, and how many of those were held.
     referenced_reported: int = 0
     referenced_held: int = 0
+    #: Reported vectors held only under an older whole-text key, copied to their path-free key.
+    referenced_rekeyed: int = 0
     #: Report batches answered 503 because another one was being stamped.
     referenced_busy: int = 0
     #: Lookup hits whose stamp was dropped because the side stamper's queue was full.
@@ -180,22 +179,28 @@ class EmbeddingService:
             "semantic_weight_bonus": semantic_weight_bonus(embedder.inner),
         }
 
-    def documents(self, spec: str, texts: list[str], label: str = UNLABELLED) -> EmbeddingMatrix:
+    def documents(
+        self, spec: str, texts: list[str], label: str = UNLABELLED, keys: list[str] | None = None
+    ) -> EmbeddingMatrix:
         """Return document vectors, buying only what no cache holds and no other request is buying.
 
         :param spec: The client's embedder spec.
         :param texts: The texts to embed.
         :param label: The client key's label the purchase is counted under.
+        :param keys: Each text's cache key; None keys every text by its whole text, as an older client does.
         :return: A float32 matrix with L2-normalized rows, in input order.
         """
         embedder = self.embedder(spec)
         dims = embedder.dimensions
         self._count("documents_requested", len(texts))
+        if keys is not None:
+            texts = [EmbeddingText(text, key) for text, key in zip(texts, keys, strict=True)]
         result = np.zeros((len(texts), dims), dtype=np.float32)
         positions: dict[str, list[int]] = {}
-        for position, digest in enumerate(text_hash(text) for text in texts):
+        for position, digest in enumerate(cache_key(text) for text in texts):
             positions.setdefault(digest, []).append(position)
-        unresolved = self._fill_cached(embedder.cache, dims, positions, result)
+        legacy = {digest: legacy_key(texts[rows[0]]) for digest, rows in positions.items()}
+        unresolved = self._fill_cached(embedder.cache, dims, positions, result, legacy)
         while unresolved:
             mine, waits = self._claim(embedder.family, dims, unresolved)
             if mine:
@@ -213,14 +218,22 @@ class EmbeddingService:
             # A claim another request held is now stored, unless that request failed: then the
             # text is unclaimed again and the next round buys it here.
             unresolved = self._fill_cached(
-                embedder.cache, dims, {digest: positions[digest] for digest in waits}, result
+                embedder.cache, dims, {digest: positions[digest] for digest in waits}, result, legacy
             )
         return result
 
     def _fill_cached(
-        self, cache: EmbeddingCache, dims: int, positions: dict[str, list[int]], result: EmbeddingMatrix
+        self,
+        cache: EmbeddingCache,
+        dims: int,
+        positions: dict[str, list[int]],
+        result: EmbeddingMatrix,
+        legacy: dict[str, str | None],
     ) -> list[str]:
-        """Copy every stored vector into its rows and return the digests still missing."""
+        """Copy every stored vector into its rows and return the keys still missing.
+
+        A key held only under its legacy key is served from there and copied to the key, buying nothing.
+        """
         missing: list[str] = []
         served: list[str] = []
         for digest, rows in positions.items():
@@ -231,7 +244,10 @@ class EmbeddingService:
             result[rows] = vector
             served.append(digest)
         self._stamp_later(cache.family, served)
-        return missing
+        adopted = cache.adopt([(old, digest) for digest in missing if (old := legacy.get(digest))], dims)
+        for digest, vector in adopted.items():
+            result[positions[digest]] = vector
+        return [digest for digest in missing if digest not in adopted]
 
     def _count(self, name: str, amount: int) -> None:
         """Add to one status counter; request threads share them."""
@@ -269,31 +285,40 @@ class EmbeddingService:
         self.spend.add(label, embedder.family, SpendKind.QUERIES, len(texts), estimate_tokens(texts))
         return vectors
 
-    def covered(self, spec: str, digests: list[str], probe: bool) -> tuple[set[str], int | None]:
-        """Return which text hashes are already paid for, and the width that was judged.
+    def covered(
+        self, spec: str, digests: list[str], probe: bool, keys: list[str] | None = None
+    ) -> tuple[set[str], int | None]:
+        """Return which of these whole-text hashes are already paid for, and the width that was judged.
 
         Every hit is stamped as used, after the answer, by the side stamper: a pre-flight asks about
         the chunks of a live tree.
 
         :param spec: The client's embedder spec.
-        :param digests: The text hashes to look up.
+        :param digests: The whole-text hashes to look up, the answer's vocabulary for every client.
         :param probe: Whether the provider may be asked for a width no spec or file declares.
-        :return: The covered hashes and the width, None when no width could be read.
+        :param keys: Each digest's cache key; a digest is covered when its key or, not migrated yet, it is held.
+        :return: The covered digests and the width, None when no width could be read.
         """
         embedder = self.embedder(spec)
         width = embedder.dimensions if probe else embedder.known_dimensions
         if width is None:
             return set(), None
-        hits = embedder.cache.covered(digests, width)
+        primary = keys if keys is not None else digests
+        legacy = [old if old != key else None for old, key in zip(digests, primary, strict=True)]
+        hits = embedder.cache.covered_keys(primary, legacy, width)
         self._stamp_later(embedder.family, list(hits))
-        return hits, width
+        return {old for old, key in zip(digests, primary, strict=True) if key in hits}, width
 
-    def referenced(self, spec: str, digests: list[str]) -> int:
+    def referenced(self, spec: str, digests: list[str], keys: list[str] | None = None) -> tuple[int, int]:
         """Stamp as used the held vectors a client's saved indexes reference, one report batch at a time.
 
+        With `keys`, a vector held only under its whole-text digest is first copied to its key: the
+        migration to path-free keys, two primary-key probes per pair on the side connection, no purchase.
+
         :param spec: The client's embedder spec, naming the family.
-        :param digests: The text hashes; ones this server never stored are ignored.
-        :return: How many of them this server holds.
+        :param digests: The whole-text hashes; ones this server never stored are ignored.
+        :param keys: Each digest's cache key, None where a client sends none.
+        :return: How many are held, by key, and how many were copied to their key.
         :raises ServiceBusy: If another report batch is being stamped; the client retries later.
         """
         family = self.embedder(spec).family
@@ -301,12 +326,15 @@ class EmbeddingService:
             self._count("referenced_busy", 1)
             raise ServiceBusy("another referenced report batch is being stamped")
         try:
-            held = self._stamper(family).stamp_held(digests)
+            stamper = self._stamper(family)
+            rekeyed = stamper.rekey(zip(digests, keys, strict=True)) if keys is not None else 0
+            held = stamper.stamp_held(keys if keys is not None else digests)
         finally:
             self._referenced_gate.release()
         self._count("referenced_reported", len(digests))
         self._count("referenced_held", held)
-        return held
+        self._count("referenced_rekeyed", rekeyed)
+        return held, rekeyed
 
     def _stamper(self, family: str) -> EmbeddingCache:
         """Return the family's side connection, which stamps without touching the serving one."""
@@ -354,7 +382,7 @@ class EmbeddingService:
         :raises ValueError: If a row is malformed.
         """
         for digest, dims, vector in rows:
-            if not _DIGEST.match(digest) or dims <= 0 or len(vector) != dims * 4:
+            if not KEY_PATTERN.match(digest) or dims <= 0 or len(vector) != dims * 4:
                 raise ValueError(f"malformed vector row for {digest[:16]!r} at {dims} dimensions")
         added = self.embedder(spec).cache.put_missing(rows)
         self._count("stored", added)
@@ -427,6 +455,7 @@ class EmbeddingService:
             "referenced_reported": self.counters.referenced_reported,
             "referenced_held": self.counters.referenced_held,
             "referenced_busy": self.counters.referenced_busy,
+            "referenced_rekeyed": self.counters.referenced_rekeyed,
             "stamps_dropped": self.counters.stamps_dropped,
             "spend": [
                 {

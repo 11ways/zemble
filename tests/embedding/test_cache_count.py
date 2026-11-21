@@ -15,8 +15,9 @@ import pytest
 
 import zemble
 from zemble.embedding import cache as cache_module
-from zemble.embedding.cache import _SCHEMA, EmbeddingCache, text_hash
+from zemble.embedding.cache import _SCHEMA, EmbeddingCache
 from zemble.embedding.gc import collect_unused
+from zemble.embedding.keys import text_hash
 from zemble.embedding.service import EmbeddingService
 
 FAMILY = "voyage:voyage-4-lite"
@@ -98,6 +99,13 @@ def test_every_writer_keeps_the_count_equal_to_a_scan(tmp_path: Path) -> None:
         assert added == 4
         check("step 3")
 
+        # 3b. rekey (path-free key migration): a copy to a new key, one already held, an unknown old key.
+        copied = cache.rekey(
+            [(text_hash("t3"), text_hash("k3")), (text_hash("t4"), text_hash("t5")), ("0" * 64, "1" * 64)]
+        )
+        assert copied == 1
+        check("step 3b")
+
         # 4. A rolled-back batch leaves the count where it was.
         with pytest.raises(sqlite3.IntegrityError):
             _raw(path, "INSERT INTO embeddings (text_sha256, dims, vec) VALUES (?, 4, ?)", [(text_hash("t1"), b"x")])
@@ -149,6 +157,7 @@ def test_every_writer_in_the_source_is_one_the_writer_test_runs() -> None:
             found.add((path.name, " ".join(match.group(0).split())))
     assert found == {
         ("cache.py", "INSERT OR IGNORE INTO embeddings (text_sha256, dims, vec) VALUES (?, ?, ?)"),
+        ("cache.py", "INSERT OR IGNORE INTO embeddings (text_sha256, dims, vec) SELECT ?2, dims, vec FROM embeddings"),
         ("cache.py", "INSERT OR REPLACE INTO embeddings (text_sha256, dims, vec) VALUES (?, ?, ?)"),
         ("gc.py", "DELETE FROM embeddings WHERE rowid IN (SELECT rid FROM doomed)"),
     }
@@ -207,7 +216,8 @@ _WRITER = """
 import random, sqlite3, sys
 from pathlib import Path
 import numpy as np
-from zemble.embedding.cache import EmbeddingCache, text_hash
+from zemble.embedding.cache import EmbeddingCache
+from zemble.embedding.keys import text_hash
 seed, directory = int(sys.argv[1]), Path(sys.argv[2])
 rng = random.Random(seed)
 cache = EmbeddingCache('voyage:voyage-4-lite', directory)

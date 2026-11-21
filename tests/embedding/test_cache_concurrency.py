@@ -10,13 +10,15 @@ import numpy as np
 import pytest
 
 import zemble
-from zemble.embedding.cache import BUSY_TIMEOUT_SECONDS, EmbeddingCache, text_hash
+from zemble.embedding.cache import BUSY_TIMEOUT_SECONDS, EmbeddingCache
+from zemble.embedding.keys import text_hash
 
 _BUY = """
 import sys
 import numpy as np
 from pathlib import Path
-from zemble.embedding.cache import EmbeddingCache, text_hash
+from zemble.embedding.cache import EmbeddingCache
+from zemble.embedding.keys import text_hash
 cache = EmbeddingCache('fake:concurrency', Path(sys.argv[1]))
 cache.put_many([(text_hash(sys.argv[2]), 3, np.array([1., 0., 0.], dtype=np.float32))])
 cache.close()
@@ -25,7 +27,8 @@ _WAITING_BUY = """
 import sys
 import numpy as np
 from pathlib import Path
-from zemble.embedding.cache import EmbeddingCache, text_hash
+from zemble.embedding.cache import EmbeddingCache
+from zemble.embedding.keys import text_hash
 cache = EmbeddingCache('fake:concurrency', Path(sys.argv[1]))
 print('opened', flush=True)
 sys.stdin.readline()

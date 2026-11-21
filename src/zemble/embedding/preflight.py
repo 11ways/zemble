@@ -18,7 +18,7 @@ from pathlib import Path
 from zemble.chunking.capsule import CapsuleOptions, embedding_text
 from zemble.dedup.model import CloneKind
 from zemble.embedding.base import declared_dimensions, is_remote
-from zemble.embedding.cache import text_hash
+from zemble.embedding.keys import cache_key
 from zemble.embedding.pricing import (
     applicable_budget_usd,
     bill_refusal,
@@ -176,8 +176,8 @@ def embed_status(
     )
 
     # The buyer answers where its vectors live: a local sqlite file, or the embedding server.
-    stored_digests = getattr(resolved.embedder, "stored_digests", None)
-    lookup = stored_digests if remote and stored_digests is not None else None
+    stored_keys = getattr(resolved.embedder, "stored_keys", None)
+    lookup = stored_keys if remote and stored_keys is not None else None
     cache_path = str(resolved.embedder.store_location) if lookup is not None else None
     lookup_seconds = 0.0
     reusable = embedded = 0
@@ -191,10 +191,9 @@ def embed_status(
         if lookup is None or not texts:
             return list(texts)
         asked = time.monotonic()
-        digests = [text_hash(text) for text in texts]
-        covered = lookup(digests)
+        covered = lookup(texts)
         lookup_seconds += time.monotonic() - asked
-        return [text for text, digest in zip(texts, digests, strict=True) if digest not in covered]
+        return [text for text in texts if cache_key(text) not in covered]
 
     def settle() -> None:
         uncached_texts.extend(uncached_of(batch))

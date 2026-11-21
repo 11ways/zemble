@@ -6,7 +6,10 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from zemble.embedding.cache import CachingEmbedder, EmbeddingCache, family_slug, text_hash
+from zemble.chunking.capsule import embedding_text
+from zemble.embedding.cache import CachingEmbedder, EmbeddingCache, family_slug
+from zemble.embedding.keys import cache_key, text_hash
+from zemble.types import Chunk
 
 
 class CountingEmbedder:
@@ -45,6 +48,38 @@ class CountingEmbedder:
         """Embed queries, recording the batch."""
         self.query_batches.append(list(texts))
         return self._vectors(texts)
+
+
+def _moved(context: str, content: str = "def moved(): pass") -> str:
+    """The embedding text of one chunk carrying the capsule of some path."""
+    return embedding_text(Chunk(content=content, file_path="x.py", start_line=1, end_line=1, context=context))
+
+
+def test_a_chunk_under_several_paths_is_one_purchase_and_an_older_purchase_is_reused(tmp_path: Path) -> None:
+    """Copies of a chunk share one key and one slot; a vector stored under its whole-text key is never bought again."""
+    inner = CountingEmbedder()
+    embedder = CachingEmbedder(inner, "fake:counting", tmp_path)
+    lane, clone = _moved("lane/basalt/a.py lane basalt a py | def moved"), _moved("clone/a.py clone a py | def moved")
+
+    # 1. One batch holding the chunk under two paths buys it once, as the first text, path included.
+    vectors = embedder.embed_documents([lane, "other", clone])
+    assert inner.document_batches == [[lane, "other"]], "step 1"
+    np.testing.assert_allclose(vectors[2], vectors[0])
+    assert embedder.pending_documents([clone, lane]) == [], "step 1: the bill guard agrees"
+
+    # 2. A vector an older zemble stored under the whole text serves the chunk, is copied to its key, buys nothing.
+    old = _moved("old/a.py old a py | def older", "def older(): pass")
+    stored = np.full(8, 1 / np.sqrt(8), dtype=np.float32)
+    embedder.cache.put_many([(text_hash(old), 8, stored)])
+    assert embedder.pending_documents([old]) == [] and embedder.stored_keys([old]) == {cache_key(old)}, "step 2"
+    np.testing.assert_allclose(embedder.embed_documents([old, old])[1], stored)
+    assert len(inner.document_batches) == 1, "step 2: nothing was bought"
+    assert embedder.cache.covered([cache_key(old), text_hash(old)], 8) == {cache_key(old), text_hash(old)}, (
+        "step 2: the copy is stored under the key; the old row stays for gc"
+    )
+
+    # 3. Rekeying again copies nothing.
+    assert embedder.cache.rekey([(text_hash(old), cache_key(old)), (text_hash(lane), cache_key(lane))]) == 0
 
 
 def test_cache_journey(tmp_path: Path) -> None:

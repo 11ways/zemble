@@ -1199,12 +1199,14 @@ class Daemon:
         for report in reports:
             if report.skipped is None:
                 logger.info(
-                    "reported %d referenced vector(s) of %s from %d index(es) to %s, %d held there, after %.1f s",
+                    "reported %d referenced vector(s) of %s from %d index(es) to %s, %d held there, "
+                    "%d copied to their path-free key, after %.1f s",
                     report.sent,
                     report.family,
                     report.indexes,
                     settings.url,
                     report.held,
+                    report.rekeyed,
                     time.monotonic() - started,
                 )
             elif report.skipped != REPORTED_TODAY:

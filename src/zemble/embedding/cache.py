@@ -9,7 +9,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from zemble.embedding.base import (
     normalize_rows,
     semantic_weight_bonus,
 )
+from zemble.embedding.keys import cache_key, legacy_key
 
 logger = logging.getLogger(__name__)
 
@@ -121,11 +122,6 @@ def family_slug(family: str) -> str:
     return slug or "embedder"
 
 
-def text_hash(text: str) -> str:
-    """Return the sha256 hex digest of a text."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def uncovered_texts(texts: list[str], digests: list[str], covered: set[str]) -> list[str]:
     """Return the texts a caching buyer would really send: uncovered ones, each distinct text once.
 
@@ -133,8 +129,8 @@ def uncovered_texts(texts: list[str], digests: list[str], covered: set[str]) -> 
     server's client, because the buyer gives every copy of one text a single provider slot.
 
     :param texts: The texts a build is about to embed.
-    :param digests: Their hashes, in the same order.
-    :param covered: The hashes a stored vector already serves.
+    :param digests: Their cache keys (`zemble.embedding.keys.cache_key`), in the same order.
+    :param covered: The keys a stored vector already serves.
     :return: Those still to be bought, first occurrence first.
     """
     pending: list[str] = []
@@ -182,6 +178,34 @@ def connect_cache(path: Path) -> sqlite3.Connection:
     except BaseException:
         connection.close()
         raise
+
+
+def rekey_rows(connection: sqlite3.Connection, pairs: Iterable[tuple[str, str]]) -> list[str]:
+    """Copy the vectors held under each pair's old key to its new key, where the new key holds none; stamp the copies.
+
+    Runs inside the caller's write transaction and buys nothing. Each pair is two key-index probes, and the
+    vector row is read only when its copy is due, so a pair already migrated costs no row read and no scan.
+
+    :param pairs: ``(old key, new key)`` pairs.
+    :return: The new keys that gained a vector.
+    """
+    copied: list[str] = []
+    for old, new in pairs:
+        if old == new:
+            continue
+        # The plan seeks the old key's index entry, runs the constant NOT EXISTS once, and reads the row only then.
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO embeddings (text_sha256, dims, vec) SELECT ?2, dims, vec FROM embeddings "
+            "WHERE NOT EXISTS (SELECT 1 FROM embeddings WHERE text_sha256 = ?2) AND text_sha256 = ?1",
+            (old, new),
+        )
+        if cursor.rowcount > 0:
+            copied.append(new)
+    day = today()
+    connection.executemany(
+        "INSERT INTO used (text_sha256, day) VALUES (?, ?) " + _STAMP_UPSERT_CONFLICT, [(new, day) for new in copied]
+    )
+    return copied
 
 
 def read_rows(path: Path, batch_size: int = 4096) -> Iterator[list[tuple[str, int, bytes]]]:
@@ -415,6 +439,59 @@ class EmbeddingCache:
             self._stamp_stale([digest for digest, stamped_today in hits if not stamped_today])
         return len(hits)
 
+    def covered_keys(self, keys: list[str], legacy: list[str | None], dims: int) -> set[str]:
+        """Return which keys have a usable vector at this width, under the key or, not migrated yet, its legacy key.
+
+        :param keys: The cache keys to look up.
+        :param legacy: Each key's legacy key (`zemble.embedding.keys.legacy_key`), None where there is none.
+        :param dims: The requested width.
+        :return: The covered subset of `keys`.
+        """
+        hits = self.covered(keys, dims)
+        unmigrated = [(old, key) for key, old in zip(keys, legacy, strict=True) if old is not None and key not in hits]
+        if unmigrated:
+            held = self.covered([old for old, _key in unmigrated], dims)
+            hits.update(key for old, key in unmigrated if old in held)
+        return hits
+
+    def covered_texts(self, texts: Sequence[str], dims: int) -> set[str]:
+        """Return the cache keys of these texts that have a usable vector at this width (:meth:`covered_keys`)."""
+        return self.covered_keys([cache_key(text) for text in texts], [legacy_key(text) for text in texts], dims)
+
+    def rekey(self, pairs: Iterable[tuple[str, str]]) -> int:
+        """Copy each old key's vectors to its new key where that holds none, a few hundred per transaction.
+
+        :param pairs: ``(old key, new key)`` pairs; an old key this file never stored is ignored.
+        :return: How many new keys gained a vector.
+        """
+        pending = list(pairs)
+        copied = 0
+        for start in range(0, len(pending), STAMPS_PER_TRANSACTION):
+            with self._lock, _transaction(self._connection):
+                moved = rekey_rows(self._connection, pending[start : start + STAMPS_PER_TRANSACTION])
+            copied += len(moved)
+        return copied
+
+    def adopt(self, pairs: list[tuple[str, str]], dims: int) -> dict[str, np.ndarray]:
+        """Return, by new key, the vectors held under these pairs' old keys at this width, copied to the new keys.
+
+        :param pairs: ``(old key, new key)`` pairs of texts no vector is stored for under the new key.
+        :param dims: The requested width.
+        :return: New key to vector, for every old key held.
+        """
+        found: dict[str, np.ndarray] = {}
+        moved: list[tuple[str, str]] = []
+        for old, new in pairs:
+            if new in found:
+                continue
+            vector = self.get(old, dims)
+            if vector is not None:
+                found[new] = vector
+                moved.append((old, new))
+        if moved:
+            self.rekey(moved)
+        return found
+
     def stored_dimensions(self, limit: int = 2) -> list[int]:
         """Return up to `limit` distinct vector widths this family's cache file already holds.
 
@@ -457,8 +534,9 @@ class EmbeddingCache:
             nothing counts as stored - never a discount nobody can prove.
         :return: Those still to be bought, first occurrence first.
         """
-        digests = [text_hash(text) for text in texts]
-        covered = self.covered(digests, dims) if dims is not None else set()
+        digests = [cache_key(text) for text in texts]
+        legacy = [legacy_key(text) for text in texts]
+        covered = self.covered_keys(digests, legacy, dims) if dims is not None else set()
         return uncovered_texts(texts, digests, covered)
 
     def count(self) -> int:
@@ -561,14 +639,14 @@ class CachingEmbedder:
         """Where the vectors this embedder reuses are kept, for a report."""
         return str(self.cache.path)
 
-    def stored_digests(self, digests: list[str]) -> set[str]:
-        """Return which text hashes already have a usable vector, asking no provider anything.
+    def stored_keys(self, texts: Sequence[str]) -> set[str]:
+        """Return the cache keys of these texts that already have a usable vector, asking no provider anything.
 
-        :param digests: The text hashes to look up.
-        :return: The covered subset; empty when no width can be read without a provider probe.
+        :param texts: The texts to look up.
+        :return: The covered keys; empty when no width can be read without a provider probe.
         """
         width = self.known_dimensions
-        return self.cache.covered(digests, width) if width is not None else set()
+        return self.cache.covered_texts(texts, width) if width is not None else set()
 
     @property
     def model_id(self) -> str:
@@ -637,7 +715,7 @@ class CachingEmbedder:
         if not texts:
             return np.empty((0, dims), dtype=np.float32)
 
-        digests = [text_hash(text) for text in texts]
+        digests = [cache_key(text) for text in texts]
         result = np.zeros((len(texts), dims), dtype=np.float32)
         missing_positions: list[int] = []
         # Duplicate texts inside one call share a single provider slot.
@@ -658,6 +736,8 @@ class CachingEmbedder:
             first_position[digest] = position
             missing_positions.append(position)
 
+        missing_positions = self._adopt_legacy(texts, digests, missing_positions, result)
+
         for start in range(0, len(missing_positions), FLUSH_EVERY):
             slice_positions = missing_positions[start : start + FLUSH_EVERY]
             fresh = self.inner.embed_documents([texts[position] for position in slice_positions])
@@ -671,6 +751,19 @@ class CachingEmbedder:
             result[position] = result[source]
         self.cache.touch(served)
         return result
+
+    def _adopt_legacy(
+        self, texts: list[str], digests: list[str], positions: list[int], result: EmbeddingMatrix
+    ) -> list[int]:
+        """Fill the rows a text first bought before keys left its path out from that purchase; return the rest."""
+        adopted = self.cache.adopt(
+            [(old, digests[position]) for position in positions if (old := legacy_key(texts[position]))],
+            result.shape[1],
+        )
+        for position in positions:
+            if digests[position] in adopted:
+                result[position] = adopted[digests[position]]
+        return [position for position in positions if digests[position] not in adopted]
 
     def embed_queries(self, texts: list[str]) -> EmbeddingMatrix:
         """Embed queries without touching the cache.

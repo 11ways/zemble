@@ -14,6 +14,7 @@ import random
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any
 
@@ -21,8 +22,9 @@ import numpy as np
 
 from zemble.embedding import http as embedding_http
 from zemble.embedding.base import Embedder, EmbeddingMatrix, declared_dimensions, semantic_weight_bonus
-from zemble.embedding.cache import text_hash, uncovered_texts
+from zemble.embedding.cache import uncovered_texts
 from zemble.embedding.http import MAX_TRIES, EmbeddingRequestError, batched, open_url, post_json
+from zemble.embedding.keys import cache_key, text_hash
 from zemble.embedding.wire import (
     AUTH_HEADER,
     BUSY_RETRY_AFTER_SECONDS,
@@ -118,26 +120,31 @@ class ServerClient:
             added += int(self.post(STORE_ROUTE, payload)["added"])
         return added
 
-    def referenced(self, spec: str, digests: list[str]) -> int:
-        """Report text hashes a saved index references, in one request; the server stamps those it holds.
+    def referenced(self, spec: str, digests: list[str], keys: list[str] | None = None) -> tuple[int, int]:
+        """Report the vectors a saved index references, in one request; the server stamps those it holds.
 
-        A busy server (503: another report batch is being stamped) is waited out quietly with a
-        growing pause for up to ``REFERENCED_BUSY_LIMIT_SECONDS``; other transient failures get the
-        usual few retries.
+        With `keys`, the server first copies a vector held only under a digest to its key, buying nothing:
+        that is how an older client's whole-text keys migrate. A busy server (503: another report batch
+        is being stamped) is waited out quietly with a growing pause for up to
+        ``REFERENCED_BUSY_LIMIT_SECONDS``; other transient failures get the usual few retries.
 
         :param spec: An embedder spec naming the family.
-        :param digests: At most ``REFERENCED_DIGESTS_PER_REQUEST`` text hashes.
-        :return: How many of them the server holds.
+        :param digests: At most ``REFERENCED_DIGESTS_PER_REQUEST`` whole-text hashes, what every server keys by.
+        :param keys: Each digest's cache key (`zemble.embedding.keys.cache_key`); an older server ignores them.
+        :return: How many of them the server holds, and how many it copied to their key; an older server copies none.
         :raises EmbeddingRequestError: With ``status`` 404 from a server older than the route.
         """
         url = f"{self.settings.url}{REFERENCED_ROUTE}"
-        payload = {"spec": spec, "digests": digests}
+        payload: dict[str, Any] = {"spec": spec, "digests": digests}
+        if keys is not None:
+            payload["keys"] = keys
         busy_until = time.monotonic() + REFERENCED_BUSY_LIMIT_SECONDS
         pause = float(BUSY_RETRY_AFTER_SECONDS)
         failures = 0
         while True:
             try:
-                return int(post_json(url, payload, self._headers(), tries=1)["held"])
+                answer = post_json(url, payload, self._headers(), tries=1)
+                return int(answer["held"]), int(answer.get("rekeyed", 0))
             except EmbeddingRequestError as exc:
                 busy = exc.status == HTTPStatus.SERVICE_UNAVAILABLE
                 transient = exc.status is None or exc.status == HTTPStatus.TOO_MANY_REQUESTS or exc.status >= 500
@@ -235,7 +242,9 @@ class ServerEmbedder:
         # Filled in place: concatenating the batches would hold every vector twice at the peak.
         matrix: EmbeddingMatrix | None = None
         for start, batch in batched(texts, DOCUMENTS_PER_REQUEST, _MAX_REQUEST_CHARS):
-            vectors = _vectors(self.client.post(DOCUMENTS_ROUTE, {"spec": self.spec, "texts": batch}), len(batch))
+            # `keys` leave the path out; a server older than them keys by the whole text and still answers right.
+            payload = {"spec": self.spec, "texts": batch, "keys": [cache_key(text) for text in batch]}
+            vectors = _vectors(self.client.post(DOCUMENTS_ROUTE, payload), len(batch))
             if matrix is None:
                 matrix = np.empty((len(texts), vectors.shape[1]), dtype=np.float32)
             matrix[start : start + len(batch)] = vectors
@@ -252,23 +261,34 @@ class ServerEmbedder:
             return np.empty((0, self.dimensions), dtype=np.float32)
         return _vectors(self.client.post(QUERIES_ROUTE, {"spec": self.spec, "texts": texts}), len(texts))
 
-    def covered(self, digests: list[str], *, probe: bool) -> set[str]:
-        """Return which text hashes the server already holds a usable vector for.
+    def covered(self, texts: Sequence[str], *, probe: bool) -> set[str]:
+        """Return the cache keys of these texts the server already holds a usable vector for.
 
-        :param digests: The text hashes to look up.
+        Each text travels as its whole-text hash, what every server keys by, plus its cache key: an older
+        server answers by the hash, a newer one by the key or, not migrated yet, the hash.
+
+        :param texts: The texts to look up.
         :param probe: Whether the server may ask its provider for a width nothing declares.
-        :return: The covered subset.
+        :return: The covered keys.
         """
+        # One pass: a build's texts are produced lazily, out of its mapped chunk store.
+        pairs = [(text_hash(text), cache_key(text)) for text in texts]
         found: set[str] = set()
-        for start in range(0, len(digests), DIGESTS_PER_REQUEST):
-            batch = digests[start : start + DIGESTS_PER_REQUEST]
-            answer = self.client.post(COVERED_ROUTE, {"spec": self.spec, "digests": batch, "probe": probe})
-            found.update(answer["covered"])
+        for start in range(0, len(pairs), DIGESTS_PER_REQUEST):
+            batch = pairs[start : start + DIGESTS_PER_REQUEST]
+            payload = {
+                "spec": self.spec,
+                "digests": [digest for digest, _key in batch],
+                "keys": [key for _digest, key in batch],
+                "probe": probe,
+            }
+            hit = set(self.client.post(COVERED_ROUTE, payload)["covered"])
+            found.update(key for digest, key in batch if digest in hit)
         return found
 
-    def stored_digests(self, digests: list[str]) -> set[str]:
-        """Return which text hashes are already paid for, without anybody asking a provider."""
-        return self.covered(digests, probe=False)
+    def stored_keys(self, texts: Sequence[str]) -> set[str]:
+        """Return the cache keys of these texts already paid for, without anybody asking a provider."""
+        return self.covered(texts, probe=False)
 
     def pending_documents(self, texts: list[str]) -> list[str]:
         """Return the distinct texts the server would still have to buy.
@@ -276,13 +296,11 @@ class ServerEmbedder:
         :param texts: The texts a build is about to embed.
         :return: Those with no usable vector stored, first occurrence first.
         """
-        digests = [text_hash(text) for text in texts]
-        return uncovered_texts(texts, digests, self.covered(digests, probe=True))
+        return uncovered_texts(texts, [cache_key(text) for text in texts], self.covered(texts, probe=True))
 
     def pending_documents_unprobed(self, texts: list[str]) -> list[str]:
         """Return the same answer for a caller that may not cost a provider request."""
-        digests = [text_hash(text) for text in texts]
-        return uncovered_texts(texts, digests, self.covered(digests, probe=False))
+        return uncovered_texts(texts, [cache_key(text) for text in texts], self.covered(texts, probe=False))
 
 
 class ServerReranker:

@@ -12,7 +12,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from zemble.chunking.capsule import embedding_text
-from zemble.embedding.cache import STAMP_REFRESH_DAYS, connect_cache, family_slug, stamps_since, text_hash, today
+from zemble.embedding.cache import STAMP_REFRESH_DAYS, connect_cache, family_slug, rekey_rows, stamps_since, today
+from zemble.embedding.keys import cache_key, text_hash
 from zemble.embedding.registry import cached_family
 from zemble.index.chunk_store import load_chunks
 from zemble.openfiles import holders
@@ -61,6 +62,8 @@ class EmbeddingSweep:
     path: Path
     rows: int = 0
     referenced: int = 0
+    #: Referenced vectors held only under an older whole-text key, copied to their path-free key before the sweep.
+    rekeyed: int = 0
     swept: int = 0
     swept_bytes: int = 0
     #: Free pages and WAL bytes a VACUUM and a truncating checkpoint return, swept rows aside.
@@ -164,28 +167,42 @@ def indexes_by_family(cache_folder: Path) -> dict[str, list[Path]]:
     return grouped
 
 
-def index_digests(folder: Path) -> Iterator[str]:
-    """Yield the cache key of every chunk one saved index embedded, a repeated text once per chunk.
+def index_keys(folder: Path) -> Iterator[tuple[str, str]]:
+    """Yield the whole-text hash and the cache key of every chunk one saved index embedded, once per chunk.
 
-    The key is recomputed from the stored chunk exactly as a build computed it
-    (`embedding_text`, then `text_hash`), so the two can never disagree.
+    Both are recomputed from the stored chunk exactly as a build computes them (`embedding_text`,
+    then `text_hash` and `cache_key`), so the two can never disagree, and an index saved before keys
+    left the path out reads the same: no key is stored in it, so it needs no rebuild.
 
     :raises OSError, ValueError: If the index cannot be read.
     """
     for chunk in load_chunks(folder / "chunks"):
-        yield text_hash(embedding_text(chunk))
+        text = embedding_text(chunk)
+        yield text_hash(text), cache_key(text)
 
 
-def referenced_digests(index_folders: Iterable[Path]) -> set[str]:
-    """Return the cache key of every chunk any of these indexes embedded.
+@dataclass
+class References:
+    """The cache keys some saved indexes reference, and the older whole-text key of each that has one."""
+
+    keys: set[str] = field(default_factory=set)
+    #: Whole-text hash to cache key, for every chunk whose two differ.
+    legacy: dict[str, str] = field(default_factory=dict)
+
+
+def referenced_keys(index_folders: Iterable[Path]) -> References:
+    """Return the cache key, and legacy key, of every chunk any of these indexes embedded.
 
     :raises OSError, ValueError: If an index cannot be read; a collection then refuses, because a
         reference it cannot see would be swept.
     """
-    digests: set[str] = set()
+    references = References()
     for folder in index_folders:
-        digests.update(index_digests(folder))
-    return digests
+        for digest, key in index_keys(folder):
+            references.keys.add(key)
+            if digest != key:
+                references.legacy[digest] = key
+    return references
 
 
 def collect_embeddings(cache_folder: Path, *, grace_days: int, dry_run: bool) -> list[EmbeddingSweep]:
@@ -222,11 +239,11 @@ def collect_embeddings(cache_folder: Path, *, grace_days: int, dry_run: bool) ->
             report.refused = f"held open by pid {', '.join(map(str, found))}; stop them (`zemble daemon stop`) first"
             continue
         try:
-            marked = referenced_digests(folders)
+            marked = referenced_keys(folders)
         except (OSError, ValueError) as exc:
             report.refused = f"an index of this embedder is unreadable ({exc}); nothing swept"
             continue
-        _sweep_file(report, marked, dry_run=dry_run)
+        _sweep_file(report, marked.keys, dry_run=dry_run, legacy=marked.legacy)
     return reports
 
 
@@ -259,8 +276,14 @@ def collect_unused(directory: Path, *, grace_days: int, dry_run: bool) -> list[E
     return reports
 
 
-def _sweep_file(report: EmbeddingSweep, marked: set[str], *, dry_run: bool) -> None:
-    """Count, and unless dry, delete and VACUUM, the rows of one file that are neither marked nor recent."""
+def _sweep_file(
+    report: EmbeddingSweep, marked: set[str], *, dry_run: bool, legacy: dict[str, str] | None = None
+) -> None:
+    """Count, and unless dry, delete and VACUUM, the rows of one file that are neither marked nor recent.
+
+    A real run first copies each marked key held only under its `legacy` key to the key, so the
+    sweep can age the old row out without losing the vector.
+    """
     if dry_run:
         connection = sqlite3.connect(f"{report.path.resolve().as_uri()}?mode=ro", uri=True)
     else:
@@ -269,6 +292,7 @@ def _sweep_file(report: EmbeddingSweep, marked: set[str], *, dry_run: bool) -> N
         if not dry_run:
             # Select doomed rows under the same writer lease that deletes them.
             connection.execute("BEGIN IMMEDIATE")
+            report.rekeyed = len(rekey_rows(connection, (legacy or {}).items()))
         has_stamps = _has_table(connection, "used")
         # A vector stored before stamps existed counts as used the day they began, never as
         # unused forever: an age nobody recorded fails closed.

@@ -10,6 +10,7 @@ import stat
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -22,9 +23,10 @@ from zemble.cache import resolve_cache_folder
 from zemble.chunking.capsule import embedding_text
 from zemble.daemon import server as daemon_server
 from zemble.embedding import server as http_server
-from zemble.embedding.cache import EmbeddingCache, cache_root, text_hash, today
+from zemble.embedding.cache import EmbeddingCache, cache_root, today
 from zemble.embedding.gc import collect_unused, day_text
 from zemble.embedding.http import EmbeddingRequestError
+from zemble.embedding.keys import cache_key, text_hash
 from zemble.embedding.pricing import EmbeddingBudgetExceeded, estimate_tokens, require_affordable_bill
 from zemble.embedding.referenced import REPORTED_FILE, REPORTED_TODAY, FamilyReport, distinct_batches, report_referenced
 from zemble.embedding.registry import build_embedder
@@ -189,7 +191,7 @@ def test_server_journey(served: Running, capsys: pytest.CaptureFixture[str]) -> 
 
     # 5. The budget guard's question is answered by the server: what is still unpaid, each text once.
     assert second.pending_documents(["alpha", "epsilon", "epsilon"]) == ["epsilon"], "step 5"
-    assert second.stored_digests([text_hash("alpha"), text_hash("zeta")]) == {text_hash("alpha")}, "step 5"
+    assert second.stored_keys(["alpha", "zeta"]) == {text_hash("alpha")}, "step 5"
 
     # 6. Queries always reach the provider and are never stored as documents.
     second.embed_queries(["only a query"])
@@ -431,7 +433,7 @@ def test_a_covered_hit_is_stamped_on_the_server(served: Running) -> None:
     embedder = build_embedder(SPEC).embedder
     embedder.embed_documents(["alpha", "beta"])
     _set(served.service.directory / "voyage-voyage-4-lite.sqlite", "UPDATE used SET day = ?", today() - 400)
-    assert embedder.stored_digests([text_hash("alpha"), text_hash("gamma")]) == {text_hash("alpha")}
+    assert embedder.stored_keys(["alpha", "gamma"]) == {text_hash("alpha")}
     served.service.settle_stamps()
     assert _server_days(served) == {text_hash("alpha"): today(), text_hash("beta"): today() - 400}
 
@@ -465,7 +467,12 @@ def test_reports_never_delay_serving(served: Running, monkeypatch: pytest.Monkey
 
     def report(host: int) -> None:
         client = ServerClient(settings)
-        results[host] = sum(client.referenced(SPEC, [*held, text_hash(f"unknown {host} {n}")]) for n in range(2))
+        # Each batch also migrates: every held vector is copied to a key of this host's own.
+        results[host] = 0
+        for n in range(2):
+            digests = [*held, text_hash(f"unknown {host} {n}")]
+            keys = [text_hash(f"key {host} {digest}") for digest in digests]
+            results[host] += client.referenced(SPEC, digests, keys)[0]
 
     reporters = [threading.Thread(target=report, args=(host,)) for host in range(3)]
     for reporter in reporters:
@@ -475,13 +482,14 @@ def test_reports_never_delay_serving(served: Running, monkeypatch: pytest.Monkey
     while any(reporter.is_alive() for reporter in reporters):
         start = time.perf_counter()
         embedder.embed_documents(texts[:5])
-        embedder.stored_digests(held)
+        embedder.stored_keys(texts)
         latencies.append(time.perf_counter() - start)
         time.sleep(0.05)
     for reporter in reporters:
         reporter.join()
     assert results == {0: 40, 1: 40, 2: 40}, "every host's batches were stamped, the busy ones after waiting"
     assert served.service.counters.referenced_busy > 0, "concurrent batches were told to come back (503)"
+    assert served.service.counters.referenced_rekeyed == 3 * 20, "each host's keys were copied once"
     assert len(latencies) > 20 and max(latencies) < 0.5, f"serving was held up: {max(latencies):.2f} s"
 
 
@@ -517,7 +525,7 @@ def test_distinct_batches_send_a_chunk_shared_by_indexes_once(tmp_path: Path) ->
     (broken / "chunks" / "chunks.json").write_text("not json")
     report = FamilyReport(FAMILY, 3)
     batches = list(distinct_batches([first, broken, second], 2, report))
-    sent = [digest for batch in batches for digest in batch]
+    sent = [digest for batch in batches for digest, _key in batch]
     assert all(len(batch) <= 2 for batch in batches)
     assert len(sent) == len(set(sent)) == 7, "each distinct hash exactly once"
     assert set(sent) == {text_hash(embedding_text(chunk)) for chunk in [*shared]} | {
@@ -659,3 +667,153 @@ async def test_the_daemon_reports_referenced_vectors_before_it_exits_idle(
     never = idle_daemon()
     await asyncio.wait_for(never.referenced_loop(), timeout=5)
     assert not never.reporting
+
+
+GREETER = "def greet(name):\n    return f'hello {name}'\n\n\nclass Greeter:\n    def wave(self):\n        return 1\n"
+
+
+def _clone(source: Path, target: Path) -> Path:
+    """Clone a repository into another folder name, as a second full checkout on the same host is."""
+    import subprocess
+
+    subprocess.run(["git", "clone", "-q", str(source), str(target)], check=True)
+    return target.resolve()
+
+
+def test_one_file_under_every_path_is_bought_once(served: Running, tmp_path: Path) -> None:
+    """A lane, a linked worktree, a full clone and a renamed copy of one file cost the first purchase only."""
+    from tests.conftest import git
+    from tests.test_lanes import _repo
+    from zemble.index.index import ZembleIndex
+
+    provider = served.provider
+    main = (tmp_path / "basalt").resolve()
+    _repo(main, {"src/greeter.py": GREETER})
+
+    # 1. The first index buys every chunk once, the provider reading each with its path.
+    ZembleIndex.from_path(main, embedder=SPEC)
+    first = provider.bought()
+    assert first and all(text.startswith("basalt/src/greeter.py") for text in first), first
+
+    # 2. A lane's worktree, a linked worktree, a full clone and a clone with the file moved buy nothing.
+    lane = tmp_path / "basalt-lane"
+    lane.mkdir()
+    git(main, "worktree", "add", "-q", "--detach", str(lane / "basalt"))
+    git(main, "worktree", "add", "-q", "--detach", str(tmp_path / "worktrees" / "task-x"))
+    renamed = _clone(main, tmp_path / "renamed-copy")
+    (renamed / "lib").mkdir()
+    git(renamed, "mv", "src/greeter.py", "lib/hello_world.py")
+    for root in (lane / "basalt", tmp_path / "worktrees" / "task-x", _clone(main, tmp_path / "full-clone"), renamed):
+        index = ZembleIndex.from_path(root.resolve(), embedder=SPEC)
+        assert provider.bought() == first, f"step 2: {root} bought again"
+        assert len(index.chunks) == len(first)
+    texts = [embedding_text(chunk) for chunk in ZembleIndex.from_path(renamed, embedder=SPEC).chunks]
+    assert all(text.startswith("renamed-copy/lib/hello_world.py") for text in texts), "the provider text keeps its path"
+    assert {cache_key(text) for text in texts} == {cache_key(text) for text in first}, "one key per chunk, any path"
+
+    # 3. Inside one request, copies of one chunk under several paths take one provider slot: the first one's.
+    lane_text, clone_text = (
+        _captioned("def fresh(): pass", f"{path} words | def fresh") for path in ("lane/a", "clone/b")
+    )
+    vectors = build_embedder(SPEC).embedder.embed_documents([lane_text, clone_text, lane_text])
+    assert provider.bought()[len(first) :] == [lane_text], "step 3: bought once, with the first text's path"
+    np.testing.assert_allclose(vectors[1], vectors[0])
+    assert build_embedder(SPEC).embedder.pending_documents([clone_text, "brand new"]) == ["brand new"], "step 3"
+
+
+def test_an_index_saved_before_path_free_keys_keeps_working_and_migrates_without_buying(
+    served: Running, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An index and server vectors keyed by whole texts load, search and migrate with no rebuild and no purchase."""
+    from tests.test_lanes import _repo
+    from zemble.index import create as create_module
+    from zemble.index.index import ZembleIndex
+
+    provider = served.provider
+    main = (tmp_path / "basalt").resolve()
+    _repo(main, {"src/greeter.py": GREETER})
+    cache_folder = resolve_cache_folder()
+    server_file = served.service.directory / "voyage-voyage-4-lite.sqlite"
+
+    # 1. The code before path-free keys: every text keys by its whole text, on the server and in the index.
+    with monkeypatch.context() as before:
+        before.setattr(create_module, "embedding_text", lambda chunk: str(embedding_text(chunk)))
+        saved = ZembleIndex.from_path(main, embedder=SPEC)
+        old_results = [(r.chunk.file_path, r.chunk.start_line, r.score) for r in saved.search("greet", rerank=False)]
+    bought = provider.bought()
+    texts = [embedding_text(chunk) for chunk in saved.chunks]
+    assert {text_hash(text) for text in texts} <= _server_digests(served), "step 1: stored under whole-text keys"
+    assert not {cache_key(text) for text in texts} & _server_digests(served)
+
+    # 2. The new code opens that index as it is: no rebuild, no purchase, the same answers.
+    reopened = ZembleIndex.from_path(main, embedder=SPEC)
+    assert reopened.loaded_from_disk, "step 2: the saved index is loaded, not rebuilt"
+    assert [
+        (r.chunk.file_path, r.chunk.start_line, r.score) for r in reopened.search("greet", rerank=False)
+    ] == old_results
+    assert provider.bought() == bought, "step 2"
+
+    # 3. Before any migration a build elsewhere is still served from the old purchase, which it copies to the key.
+    client_embedder = build_embedder(SPEC).embedder
+    assert client_embedder.pending_documents(texts) == [], "step 3: the bill guard sees every chunk paid"
+    np.testing.assert_allclose(client_embedder.embed_documents(texts[:1]), provider.vectors([str(texts[0])]), atol=1e-6)
+    assert provider.bought() == bought and cache_key(texts[0]) in _server_digests(served), "step 3"
+
+    # 4. The daily report migrates the rest on the server, from the stored chunks alone, buying nothing.
+    _set(server_file, "UPDATE used SET day = ?", today() - 400)
+    daemon_server.Daemon(watch=False).report_referenced()
+    [report] = report_referenced(cache_folder, ServerClient(server_settings()), force=True)
+    keys = {cache_key(text) for text in texts}
+    assert report.rekeyed == 0 and report.held == len(keys), "step 4: the daemon's report already migrated"
+    assert {cache_key(text) for text in texts} <= _server_digests(served)
+    assert served.service.counters.referenced_rekeyed == len(keys) - 1, "step 4: all but step 3's copy"
+    assert provider.bought() == bought, "step 4: a migration buys nothing"
+    days = _server_days(served)
+    assert all(days[cache_key(text)] == today() for text in texts), "step 4: the new keys are in use today"
+    assert all(days[text_hash(text)] == today() - 400 for text in texts), "step 4: the old rows age out for gc"
+
+    # 5. Once a day: the next report the same day sends nothing; `--force` re-sends and copies nothing twice.
+    assert report_referenced(cache_folder, ServerClient(server_settings()))[0].skipped == REPORTED_TODAY
+    assert run_embed_server(argparse.Namespace(embed_server_action="report", force=True)) == 0
+    assert "0 copied to their path-free key" in capsys.readouterr().out
+
+    # 6. A full clone of the same tree now buys nothing.
+    ZembleIndex.from_path(_clone(main, tmp_path / "full-clone"), embedder=SPEC)
+    assert provider.bought() == bought, "step 6"
+
+
+def test_a_server_from_before_path_free_keys_still_answers_new_clients(
+    served: Running, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server that ignores keys keys by whole texts: a new client is served right and its report stamps those."""
+    original = http_server._route
+
+    def old_route(service: EmbeddingService, route: str, payload: dict, label: str) -> dict:
+        answer = original(service, route, {name: value for name, value in payload.items() if name != "keys"}, label)
+        return {name: value for name, value in answer.items() if name != "rekeyed"}
+
+    monkeypatch.setattr(http_server, "_route", old_route)
+    chunk = replace(make_chunk("def kept(): pass"), context="basalt/src/module.py words | def kept")
+    moved = embedding_text(chunk)
+    embedder = build_embedder(SPEC).embedder
+    embedder.embed_documents([moved])
+    assert _server_digests(served) == {text_hash(moved)}, "an old server keys by the whole text"
+    assert embedder.pending_documents([moved]) == [], "and a new client's coverage question reads it right"
+    _index(resolve_cache_folder(), "a" * 64, [chunk], embedder=SPEC)
+    [report] = report_referenced(resolve_cache_folder(), ServerClient(server_settings()))
+    assert (report.held, report.rekeyed) == (1, 0), "the report stamps the whole-text key an old server holds"
+    assert served.provider.bought() == [moved]
+
+
+def _captioned(content: str, context: str) -> str:
+    """The embedding text of a chunk carrying this capsule."""
+    return embedding_text(replace(make_chunk(content), context=context))
+
+
+def _server_digests(running: Running) -> set[str]:
+    """Every key the server's cache file holds a vector under."""
+    connection = sqlite3.connect(running.service.directory / "voyage-voyage-4-lite.sqlite")
+    try:
+        return {row[0] for row in connection.execute("SELECT text_sha256 FROM embeddings")}
+    finally:
+        connection.close()

@@ -689,6 +689,10 @@ def _clear_embeddings(cache_folder: Path, *, dry_run: bool, grace_days: int) -> 
         else:
             after = report.size_after if report.size_after is not None else report.size_before
             print(f"  {megabytes(report.size_before)} -> {megabytes(after)}")
+            if report.rekeyed:
+                print(
+                    f"  {report.rekeyed} referenced vector(s) copied from their whole-text key to their path-free key"
+                )
         note = vacuum_note(report, dry_run=dry_run)
         if note is not None:
             print(f"  {note}")
