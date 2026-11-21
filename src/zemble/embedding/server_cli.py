@@ -186,7 +186,8 @@ def _check() -> int:
     status = client.status()
     print(f"{client.settings.url}: up, zemble {health.get('version')}, for {status['uptime_seconds']} s")
     for family in status["families"]:
-        print(f"  {family['family']}: {family['vectors']} vectors, {family['bytes'] / 1e6:.1f} MB")
+        held = "vectors not counted yet" if family["vectors"] is None else f"{family['vectors']} vectors"
+        print(f"  {family['family']}: {held}, {family['bytes'] / 1e6:.1f} MB")
     print(f"  rerankers: {', '.join(status['rerankers']) or 'none'}")
     print(
         f"  since start: {status['documents_requested']} document texts asked for, "

@@ -287,16 +287,26 @@ class EmbeddingService:
         return reranker.score(query, passages)
 
     def status(self) -> dict[str, Any]:
-        """Report what the service holds and what it has done since it started."""
+        """Report what the service holds and what it has done since it started.
+
+        A family's ``vectors`` is the count its file keeps, read without a scan; it is None, with
+        ``counting`` true, while the one-time first count of a file from before that count runs.
+        """
         families = []
         for family in self.families:
             cache = EmbeddingCache(family, self.directory)
             try:
-                rows = cache.count()
+                rows = cache.stored_count()
             finally:
                 cache.close()
             families.append(
-                {"family": family, "vectors": rows, "bytes": file_size(cache.path), "path": str(cache.path)}
+                {
+                    "family": family,
+                    "vectors": rows,
+                    "counting": rows is None,
+                    "bytes": file_size(cache.path),
+                    "path": str(cache.path),
+                }
             )
         tokens = sum(int(getattr(embedder.inner, "total_tokens", 0)) for embedder in self._embedders.values())
         return {

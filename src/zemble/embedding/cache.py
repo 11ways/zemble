@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import logging
 import re
 import sqlite3
 import threading
@@ -22,6 +23,8 @@ from zemble.embedding.base import (
     normalize_rows,
     semantic_weight_bonus,
 )
+
+logger = logging.getLogger(__name__)
 
 _SLUG_UNSAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 
@@ -55,6 +58,28 @@ CREATE TABLE IF NOT EXISTS cache_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL
 #: `cache_meta` key: the day the `used` stamps began. A vector stored before it has no stamp,
 #: and counts as used that day, never as unused forever: an unknown age fails closed.
 STAMPS_SINCE_KEY = "used_stamps_since"
+
+#: `cache_meta` keys of the vector count a file keeps of itself. TRACKED is moved by triggers on
+#: every row added or removed since they were installed; BASE is COUNT(*) minus TRACKED, read
+#: once from one snapshot. That difference never changes after the triggers exist, so the stored
+#: count is TRACKED plus BASE, exact, and a file without BASE is still being counted.
+VECTORS_TRACKED_KEY = "vectors_tracked"
+VECTORS_BASE_KEY = "vectors_base"
+
+_COUNT_INSERT_TRIGGER = "embeddings_count_insert"
+
+# AIDEV-NOTE: the insert trigger runs BEFORE the row lands and counts only a key that is new and
+# would pass NOT NULL, so INSERT OR IGNORE and INSERT OR REPLACE (whose replaced row fires no delete
+# trigger unless recursive_triggers is on, which nothing here turns on) both count right, and so
+# does any older zemble writing this file: triggers live in the file, not in this code.
+_COUNT_TRIGGERS = (
+    f"""CREATE TRIGGER IF NOT EXISTS {_COUNT_INSERT_TRIGGER} BEFORE INSERT ON embeddings
+    WHEN NEW.text_sha256 IS NOT NULL AND NEW.dims IS NOT NULL AND NEW.vec IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM embeddings WHERE text_sha256 = NEW.text_sha256 AND dims = NEW.dims)
+    BEGIN UPDATE cache_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = '{VECTORS_TRACKED_KEY}'; END""",
+    f"""CREATE TRIGGER IF NOT EXISTS embeddings_count_delete AFTER DELETE ON embeddings
+    BEGIN UPDATE cache_meta SET value = CAST(value AS INTEGER) - 1 WHERE key = '{VECTORS_TRACKED_KEY}'; END""",
+)
 
 
 def today() -> int:
@@ -138,6 +163,7 @@ def connect_cache(path: Path) -> sqlite3.Connection:
                         "INSERT OR IGNORE INTO cache_meta (key, value) VALUES (?, ?)",
                         (STAMPS_SINCE_KEY, str(today())),
                     )
+            _install_count(connection)
         return connection
     except BaseException:
         connection.close()
@@ -179,6 +205,80 @@ def stamps_since(connection: sqlite3.Connection) -> int | None:
     except sqlite3.OperationalError:
         return None
     return int(row[0]) if row is not None else None
+
+
+def _install_count(connection: sqlite3.Connection) -> None:
+    """Give a file its kept vector count: the tracking row and its triggers in one transaction."""
+    installed = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?", (_COUNT_INSERT_TRIGGER,)
+    ).fetchone()
+    if installed is not None:
+        return
+    with _transaction(connection):
+        connection.execute("INSERT OR IGNORE INTO cache_meta (key, value) VALUES (?, '0')", (VECTORS_TRACKED_KEY,))
+        for trigger in _COUNT_TRIGGERS:
+            connection.execute(trigger)
+        if connection.execute("SELECT 1 FROM embeddings LIMIT 1").fetchone() is None:
+            connection.execute("INSERT OR IGNORE INTO cache_meta (key, value) VALUES (?, '0')", (VECTORS_BASE_KEY,))
+
+
+def _kept_count(connection: sqlite3.Connection) -> int | None:
+    """Return the count a file keeps of its vectors, or None while its first count has not been recorded."""
+    rows = dict(
+        connection.execute(
+            "SELECT key, value FROM cache_meta WHERE key IN (?, ?)", (VECTORS_TRACKED_KEY, VECTORS_BASE_KEY)
+        ).fetchall()
+    )
+    if VECTORS_TRACKED_KEY not in rows or VECTORS_BASE_KEY not in rows:
+        return None
+    return int(rows[VECTORS_TRACKED_KEY]) + int(rows[VECTORS_BASE_KEY])
+
+
+def settle_count(path: Path) -> None:
+    """Record what a file's kept count starts from, scanning it once on a connection of its own.
+
+    The scan and the tracked change are read in one snapshot, and their difference is the same in
+    every snapshot, so a writer between the scan and the record, or a second settler, cannot make it
+    wrong. WAL readers block no writer; the WAL only cannot be checkpointed past the scan meanwhile.
+    """
+    connection = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=BUSY_TIMEOUT_SECONDS)
+    try:
+        with _transaction(connection, immediate=False):
+            counted = int(connection.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
+            tracked = connection.execute(
+                "SELECT value FROM cache_meta WHERE key = ?", (VECTORS_TRACKED_KEY,)
+            ).fetchone()
+        if tracked is None:
+            return
+        with _transaction(connection):
+            connection.execute(
+                "INSERT OR IGNORE INTO cache_meta (key, value) VALUES (?, ?)",
+                (VECTORS_BASE_KEY, str(counted - int(tracked[0]))),
+            )
+    finally:
+        connection.close()
+
+
+_settling: dict[Path, threading.Thread] = {}
+_settling_lock = threading.Lock()
+
+
+def _settle_in_background(path: Path) -> None:
+    """Start the one-time first count of a file on a thread, unless one already runs in this process."""
+
+    def settle() -> None:
+        try:
+            settle_count(path)
+        except sqlite3.Error:
+            logger.warning("counting the vectors of %s failed; the next status retries", path, exc_info=True)
+
+    with _settling_lock:
+        running = _settling.get(path)
+        if running is not None and running.is_alive():
+            return
+        thread = threading.Thread(target=settle, name=f"zemble-count-{path.name}", daemon=True)
+        _settling[path] = thread
+        thread.start()
 
 
 class EmbeddingCache:
@@ -308,9 +408,28 @@ class EmbeddingCache:
         return uncovered_texts(texts, digests, covered)
 
     def count(self) -> int:
-        """Return how many vectors this file stores, at every width."""
+        """Return how many vectors this file stores, at every width, scanning it here if it was never counted."""
         with self._lock:
-            return int(self._connection.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
+            kept = _kept_count(self._connection)
+        if kept is not None:
+            return kept
+        settle_count(self.path)
+        with self._lock:
+            kept = _kept_count(self._connection)
+        if kept is None:
+            raise sqlite3.DatabaseError(f"{self.path} keeps no vector count after counting it")
+        return kept
+
+    def stored_count(self) -> int | None:
+        """Return how many vectors this file stores without scanning it, or None while its first count runs.
+
+        A None starts that count in the background; it runs once per file, ever.
+        """
+        with self._lock:
+            kept = _kept_count(self._connection)
+        if kept is None:
+            _settle_in_background(self.path)
+        return kept
 
     def put_missing(self, rows: list[tuple[str, int, bytes]]) -> int:
         """Store vectors another cache already bought, keeping any this file holds, and stamp them.
@@ -321,11 +440,10 @@ class EmbeddingCache:
         if not rows:
             return 0
         with self._lock, _transaction(self._connection):
-            before = self._connection.total_changes
-            self._connection.executemany(
+            # The cursor counts the rows inserted; `total_changes` would add the count triggers' updates.
+            added = self._connection.executemany(
                 "INSERT OR IGNORE INTO embeddings (text_sha256, dims, vec) VALUES (?, ?, ?)", rows
-            )
-            added = self._connection.total_changes - before
+            ).rowcount
             self._stamp({digest for digest, _dims, _vector in rows})
         return added
 

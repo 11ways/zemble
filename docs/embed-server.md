@@ -82,6 +82,19 @@ is also how many texts one client request carries, so a failure loses at most on
 Queries are never stored: for an asymmetric model a query vector must never be served where a
 document vector was asked for.
 
+## Counting what the server holds
+
+`GET /v1/status` reads each family's vector count from the file itself, never by scanning it:
+two triggers in the file move a counter in `cache_meta` on every row added or removed, whoever
+writes (`put_many`, `put_missing`/`push`, `gc`, an older zemble, a hand-run statement), inside
+that writer's own transaction, so a daemon and a CLI on one client file cannot tear it. A file
+from before the counter gets the triggers when it is first opened and is counted once, on a
+background thread with a connection of its own; until that scan ends its status says
+`"vectors": null, "counting": true` (`check` prints "vectors not counted yet"), then the exact
+number. On a 9.4 GB synthetic file of 2,000,000 vectors (2026-11-21, page cache evicted) status
+took 3.3 s before (0.09 s warm), and 0.05 s after with the scan running behind it for 3.4 s, then
+0.002 s.
+
 ## Garbage collection
 
 ```bash
@@ -106,7 +119,7 @@ one home of every route and limit both sides share).
 | `POST /v1/describe` | `spec` | `model_id`, `dimensions`, `family`, `semantic_weight_bonus` |
 | `POST /v1/store` | `spec`, `rows` of `[text sha256, dims, base64 vector]` | `added` |
 | `POST /v1/rerank` | `spec`, `query`, `passages` | `scores` |
-| `GET /v1/status` | - | families, counters since start |
+| `GET /v1/status` | - | families (`vectors`, `counting`, `bytes`), counters since start |
 | `GET /v1/health` | - | `ok`, `version` (no key needed) |
 
 ## Measured
