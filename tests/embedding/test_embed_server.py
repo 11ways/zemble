@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
+import sqlite3
 import stat
 import threading
 import time
@@ -13,16 +16,23 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from zemble.embedding.cache import EmbeddingCache, cache_root, text_hash
+from tests.conftest import make_chunk
+from tests.embedding.test_embedding_gc import _index, _set
+from zemble.cache import resolve_cache_folder
+from zemble.chunking.capsule import embedding_text
+from zemble.daemon import server as daemon_server
+from zemble.embedding import server as http_server
+from zemble.embedding.cache import EmbeddingCache, cache_root, text_hash, today
 from zemble.embedding.gc import collect_unused
 from zemble.embedding.http import EmbeddingRequestError
 from zemble.embedding.pricing import EmbeddingBudgetExceeded, require_affordable_bill
+from zemble.embedding.referenced import REPORTED_FILE, REPORTED_TODAY, FamilyReport, distinct_batches, report_referenced
 from zemble.embedding.registry import build_embedder
-from zemble.embedding.served import ServerEmbedder, ServerReranker
+from zemble.embedding.served import ServerClient, ServerEmbedder, ServerReranker
 from zemble.embedding.server import KeyRing, add_key, make_server
 from zemble.embedding.server_cli import run_embed_server
 from zemble.embedding.service import EmbeddingService
-from zemble.embedding.wire import DOCUMENTS_PER_REQUEST, SERVER_ENV, SERVER_KEY_ENV
+from zemble.embedding.wire import DOCUMENTS_PER_REQUEST, REFERENCED_ROUTE, SERVER_ENV, SERVER_KEY_ENV, server_settings
 from zemble.rerank.registry import load_reranker
 
 SPEC = "voyage:voyage-4-lite@8"
@@ -378,3 +388,121 @@ def test_server_gc_sweeps_only_what_nobody_used(tmp_path: Path) -> None:
         assert remaining.covered([text_hash("fresh"), text_hash("stale")], 8) == {text_hash("fresh")}
     finally:
         remaining.close()
+
+
+def _server_days(running: Running) -> dict[str, int]:
+    """Every use stamp the server's cache file holds."""
+    connection = sqlite3.connect(running.service.directory / "voyage-voyage-4-lite.sqlite")
+    try:
+        return dict(connection.execute("SELECT text_sha256, day FROM used").fetchall())
+    finally:
+        connection.close()
+
+
+def test_a_covered_hit_is_stamped_on_the_server(served: Running) -> None:
+    """A pre-flight's coverage question proves its hits are in a live tree, so the server stamps them."""
+    embedder = build_embedder(SPEC).embedder
+    embedder.embed_documents(["alpha", "beta"])
+    _set(served.service.directory / "voyage-voyage-4-lite.sqlite", "UPDATE used SET day = ?", today() - 400)
+    assert embedder.stored_digests([text_hash("alpha"), text_hash("gamma")]) == {text_hash("alpha")}
+    assert _server_days(served) == {text_hash("alpha"): today(), text_hash("beta"): today() - 400}
+
+
+def test_distinct_batches_send_a_chunk_shared_by_indexes_once(tmp_path: Path) -> None:
+    """Indexes of one workspace share most chunks; the report sends each shared hash once, in bounded batches."""
+    shared = [make_chunk(f"def shared_{i}(): pass") for i in range(5)]
+    first = _index(tmp_path, "a" * 64, [*shared, make_chunk("def own_a(): pass")])
+    second = _index(tmp_path, "b" * 64, [make_chunk("def own_b(): pass"), *shared[::-1]], variant="overlay")
+    broken = _index(tmp_path, "c" * 64, shared)
+    (broken / "chunks" / "chunks.json").write_text("not json")
+    report = FamilyReport(FAMILY, 3)
+    batches = list(distinct_batches([first, broken, second], 2, report))
+    sent = [digest for batch in batches for digest in batch]
+    assert all(len(batch) <= 2 for batch in batches)
+    assert len(sent) == len(set(sent)) == 7, "each distinct hash exactly once"
+    assert set(sent) == {text_hash(embedding_text(chunk)) for chunk in [*shared]} | {
+        text_hash(embedding_text(make_chunk("def own_a(): pass"))),
+        text_hash(embedding_text(make_chunk("def own_b(): pass"))),
+    }
+    assert report.unreadable == 1, "an unreadable index is passed over and counted"
+
+
+def test_referenced_report_journey(
+    served: Running,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A client's saved indexes and overlays keep their server vectors alive, once a day, quietly past an old server."""
+    cache_folder = resolve_cache_folder()
+    chunks = [make_chunk(f"def chunk_{i}(): pass") for i in range(5)]
+    _index(cache_folder, "a" * 64, chunks, embedder=SPEC)
+    _index(cache_folder, "b" * 64, [*chunks[:2], make_chunk("def lane(): pass")], embedder=SPEC, variant="overlay-code")
+    _index(cache_folder, "c" * 64, [make_chunk("def free(): pass")], embedder="model2vec:minishlab/potion-code-16M")
+    held = [text_hash(embedding_text(chunk)) for chunk in chunks[:4]]
+    build_embedder(SPEC).embedder.embed_documents([embedding_text(chunk) for chunk in chunks[:4]])
+    _set(served.service.directory / "voyage-voyage-4-lite.sqlite", "UPDATE used SET day = ?", today() - 400)
+    settings = server_settings()
+    assert settings is not None
+    client = ServerClient(settings)
+
+    # 1. The paid family's index and overlay are reported; the server stamps what it holds, and only that.
+    [report] = report_referenced(cache_folder, client)
+    assert (report.family, report.indexes, report.sent, report.held, report.skipped) == (FAMILY, 2, 6, 4, None)
+    assert _server_days(served) == dict.fromkeys(held, today()), "step 1: no row for a hash the server never stored"
+    assert served.service.counters.referenced_reported == 6
+
+    # 2. The same day it is not sent again, across processes: the day is kept in the cache folder.
+    assert (cache_folder / REPORTED_FILE).exists()
+    [again] = report_referenced(cache_folder, client)
+    assert again.skipped == REPORTED_TODAY and served.service.counters.referenced_reported == 6, "step 2"
+
+    # 3. The command line sends one report by hand, `--force` past today's.
+    assert run_embed_server(argparse.Namespace(embed_server_action="report", force=True)) == 0
+    out = capsys.readouterr().out
+    assert f"{FAMILY}: 6 distinct hashes from 2 index(es) reported to {served.url}, 4 held there" in out, out
+
+    # 4. A server older than the route answers 404: logged once, the day recorded, nothing raised.
+    original = http_server._route
+
+    def old_route(service: EmbeddingService, route: str, payload: dict) -> dict:
+        if route == REFERENCED_ROUTE:
+            raise http_server._HttpError(404, f"unknown route {route}")
+        return original(service, route, payload)
+
+    monkeypatch.setattr(http_server, "_route", old_route)
+    tomorrow = today() + 1
+    monkeypatch.setattr("zemble.embedding.referenced.today", lambda: tomorrow)
+    with caplog.at_level(logging.INFO, logger="zemble.embedding.referenced"):
+        [old] = report_referenced(cache_folder, client)
+    assert old.skipped is not None and "predates" in old.skipped, "step 4"
+    assert sum("no referenced-vectors route" in record.message for record in caplog.records) == 1
+    assert report_referenced(cache_folder, client)[0].skipped == REPORTED_TODAY, "step 4: retried only the next day"
+
+    # 5. The next day, against an upgraded server, it goes out again.
+    monkeypatch.setattr(http_server, "_route", original)
+    monkeypatch.setattr("zemble.embedding.referenced.today", lambda: tomorrow + 1)
+    assert report_referenced(cache_folder, client)[0].held == 4, "step 5"
+
+
+@pytest.mark.anyio
+async def test_the_daemon_reports_referenced_vectors_in_the_background(
+    served: Running, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The daemon's loop sends the report after its first delay, and its env knob turns it off."""
+    cache_folder = resolve_cache_folder()
+    _index(cache_folder, "a" * 64, [make_chunk("def kept(): pass")], embedder=SPEC)
+    monkeypatch.setattr(daemon_server, "_REFERENCED_FIRST_DELAY_SECONDS", 0.0)
+    daemon = daemon_server.Daemon(watch=False)
+    loop = asyncio.create_task(daemon.referenced_loop())
+    try:
+        for _ in range(500):
+            if served.service.counters.referenced_reported:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        loop.cancel()
+    assert served.service.counters.referenced_reported == 1, "the loop reported the one chunk"
+
+    monkeypatch.setenv(daemon_server.REFERENCED_HOURS_ENV, "0")
+    await asyncio.wait_for(daemon.referenced_loop(), timeout=5)

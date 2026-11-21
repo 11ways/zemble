@@ -32,6 +32,7 @@ from zemble.embedding.wire import (
     MAX_BODY_BYTES,
     PROVIDER_FAILED_STATUS,
     QUERIES_ROUTE,
+    REFERENCED_ROUTE,
     RERANK_ROUTE,
     STATUS_ROUTE,
     STORE_ROUTE,
@@ -177,6 +178,8 @@ def _route(service: EmbeddingService, route: str, payload: dict[str, Any]) -> di
     if route == COVERED_ROUTE:
         covered, width = service.covered(_spec(payload), _texts(payload, "digests"), bool(payload.get("probe")))
         return {"covered": sorted(covered), "dimensions": width}
+    if route == REFERENCED_ROUTE:
+        return {"held": service.referenced(_spec(payload), _texts(payload, "digests"))}
     if route == DESCRIBE_ROUTE:
         return service.describe(_spec(payload))
     if route == STORE_ROUTE:

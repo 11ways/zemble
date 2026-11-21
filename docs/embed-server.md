@@ -95,6 +95,29 @@ number. On a 9.4 GB synthetic file of 2,000,000 vectors (2026-11-21, page cache 
 took 3.3 s before (0.09 s warm), and 0.05 s after with the scan running behind it for 3.4 s, then
 0.002 s.
 
+## Keeping used vectors alive
+
+The server cannot see its clients' indexes, and an index that is only loaded never asks for its
+vectors again, so the `used` stamp (the last day a vector was used) is the server's only
+evidence of what is still wanted. Three things write it: storing a vector (`documents`, `store`),
+serving one (`documents`), and a `covered` hit, since a pre-flight only asks about the chunks of
+a live tree. A lookup stamps after its read, in a write transaction of its own, so it never pins
+a WAL snapshot, and a hash already stamped today takes no writer lock at all.
+
+Each client also reports what its saved indexes hold: the daemon, 10 minutes after it starts and
+then every `ZEMBLE_DAEMON_REFERENCED_HOURS` (6; `0` disables), sends the server the text hash of
+every chunk of every saved index and lane overlay of a paid family (`POST /v1/referenced`, in
+requests of 10,000 hashes, each distinct hash once). The server stamps the ones it holds and
+never creates a stamp for a hash it does not. Each family goes once a day per server: the last
+day reported is kept in `~/.cache/zemble/embed-server-referenced.json`, so a daemon restart does
+not resend. A server older than the route answers 404: the client logs it once and tries again
+the next day. `zemble embed-server report [--force]` sends the report by hand.
+
+Measured 2026-11-21 on aeor: the client's 38 saved indexes and overlays of `voyage-4-lite` hold
+3.35M chunks, 0.96M distinct hashes, read and hashed in 27 s with 57 MB of private memory; on a
+synthetic 4M-vector server file a 10,000-hash batch costs ~3 s the first time that day (about
+1.2 s of it the lookup, the rest writing the stamps) and ~0.14 s again the same day.
+
 ## Garbage collection
 
 ```bash
@@ -102,9 +125,14 @@ zemble embed-server gc --dry-run          # on the server host
 zemble embed-server gc                    # stop the server first; VACUUM needs the file alone
 ```
 
-The server cannot see its clients' indexes, and an index that is only loaded never asks for
-its vectors again, so a use stamp is its only evidence. It keeps every vector stored or served
-within `--grace-days` (180 by default, against 14 on a client) and sweeps the rest.
+It keeps every vector used within `--grace-days` (180 by default, against 14 on a client) and
+sweeps the rest. Then it VACUUMs, but only when the disk can hold it: in WAL mode VACUUM copies
+the live pages into a temp database (in `SQLITE_TMPDIR`, else `TMPDIR`, else `/var/tmp`) and
+then writes the whole rebuilt file through the WAL before the file shrinks, so it needs about
+the live size twice. When it is short the deletes are still committed and the WAL checkpointed,
+and both `gc` and `zemble clear embeddings` say "VACUUM skipped: needs ~X on <folder>, Y free;
+freed pages are reused by new vectors"; a dry run predicts the same and reports the free pages
+the file already holds.
 
 ## Wire format
 
@@ -115,7 +143,8 @@ one home of every route and limit both sides share).
 | --- | --- | --- |
 | `POST /v1/documents` | `spec`, `texts` | `rows`, `dimensions`, `vectors` |
 | `POST /v1/queries` | `spec`, `texts` | `rows`, `dimensions`, `vectors` |
-| `POST /v1/covered` | `spec`, `digests`, `probe` | `covered`, `dimensions` |
+| `POST /v1/covered` | `spec`, `digests`, `probe` | `covered`, `dimensions` (hits are stamped) |
+| `POST /v1/referenced` | `spec`, `digests` | `held` (the held ones are stamped) |
 | `POST /v1/describe` | `spec` | `model_id`, `dimensions`, `family`, `semantic_weight_bonus` |
 | `POST /v1/store` | `spec`, `rows` of `[text sha256, dims, base64 vector]` | `added` |
 | `POST /v1/rerank` | `spec`, `query`, `passages` | `scores` |

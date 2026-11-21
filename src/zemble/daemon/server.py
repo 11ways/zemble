@@ -108,6 +108,14 @@ PRUNE_HOURS_ENV = "ZEMBLE_DAEMON_PRUNE_HOURS"
 _DEFAULT_PRUNE_HOURS = 6
 #: The first prune waits this long after start, so it never competes with the first requests.
 _PRUNE_FIRST_DELAY_SECONDS = 120.0
+#: Hours between two checks whether a paid family's referenced vectors are due for their daily report
+#: to the embedding server (`zemble.embedding.referenced`); 0 disables the daemon's own reports.
+REFERENCED_HOURS_ENV = "ZEMBLE_DAEMON_REFERENCED_HOURS"
+_DEFAULT_REFERENCED_HOURS = 6
+#: The first report waits this long after start, well past the first requests and the first prune.
+_REFERENCED_FIRST_DELAY_SECONDS = 600.0
+#: How often a due report looks again while a rebuild runs.
+_REFERENCED_BUSY_RETRY_SECONDS = 60.0
 _MAX_CHANGED_PATHS = 4096
 
 
@@ -1120,6 +1128,46 @@ class Daemon:
                 logger.exception("pruning the cache of roots that are gone failed")
             await asyncio.sleep(hours * 3600)
 
+    async def referenced_loop(self) -> None:
+        """Report the vectors saved indexes reference to the configured embedding server, once a day per family."""
+        hours = _env_int(REFERENCED_HOURS_ENV, _DEFAULT_REFERENCED_HOURS)
+        if hours <= 0:
+            return
+        await asyncio.sleep(_REFERENCED_FIRST_DELAY_SECONDS)
+        while not self.stop_event.is_set():
+            while self.rebuilding:
+                await asyncio.sleep(_REFERENCED_BUSY_RETRY_SECONDS)
+            try:
+                await asyncio.to_thread(self.report_referenced)
+            except Exception:
+                logger.exception("reporting referenced vectors to the embedding server failed")
+            await asyncio.sleep(hours * 3600)
+
+    def report_referenced(self) -> None:
+        """Send one referenced-vectors report when an embedding server is configured; blocking."""
+        from zemble.cache import resolve_cache_folder
+        from zemble.embedding.referenced import REPORTED_TODAY, report_referenced
+        from zemble.embedding.served import ServerClient
+        from zemble.embedding.wire import server_settings
+
+        settings = server_settings()
+        if settings is None:
+            return
+        started = time.monotonic()
+        for report in report_referenced(resolve_cache_folder(), ServerClient(settings)):
+            if report.skipped is None:
+                logger.info(
+                    "reported %d referenced vector(s) of %s from %d index(es) to %s, %d held there, after %.1f s",
+                    report.sent,
+                    report.family,
+                    report.indexes,
+                    settings.url,
+                    report.held,
+                    time.monotonic() - started,
+                )
+            elif report.skipped != REPORTED_TODAY:
+                logger.info("referenced vectors of %s not reported: %s", report.family, report.skipped)
+
     async def prune_gone_roots(self, *, roots: bool = True) -> list[str]:
         """Delete what dead builds left behind and, unless told not to, every gone root's indexes, overlays and graphs.
 
@@ -1625,6 +1673,7 @@ async def run(max_indexes: int | None = None, idle_minutes: int | None = None, w
     idle_task = asyncio.create_task(daemon.idle_loop())
     prewarm = asyncio.create_task(daemon.cache.load_embedder_once())
     prune_task = asyncio.create_task(daemon.prune_loop())
+    referenced_task = asyncio.create_task(daemon.referenced_loop())
     try:
         async with server:
             await daemon.stop_event.wait()
@@ -1632,6 +1681,7 @@ async def run(max_indexes: int | None = None, idle_minutes: int | None = None, w
         idle_task.cancel()
         prewarm.cancel()
         prune_task.cancel()
+        referenced_task.cancel()
         daemon.shutdown()
         await daemon.graphs.close()
         await daemon.reads.drain()

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -33,9 +34,11 @@ _FAMILY = "voyage:voyage-4-lite"
 _DIMS = 256
 
 
-def _index(cache_folder: Path, key: str, chunks: list[Chunk], embedder: str = f"{_FAMILY}@{_DIMS}") -> Path:
-    """Save a minimal index folder: chunk columns plus the metadata naming its embedder."""
-    folder = cache_folder / key / "index"
+def _index(
+    cache_folder: Path, key: str, chunks: list[Chunk], embedder: str = f"{_FAMILY}@{_DIMS}", variant: str = "index"
+) -> Path:
+    """Save a minimal index (or, with an `overlay` variant, lane overlay) folder: chunk columns plus its embedder."""
+    folder = cache_folder / key / variant
     save_chunks(folder / "chunks", chunks)
     (folder / "metadata.json").write_text(json.dumps({"root_path": "/nowhere", "embedder": embedder}))
     return folder
@@ -111,6 +114,44 @@ def test_vectors_are_stamped_when_stored_and_when_served(tmp_path: Path) -> None
     assert limit == JOURNAL_SIZE_LIMIT_BYTES, "step 3: journal_size_limit is set"
 
 
+def test_lookups_stamp_only_held_vectors_and_a_day_s_repeat_takes_no_writer(tmp_path: Path) -> None:
+    """A stamping lookup stamps its hits, `stamp_held` any held width, an unknown hash never; repeats write nothing."""
+    cache = EmbeddingCache(_FAMILY, tmp_path)
+    narrow, wide, unknown = text_hash("narrow"), text_hash("wide"), text_hash("unknown")
+    cache.put_many([(narrow, 8, np.ones(8, dtype=np.float32)), (wide, 16, np.ones(16, dtype=np.float32))])
+    _set(cache.path, "UPDATE used SET day = ?", today() - 40)
+
+    def days() -> dict[str, int]:
+        connection = sqlite3.connect(cache.path)
+        try:
+            return dict(connection.execute("SELECT text_sha256, day FROM used").fetchall())
+        finally:
+            connection.close()
+
+    # 1. A plain lookup stamps nothing; a stamping one stamps exactly its hits at that width.
+    assert cache.covered([narrow, wide, unknown], 16) == {wide}
+    assert days() == {narrow: today() - 40, wide: today() - 40}, "step 1: a plain lookup writes nothing"
+    assert cache.covered([narrow, wide, unknown], 16, stamp=True) == {wide}
+    assert days() == {narrow: today() - 40, wide: today()}, "step 1: only the hit is stamped"
+
+    # 2. Held hashes are stamped at any width and counted; an unknown one gets no row.
+    assert cache.stamp_held([narrow, wide, unknown]) == 2
+    assert days() == {narrow: today(), wide: today()}, "step 2: no row for an unknown hash"
+
+    # 3. A repeat the same day never asks for the writer: another connection holds it and nothing waits.
+    other = sqlite3.connect(cache.path, isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")
+    cache._connection.execute("PRAGMA busy_timeout = 50")
+    try:
+        assert cache.stamp_held([narrow, wide, unknown]) == 2, "step 3: no writer lock was needed"
+        assert cache.covered([narrow, wide], 8, stamp=True) == {narrow, wide}
+        cache.touch([narrow])
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+        cache.close()
+
+
 def test_a_collection_keeps_references_and_recent_use_and_sweeps_the_rest(tmp_path: Path, holder) -> None:
     """Referenced and recently used vectors survive; the rest is swept and the file shrinks."""
     cache_folder = tmp_path / "cache"
@@ -167,9 +208,73 @@ def test_a_real_collection_sweeps_and_vacuums(tmp_path: Path) -> None:
     connection.close()
 
     # 2. VACUUM returned the space, and the WAL was truncated.
+    assert report.vacuumed and report.vacuum_short is None, "step 2: the disk had room for VACUUM"
     assert report.size_after is not None and report.size_after < report.size_before // 4, "step 2: the file shrank"
     wal = path.with_name(path.name + "-wal")
     assert not wal.exists() or wal.stat().st_size == 0, "step 2: no WAL left over"
+
+
+def test_a_disk_without_room_for_vacuum_keeps_the_sweep_and_skips_vacuum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Short of space for VACUUM's copy, the deletes still commit, the WAL is checkpointed, and both outputs say why."""
+    cache_folder = resolve_cache_folder()
+    _index(cache_folder, "a" * 64, [make_chunk("def kept(): pass")])
+    cache = EmbeddingCache(_FAMILY, cache_folder / "embeddings")
+    path = cache.path
+    cache.put_many([(text_hash(f"padding {i}"), _DIMS, _vector()) for i in range(200)])
+    cache.close()
+    # The temp database lands beside the file, so both of VACUUM's copies are needed on one disk.
+    monkeypatch.setenv("SQLITE_TMPDIR", str(path.parent))
+    free = {"bytes": 10**12}
+    monkeypatch.setattr("zemble.embedding.gc.shutil.disk_usage", lambda place: SimpleNamespace(free=free["bytes"]))
+
+    # 1. With room, a dry run reports the free pages the file already has and no VACUUM note.
+    [dry] = collect_embeddings(cache_folder, grace_days=0, dry_run=True)
+    assert dry.vacuum_short is None and dry.free_page_bytes >= 0, "step 1: room enough"
+
+    # 2. With a few bytes free, the dry run predicts the skip and both copies are counted on the one disk.
+    free["bytes"] = 1000
+    [dry] = collect_embeddings(cache_folder, grace_days=0, dry_run=True)
+    assert dry.vacuum_short is not None and dry.vacuum_short.where == path.parent, "step 2: the skip is predicted"
+    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--dry-run", "--grace-days", "0"])
+    _cli_main()
+    out = capsys.readouterr().out
+    assert "VACUUM would be skipped: needs ~" in out and "free pages new vectors fill" in out, out
+
+    # 3. A real run deletes and checkpoints, skips VACUUM, and says so.
+    monkeypatch.setattr(sys, "argv", ["zemble", "clear", "embeddings", "--grace-days", "0"])
+    _cli_main()
+    out = capsys.readouterr().out
+    assert "VACUUM skipped: needs ~" in out and "freed pages are reused by new vectors" in out, out
+    assert _digests(path) == set(), "step 3: the sweep committed"
+    wal = path.with_name(path.name + "-wal")
+    assert not wal.exists() or wal.stat().st_size == 0, "step 3: the WAL was checkpointed"
+    connection = sqlite3.connect(path)
+    freelist, page_size, page_count = (
+        connection.execute(f"PRAGMA {name}").fetchone()[0] for name in ("freelist_count", "page_size", "page_count")
+    )
+    connection.close()
+    assert freelist * page_size > 200 * _DIMS * 4 * 0.9, "step 3: the swept pages stay as free pages, unvacuumed"
+
+    # 4. The estimate is the live pages, free ones aside, with a margin, once per copy on the one disk.
+    [last] = collect_embeddings(cache_folder, grace_days=0, dry_run=False)
+    assert last.vacuum_short is not None
+    assert last.vacuum_short.needed == 2 * int((page_count - freelist) * page_size * 1.1), "step 4"
+
+
+def test_an_overlay_keeps_its_own_chunks_vectors(tmp_path: Path) -> None:
+    """A lane overlay's saved chunk store references vectors like an index of its own."""
+    cache_folder = tmp_path / "cache"
+    _index(cache_folder, "a" * 64, [make_chunk("def base(): pass")])
+    _index(cache_folder, "b" * 64, [make_chunk("def lane_only(): pass")], variant="overlay-code-docs")
+    cache = EmbeddingCache(_FAMILY, cache_folder / "embeddings")
+    lane_only = text_hash(embedding_text(make_chunk("def lane_only(): pass")))
+    cache.put_many([(lane_only, _DIMS, _vector()), (text_hash("dead"), _DIMS, _vector())])
+    cache.close()
+    [report] = collect_embeddings(cache_folder, grace_days=0, dry_run=False)
+    assert (report.indexes, report.swept) == (2, 1), "the overlay counts as a user of the family"
+    assert _digests(report.path) == {lane_only}, "and its chunk's vector is kept"
 
 
 def test_an_unrecorded_age_fails_closed(tmp_path: Path) -> None:

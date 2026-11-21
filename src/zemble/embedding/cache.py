@@ -331,7 +331,7 @@ class EmbeddingCache:
         sliced = np.frombuffer(wider[0], dtype=np.float32)[:dims]
         return normalize_rows(sliced.reshape(1, -1))[0]
 
-    def covered(self, digests: list[str], dims: int) -> set[str]:
+    def covered(self, digests: list[str], dims: int, *, stamp: bool = False) -> set[str]:
         """Return which of these text hashes already have a usable vector at this width.
 
         A wider vector counts: :meth:`get` slices it. One pass over the primary key instead
@@ -339,27 +339,73 @@ class EmbeddingCache:
 
         :param digests: The text hashes to look up.
         :param dims: The requested width.
+        :param stamp: Also stamp the hits as used today, in a write transaction of its own after the read.
         :return: The subset of ``digests`` that would be a cache hit.
         """
         if not digests:
             return set()
         with self._lock:
-            # Group temporary writes, then release their transaction BEFORE reading the main DB.
-            # Otherwise this lookup pins a WAL snapshot until a later paid embedding tries to write.
-            with _transaction(self._connection, immediate=False):
-                self._connection.execute("CREATE TEMP TABLE IF NOT EXISTS wanted (digest TEXT PRIMARY KEY)")
-                self._connection.execute("DELETE FROM wanted")
-                self._connection.executemany(
-                    "INSERT OR IGNORE INTO wanted (digest) VALUES (?)", [(digest,) for digest in digests]
-                )
+            self._load_wanted(digests)
             # EXISTS pins the probe direction: as a JOIN, sqlite chose to scan the whole embeddings
             # key for every request, 1.6 s per call on a server holding millions of vectors.
+            if stamp:
+                hits = self._held_wanted(dims)
+                self._stamp_stale([digest for digest, stamped_today in hits if not stamped_today])
+                return {digest for digest, _stamped_today in hits}
             rows = self._connection.execute(
                 "SELECT w.digest FROM wanted w WHERE EXISTS "
                 "(SELECT 1 FROM embeddings e WHERE e.text_sha256 = w.digest AND e.dims >= ?)",
                 (dims,),
             ).fetchall()
         return {row[0] for row in rows}
+
+    def _load_wanted(self, digests: Iterable[str]) -> None:
+        """Replace the temp table `wanted` with these digests; the caller holds the lock."""
+        # Group temporary writes, then release their transaction BEFORE reading the main DB.
+        # Otherwise a lookup pins a WAL snapshot until a later paid embedding tries to write.
+        with _transaction(self._connection, immediate=False):
+            self._connection.execute("CREATE TEMP TABLE IF NOT EXISTS wanted (digest TEXT PRIMARY KEY)")
+            self._connection.execute("DELETE FROM wanted")
+            self._connection.executemany(
+                "INSERT OR IGNORE INTO wanted (digest) VALUES (?)", [(digest,) for digest in digests]
+            )
+
+    def _held_wanted(self, dims: int) -> list[tuple[str, int]]:
+        """Return each `wanted` digest held at `dims` or wider, with 1 when it is stamped today already."""
+        return self._connection.execute(
+            "SELECT w.digest, EXISTS (SELECT 1 FROM used u WHERE u.text_sha256 = w.digest AND u.day >= ?) "
+            "FROM wanted w WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.text_sha256 = w.digest AND e.dims >= ?)",
+            (today(), dims),
+        ).fetchall()
+
+    def _stamp_stale(self, digests: list[str]) -> None:
+        """Stamp today held digests a read found unstamped today, in a write transaction of their own.
+
+        Nothing is written, and the writer never taken, when the read found every one stamped today.
+        The upsert re-checks that each is held, so a vector deleted since the read gets no stamp.
+        """
+        if not digests:
+            return
+        day = today()
+        with _transaction(self._connection):
+            self._connection.executemany(
+                "INSERT INTO used (text_sha256, day) SELECT ?1, ?2 "
+                "WHERE EXISTS (SELECT 1 FROM embeddings WHERE text_sha256 = ?1) "
+                "ON CONFLICT(text_sha256) DO UPDATE SET day = excluded.day WHERE day < excluded.day",
+                [(digest, day) for digest in digests],
+            )
+
+    def stamp_held(self, digests: Iterable[str]) -> int:
+        """Stamp today the vectors this file holds for these text hashes, at any width, and count them.
+
+        :param digests: Text hashes a client's saved indexes reference; unknown ones are ignored.
+        :return: How many of them this file holds.
+        """
+        with self._lock:
+            self._load_wanted(digests)
+            hits = self._held_wanted(0)
+            self._stamp_stale([digest for digest, stamped_today in hits if not stamped_today])
+        return len(hits)
 
     def stored_dimensions(self, limit: int = 2) -> list[int]:
         """Return up to `limit` distinct vector widths this family's cache file already holds.
@@ -467,13 +513,11 @@ class EmbeddingCache:
         :param digests: The text hashes a caller was served from this file.
         """
         distinct = set(digests)
-        if not distinct:
-            return
-        with self._lock, _transaction(self._connection):
-            self._stamp(distinct)
+        if distinct:
+            self.stamp_held(distinct)
 
     def _stamp(self, digests: set[str]) -> None:
-        """Write today's stamp for these hashes; a stamp already at today is left unwritten."""
+        """Write today's stamp for these hashes inside the caller's write transaction; one at today stays unwritten."""
         day = today()
         self._connection.executemany(
             "INSERT INTO used (text_sha256, day) VALUES (?, ?) "

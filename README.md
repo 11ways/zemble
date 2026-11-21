@@ -325,6 +325,7 @@ zemble embed-server add-key --label aeor       # on the server host, once per cl
 zemble embed-server run --host 0.0.0.0         # on the server host
 zemble embed-server check                      # on a client: what the server holds
 zemble embed-server push --remove-local        # on a client: upload its vectors, drop the local file
+zemble embed-server report                     # on a client: keep its indexes' vectors alive (the daemon does it daily)
 zemble embed-server gc --dry-run               # on the server host
 ```
 

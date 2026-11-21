@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -22,6 +24,18 @@ DEFAULT_GRACE_DAYS = 14
 
 #: Rough per-row cost of the key, the row header and the `used` stamp beside the vector bytes.
 _ROW_OVERHEAD_BYTES = 100
+
+#: Head room VACUUM gets on top of its estimate before it is run on a nearly full disk.
+_VACUUM_MARGIN = 1.1
+
+
+@dataclass(frozen=True)
+class VacuumRoom:
+    """Space a VACUUM needs on one filesystem against what is free there."""
+
+    needed: int
+    free: int
+    where: Path
 
 
 @dataclass
@@ -43,6 +57,25 @@ class EmbeddingSweep:
     indexes: int = 0
     refused: str | None = None
     holders: list[int] = field(default_factory=list)
+    #: Bytes of free pages the file already holds; new vectors reuse them without growing it.
+    free_page_bytes: int = 0
+    #: Set when the disk cannot hold a VACUUM: a real run then skipped it, a dry run would.
+    vacuum_short: VacuumRoom | None = None
+    vacuumed: bool = False
+
+
+def vacuum_note(report: EmbeddingSweep, *, dry_run: bool) -> str | None:
+    """Render why a sweep did not, or would not, VACUUM; None when the disk holds it."""
+    from zemble.index.scope import megabytes
+
+    short = report.vacuum_short
+    if short is None:
+        return None
+    verb = "would be skipped" if dry_run else "skipped"
+    return (
+        f"VACUUM {verb}: needs ~{megabytes(short.needed)} on {short.where}, {megabytes(short.free)} free; "
+        "freed pages are reused by new vectors"
+    )
 
 
 def day_text(day: int) -> str:
@@ -88,37 +121,54 @@ def last_activity(path: Path) -> float:
     return max(times)
 
 
-def indexes_by_family(cache_folder: Path) -> dict[str, list[Path]]:
-    """Group every saved index folder by the slug of the embedding-cache file its embedder reads.
-
-    :return: Cache-file slug to index folders; an index whose embedder is never cached is absent.
-    """
-    grouped: dict[str, list[Path]] = {}
-    for metadata_path in sorted(cache_folder.glob("*/index*/metadata.json")):
+def saved_indexes(cache_folder: Path) -> Iterator[tuple[str, Path]]:
+    """Yield the embedder spec and folder of every saved index and lane overlay with its own chunk store."""
+    for metadata_path in sorted(
+        [*cache_folder.glob("*/index*/metadata.json"), *cache_folder.glob("*/overlay*/metadata.json")]
+    ):
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         embedder = metadata.get("embedder") if isinstance(metadata, dict) else None
-        family = cached_family(embedder) if isinstance(embedder, str) else None
+        if isinstance(embedder, str):
+            yield embedder, metadata_path.parent
+
+
+def indexes_by_family(cache_folder: Path) -> dict[str, list[Path]]:
+    """Group every saved index and overlay folder by the slug of the embedding-cache file its embedder reads.
+
+    :return: Cache-file slug to index folders; an index whose embedder is never cached is absent.
+    """
+    grouped: dict[str, list[Path]] = {}
+    for embedder, folder in saved_indexes(cache_folder):
+        family = cached_family(embedder)
         if family is not None:
-            grouped.setdefault(family_slug(family), []).append(metadata_path.parent)
+            grouped.setdefault(family_slug(family), []).append(folder)
     return grouped
+
+
+def index_digests(folder: Path) -> Iterator[str]:
+    """Yield the cache key of every chunk one saved index embedded, a repeated text once per chunk.
+
+    The key is recomputed from the stored chunk exactly as a build computed it
+    (`embedding_text`, then `text_hash`), so the two can never disagree.
+
+    :raises OSError, ValueError: If the index cannot be read.
+    """
+    for chunk in load_chunks(folder / "chunks"):
+        yield text_hash(embedding_text(chunk))
 
 
 def referenced_digests(index_folders: Iterable[Path]) -> set[str]:
     """Return the cache key of every chunk any of these indexes embedded.
-
-    The key is recomputed from the stored chunk exactly as a build computed it
-    (`embedding_text`, then `text_hash`), so the two can never disagree.
 
     :raises OSError, ValueError: If an index cannot be read; a collection then refuses, because a
         reference it cannot see would be swept.
     """
     digests: set[str] = set()
     for folder in index_folders:
-        for chunk in load_chunks(folder / "chunks"):
-            digests.add(text_hash(embedding_text(chunk)))
+        digests.update(index_digests(folder))
     return digests
 
 
@@ -228,19 +278,66 @@ def _sweep_file(report: EmbeddingSweep, marked: set[str], *, dry_run: bool) -> N
         pages = connection.execute("PRAGMA freelist_count").fetchone()[0]
         page_size = connection.execute("PRAGMA page_size").fetchone()[0]
         wal = report.path.with_name(report.path.name + "-wal")
-        report.slack_bytes = pages * page_size + (wal.stat().st_size if wal.exists() else 0)
+        report.free_page_bytes = pages * page_size
+        report.slack_bytes = report.free_page_bytes + (wal.stat().st_size if wal.exists() else 0)
+        temp_in_memory = connection.execute("PRAGMA temp_store").fetchone()[0] == 2
         if dry_run:
+            live = _live_bytes(connection) - report.swept_bytes
+            report.vacuum_short = _vacuum_shortfall(report.path, max(live, 0), temp_in_memory)
             return
         connection.execute("DELETE FROM embeddings WHERE rowid IN (SELECT rid FROM doomed)")
         connection.execute("DELETE FROM used WHERE text_sha256 NOT IN (SELECT text_sha256 FROM embeddings)")
         connection.commit()
         connection.execute("DROP TABLE doomed")
         connection.execute("DROP TABLE keep")
-        connection.execute("VACUUM")
+        report.vacuum_short = _vacuum_shortfall(report.path, _live_bytes(connection), temp_in_memory)
+        if report.vacuum_short is None:
+            connection.execute("VACUUM")
+            report.vacuumed = True
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         connection.close()
     report.size_after = file_size(report.path)
+
+
+def _live_bytes(connection: sqlite3.Connection) -> int:
+    """Return the bytes of the pages a database uses, free pages aside."""
+    page_count = connection.execute("PRAGMA page_count").fetchone()[0]
+    free = connection.execute("PRAGMA freelist_count").fetchone()[0]
+    page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+    return int((page_count - free) * page_size)
+
+
+def _sqlite_temp_dir() -> Path:
+    """Return the folder sqlite puts a temp database in on unix, searched in sqlite's own order."""
+    candidates = [os.environ.get("SQLITE_TMPDIR"), os.environ.get("TMPDIR"), "/var/tmp", "/usr/tmp", "/tmp"]
+    for candidate in candidates:
+        if candidate and os.path.isdir(candidate) and os.access(candidate, os.W_OK | os.X_OK):
+            return Path(candidate)
+    return Path.cwd()
+
+
+def _vacuum_shortfall(path: Path, live_bytes: int, temp_in_memory: bool) -> VacuumRoom | None:
+    """Return where a VACUUM of a database with this many live bytes would run out of disk, or None.
+
+    In WAL mode VACUUM first copies the live pages into a temp database, then writes every page of
+    the rebuilt file into the WAL; the main file only shrinks at the checkpoint after it. So it needs
+    about the live size beside the file and the live size again in the temp folder.
+    """
+    needed_each = int(live_bytes * _VACUUM_MARGIN)
+    places = [path.parent] if temp_in_memory else [path.parent, _sqlite_temp_dir()]
+    by_device: dict[int, VacuumRoom] = {}
+    for place in places:
+        device = place.stat().st_dev
+        known = by_device.get(device)
+        if known is None:
+            by_device[device] = VacuumRoom(needed_each, shutil.disk_usage(place).free, place)
+        else:
+            by_device[device] = VacuumRoom(known.needed + needed_each, known.free, known.where)
+    for room in by_device.values():
+        if room.needed > room.free:
+            return room
+    return None
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:

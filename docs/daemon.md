@@ -393,6 +393,7 @@ output can end up in a backup.
 | `ZEMBLE_DAEMON_DIR` / `ZEMBLE_DAEMON_SOCKET` | unset | Move the runtime directory or the socket itself (tests use this). |
 | `ZEMBLE_QUERY_WAIT_SECONDS` | 180 | How long one query waits for a busy daemon in all, before it reports the wait. |
 | `ZEMBLE_DAEMON_PRUNE_HOURS` | 6 | Hours between the daemon's own prunes of the caches of roots that are gone (first one 2 min after start), and of what dead builds left (scratch databases, staging folders, temp files whose writer is gone: at start too); `0` disables. |
+| `ZEMBLE_DAEMON_REFERENCED_HOURS` | 6 | Hours between the daemon's checks whether its saved indexes' text hashes are due for their daily report to the embedding server (`docs/embed-server.md`; first one 10 min after start, never during a rebuild, each family once a day); `0` disables. |
 
 A socket with a dead owner is detected (connect fails, pidfile pid is gone) and
 removed before a new daemon starts; a pidfile owned by a live process is left alone,

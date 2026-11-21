@@ -37,6 +37,8 @@ QUERIES_ROUTE = "/v1/queries"
 COVERED_ROUTE = "/v1/covered"
 #: Vectors another cache already bought, stored where missing.
 STORE_ROUTE = "/v1/store"
+#: Text hashes a client's saved indexes reference; the server stamps those it holds as used today.
+REFERENCED_ROUTE = "/v1/referenced"
 #: Reranker scores for one query and its passages.
 RERANK_ROUTE = "/v1/rerank"
 
@@ -109,6 +111,7 @@ __all__ = [
     "MAX_BODY_BYTES",
     "PROVIDER_FAILED_STATUS",
     "QUERIES_ROUTE",
+    "REFERENCED_ROUTE",
     "RERANK_ROUTE",
     "ROWS_PER_REQUEST",
     "SERVER_ENV",

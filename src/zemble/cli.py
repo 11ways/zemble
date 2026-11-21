@@ -31,7 +31,7 @@ from zemble.cache_orphans import (
 from zemble.daemon.cli import add_daemon_parser, run_daemon
 from zemble.dedup.cli import add_dupes_parser, run_dupes
 from zemble.embedding.cli import EMBED_STATUS_COMMANDS, add_embed_status_parser, run_embed_status
-from zemble.embedding.gc import DEFAULT_GRACE_DAYS, collect_embeddings, day_text
+from zemble.embedding.gc import DEFAULT_GRACE_DAYS, collect_embeddings, day_text, vacuum_note
 from zemble.embedding.pricing import CONFIRM_ENV, EmbeddingBudgetExceeded, confirmed
 from zemble.embedding.registry import EmbedderSpecError, resolve_embedder_spec
 from zemble.embedding.server_cli import EMBED_SERVER_COMMANDS, add_embed_server_parser, run_embed_server
@@ -678,13 +678,17 @@ def _clear_embeddings(cache_folder: Path, *, dry_run: bool, grace_days: int) -> 
             print(
                 f"  would free about {megabytes(report.swept_bytes + report.slack_bytes)} of "
                 f"{megabytes(report.size_before)} ({megabytes(report.swept_bytes)} of vectors, "
-                f"{megabytes(report.slack_bytes)} of free pages and WAL)"
+                f"{megabytes(report.slack_bytes)} of free pages and WAL; "
+                f"{megabytes(report.free_page_bytes)} of free pages new vectors fill before the file grows)"
             )
             if report.holders:
                 print(f"  a real run is refused while pid {', '.join(map(str, report.holders))} hold(s) it open")
         else:
             after = report.size_after if report.size_after is not None else report.size_before
             print(f"  {megabytes(report.size_before)} -> {megabytes(after)}")
+        note = vacuum_note(report, dry_run=dry_run)
+        if note is not None:
+            print(f"  {note}")
 
 
 def _run_clear(

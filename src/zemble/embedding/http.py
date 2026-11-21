@@ -26,6 +26,11 @@ CHARS_PER_TOKEN = 3.0
 class EmbeddingRequestError(RuntimeError):
     """A provider refused the request; the message carries the provider's own wording."""
 
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        """Carry the HTTP status of a refusal beside the message; None when no answer came back."""
+        super().__init__(message)
+        self.status = status
+
 
 def _sleep(seconds: float) -> None:
     """Pause between retries; the seam tests replace so a backoff costs no wall time."""
@@ -124,7 +129,7 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dic
         except urllib.error.HTTPError as exc:
             message = _extract_message(exc.read())
             if exc.code != 429 and exc.code < 500:
-                raise EmbeddingRequestError(f"{url} returned {exc.code}: {message}") from None
+                raise EmbeddingRequestError(f"{url} returned {exc.code}: {message}", status=exc.code) from None
             retry_after = _retry_after_seconds(exc.headers)
             last_error = f"{url} returned {exc.code}: {message}"
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:

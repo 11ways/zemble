@@ -1,7 +1,7 @@
 """Command-line surface for `zemble embed-server`: run the shared embedding server, and talk to it.
 
-`run`, `add-key` and `gc` are for the machine that hosts the server; `check` and `push` are for
-every machine that uses it.
+`run`, `add-key` and `gc` are for the machine that hosts the server; `check`, `push` and `report` are
+for every machine that uses it.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 from zemble.embedding.cache import cache_root, family_slug, read_rows
-from zemble.embedding.gc import day_text
+from zemble.embedding.gc import day_text, vacuum_note
 from zemble.embedding.http import EmbeddingRequestError
 from zemble.embedding.served import ServerClient
 from zemble.embedding.wire import ROWS_PER_REQUEST, SERVER_ENV, SERVER_KEY_ENV, server_settings
@@ -83,6 +83,13 @@ def add_embed_server_parser(sub: argparse._SubParsersAction) -> None:
         "--remove-local", action="store_true", help="Delete each uploaded file once the server holds all of it."
     )
 
+    report = declare_no_root(
+        actions.add_parser(
+            "report",
+            help="Tell the server which vectors this machine's saved indexes reference (the daemon does it daily).",
+        )
+    )
+    report.add_argument("--force", action="store_true", help="Report again a family already reported today.")
     gc = declare_no_root(
         actions.add_parser("gc", help="Sweep vectors nobody asked for within the grace period, then VACUUM.")
     )
@@ -108,6 +115,8 @@ def run_embed_server(args: argparse.Namespace) -> int:
             return _check()
         if action == "push":
             return _push(args)
+        if action == "report":
+            return _report(args)
         if action == "gc":
             return _gc(args)
     except (EmbeddingRequestError, ValueError, OSError) as exc:
@@ -193,7 +202,9 @@ def _check() -> int:
         f"  since start: {status['documents_requested']} document texts asked for, "
         f"{status['documents_missed']} missed, {status['provider_tokens']} provider tokens, "
         f"{status['queries']} queries, {status['rerank_passages']} reranked passages, "
-        f"{status['vectors_pushed']} vectors pushed"
+        f"{status['vectors_pushed']} vectors pushed, "
+        f"{status.get('referenced_reported', 0)} referenced hashes reported "
+        f"({status.get('referenced_held', 0)} held)"
     )
     return 0
 
@@ -234,6 +245,27 @@ def _push(args: argparse.Namespace) -> int:
     return EXIT_ERROR if failed else 0
 
 
+def _report(args: argparse.Namespace) -> int:
+    """Send this machine's referenced-vectors report now."""
+    from zemble.cache import resolve_cache_folder
+    from zemble.embedding.referenced import report_referenced
+
+    client = _client()
+    reports = report_referenced(resolve_cache_folder(), client, force=args.force)
+    if not reports:
+        print("No saved index uses a paid embedder; nothing to report")
+    for report in reports:
+        unreadable = f", {report.unreadable} unreadable index(es) passed over" if report.unreadable else ""
+        if report.skipped is not None:
+            print(f"{report.family}: not reported, {report.skipped}")
+            continue
+        print(
+            f"{report.family}: {report.sent} distinct hashes from {report.indexes} index(es) reported to "
+            f"{client.settings.url}, {report.held} held there{unreadable}"
+        )
+    return 0
+
+
 def _sqlite_files(path: Path) -> list[Path]:
     """Return a sqlite file and its WAL and shared-memory companions."""
     return [path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")]
@@ -259,9 +291,14 @@ def _gc(args: argparse.Namespace) -> int:
             f"{report.path.name}: {report.rows} vectors, {verb} {report.swept} last used on "
             f"{day_text(report.cutoff_day)} or earlier ({megabytes(report.swept_bytes)})"
         )
-        if not args.dry_run:
+        if args.dry_run:
+            print(f"  {megabytes(report.free_page_bytes)} of free pages new vectors fill before the file grows")
+        else:
             after = report.size_after if report.size_after is not None else report.size_before
             print(f"  {megabytes(report.size_before)} -> {megabytes(after)}")
+        note = vacuum_note(report, dry_run=args.dry_run)
+        if note is not None:
+            print(f"  {note}")
     return 0
 
 

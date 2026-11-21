@@ -29,6 +29,7 @@ from zemble.embedding.wire import (
     HEALTH_ROUTE,
     MAX_BODY_BYTES,
     QUERIES_ROUTE,
+    REFERENCED_ROUTE,
     RERANK_ROUTE,
     ROWS_PER_REQUEST,
     STATUS_ROUTE,
@@ -107,6 +108,16 @@ class ServerClient:
             }
             added += int(self.post(STORE_ROUTE, payload)["added"])
         return added
+
+    def referenced(self, spec: str, digests: list[str]) -> int:
+        """Report text hashes a saved index references, in one request; the server stamps those it holds.
+
+        :param spec: An embedder spec naming the family.
+        :param digests: At most ``DIGESTS_PER_REQUEST`` text hashes.
+        :return: How many of them the server holds.
+        :raises EmbeddingRequestError: With ``status`` 404 from a server older than the route.
+        """
+        return int(self.post(REFERENCED_ROUTE, {"spec": spec, "digests": digests})["held"])
 
 
 def _vectors(response: dict[str, Any], expected_rows: int) -> EmbeddingMatrix:

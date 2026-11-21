@@ -66,6 +66,9 @@ class _Counters:
     queries: int = 0
     rerank_passages: int = 0
     stored: int = 0
+    #: Text hashes clients reported their saved indexes reference, and how many of those were held.
+    referenced_reported: int = 0
+    referenced_held: int = 0
 
     def add(self, name: str, amount: int) -> None:
         """Add to one counter; called under the service's lock."""
@@ -236,6 +239,8 @@ class EmbeddingService:
     def covered(self, spec: str, digests: list[str], probe: bool) -> tuple[set[str], int | None]:
         """Return which text hashes are already paid for, and the width that was judged.
 
+        Every hit is stamped as used today: a pre-flight asks about the chunks of a live tree.
+
         :param spec: The client's embedder spec.
         :param digests: The text hashes to look up.
         :param probe: Whether the provider may be asked for a width no spec or file declares.
@@ -245,7 +250,19 @@ class EmbeddingService:
         width = embedder.dimensions if probe else embedder.known_dimensions
         if width is None:
             return set(), None
-        return embedder.cache.covered(digests, width), width
+        return embedder.cache.covered(digests, width, stamp=True), width
+
+    def referenced(self, spec: str, digests: list[str]) -> int:
+        """Stamp as used today the held vectors a client's saved indexes reference.
+
+        :param spec: The client's embedder spec, naming the family.
+        :param digests: The text hashes; ones this server never stored are ignored.
+        :return: How many of them this server holds.
+        """
+        held = self.embedder(spec).cache.stamp_held(digests)
+        self._count("referenced_reported", len(digests))
+        self._count("referenced_held", held)
+        return held
 
     def store(self, spec: str, rows: list[tuple[str, int, bytes]]) -> int:
         """Store vectors a client's own cache already bought, keeping every vector already here.
@@ -319,6 +336,8 @@ class EmbeddingService:
             "queries": self.counters.queries,
             "rerank_passages": self.counters.rerank_passages,
             "vectors_pushed": self.counters.stored,
+            "referenced_reported": self.counters.referenced_reported,
+            "referenced_held": self.counters.referenced_held,
         }
 
 
