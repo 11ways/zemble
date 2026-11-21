@@ -194,14 +194,18 @@ def describe_lane(root: Path, base: Path) -> Lane:
     return Lane(root=root, base=base, repos=tuple(pairs))
 
 
-def mirrored_root(lane: Lane) -> Path | None:
+def mirrored_root(root: Path, base: Path) -> Path | None:
     """Return the base root whose ignore files a lane's walk honours, or None for a lane root that is a checkout.
 
     A lane root that is no checkout is a copy of the base root's layout, so the base root's ignore
     files say what of it is indexed: without them its run state and Maven repository were indexed,
-    and every rewrite of them was bought again.
+    and every rewrite of them was bought again. The index walk, the watcher and the graph walk of a
+    lane all read this one answer.
+
+    :param root: The lane root.
+    :param base: Its base workspace.
     """
-    return None if _git_dir_entry(lane.root) is not None else lane.base
+    return None if _git_dir_entry(root) is not None else base
 
 
 class LaneRelativePaths(RepoRelativePaths):

@@ -202,26 +202,26 @@ def walk_entries(
     :yield: Each matching file and its path relative to root.
     :ytype: WalkedFile
     """
-    extensions_set = frozenset(extensions)
-    specs = [_root_spec(root, ignore)]
-    loaded = _load_ignore_for_dir(str(mirrored_root)) if mirrored_root is not None else None
-    if loaded is not None:
-        specs.append(IgnoreSpec(base=root, spec=loaded[0], patterns=loaded[1], prefilter=loaded[2], base_offset=0))
-    yield from _walk(str(root), "", specs, extensions_set)
+    yield from _walk(str(root), "", _root_specs(root, ignore, mirrored_root), frozenset(extensions))
 
 
-def _root_spec(root: Path, ignore: Sequence[str] | None = None) -> IgnoreSpec:
-    """Build the spec of always-ignored directories the walk starts from."""
+def _root_specs(root: Path, ignore: Sequence[str] | None = None, mirrored_root: Path | None = None) -> list[IgnoreSpec]:
+    """Build the specs every walk of *root* starts from: always-ignored directories, then a mirrored root's files.
+
+    THE one home of where a walk's rules begin: the walk, a named path's check and the watcher read it.
+    """
     dir_patterns = list(sorted(_DEFAULT_IGNORED_DIRS)) + list(ignore or [])
     base_spec = GitIgnoreSpec.from_lines(dir_patterns, backend="simple")
     base_patterns = _prepare(base_spec)
-    return IgnoreSpec(
-        base=root,
-        spec=base_spec,
-        patterns=base_patterns,
-        prefilter=_prefilter(base_patterns),
-        base_offset=0,
-    )
+    specs = [
+        IgnoreSpec(
+            base=root, spec=base_spec, patterns=base_patterns, prefilter=_prefilter(base_patterns), base_offset=0
+        )
+    ]
+    loaded = _load_ignore_for_dir(str(mirrored_root)) if mirrored_root is not None else None
+    if loaded is not None:
+        specs.append(IgnoreSpec(base=root, spec=loaded[0], patterns=loaded[1], prefilter=loaded[2], base_offset=0))
+    return specs
 
 
 def is_duplicate_worktree(root: Path | str, directory: Path | str) -> bool:
@@ -355,7 +355,9 @@ def duplicate_tree_prefix(root: Path, relative_path: str) -> str | None:
     return None
 
 
-def ignored_prefix(root: Path, relative_path: str, ignore: Sequence[str] | None = None) -> str | None:
+def ignored_prefix(
+    root: Path, relative_path: str, ignore: Sequence[str] | None = None, mirrored_root: Path | None = None
+) -> str | None:
     """Return the path prefix that keeps a root-relative path out of the walk, or None.
 
     The walk decides per directory, so the answer names the segment the descent stopped
@@ -364,9 +366,10 @@ def ignored_prefix(root: Path, relative_path: str, ignore: Sequence[str] | None 
     :param root: The walk root the path is relative to.
     :param relative_path: A root-relative path, whether or not it exists.
     :param ignore: Additional patterns the walk was given.
+    :param mirrored_root: The mirrored root the walk was given (see `walk_entries`).
     :return: The prefix that was ignored, or None when the walk would have reached the path.
     """
-    specs = [_root_spec(root, ignore)]
+    specs = _root_specs(root, ignore, mirrored_root)
     segments = [segment for segment in relative_path.split("/") if segment]
     directory = str(root)
     walked = ""

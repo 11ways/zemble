@@ -386,6 +386,8 @@ def parked(tmp_path: Path, graph_cache: Path) -> tuple[Path, Path, Path]:
     for name, files in WORKSPACE.items():
         _repo(workspace / name, files)
     _write_facts(workspace)
+    # The real workspace's root ignore file keeps the run state out; a lane root is walked by it too.
+    (workspace / ".gitignore").write_text(".zenit-dev/\n", encoding="utf-8")
     reference = (tmp_path / "reference").resolve()
     shutil.copytree(workspace, reference, symlinks=True)
     lane = workspace / "lanes" / "lane"
@@ -426,6 +428,12 @@ def test_a_lane_parked_inside_its_base_is_its_own_overlay_never_a_sub_tree_of_th
 
     # 3. A sub-path of the lane is a sub-tree of the lane's graph.
     assert resolve_graph_root(str(lane / "core")) == (str(lane), "core"), "3: a lane sub-path is the lane's"
+
+    # 3b. The lane root's run state is out of the lane's graph, walked or named in a change set.
+    assert not graph_covers(str(lane), ".zenit-dev"), "3b: the lane walk honours the base root's ignore file"
+    (lane / ".zenit-dev/gradle-init-2.gradle").write_text("allprojects {\n}\n", encoding="utf-8")
+    build_graph(str(lane), changed_paths=[lane / ".zenit-dev/gradle-init-2.gradle"])
+    assert not graph_covers(str(lane), ".zenit-dev"), "3b: and so does a change set"
 
     # 4. The lane's graph is no orphan answered from the base, so a prune keeps it.
     orphans = [orphan for orphan in find_orphans(graph_cache) if orphan.kind is OrphanKind.GRAPH_UNDER_ANCESTOR]

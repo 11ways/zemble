@@ -54,7 +54,7 @@ from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol
 from zemble.graph.resolve import Resolver
 from zemble.index.file_walker import ignored_prefix, walk_entries
 from zemble.index.files import detect_language, get_extensions
-from zemble.lane import Lane, LaneComparer, find_lane, lane_scope
+from zemble.lane import Lane, LaneComparer, find_lane, lane_scope, mirrored_root
 from zemble.languages.catalog import SPECS
 from zemble.languages.metrics import FILE_METRIC_COLUMNS
 from zemble.openfiles import held_open
@@ -1418,15 +1418,20 @@ class _Scan:
     scanned: int = 0
 
 
-def _scan(root: Path, restamp: Callable[[str, os.stat_result], tuple[int, int]] | None = None) -> _Scan:
+def _scan(
+    root: Path,
+    restamp: Callable[[str, os.stat_result], tuple[int, int]] | None = None,
+    mirrored_root: Path | None = None,
+) -> _Scan:
     """Walk the workspace, splitting extractable files from everything the graph has no reader for.
 
     :param restamp: The stamp to record for a file instead of its own, given its relative path and stat.
+    :param mirrored_root: The mirrored root of a lane's walk (`zemble.lane.mirrored_root`).
     """
     scan = _Scan()
     # The walk already knows each file's relative path and stat: computing them again cost a lane's
     # scan seconds of `Path.relative_to` over its 19k files.
-    for walked in walk_entries(root, extensions=get_extensions((ContentType.CODE,))):
+    for walked in walk_entries(root, extensions=get_extensions((ContentType.CODE,)), mirrored_root=mirrored_root):
         scan.scanned += 1
         file_path, stat = walked.path, walked.stat
         suffix = file_path.suffix.lower()
@@ -1442,7 +1447,9 @@ def _scan(root: Path, restamp: Callable[[str, os.stat_result], tuple[int, int]] 
     return scan
 
 
-def _scan_changed(root: Path, changed: Iterable[Path], stored: dict[str, tuple[int, int]]) -> _Scan:
+def _scan_changed(
+    root: Path, changed: Iterable[Path], stored: dict[str, tuple[int, int]], mirrored_root: Path | None = None
+) -> _Scan:
     """Build the scan a walk would have produced, from a change set plus the stored file stamps.
 
     Every file the graph already holds keeps the stamp it was extracted with, so the build
@@ -1456,7 +1463,7 @@ def _scan_changed(root: Path, changed: Iterable[Path], stored: dict[str, tuple[i
             relative = candidate.relative_to(root).as_posix()
         except ValueError:
             continue
-        if extractor_for(candidate) is not None and ignored_prefix(root, relative) is None:
+        if extractor_for(candidate) is not None and ignored_prefix(root, relative, mirrored_root=mirrored_root) is None:
             named[relative] = candidate
 
     for relative, stamp in stored.items():
@@ -1773,7 +1780,7 @@ def _first_overlay_scan(
 ) -> _Scan:
     """The scan an overlay pass builds from: the change set's, or the lane's walk, whose scope a new overlay records."""
     if named is not None:
-        return _scan_changed(root, named, _stored_stamps(connection))
+        return _scan_changed(root, named, _stored_stamps(connection), mirrored_root(lane.root, lane.base))
     scan, walked = _overlay_scan(root, lane, connection)
     if fresh:
         lane_overlay.record_hidden(connection, lane_scope(lane).holds, walked)
@@ -1889,7 +1896,7 @@ def _overlay_scan(root: Path, lane: Lane, connection: sqlite3.Connection) -> tup
             return stamp
         return own
 
-    scan = _scan(root, restamp)
+    scan = _scan(root, restamp, mirrored_root(lane.root, lane.base))
     walked = set(scan.stamps)
     for relative, stamp in stored.items():
         if relative not in walked and not scope.holds(relative):

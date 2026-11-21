@@ -240,7 +240,10 @@ def plan_overlay(lane: Lane, base: ZembleIndex) -> OverlayPlan:
     manifest = base._manifest  # noqa: SLF001
     plan = OverlayPlan()
     walk = walk_entries(
-        lane.root, get_extensions(base.storage_content), ignore=list(base.exclude), mirrored_root=mirrored_root(lane)
+        lane.root,
+        get_extensions(base.storage_content),
+        ignore=list(base.exclude),
+        mirrored_root=mirrored_root(lane.root, lane.base),
     )
     for walked in walk:
         try:

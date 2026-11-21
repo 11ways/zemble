@@ -15,6 +15,7 @@ from zemble.cache import cache_key, find_index_from_cache_folder, mark_root
 from zemble.cache_orphans import OrphanKind, find_orphans, remove_orphan
 from zemble.daemon import client, server
 from zemble.daemon.protocol import QUERY_WAIT_ENV, CommandBusy, QueryTimedOut
+from zemble.daemon.watch import WatchSpec
 from zemble.index.create import tree_moves_anything
 from zemble.index.index import ZembleIndex
 from zemble.index.overlay import OverlayIndex, build_overlay, overlay_folder
@@ -189,7 +190,7 @@ def test_a_second_overlay_reuses_the_previous_delta(workspace: Path, mock_embedd
 
 
 def test_a_lane_parked_in_a_repository_workspace_buys_nothing_its_base_holds(
-    tmp_path: Path, mock_embedder: FakeEmbedder
+    tmp_path: Path, mock_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The zenit-dev layout: a workspace repository, `lanes/<name>/` holding worktrees plus copies of its root files."""
     root = (tmp_path / "ws").resolve()
@@ -226,6 +227,22 @@ def test_a_lane_parked_in_a_repository_workspace_buys_nothing_its_base_holds(
     assert edited.plan.differing == ["tools/helper.py"], "3: only the edit is the delta"
     [text] = [text for text in _embedded(mock_embedder) if "lane edit" in text]
     assert text.startswith("ws/tools/helper.py "), "3: named as the base names its twin"
+
+    # 4. The lane's watcher walks by the same rules: a run-state write starts no re-plan, an edit does.
+    monkeypatch.setattr(server.RootWatcher, "start", lambda self: None)
+    daemon = _daemon()
+    daemon.watch_enabled = True
+
+    async def watched() -> server.RootWatcher:
+        await daemon.index_for({"path": str(root)})
+        lane_key, _index = await daemon.index_for({"path": str(lane)})
+        return daemon.watchers[lane_key]
+
+    spec = asyncio.run(watched()).spec
+    assert spec.mirrored_root == root and WatchSpec.from_json(spec.to_json()) == spec, "4: the worker gets it too"
+    rules = spec.rules()
+    assert not rules.matches(lane / ".run/state.py"), "4: a run-state write is no change of the lane"
+    assert rules.matches(lane / "tools/helper.py") and rules.matches(lane / "alpha/src/edited.py"), "4: edits are"
 
 
 def test_index_cache_serves_a_lane_as_an_overlay_outside_the_slot_count(

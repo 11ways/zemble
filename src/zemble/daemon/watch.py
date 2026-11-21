@@ -16,19 +16,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pathspec import GitIgnoreSpec
-
-# AIDEV-NOTE: these are file_walker internals on purpose - the walker owns the ignore
-# vocabulary, and the watcher must answer "would this file have been indexed?" the same way.
-from zemble.index.file_walker import (
-    _DEFAULT_IGNORED_DIRS,
-    IgnoreSpec,
-    _is_ignored,
-    _load_ignore_for_dir,
-    _prefilter,
-    _prepare,
-    duplicate_tree_prefix,
-)
+from zemble.index.file_walker import duplicate_tree_prefix, ignored_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +31,20 @@ _LINE_LIMIT = 64 * 1024 * 1024
 
 
 class IgnoreRules:
-    """Answers whether a changed path is one the index would have walked."""
+    """Answers whether a changed path is one the index would have walked.
 
-    def __init__(self, root: Path, extensions: Iterable[str], always: Callable[[Path], bool] | None = None) -> None:
+    AIDEV-NOTE: the answer is the file walker's own `ignored_prefix`, never a copy of its rules: a watcher
+    that disagreed with the walk re-planned a lane on every write to its `.m2/` and run state (25,000
+    re-plans in five days on one host), because only the walk knew the lane's mirrored root.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        extensions: Iterable[str],
+        always: Callable[[Path], bool] | None = None,
+        mirrored_root: Path | None = None,
+    ) -> None:
         """Build the rules for one root.
 
         :param root: The indexed root directory.
@@ -53,45 +52,12 @@ class IgnoreRules:
         :param always: Optional predicate for paths that matter whatever the ignore rules
             say. A graph facts file lives under `build/` or `.zemble/` by convention, both
             of which the walker skips, so without this the daemon would never see one change.
+        :param mirrored_root: The mirrored root the root's walk is given (`zemble.lane.mirrored_root`).
         """
         self.root = root
         self.always = always
+        self.mirrored_root = mirrored_root
         self.extensions = frozenset(extension.lower() for extension in extensions)
-        base_spec = GitIgnoreSpec.from_lines(sorted(_DEFAULT_IGNORED_DIRS), backend="simple")
-        base_patterns = _prepare(base_spec)
-        self._base = IgnoreSpec(
-            base=root,
-            spec=base_spec,
-            patterns=base_patterns,
-            prefilter=_prefilter(base_patterns),
-            base_offset=0,
-        )
-
-    def _specs_for(self, relative_directory: str) -> list[IgnoreSpec]:
-        """Return the ignore specs applying inside a root-relative directory, root-first.
-
-        The walker's own loader is used, so an edited .gitignore is picked up by its
-        modification time exactly as it is during a build.
-        """
-        specs = [self._base]
-        walked = ""
-        parts = [part for part in relative_directory.split("/") if part]
-        for depth in range(len(parts) + 1):
-            directory = self.root.joinpath(*parts[:depth])
-            loaded = _load_ignore_for_dir(str(directory))
-            if loaded is not None:
-                specs.append(
-                    IgnoreSpec(
-                        base=directory,
-                        spec=loaded[0],
-                        patterns=loaded[1],
-                        prefilter=loaded[2],
-                        base_offset=len(walked) + 1 if walked else 0,
-                    )
-                )
-            if depth < len(parts):
-                walked = f"{walked}/{parts[depth]}" if walked else parts[depth]
-        return specs
 
     def matches(self, path: Path) -> bool:
         """Return whether a changed path is one the index cares about."""
@@ -106,37 +72,45 @@ class IgnoreRules:
             return True
         if path.suffix.lower() not in self.extensions or relative is None:
             return False
-        directory = relative.rsplit("/", 1)[0] if "/" in relative else ""
-        ignored, _bypasses = _is_ignored(relative, False, self._specs_for(directory))
-        return not ignored
+        return ignored_prefix(self.root, relative, mirrored_root=self.mirrored_root) is None
 
 
 @dataclass(frozen=True)
 class WatchSpec:
-    """What one watcher watches: a root, the suffixes that count as source, and whether graph facts files count."""
+    """What one watcher watches: a root, the suffixes that count as source, whether graph facts files count."""
 
     root: Path
     extensions: tuple[str, ...]
     facts: bool = False
+    #: The mirrored root the root's walk is given, for a lane root that is no checkout.
+    mirrored_root: Path | None = None
 
     def rules(self) -> IgnoreRules:
         """Build the ignore rules this spec describes."""
         if not self.facts:
-            return IgnoreRules(self.root, self.extensions)
+            return IgnoreRules(self.root, self.extensions, mirrored_root=self.mirrored_root)
         from zemble.graph.facts import matches_facts_glob
 
         root = self.root
-        return IgnoreRules(root, self.extensions, always=lambda path: matches_facts_glob(root, path))
+        return IgnoreRules(
+            root, self.extensions, always=lambda path: matches_facts_glob(root, path), mirrored_root=self.mirrored_root
+        )
 
     def to_json(self) -> str:
         """Serialise the spec for a watch worker's command line."""
-        return json.dumps({"root": str(self.root), "extensions": sorted(self.extensions), "facts": self.facts})
+        mirrored = str(self.mirrored_root) if self.mirrored_root is not None else None
+        return json.dumps(
+            {"root": str(self.root), "extensions": sorted(self.extensions), "facts": self.facts, "mirrored": mirrored}
+        )
 
     @classmethod
     def from_json(cls, text: str) -> WatchSpec:
         """Read a spec written by :meth:`to_json`."""
         raw = json.loads(text)
-        return cls(Path(raw["root"]), tuple(raw["extensions"]), bool(raw["facts"]))
+        mirrored = raw.get("mirrored")
+        return cls(
+            Path(raw["root"]), tuple(raw["extensions"]), bool(raw["facts"]), Path(mirrored) if mirrored else None
+        )
 
 
 class RootWatcher:

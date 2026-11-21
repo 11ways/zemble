@@ -74,7 +74,7 @@ from zemble.index.scope import (
 )
 from zemble.index.types import PreviousIndex
 from zemble.index_cache import CacheKey, IndexCache, compute_cache_key
-from zemble.lane import Lane
+from zemble.lane import Lane, mirrored_root
 from zemble.refusal import Refused
 from zemble.runtime.identity import identity, status_payload
 from zemble.runtime.memory import release_free_heap
@@ -593,15 +593,17 @@ class Daemon:
         return None
 
     def _ensure_watcher(self, cache_key: CacheKey) -> None:
-        """Start watching a local root the first time it is served."""
+        """Start watching a local root the first time it is served; a lane's watch honours its walk's mirrored root."""
         if not self.watch_enabled or cache_key in self.watchers or is_git_url(cache_key[0]):
             return
         root = Path(cache_key[0])
         if not root.is_dir():
             return
         extensions = tuple(sorted(set(get_extensions(cache_key[1])) | _GRAPH_EXTENSIONS))
+        base_key = self.cache.base_of(cache_key)
+        mirrored = mirrored_root(root, Path(base_key[0])) if base_key is not None else None
         watcher = RootWatcher(
-            WatchSpec(root, extensions, facts=True),
+            WatchSpec(root, extensions, facts=True, mirrored_root=mirrored),
             lambda paths: self._on_change(cache_key, paths),
             # Edits made before the watches existed were never seen: one full rescan covers them.
             on_ready=lambda: self._note_change(cache_key, None),
