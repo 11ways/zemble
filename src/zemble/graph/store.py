@@ -1063,6 +1063,10 @@ def _prune_refs(connection: sqlite3.Connection) -> None:
 
 #: Meta key saying the `decl_keys` table has been filled for this graph.
 _DECL_KEYS_META = "decl_keys_built"
+#: Meta key saying this store's derived overrides were re-derived per supertype branch (`_rederive_overrides`).
+_OVERRIDES_META = "overrides_per_branch"
+#: Methods re-derived per lookup generation, so the lookup's cache stays bounded on a large graph.
+_REDERIVE_BATCH = 2000
 
 #: Columns `facts_status` grew after format version 4, so an older graph is migrated rather
 #: than rebuilt. A row written by the older zemble simply reports zero for them until the
@@ -1094,6 +1098,50 @@ def _backfill_declaration_keys(connection: sqlite3.Connection) -> None:
     )
     connection.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (_DECL_KEYS_META, "1"))
     connection.commit()
+
+
+def _rederive_overrides(connection: sqlite3.Connection) -> None:
+    """Re-derive the tree-sitter OVERRIDES edges this store's own rows hold, once, with the per-branch derivation.
+
+    AIDEV-NOTE: an older derivation kept only the first match of the whole supertype chain, so a
+    method with no derived edge has no match on any branch: only methods holding one can gain
+    edges, and re-deriving those reads the stored symbols and hierarchy without re-extracting a
+    file. Edges a facts file supplied carry its tool as their source and are never touched. A lane
+    overlay re-derives only its own rows; its base's are its base's to fix.
+    """
+    if connection.execute("SELECT 1 FROM main.meta WHERE key = ?", (_OVERRIDES_META,)).fetchone() is not None:
+        return
+    derived_rows = "main.edge_rows WHERE kind = ? AND (source IS NULL OR source = ?)"
+    kinds = (EdgeKind.OVERRIDES.value, TREE_SITTER_SOURCE)
+    methods = sorted(
+        row[0]
+        for row in connection.execute(
+            f"SELECT DISTINCT (SELECT text FROM refs WHERE key = src) FROM {derived_rows}",  # noqa: S608
+            kinds,
+        )
+    )
+    started = time.perf_counter()
+    lookup = SqliteLookup(connection)
+    resolver = Resolver(lookup)
+    derived: list[Edge] = []
+    for chunk in _chunks(methods, _REDERIVE_BATCH):
+        placeholders = ",".join("?" * len(chunk))
+        query = f"SELECT * FROM symbols WHERE id IN ({placeholders})"  # noqa: S608
+        derived += resolver.derive_overrides([symbol_from_row(row) for row in connection.execute(query, chunk)])
+        lookup.release()
+    with _scratch(connection):
+        dropped = connection.execute(f"DELETE FROM {derived_rows}", kinds).rowcount  # noqa: S608
+        _stage(connection, derived, table="resolved")
+        _publish_resolved(connection)
+        connection.execute("INSERT OR REPLACE INTO main.meta (key, value) VALUES (?, ?)", (_OVERRIDES_META, "1"))
+    if methods:
+        logger.info(
+            "graph: re-derived the overrides of %d method(s) per supertype branch in %.1f s: %d edge(s) became %d",
+            len(methods),
+            time.perf_counter() - started,
+            dropped,
+            len(derived),
+        )
 
 
 def graph_present(path: str) -> bool:
@@ -1955,6 +2003,7 @@ def _run_build(
     :return: What this pass deferred.
     """
     owed = owed if owed is not None else Owed()
+    _rederive_overrides(connection)
     known = _stored_stamps(connection)
     changed = [job for job in scan.jobs if force or known.get(job[1]) != scan.stamps[job[1]]]
     removed = sorted(set(known) - set(scan.stamps))

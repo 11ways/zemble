@@ -128,8 +128,14 @@ overridden, as the facts contract's `override` has it (one per direct supertype 
 class extending one type and implementing another overrides a declaration on each. Until
 2026-11-21 only the first match in the whole chain was kept, so a class implementing two
 interfaces overrode one of them. Those edges are graded `UNIQUE_NAME` because parameter types
-were never compared. A graph built before then keeps one edge for every file it has not
-re-resolved since; `zemble graph build --force` derives them all again.
+were never compared. A graph built before then is fixed by its first write from newer code,
+once, without a format bump or a re-extract (`store._rederive_overrides`, recorded under the
+meta key `overrides_per_branch`): the older derivation kept the first match of the whole
+chain, so only a method that holds a derived edge can gain one, and those methods are derived
+again from the stored symbols and hierarchy. Edges a facts file supplied (source = its tool)
+are never touched, and a lane overlay re-derives only its own rows. On a protoblast graph
+(2,056 files, 37k symbols, 312k edges, no facts) it re-derived 3,003 methods in 0.4 s and
+3,003 edges became 3,059; a 22.7 s cold build is what a format bump would have cost there.
 
 ### Callers follow the override relation
 
