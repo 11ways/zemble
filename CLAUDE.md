@@ -35,8 +35,9 @@ status table with every measured number; read it first.
 
 ```
 uv venv && uv pip install -e ".[mcp,dev]"      # .venv for development
-ZEMBLE_DAEMON=0 .venv/bin/pytest                # full suite (~30 s); conftest forces the guard anyway
-.venv/bin/pytest -m "not slow"                  # skip the real-workspace journeys
+ZEMBLE_DAEMON=0 .venv/bin/pytest                # full suite (313 s measured 2026-11-21, coverage on; the slow
+                                                # zenit journey's graph build is 134 s of it); conftest forces the guard anyway
+.venv/bin/pytest -m "not slow"                  # skip the real-workspace journeys (~180 s)
 ruff check src tests && ruff format --check src tests
 ```
 
