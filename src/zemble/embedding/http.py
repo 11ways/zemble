@@ -103,7 +103,7 @@ def open_url(request: urllib.request.Request, timeout: float) -> Any:
         raise urllib.error.URLError(f"{exc.reason}{route}") from exc
 
 
-def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], tries: int = MAX_TRIES) -> dict[str, Any]:
     """POST a JSON body and return the decoded JSON response.
 
     429 and 5xx are retried with exponential backoff (honouring ``Retry-After``); every
@@ -112,14 +112,17 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dic
     :param url: The full endpoint URL.
     :param payload: The JSON request body.
     :param headers: Extra request headers; ``Content-Type`` is added automatically.
+    :param tries: Attempts in all; 1 hands every retry decision to the caller.
     :return: The decoded response body.
-    :raises EmbeddingRequestError: If the request is refused or every attempt fails.
+    :raises EmbeddingRequestError: If the request is refused or every attempt fails; ``status`` is
+        the last HTTP status, None when no answer came back.
     """
     body = json.dumps(payload).encode("utf-8")
     request_headers = {"Content-Type": "application/json", **headers}
     last_error: str = "no attempt was made"
+    last_status: int | None = None
 
-    for attempt in range(1, MAX_TRIES + 1):
+    for attempt in range(1, tries + 1):
         request = urllib.request.Request(url, data=body, headers=request_headers, method="POST")  # noqa: S310
         retry_after: float | None = None
         try:
@@ -132,10 +135,12 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dic
                 raise EmbeddingRequestError(f"{url} returned {exc.code}: {message}", status=exc.code) from None
             retry_after = _retry_after_seconds(exc.headers)
             last_error = f"{url} returned {exc.code}: {message}"
+            last_status = exc.code
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_error = f"{url} failed: {exc}"
+            last_status = None
 
-        if attempt == MAX_TRIES:
+        if attempt == tries:
             break
         delay = (
             retry_after
@@ -148,7 +153,11 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dic
         )
         _sleep(delay)
 
-    raise EmbeddingRequestError(f"Embedding request gave up after {MAX_TRIES} attempts. Last error: {last_error}")
+    if tries == 1:
+        raise EmbeddingRequestError(last_error, status=last_status)
+    raise EmbeddingRequestError(
+        f"Embedding request gave up after {tries} attempts. Last error: {last_error}", status=last_status
+    )
 
 
 def batched(texts: list[str], max_texts: int, max_chars: int) -> list[tuple[int, list[str]]]:

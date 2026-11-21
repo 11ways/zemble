@@ -400,12 +400,85 @@ def _server_days(running: Running) -> dict[str, int]:
 
 
 def test_a_covered_hit_is_stamped_on_the_server(served: Running) -> None:
-    """A pre-flight's coverage question proves its hits are in a live tree, so the server stamps them."""
+    """A pre-flight's coverage question proves its hits are in a live tree, so the side stamper stamps them."""
     embedder = build_embedder(SPEC).embedder
     embedder.embed_documents(["alpha", "beta"])
     _set(served.service.directory / "voyage-voyage-4-lite.sqlite", "UPDATE used SET day = ?", today() - 400)
     assert embedder.stored_digests([text_hash("alpha"), text_hash("gamma")]) == {text_hash("alpha")}
+    served.service.settle_stamps()
     assert _server_days(served) == {text_hash("alpha"): today(), text_hash("beta"): today() - 400}
+
+    # A served document is stamped the same way, after its answer.
+    embedder.embed_documents(["beta"])
+    served.service.settle_stamps()
+    assert _server_days(served)[text_hash("beta")] == today()
+
+
+def test_reports_never_delay_serving(served: Running, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three hosts reporting at once never hold up documents or covered: each answers within 0.5 s.
+
+    Each report batch is made to take 1 s on the stamper, so a report that ran under the serving
+    lock (the 2026-11-21 incident) would hold every serving request for up to that long per batch.
+    """
+    texts = [f"served {n}" for n in range(20)]
+    build_embedder(SPEC).embedder.embed_documents(texts)
+    held = [text_hash(text) for text in texts]
+    slow_stamp = EmbeddingCache.stamp_held
+
+    def stamp_slowly(cache: EmbeddingCache, digests: list[str]) -> int:
+        if threading.current_thread().name != "stamps":  # a report batch, not the lookup stamper
+            time.sleep(1.0)
+        return slow_stamp(cache, digests)
+
+    monkeypatch.setattr(EmbeddingCache, "stamp_held", stamp_slowly)
+    monkeypatch.setattr("zemble.embedding.http._sleep", lambda seconds: time.sleep(0.05))
+    settings = server_settings()
+    assert settings is not None
+    results: dict[int, int] = {}
+
+    def report(host: int) -> None:
+        client = ServerClient(settings)
+        results[host] = sum(client.referenced(SPEC, [*held, text_hash(f"unknown {host} {n}")]) for n in range(2))
+
+    reporters = [threading.Thread(target=report, args=(host,)) for host in range(3)]
+    for reporter in reporters:
+        reporter.start()
+    embedder = build_embedder(SPEC).embedder
+    latencies: list[float] = []
+    while any(reporter.is_alive() for reporter in reporters):
+        start = time.perf_counter()
+        embedder.embed_documents(texts[:5])
+        embedder.stored_digests(held)
+        latencies.append(time.perf_counter() - start)
+        time.sleep(0.05)
+    for reporter in reporters:
+        reporter.join()
+    assert results == {0: 40, 1: 40, 2: 40}, "every host's batches were stamped, the busy ones after waiting"
+    assert served.service.counters.referenced_busy > 0, "concurrent batches were told to come back (503)"
+    assert len(latencies) > 20 and max(latencies) < 0.5, f"serving was held up: {max(latencies):.2f} s"
+
+
+def test_one_report_at_a_time_per_host(served: Running, capsys: pytest.CaptureFixture[str]) -> None:
+    """The daemon's loop and a hand-run report exclude each other through the report lock; the loser skips."""
+    import fcntl
+
+    from zemble.embedding.referenced import REPORT_LOCK_FILE, ReportRunning
+
+    cache_folder = resolve_cache_folder()
+    _index(cache_folder, "a" * 64, [make_chunk("def kept(): pass")], embedder=SPEC)
+    settings = server_settings()
+    assert settings is not None
+    cache_folder.mkdir(parents=True, exist_ok=True)
+    with (cache_folder / REPORT_LOCK_FILE).open("a+b") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        with pytest.raises(ReportRunning):
+            report_referenced(cache_folder, ServerClient(settings))
+        assert run_embed_server(argparse.Namespace(embed_server_action="report", force=False)) == 0
+        assert "Skipped: another referenced report is running" in capsys.readouterr().out
+        daemon_server.Daemon(watch=False).report_referenced()
+        assert served.service.counters.referenced_reported == 0, "nothing was sent while another report ran"
+    [report] = report_referenced(cache_folder, ServerClient(settings))
+    assert report.sent == 1, "the lock is free again once its holder is done"
 
 
 def test_distinct_batches_send_a_chunk_shared_by_indexes_once(tmp_path: Path) -> None:
@@ -492,7 +565,7 @@ async def test_the_daemon_reports_referenced_vectors_in_the_background(
     """The daemon's loop sends the report after its first delay, and its env knob turns it off."""
     cache_folder = resolve_cache_folder()
     _index(cache_folder, "a" * 64, [make_chunk("def kept(): pass")], embedder=SPEC)
-    monkeypatch.setattr(daemon_server, "_REFERENCED_FIRST_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(daemon_server, "_REFERENCED_FIRST_DELAY_SECONDS", (0.0, 0.0))
     daemon = daemon_server.Daemon(watch=False)
     loop = asyncio.create_task(daemon.referenced_loop())
     try:

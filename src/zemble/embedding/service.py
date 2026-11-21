@@ -9,6 +9,7 @@ stored vector.
 from __future__ import annotations
 
 import logging
+import queue
 import re
 import threading
 import time
@@ -32,8 +33,17 @@ logger = logging.getLogger(__name__)
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
+#: Lookup batches the side stamper may have waiting; beyond them a lookup's stamps are dropped, the
+#: daily referenced report being what keeps an index's vectors alive anyway.
+_STAMP_QUEUE_BATCHES = 64
+
+
 class SpecNotServed(ValueError):
     """A client asked for an embedder or reranker this server was not configured to pay for."""
+
+
+class ServiceBusy(RuntimeError):
+    """A request the server declines for now because the same kind of work is running; retry later."""
 
 
 def _hosted_reranker_spec(spec: str) -> str:
@@ -69,6 +79,10 @@ class _Counters:
     #: Text hashes clients reported their saved indexes reference, and how many of those were held.
     referenced_reported: int = 0
     referenced_held: int = 0
+    #: Report batches answered 503 because another one was being stamped.
+    referenced_busy: int = 0
+    #: Lookup hits whose stamp was dropped because the side stamper's queue was full.
+    stamps_dropped: int = 0
 
     def add(self, name: str, amount: int) -> None:
         """Add to one counter; called under the service's lock."""
@@ -112,6 +126,11 @@ class EmbeddingService:
         self._claims_lock = threading.Lock()
         self._claims: dict[tuple[str, str, int], threading.Event] = {}
         self.counters = _Counters()
+        # Stamping runs on a second connection per family, so it never holds the serving lock.
+        self._stampers: dict[str, EmbeddingCache] = {}
+        self._stamp_queue: queue.Queue[tuple[str, list[str]]] = queue.Queue(maxsize=_STAMP_QUEUE_BATCHES)
+        self._stamp_worker: threading.Thread | None = None
+        self._referenced_gate = threading.Lock()
 
     @property
     def families(self) -> list[str]:
@@ -199,7 +218,7 @@ class EmbeddingService:
                 continue
             result[rows] = vector
             served.append(digest)
-        cache.touch(served)
+        self._stamp_later(cache.family, served)
         return missing
 
     def _count(self, name: str, amount: int) -> None:
@@ -239,7 +258,8 @@ class EmbeddingService:
     def covered(self, spec: str, digests: list[str], probe: bool) -> tuple[set[str], int | None]:
         """Return which text hashes are already paid for, and the width that was judged.
 
-        Every hit is stamped as used today: a pre-flight asks about the chunks of a live tree.
+        Every hit is stamped as used, after the answer, by the side stamper: a pre-flight asks about
+        the chunks of a live tree.
 
         :param spec: The client's embedder spec.
         :param digests: The text hashes to look up.
@@ -250,19 +270,66 @@ class EmbeddingService:
         width = embedder.dimensions if probe else embedder.known_dimensions
         if width is None:
             return set(), None
-        return embedder.cache.covered(digests, width, stamp=True), width
+        hits = embedder.cache.covered(digests, width)
+        self._stamp_later(embedder.family, list(hits))
+        return hits, width
 
     def referenced(self, spec: str, digests: list[str]) -> int:
-        """Stamp as used today the held vectors a client's saved indexes reference.
+        """Stamp as used the held vectors a client's saved indexes reference, one report batch at a time.
 
         :param spec: The client's embedder spec, naming the family.
         :param digests: The text hashes; ones this server never stored are ignored.
         :return: How many of them this server holds.
+        :raises ServiceBusy: If another report batch is being stamped; the client retries later.
         """
-        held = self.embedder(spec).cache.stamp_held(digests)
+        family = self.embedder(spec).family
+        if not self._referenced_gate.acquire(blocking=False):
+            self._count("referenced_busy", 1)
+            raise ServiceBusy("another referenced report batch is being stamped")
+        try:
+            held = self._stamper(family).stamp_held(digests)
+        finally:
+            self._referenced_gate.release()
         self._count("referenced_reported", len(digests))
         self._count("referenced_held", held)
         return held
+
+    def _stamper(self, family: str) -> EmbeddingCache:
+        """Return the family's side connection, which stamps without touching the serving one."""
+        with self._build_lock:
+            stamper = self._stampers.get(family)
+            if stamper is None:
+                stamper = EmbeddingCache(family, self.directory)
+                self._stampers[family] = stamper
+        return stamper
+
+    def _stamp_later(self, family: str, digests: list[str]) -> None:
+        """Hand served or covered hashes to the side stamper; a full queue drops them, never waits."""
+        if not digests:
+            return
+        with self._build_lock:
+            if self._stamp_worker is None:
+                self._stamp_worker = threading.Thread(target=self._stamp_loop, name="stamps", daemon=True)
+                self._stamp_worker.start()
+        try:
+            self._stamp_queue.put_nowait((family, digests))
+        except queue.Full:
+            self._count("stamps_dropped", len(digests))
+
+    def _stamp_loop(self) -> None:
+        """Stamp queued lookup hits on the side connections, one batch at a time, forever."""
+        while True:
+            family, digests = self._stamp_queue.get()
+            try:
+                self._stamper(family).stamp_held(digests)
+            except Exception:
+                logger.exception("stamping %d looked-up vector(s) of %s failed", len(digests), family)
+            finally:
+                self._stamp_queue.task_done()
+
+    def settle_stamps(self) -> None:
+        """Wait until every queued lookup stamp is written."""
+        self._stamp_queue.join()
 
     def store(self, spec: str, rows: list[tuple[str, int, bytes]]) -> int:
         """Store vectors a client's own cache already bought, keeping every vector already here.
@@ -338,7 +405,9 @@ class EmbeddingService:
             "vectors_pushed": self.counters.stored,
             "referenced_reported": self.counters.referenced_reported,
             "referenced_held": self.counters.referenced_held,
+            "referenced_busy": self.counters.referenced_busy,
+            "stamps_dropped": self.counters.stamps_dropped,
         }
 
 
-__all__ = ["EmbeddingService", "SpecNotServed", "build_reranker"]
+__all__ = ["EmbeddingService", "ServiceBusy", "SpecNotServed", "build_reranker"]

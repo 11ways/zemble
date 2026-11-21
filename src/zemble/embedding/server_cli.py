@@ -248,10 +248,14 @@ def _push(args: argparse.Namespace) -> int:
 def _report(args: argparse.Namespace) -> int:
     """Send this machine's referenced-vectors report now."""
     from zemble.cache import resolve_cache_folder
-    from zemble.embedding.referenced import report_referenced
+    from zemble.embedding.referenced import ReportRunning, report_referenced
 
     client = _client()
-    reports = report_referenced(resolve_cache_folder(), client, force=args.force)
+    try:
+        reports = report_referenced(resolve_cache_folder(), client, force=args.force)
+    except ReportRunning as exc:
+        print(f"Skipped: {exc}")
+        return 0
     if not reports:
         print("No saved index uses a paid embedder; nothing to report")
     for report in reports:

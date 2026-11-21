@@ -13,6 +13,7 @@ import gc
 import json
 import logging
 import os
+import random
 import time
 import traceback
 import weakref
@@ -112,8 +113,9 @@ _PRUNE_FIRST_DELAY_SECONDS = 120.0
 #: to the embedding server (`zemble.embedding.referenced`); 0 disables the daemon's own reports.
 REFERENCED_HOURS_ENV = "ZEMBLE_DAEMON_REFERENCED_HOURS"
 _DEFAULT_REFERENCED_HOURS = 6
-#: The first report waits this long after start, well past the first requests and the first prune.
-_REFERENCED_FIRST_DELAY_SECONDS = 600.0
+#: The first report waits a random time in this range after start, past the first requests and the
+#: first prune, and so that hosts restarted together do not report together.
+_REFERENCED_FIRST_DELAY_SECONDS = (600.0, 3600.0)
 #: How often a due report looks again while a rebuild runs.
 _REFERENCED_BUSY_RETRY_SECONDS = 60.0
 _MAX_CHANGED_PATHS = 4096
@@ -1133,7 +1135,7 @@ class Daemon:
         hours = _env_int(REFERENCED_HOURS_ENV, _DEFAULT_REFERENCED_HOURS)
         if hours <= 0:
             return
-        await asyncio.sleep(_REFERENCED_FIRST_DELAY_SECONDS)
+        await asyncio.sleep(random.uniform(*_REFERENCED_FIRST_DELAY_SECONDS))  # noqa: S311 - jitter
         while not self.stop_event.is_set():
             while self.rebuilding:
                 await asyncio.sleep(_REFERENCED_BUSY_RETRY_SECONDS)
@@ -1146,7 +1148,7 @@ class Daemon:
     def report_referenced(self) -> None:
         """Send one referenced-vectors report when an embedding server is configured; blocking."""
         from zemble.cache import resolve_cache_folder
-        from zemble.embedding.referenced import REPORTED_TODAY, report_referenced
+        from zemble.embedding.referenced import REPORTED_TODAY, ReportRunning, report_referenced
         from zemble.embedding.served import ServerClient
         from zemble.embedding.wire import server_settings
 
@@ -1154,7 +1156,12 @@ class Daemon:
         if settings is None:
             return
         started = time.monotonic()
-        for report in report_referenced(resolve_cache_folder(), ServerClient(settings)):
+        try:
+            reports = report_referenced(resolve_cache_folder(), ServerClient(settings))
+        except ReportRunning as exc:
+            logger.info("referenced report skipped: %s", exc)
+            return
+        for report in reports:
             if report.skipped is None:
                 logger.info(
                     "reported %d referenced vector(s) of %s from %d index(es) to %s, %d held there, after %.1f s",

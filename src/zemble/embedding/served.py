@@ -10,17 +10,22 @@ from __future__ import annotations
 
 import base64
 import json
+import random
+import time
 import urllib.error
 import urllib.request
+from http import HTTPStatus
 from typing import Any
 
 import numpy as np
 
+from zemble.embedding import http as embedding_http
 from zemble.embedding.base import Embedder, EmbeddingMatrix, declared_dimensions, semantic_weight_bonus
 from zemble.embedding.cache import text_hash, uncovered_texts
-from zemble.embedding.http import EmbeddingRequestError, batched, open_url, post_json
+from zemble.embedding.http import MAX_TRIES, EmbeddingRequestError, batched, open_url, post_json
 from zemble.embedding.wire import (
     AUTH_HEADER,
+    BUSY_RETRY_AFTER_SECONDS,
     COVERED_ROUTE,
     DESCRIBE_ROUTE,
     DIGESTS_PER_REQUEST,
@@ -44,6 +49,10 @@ from zemble.version import __version__
 _MAX_REQUEST_CHARS = MAX_BODY_BYTES // 4
 #: Seconds a GET to the server may take.
 _GET_TIMEOUT_SECONDS = 30.0
+#: Seconds a report waits out a busy server before it gives up until the next run.
+REFERENCED_BUSY_LIMIT_SECONDS = 1800.0
+#: The longest single pause between two tries of a busy report batch.
+_BUSY_PAUSE_CEILING_SECONDS = 60.0
 
 
 class ServerClient:
@@ -112,12 +121,31 @@ class ServerClient:
     def referenced(self, spec: str, digests: list[str]) -> int:
         """Report text hashes a saved index references, in one request; the server stamps those it holds.
 
+        A busy server (503: another report batch is being stamped) is waited out quietly with a
+        growing pause for up to ``REFERENCED_BUSY_LIMIT_SECONDS``; other transient failures get the
+        usual few retries.
+
         :param spec: An embedder spec naming the family.
-        :param digests: At most ``DIGESTS_PER_REQUEST`` text hashes.
+        :param digests: At most ``REFERENCED_DIGESTS_PER_REQUEST`` text hashes.
         :return: How many of them the server holds.
         :raises EmbeddingRequestError: With ``status`` 404 from a server older than the route.
         """
-        return int(self.post(REFERENCED_ROUTE, {"spec": spec, "digests": digests})["held"])
+        url = f"{self.settings.url}{REFERENCED_ROUTE}"
+        payload = {"spec": spec, "digests": digests}
+        busy_until = time.monotonic() + REFERENCED_BUSY_LIMIT_SECONDS
+        pause = float(BUSY_RETRY_AFTER_SECONDS)
+        failures = 0
+        while True:
+            try:
+                return int(post_json(url, payload, self._headers(), tries=1)["held"])
+            except EmbeddingRequestError as exc:
+                busy = exc.status == HTTPStatus.SERVICE_UNAVAILABLE
+                transient = exc.status is None or exc.status == HTTPStatus.TOO_MANY_REQUESTS or exc.status >= 500
+                failures += 0 if busy else 1
+                if not transient or (busy and time.monotonic() >= busy_until) or failures >= MAX_TRIES:
+                    raise
+            embedding_http._sleep(pause * (1.0 + random.random() * 0.5))  # noqa: S311 - jitter, not cryptography
+            pause = min(pause * 2, _BUSY_PAUSE_CEILING_SECONDS)
 
 
 def _vectors(response: dict[str, Any], expected_rows: int) -> EmbeddingMatrix:

@@ -22,9 +22,10 @@ from typing import Any
 import orjson
 
 from zemble.embedding.http import EmbeddingRequestError
-from zemble.embedding.service import EmbeddingService, SpecNotServed
+from zemble.embedding.service import EmbeddingService, ServiceBusy, SpecNotServed
 from zemble.embedding.wire import (
     AUTH_HEADER,
+    BUSY_RETRY_AFTER_SECONDS,
     COVERED_ROUTE,
     DESCRIBE_ROUTE,
     DOCUMENTS_ROUTE,
@@ -239,6 +240,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._answer(exc.status, {"error": str(exc)})
         except SpecNotServed as exc:
             self._answer(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+        except ServiceBusy as exc:
+            self._answer(
+                HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)}, {"Retry-After": str(BUSY_RETRY_AFTER_SECONDS)}
+            )
         except EmbeddingRequestError as exc:
             # The provider refused or gave up after its own retries; say so as the provider said it.
             logger.warning("provider failed for %s: %s", self.path, exc)
@@ -274,7 +279,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise _HttpError(HTTPStatus.BAD_REQUEST, "body must be a JSON object")
         return payload
 
-    def _answer(self, status: int, body: dict[str, Any]) -> None:
+    def _answer(self, status: int, body: dict[str, Any], headers: dict[str, str] | None = None) -> None:
         """Write one JSON response; an error also ends the connection.
 
         A request refused before its body was read leaves that body in the stream, where the
@@ -284,6 +289,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         if status != HTTPStatus.OK:
             self.send_header("Connection", "close")
             self.close_connection = True

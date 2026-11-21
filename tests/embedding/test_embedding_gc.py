@@ -117,8 +117,10 @@ def test_vectors_are_stamped_when_stored_and_when_served(tmp_path: Path) -> None
     assert limit == JOURNAL_SIZE_LIMIT_BYTES, "step 3: journal_size_limit is set"
 
 
-def test_lookups_stamp_only_held_vectors_and_a_day_s_repeat_takes_no_writer(tmp_path: Path) -> None:
-    """A stamping lookup stamps its hits, `stamp_held` any held width, an unknown hash never; repeats write nothing."""
+def test_stamping_writes_only_held_stale_stamps_in_small_transactions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stamp_held` stamps any held width, an unknown hash never, a fresh stamp never, a few per transaction."""
     cache = EmbeddingCache(_FAMILY, tmp_path)
     narrow, wide, unknown = text_hash("narrow"), text_hash("wide"), text_hash("unknown")
     cache.put_many([(narrow, 8, np.ones(8, dtype=np.float32)), (wide, 16, np.ones(16, dtype=np.float32))])
@@ -131,15 +133,18 @@ def test_lookups_stamp_only_held_vectors_and_a_day_s_repeat_takes_no_writer(tmp_
         finally:
             connection.close()
 
-    # 1. A plain lookup stamps nothing; a stamping one stamps exactly its hits at that width.
+    # 1. A lookup stamps nothing.
     assert cache.covered([narrow, wide, unknown], 16) == {wide}
-    assert days() == {narrow: today() - 40, wide: today() - 40}, "step 1: a plain lookup writes nothing"
-    assert cache.covered([narrow, wide, unknown], 16, stamp=True) == {wide}
-    assert days() == {narrow: today() - 40, wide: today()}, "step 1: only the hit is stamped"
+    assert days() == {narrow: today() - 40, wide: today() - 40}, "step 1: a lookup writes nothing"
 
-    # 2. Held hashes are stamped at any width and counted; an unknown one gets no row.
+    # 2. Held hashes are stamped at any width and counted, one per transaction here; an unknown one gets no row.
+    monkeypatch.setattr("zemble.embedding.cache.STAMPS_PER_TRANSACTION", 1)
+    transactions = []
+    cache._connection.set_trace_callback(lambda sql: transactions.append(sql) if sql == "BEGIN IMMEDIATE" else None)
     assert cache.stamp_held([narrow, wide, unknown]) == 2
     assert days() == {narrow: today(), wide: today()}, "step 2: no row for an unknown hash"
+    assert len(transactions) == 2, "step 2: one small write transaction per slice"
+    cache._connection.set_trace_callback(None)
 
     # 3. A repeat while the stamp is fresh never asks for the writer: another connection holds it and nothing waits.
     other = sqlite3.connect(cache.path, isolation_level=None)
@@ -147,7 +152,6 @@ def test_lookups_stamp_only_held_vectors_and_a_day_s_repeat_takes_no_writer(tmp_
     cache._connection.execute("PRAGMA busy_timeout = 50")
     try:
         assert cache.stamp_held([narrow, wide, unknown]) == 2, "step 3: no writer lock was needed"
-        assert cache.covered([narrow, wide], 8, stamp=True) == {narrow, wide}
         cache.touch([narrow])
     finally:
         other.execute("ROLLBACK")
@@ -157,11 +161,11 @@ def test_lookups_stamp_only_held_vectors_and_a_day_s_repeat_takes_no_writer(tmp_
     _set(cache.path, "UPDATE used SET day = ? WHERE text_sha256 = ?", today() - 3, narrow)
     _set(cache.path, "UPDATE used SET day = ? WHERE text_sha256 = ?", today() - STAMP_REFRESH_DAYS - 1, wide)
     try:
-        cache.covered([narrow, wide], 8, stamp=True)
-        assert days() == {narrow: today() - 3, wide: today()}, "step 4: covered keeps today-3, refreshes today-8"
-        _set(cache.path, "UPDATE used SET day = ? WHERE text_sha256 = ?", today() - STAMP_REFRESH_DAYS - 1, wide)
         cache.stamp_held([narrow, wide])
-        assert days() == {narrow: today() - 3, wide: today()}, "step 4: so does a referenced report"
+        assert days() == {narrow: today() - 3, wide: today()}, "step 4: a report keeps today-3, refreshes today-8"
+        _set(cache.path, "UPDATE used SET day = ? WHERE text_sha256 = ?", today() - STAMP_REFRESH_DAYS - 1, wide)
+        cache.touch([narrow, wide])
+        assert days() == {narrow: today() - 3, wide: today()}, "step 4: so does a served lookup"
         _set(cache.path, "UPDATE used SET day = ? WHERE text_sha256 = ?", today() - STAMP_REFRESH_DAYS - 1, wide)
         cache.put_many([(narrow, 8, np.ones(8, dtype=np.float32)), (wide, 16, np.ones(16, dtype=np.float32))])
         assert days() == {narrow: today() - 3, wide: today()}, "step 4: and storing again"

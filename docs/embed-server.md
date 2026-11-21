@@ -101,28 +101,43 @@ The server cannot see its clients' indexes, and an index that is only loaded nev
 vectors again, so the `used` stamp (the last day a vector was used) is the server's only
 evidence of what is still wanted. Three things write it: storing a vector (`documents`, `store`),
 serving one (`documents`), and a `covered` hit, since a pre-flight only asks about the chunks of
-a live tree. A lookup stamps after its read, in a write transaction of its own, so it never pins
-a WAL snapshot. Every stamping path shares one refresh window (`STAMP_REFRESH_DAYS`, 7, in
+a live tree. Every stamping path shares one refresh window (`STAMP_REFRESH_DAYS`, 7, in
 `zemble.embedding.cache`): a new hash is stamped today, but an existing stamp is rewritten only
-once it is 7 days old, so a vector in daily use costs one stamp write a week and a lookup whose
+once it is 7 days old, so a vector in daily use costs one stamp write a week and a batch whose
 stamps are all fresh takes no writer lock at all. A vector in use can therefore show a stamp up
 to 6 days old, and both collections refuse a grace period under 8 days.
 
-Each client also reports what its saved indexes hold: the daemon, 10 minutes after it starts and
-then every `ZEMBLE_DAEMON_REFERENCED_HOURS` (6; `0` disables), sends the server the text hash of
-every chunk of every saved index and lane overlay of a paid family (`POST /v1/referenced`, in
-requests of 10,000 hashes, each distinct hash once). The server stamps the ones it holds and
-never creates a stamp for a hash it does not. Each family goes once a day per server: the last
-day reported is kept in `~/.cache/zemble/embed-server-referenced.json`, so a daemon restart does
+Stamping never runs on the connection that serves. A store stamps inside its own insert; served
+and covered hashes go, after the answer, to a side stamper with its own sqlite connection per
+family (a bounded queue of 64 batches; when it is full their stamps are dropped and counted in
+`stamps_dropped`, the daily report being what keeps an index's vectors alive). Stale stamps are
+written 250 per write transaction (`STAMPS_PER_TRANSACTION`), so a buyer's insert gets the writer
+between two of them.
+
+Each client also reports what its saved indexes hold: the daemon, a random 10 to 60 minutes after
+it starts (so hosts restarted together do not report together) and then every
+`ZEMBLE_DAEMON_REFERENCED_HOURS` (6; `0` disables), sends the server the text hash of every chunk
+of every saved index and lane overlay of a paid family (`POST /v1/referenced`, 2,000 hashes per
+request, each distinct hash once). The server stamps the ones it holds on the side connection
+and never creates a stamp for a hash it does not. It stamps one report batch at a time, server
+wide; a batch arriving meanwhile gets `503` with `Retry-After: 2`, and the client waits with a
+growing pause (up to 60 s, up to 30 minutes in all) and resumes with the same batch. On one host
+the daemon and `zemble embed-server report [--force]` share an exclusive lock
+(`~/.cache/zemble/embed-server-referenced.lock`); the second one skips and says so. Each family
+goes once a day per server, and its day is written to
+`~/.cache/zemble/embed-server-referenced.json` as soon as that family is done, so a restart does
 not resend. A server older than the route answers 404: the client logs it once and tries again
-the next day. `zemble embed-server report [--force]` sends the report by hand.
+the next day.
 
 Measured 2026-11-21 on aeor: the client's 38 saved indexes and overlays of `voyage-4-lite` hold
-3.35M chunks, 0.96M distinct hashes, read and hashed in 27 s with 57 MB of private memory; on a
-synthetic 4M-vector server file a 10,000-hash batch whose stamps are 1-6 days old (inside the
-window) costs 0.13-0.14 s warm and 2.2 s with the page cache evicted, all of it reads and no
-writer; with stamps 10 days old it costs 0.95 s warm and 3.0 s cold, the difference being the
-stamp writes.
+3.35M chunks, 0.96M distinct hashes, read and hashed in 27 s with 57 MB of private memory. On a
+synthetic 4M-vector server file with the page cache evicted, a 2,000-hash batch of stale stamps
+takes 0.9 s, of which the eight write transactions hold the writer at most 78 ms each (500 per
+transaction: 106 ms, 1,000: 144 ms). Three reporters of 60 such batches each, run at once against
+a server on that file, finished in 93, 117 and 198 s (180 batches in 200 s, 15 answered 503);
+meanwhile a `documents` request of 32 cached texts answered in 30 ms at the median, 393 ms at
+worst (34 and 85 ms with no report running), and a 2,000-hash `covered` request in 51 ms and
+203 ms (213 and 693 ms, colder, before).
 
 ## Garbage collection
 

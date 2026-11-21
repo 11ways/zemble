@@ -47,6 +47,11 @@ RERANK_ROUTE = "/v1/rerank"
 DOCUMENTS_PER_REQUEST = FLUSH_EVERY
 #: Hashes one covered request carries.
 DIGESTS_PER_REQUEST = 10_000
+#: Hashes one referenced report request carries: small enough that the server stamps one batch in
+#: well under a second even when its pages are cold (measured in docs/embed-server.md).
+REFERENCED_DIGESTS_PER_REQUEST = 2000
+#: Seconds a busy server asks a report client to wait before its next try (the Retry-After of a 503).
+BUSY_RETRY_AFTER_SECONDS = 2
 #: Rows one store request carries.
 ROWS_PER_REQUEST = 4096
 #: The largest request body the server reads.
@@ -102,6 +107,7 @@ def decode_vectors(encoded: str, rows: int, dimensions: int) -> EmbeddingMatrix:
 
 __all__ = [
     "AUTH_HEADER",
+    "BUSY_RETRY_AFTER_SECONDS",
     "COVERED_ROUTE",
     "DESCRIBE_ROUTE",
     "DIGESTS_PER_REQUEST",
@@ -111,6 +117,7 @@ __all__ = [
     "MAX_BODY_BYTES",
     "PROVIDER_FAILED_STATUS",
     "QUERIES_ROUTE",
+    "REFERENCED_DIGESTS_PER_REQUEST",
     "REFERENCED_ROUTE",
     "RERANK_ROUTE",
     "ROWS_PER_REQUEST",

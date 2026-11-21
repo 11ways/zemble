@@ -7,6 +7,7 @@ have day granularity, so each family is reported at most once a day per server.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ from zemble.embedding.gc import index_digests, saved_indexes
 from zemble.embedding.http import EmbeddingRequestError
 from zemble.embedding.registry import cached_family
 from zemble.embedding.served import ServerClient
-from zemble.embedding.wire import DIGESTS_PER_REQUEST
+from zemble.embedding.wire import REFERENCED_DIGESTS_PER_REQUEST
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,12 @@ logger = logging.getLogger(__name__)
 REPORTED_FILE = "embed-server-referenced.json"
 #: The skip reason of a family whose report already went out today.
 REPORTED_TODAY = "reported today already"
+#: The lock one report on this host holds, so the daemon's loop and a hand-run report never overlap.
+REPORT_LOCK_FILE = "embed-server-referenced.lock"
+
+
+class ReportRunning(RuntimeError):
+    """Another referenced report holds this host's report lock; this one skips."""
 
 
 @dataclass
@@ -58,7 +65,21 @@ def report_referenced(cache_folder: Path, client: ServerClient, *, force: bool =
     :param force: Report a family again although it was reported today.
     :return: One report per family, in name order.
     :raises EmbeddingRequestError: If the server is unreachable or refuses in a way a day does not settle.
+    :raises ReportRunning: If another report on this host is running.
     """
+    cache_folder.mkdir(parents=True, exist_ok=True)
+    with (cache_folder / REPORT_LOCK_FILE).open("a+b") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ReportRunning(
+                "another referenced report is running on this host (the daemon or `zemble embed-server report`)"
+            ) from None
+        return _report_locked(cache_folder, client, force=force)
+
+
+def _report_locked(cache_folder: Path, client: ServerClient, *, force: bool) -> list[FamilyReport]:
+    """Run the report under this host's report lock; each family's day is saved as soon as it is done."""
     families: dict[str, tuple[str, list[Path]]] = {}
     for spec, folder in saved_indexes(cache_folder):
         family = cached_family(spec)
@@ -80,7 +101,7 @@ def report_referenced(cache_folder: Path, client: ServerClient, *, force: bool =
             report.skipped = "the server predates this report; retried tomorrow"
         else:
             try:
-                for batch in distinct_batches(folders, DIGESTS_PER_REQUEST, report):
+                for batch in distinct_batches(folders, REFERENCED_DIGESTS_PER_REQUEST, report):
                     report.held += client.referenced(spec, batch)
                     report.sent += len(batch)
             except EmbeddingRequestError as exc:
@@ -172,4 +193,12 @@ def _write_state(path: Path, state: dict[str, dict[str, int]]) -> None:
     staging.replace(path)
 
 
-__all__ = ["REPORTED_FILE", "REPORTED_TODAY", "FamilyReport", "distinct_batches", "report_referenced"]
+__all__ = [
+    "REPORTED_FILE",
+    "REPORTED_TODAY",
+    "REPORT_LOCK_FILE",
+    "FamilyReport",
+    "ReportRunning",
+    "distinct_batches",
+    "report_referenced",
+]
