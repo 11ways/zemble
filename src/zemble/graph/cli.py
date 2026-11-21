@@ -12,6 +12,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TextIO
 
 from zemble.graph.facts import (
     TREE_SITTER_SOURCE,
@@ -24,11 +25,13 @@ from zemble.graph.facts import (
 )
 from zemble.graph.model import CALLABLE_KINDS, TYPE_KINDS, EdgeKind, Hit, Symbol, SymbolKind
 from zemble.graph.provider import AnyProvider, SqliteGraphProvider, display_name, inherited_tally, open_provider
+from zemble.graph.refresh import REFRESHING_KEY, PendingRefresh, RefreshPhase, refresh_note
 from zemble.graph.signature import SymbolQuery, signature_form
 from zemble.graph.store import (
     StoredDeclaredSymbols,
     build_graph,
     graph_ancestor,
+    graph_being_written,
     graph_covers,
     graph_exists,
     refresh_graph,
@@ -363,7 +366,7 @@ def _globs_of(overlay: FactsOverlay) -> tuple[str, ...]:
     return facts_source_globs(overlay.root)
 
 
-def ensure_graph(path: str, *, refresh: bool = True, allow_daemon: bool = True) -> None:
+def ensure_graph(path: str, *, refresh: bool = True, allow_daemon: bool = True) -> PendingRefresh | None:
     """Build the graph if it is missing, and refresh it once per process.
 
     A warm daemon does both instead where one is reachable: it keeps the graph fresh with
@@ -374,6 +377,8 @@ def ensure_graph(path: str, *, refresh: bool = True, allow_daemon: bool = True) 
     :param allow_daemon: Whether a daemon may be asked; a handler running INSIDE the daemon
         passes False, because asking a daemon to ensure the graph it is already ensuring
         recurses through its own socket.
+    :return: The refresh still coming or running on the graph that answers for `path`, which an
+        answer read now does not hold yet; None when it is current.
     """
     # A sub-directory of a tree that has a graph is answered from that graph (see
     # `open_provider`), so it is the ancestor that is kept fresh, never a second graph built.
@@ -381,43 +386,70 @@ def ensure_graph(path: str, *, refresh: bool = True, allow_daemon: bool = True) 
     # created since its last build is not mistaken for one it excludes.
     ancestor = graph_ancestor(path)
     if ancestor is not None:
-        _ensure_one(ancestor[0], refresh=refresh, allow_daemon=allow_daemon)
+        pending = _ensure_one(ancestor[0], refresh=refresh, allow_daemon=allow_daemon)
         if graph_covers(*ancestor):
-            return
-    _ensure_one(path, refresh=refresh, allow_daemon=allow_daemon)
+            return pending
+    return _ensure_one(path, refresh=refresh, allow_daemon=allow_daemon)
 
 
-def _ensure_one(path: str, *, refresh: bool, allow_daemon: bool) -> None:
+def _ensure_one(path: str, *, refresh: bool, allow_daemon: bool) -> PendingRefresh | None:
     """Build one root's graph if it is missing, and refresh it once per process."""
-    if allow_daemon and _ensure_via_daemon(path):
-        return
+    if allow_daemon and (answered := _ensure_via_daemon(path)) is not None:
+        return PendingRefresh.from_json(answered.get(REFRESHING_KEY))
     if not graph_exists(path):
         build_graph(path)
         _refreshed.add(path)
-        return
-    if refresh and path not in _refreshed:
+    elif refresh and path not in _refreshed:
         # Skipped when another process is writing the graph: that writer is refreshing it.
         refresh_graph(path)
         _refreshed.add(path)
+    return _written_elsewhere(path)
 
 
-def _ensure_via_daemon(path: str) -> bool:
+def _written_elsewhere(path: str) -> PendingRefresh | None:
+    """The refresh another process is running on a root's graph, seen only as its held writer lock."""
+    if not graph_being_written(path):
+        return None
+    return PendingRefresh(root=str(Path(path).resolve()), phase=RefreshPhase.BUILDING, awaitable=False)
+
+
+def _ensure_via_daemon(path: str, *, settle: bool = False) -> dict[str, object] | None:
     """Ask the daemon to guarantee a fresh graph for a path.
 
     :param path: The workspace directory.
-    :return: Whether the daemon answered; False means do it in this process, as for a daemon that cannot.
+    :param settle: Whether the daemon also waits out a refresh pending on that graph, as busy.
+    :return: The daemon's answer; None means do it in this process, as for a daemon that cannot.
     """
     from zemble.daemon import client
 
     if client.in_process():
-        return False
+        return None
     try:
-        client.answer("graph", {"path": path, "command": "ensure"})
+        answered = client.answer("graph", {"path": path, "command": "ensure", "settle": settle})
     except client.AnswerHere as exc:
         print(f"{exc}; answering in this process.", file=sys.stderr)
         client.answer_here(str(exc))
-        return False
-    return True
+        return None
+    return answered if isinstance(answered, dict) else {}
+
+
+def settle_graph(path: str, pending: PendingRefresh) -> PendingRefresh | None:
+    """Wait for a refresh the daemon owns to land, as long as a query waits out a busy daemon.
+
+    :return: None once it landed; the refresh as it stands when the wait ran out, or when nobody can wait for it.
+    """
+    from zemble.daemon.protocol import QueryTimedOut
+
+    if not pending.awaitable:
+        return pending
+    try:
+        answered = _ensure_via_daemon(path, settle=True)
+    except QueryTimedOut as exc:
+        print(f"{exc}", file=sys.stderr)
+        answered = _ensure_via_daemon(path)
+    if answered is None:
+        return pending
+    return PendingRefresh.from_json(answered.get(REFRESHING_KEY))
 
 
 def select_symbol(symbols: Sequence[Symbol], name: str) -> tuple[Symbol | None, list[Symbol]]:
@@ -539,28 +571,62 @@ def overload_context(provider: AnyProvider, chosen: Symbol, method: str) -> dict
 
 
 def _run_query(args: argparse.Namespace) -> int:
-    """Run one graph query and print its answer."""
-    ensure_graph(args.path)
+    """Run one graph query and print its answer; one naming nothing waits for a refresh the daemon is running first."""
+    pending = ensure_graph(args.path)
     provider = open_provider(args.path)
     try:
-        return _answer_query(args, provider)
+        found = _find(args, provider)
+        if found.names_nothing and pending is not None and pending.awaitable:
+            provider.close()
+            pending = settle_graph(args.path, pending)
+            provider = open_provider(args.path)
+            found = _find(args, provider)
+        return _print_answer(args, provider, found, pending)
     finally:
         provider.close()
 
 
-def _answer_query(args: argparse.Namespace, provider: AnyProvider) -> int:
-    """Resolve the written name and print the requested relationship."""
+@dataclass(frozen=True)
+class _Found:
+    """What one graph query found: the declarations a name matched, the one it chose and its hits."""
+
+    symbols: list[Symbol]
+    chosen: Symbol | None
+    candidates: list[Symbol]
+    hits: list[Hit]
+
+    @property
+    def names_nothing(self) -> bool:
+        """Whether the answer is empty: no declaration, or a chosen one with no hit."""
+        return not self.symbols or (self.chosen is not None and not self.hits)
+
+
+def _find(args: argparse.Namespace, provider: AnyProvider) -> _Found:
+    """Resolve the written name and run the requested relationship."""
     symbols = provider.definition(args.symbol)
     if args.graph_command == "definition":
-        return _print_definitions(args, provider, symbols)
+        return _Found(symbols, None, [], [])
     chosen, candidates = select_symbol(symbols, args.symbol)
     if chosen is None:
-        return _report_selection_failure(args, provider, candidates)
+        return _Found(symbols, None, candidates, [])
     if args.graph_command == "neighbors":
         kinds = [EdgeKind(value) for value in args.kinds] if args.kinds else None
         hits = provider.neighbors(chosen.id, hops=args.hops, kinds=kinds)
     else:
         hits = getattr(provider, _METHODS[args.graph_command])(chosen.id)
+    return _Found(symbols, chosen, candidates, hits)
+
+
+def _print_answer(
+    args: argparse.Namespace, provider: AnyProvider, found: _Found, pending: PendingRefresh | None
+) -> int:
+    """Print what a graph query found, and the refresh it was read before when one is pending."""
+    refreshing = {REFRESHING_KEY: pending.to_json()} if pending is not None else {}
+    if args.graph_command == "definition":
+        return _print_definitions(args, provider, found.symbols, refreshing)
+    chosen, hits = found.chosen, found.hits
+    if chosen is None:
+        return _report_selection_failure(args, provider, found.candidates, refreshing)
     overloads = overload_context(provider, chosen, _METHODS.get(args.graph_command, args.graph_command))
     if args.json:
         payload = {
@@ -568,6 +634,7 @@ def _answer_query(args: argparse.Namespace, provider: AnyProvider) -> int:
             "results": [_hit_json(hit) for hit in hits],
             **overloads,
             **(inherited_counts(hits) if args.graph_command == "callers" else {}),
+            **refreshing,
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -581,35 +648,52 @@ def _answer_query(args: argparse.Namespace, provider: AnyProvider) -> int:
         print(f"  ({overloads['overload_note']})")
     if not hits:
         print(f"  ({provider.coverage_note()})")
+    if pending is not None:
+        print(f"  ({pending.note()})")
     return 0
 
 
-def _print_definitions(args: argparse.Namespace, provider: AnyProvider, symbols: Sequence[Symbol]) -> int:
+def _print_definitions(
+    args: argparse.Namespace, provider: AnyProvider, symbols: Sequence[Symbol], refreshing: dict[str, object]
+) -> int:
     """Print every declaration matching a name."""
     if args.json:
-        print(json.dumps({"results": [_symbol_json(symbol) for symbol in symbols]}, indent=2))
+        print(json.dumps({"results": [_symbol_json(symbol) for symbol in symbols], **refreshing}, indent=2))
         return 0 if symbols else EXIT_NOT_FOUND
     if not symbols:
         print(refuse_selection(provider, args.symbol, []).message, file=sys.stderr)
+        _print_refresh_note(refreshing, sys.stderr)
         return EXIT_NOT_FOUND
     for symbol in symbols:
         print(f"{symbol.kind.value:14} {symbol.file_path}:{symbol.start_line}  {symbol.signature or symbol.name}")
+    _print_refresh_note(refreshing, sys.stdout)
     return 0
 
 
-def _report_selection_failure(args: argparse.Namespace, provider: AnyProvider, candidates: Sequence[Symbol]) -> int:
+def _print_refresh_note(refreshing: dict[str, object], stream: TextIO) -> None:
+    """Print a pending refresh's note, when there is one."""
+    note = refresh_note(refreshing)
+    if note:
+        print(f"({note})", file=stream)
+
+
+def _report_selection_failure(
+    args: argparse.Namespace, provider: AnyProvider, candidates: Sequence[Symbol], refreshing: dict[str, object]
+) -> int:
     """Report an unknown or ambiguous name with the exit code that says which."""
     refusal = refuse_selection(provider, args.symbol, candidates)
     if args.json:
         payload: dict[str, object] = {
             "error": refusal.message,
             "candidates": [_symbol_json(symbol) for symbol in candidates],
+            **refreshing,
         }
         if refusal.overloads:
             payload["overloads"] = refusal.overloads
         print(json.dumps(payload, indent=2))
         return refusal.exit_code
     print(refusal.message, file=sys.stderr)
+    _print_refresh_note(refreshing, sys.stderr)
     if candidates and not refusal.overloads:
         print(f"{len(candidates)} candidates:", file=sys.stderr)
         for symbol in candidates:

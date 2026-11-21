@@ -21,9 +21,7 @@ from zemble.evidence.outline import (
     omitted_line,
     outline_header,
 )
-from zemble.graph.cli import ensure_graph
-from zemble.graph.mcp import CallSite, call_site_parts
-from zemble.graph.provider import AnyProvider, open_provider
+from zemble.graph.mcp import CallSite, call_site_parts, read_graph
 from zemble.index import ZembleIndex
 from zemble.mcp_repo import resolve_repo, with_default_note
 from zemble.nib.parts import Part, file_lines, location_part, nib_answer, source_part, text_part
@@ -57,12 +55,6 @@ _EXCLUDE_DESCRIPTION = (
 )
 
 
-def _open(repo: str) -> AnyProvider:
-    """Build the graph if needed and open a provider on it."""
-    ensure_graph(repo)
-    return open_provider(repo)
-
-
 async def _remote(cmd: str, args: dict[str, Any]) -> dict[str, Any] | None:
     """Ask the warm daemon for one evidence payload, or return None to answer here.
 
@@ -77,29 +69,17 @@ async def _remote(cmd: str, args: dict[str, Any]) -> dict[str, Any] | None:
 
 def _explain_here(index: ZembleIndex, repo: str, query: str, budget: int, top_k: int) -> dict[str, Any]:
     """Build an evidence bundle in this process."""
-    provider = _open(repo)
-    try:
-        return explain_payload(index, provider, query, budget, top_k)
-    finally:
-        provider.close()
+    return read_graph(repo, lambda provider: explain_payload(index, provider, query, budget, top_k))
 
 
 def _outline_here(repo: str, target: str, members: str | None, everything: bool) -> dict[str, Any]:
     """Outline a file or a type in this process."""
-    provider = _open(repo)
-    try:
-        return outline_payload(provider, target, members, everything)
-    finally:
-        provider.close()
+    return read_graph(repo, lambda provider: outline_payload(provider, target, members, everything))
 
 
 def _signatures_here(repo: str, symbol: str) -> dict[str, Any]:
     """Describe a symbol and its exact callers in this process."""
-    provider = _open(repo)
-    try:
-        return signatures_payload(provider, symbol)
-    finally:
-        provider.close()
+    return read_graph(repo, lambda provider: signatures_payload(provider, symbol))
 
 
 def _as_payload(payload: dict[str, Any], key: str) -> dict[str, Any]:

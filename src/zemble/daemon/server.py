@@ -58,6 +58,7 @@ from zemble.daemon.protocol import (
 from zemble.daemon.watch import RootWatcher, WatchSpec
 from zemble.embedding.base import Embedder
 from zemble.graph.facts import matches_facts_glob
+from zemble.graph.refresh import names_nothing, stamp
 from zemble.index import ZembleIndex
 from zemble.index.chunk_store import ChunkList
 from zemble.index.create import change_set_moves_anything, tree_moves_anything
@@ -927,10 +928,30 @@ class Daemon:
             return None
         return round((time.monotonic() - started) * 1000)
 
-    async def with_graph(self, root: str, work: Callable[[Any], Any]) -> Any:
-        """Read a prepared immutable graph without borrowing the construction slot."""
-        await self.graphs.ensure(root, time.monotonic() + 25)
-        return await asyncio.to_thread(_with_graph, root, work, fresh=True)
+    async def with_graph(self, root: str, work: Callable[[Any], Any], *, lookup: bool = False) -> Any:
+        """Read a prepared immutable graph without borrowing the construction slot.
+
+        :param lookup: Whether the read looks one name or file up, so an answer naming nothing is not final.
+        """
+        return await self.graph_answer(root, lambda: _with_graph(root, work, fresh=True), lookup=lookup)
+
+    async def graph_answer(self, path: str, compute: Callable[[], Any], *, lookup: bool) -> Any:
+        """Answer one read of a path's graph in a worker thread, carrying the refresh it was read before.
+
+        AIDEV-NOTE: a published graph answers while its refresh runs (`GraphJobs.ensure`), so a method
+        a pull just added reads as "no symbol" for as long as that refresh takes, minutes on a large
+        workspace. A lookup naming nothing is then busy instead (`refresh.names_nothing`), which
+        `client.answer` waits out like any busy daemon; every other answer carries the refresh. A read
+        of the whole graph (health, home) may rightly find nothing, so it is never held back.
+        """
+        root = await self.graphs.ensure(path, time.monotonic() + 25)
+        before = self.graphs.pending_refresh(root)
+        payload = await asyncio.to_thread(compute)
+        # One that landed while the answer was read still counts: the answer predates it.
+        pending = self.graphs.pending_refresh(root) or before
+        if pending is not None and lookup and names_nothing(payload):
+            raise AdmissionBusy(pending.busy_reason())
+        return stamp(payload, pending)
 
     async def _execute_read(self, handler: Handler, args: dict[str, Any], *, memo: bool = True) -> Any:
         """Pin a request's serving generation until its actual work finishes."""
@@ -942,7 +963,9 @@ class Daemon:
                     (key[0], weakref.ref(index)) for key, index in sorted(self.cache.loaded(), key=lambda x: x[0][0])
                 )
                 generations = tuple(sorted(self.graphs.generations.items()))
-                key = (handler.__name__, json.dumps(args, sort_keys=True), indexes, generations)
+                # An answer carries the refreshes pending when it was read, so their start is a new key too.
+                pending = self.graphs.pending_roots()
+                key = (handler.__name__, json.dumps(args, sort_keys=True), indexes, generations, pending)
                 return await self.read_cache.get(key, lambda: self._execute_read(handler, args, memo=False))
             return await handler(self, args)
         finally:
@@ -1259,6 +1282,7 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
     The daemon's win here is freshness: it builds the graph once and its watcher keeps
     it current, so a client never pays the workspace scan `ensure_graph` would do.
     """
+    from zemble.graph.cli import PROVIDER_METHODS
     from zemble.graph.mcp import answer
 
     path = str(args.get("path", ""))
@@ -1266,8 +1290,12 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
         raise ValueError("missing 'path'")
     command = str(args.get("command", "ensure"))
     if command == "ensure":
-        await daemon.graphs.ensure(path, time.monotonic() + 25)
-        return {"ensured": True}
+        root = await daemon.graphs.ensure(path, time.monotonic() + 25)
+        pending = daemon.graphs.pending_refresh(root)
+        if pending is not None and args.get("settle"):
+            # The client asked to wait for it: busy is what `client.answer` waits out.
+            raise AdmissionBusy(pending.busy_reason())
+        return stamp({"ensured": True}, pending)
     kinds = args.get("kinds")
     extra: dict[str, Any] = {}
     if args.get("limit") is not None:
@@ -1276,8 +1304,10 @@ async def _cmd_graph(daemon: Daemon, args: dict[str, Any]) -> Any:
         from zemble.graph.model import EdgeKind
 
         extra.update({"hops": int(args.get("hops", 1)), "kinds": [EdgeKind(kind) for kind in kinds] if kinds else None})
-    await daemon.graphs.ensure(path, time.monotonic() + 25)
-    return await asyncio.to_thread(answer, path, str(args.get("symbol", "")), command, fresh=True, **extra)
+    symbol = str(args.get("symbol", ""))
+    # A command outside the vocabulary is refused before any lookup, so its error is final.
+    lookup = command in PROVIDER_METHODS
+    return await daemon.graph_answer(path, lambda: answer(path, symbol, command, fresh=True, **extra), lookup=lookup)
 
 
 def _failure_response(request_id: Any, command: str, exc: Exception) -> dict[str, Any]:
@@ -1376,7 +1406,7 @@ async def _cmd_outline(daemon: Daemon, args: dict[str, Any]) -> Any:
     target = str(args.get("target", ""))
     members = args.get("members")
     everything = bool(args.get("all", False))
-    return await daemon.with_graph(root, lambda graph: outline_payload(graph, target, members, everything))
+    return await daemon.with_graph(root, lambda graph: outline_payload(graph, target, members, everything), lookup=True)
 
 
 async def _cmd_signatures(daemon: Daemon, args: dict[str, Any]) -> Any:
@@ -1385,7 +1415,7 @@ async def _cmd_signatures(daemon: Daemon, args: dict[str, Any]) -> Any:
 
     root = _root_of(args)
     symbol = str(args.get("symbol", ""))
-    return await daemon.with_graph(root, lambda graph: signatures_payload(graph, symbol))
+    return await daemon.with_graph(root, lambda graph: signatures_payload(graph, symbol), lookup=True)
 
 
 async def _cmd_home(daemon: Daemon, args: dict[str, Any]) -> Any:

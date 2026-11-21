@@ -76,7 +76,7 @@ def _stub_local_paths(monkeypatch) -> list[str]:
 
     monkeypatch.setattr("zemble.mcp._get_index", local("index"))
     monkeypatch.setattr("zemble.graph.mcp.answer", local("graph"))
-    monkeypatch.setattr("zemble.evidence.mcp._open", local("open"))
+    monkeypatch.setattr("zemble.evidence.mcp.read_graph", local("open"))
     monkeypatch.setattr("zemble.home.mcp._here", local("home"))
     return ran
 

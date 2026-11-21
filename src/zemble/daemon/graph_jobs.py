@@ -7,6 +7,7 @@ import contextlib
 import heapq
 import itertools
 import json
+import logging
 import os
 import resource
 import sys
@@ -17,6 +18,9 @@ from typing import Any
 
 from zemble.daemon.admission import AdmissionBusy
 from zemble.daemon.memory import MIB, ReadOutgrown, private_mb
+from zemble.graph.refresh import PendingRefresh, RefreshPhase
+
+logger = logging.getLogger(__name__)
 
 TOTAL_MEMORY_ENV = "ZEMBLE_DAEMON_TOTAL_MEMORY_MB"
 GRAPH_MEMORY_ENV = "ZEMBLE_GRAPH_BUILD_MEMORY_MB"
@@ -55,6 +59,37 @@ def _lane_base(root: str) -> str | None:
 
 #: Turn priorities: a root no lane of which it is (a base, or any plain root) goes before every lane.
 _BASE_FIRST, _LANE_LAST = 0, 1
+
+
+def _log_finished(root: str, state: dict[str, Any], elapsed: float) -> None:
+    """Log a landed refresh: how long it took from its turn being asked for, and the files it read and resolved."""
+    if "stats" in state and state["stats"] is None:
+        logger.info(
+            "graph refresh of %s finished in %.1f s: another process was writing it, so it read nothing", root, elapsed
+        )
+        return
+    stats = state.get("stats") or {}
+    logger.info(
+        "graph refresh of %s finished in %.1f s (worker %.1f s, peak %.0f MiB): %d of %d file(s) re-extracted, "
+        "%d re-resolved, %d removed%s",
+        root,
+        elapsed,
+        state.get("build_seconds", 0.0),
+        state.get("peak_rss_mb", 0.0),
+        stats.get("extracted_files", 0),
+        stats.get("files_scanned", 0),
+        stats.get("reresolved_files", 0),
+        stats.get("removed_files", 0),
+        ", then compacted" if stats.get("compacted") else "",
+    )
+
+
+def _log_unfinished(root: str, outcome: str, elapsed: float, error: BaseException) -> None:
+    """Log a refresh that did not land: a failure at WARNING with its reason, a dropped or cancelled one at INFO."""
+    if outcome == "failed":
+        logger.warning("graph refresh of %s failed after %.1f s; the graph stays as it was: %s", root, elapsed, error)
+    else:
+        logger.info("graph refresh of %s %s after %.1f s: %s", root, outcome, elapsed, error)
 
 
 class GraphJobs:
@@ -98,23 +133,24 @@ class GraphJobs:
 
     async def ensure(
         self, root: str, deadline: float | None, *, refresh: bool = False, changed_paths: Any = None
-    ) -> None:
+    ) -> str:
         """Join construction without letting a client timeout cancel shared work.
 
         A root that already has a published graph is never waited for: its first request starts
         the refresh and reads the published generation meanwhile, as every later one does.
 
         :param deadline: When this caller stops waiting (``time.monotonic()``); None waits it out.
+        :return: The canonical root whose graph answers for *root*, as `pending_refresh` takes it.
         """
         from zemble.graph.store import graph_exists
 
         if (key := str(Path(root).resolve())) in self.ready and not refresh:
             self._follow_base(key)
-            return
+            return key
         root = await self._graph_root(root)
         if root in self.ready and not refresh:
             self._follow_base(root)
-            return
+            return root
         if root not in self.ready and await asyncio.to_thread(graph_exists, root):
             # AIDEV-NOTE: a refresh of a large, busy workspace (javac facts rewritten by every build)
             # took 3 to 15+ minutes; making the first request after a daemon start wait for it
@@ -122,11 +158,33 @@ class GraphJobs:
             self.ready.add(root)
         task = self._start(root, refresh=refresh, changed_paths=changed_paths)
         if task is None or (root in self.ready and not refresh):
-            return
+            return root
         if not refresh and await asyncio.to_thread(_answered_meanwhile, root):
             # A lane's first graph is seeded from its base's, which answers for it until then.
-            return
+            return root
         await self._join(root, task, deadline)
+        return root
+
+    def pending_refresh(self, root: str) -> PendingRefresh | None:
+        """The refresh of a canonical root's graph that is announced, queued or running, if any."""
+        if (job := self.jobs.get(root)) is not None and not job.done():
+            state = self.states.get(root, {})
+            building = state.get("state") == "building"
+            paths = self.paths.get(root)
+            return PendingRefresh(
+                root=root,
+                phase=RefreshPhase.BUILDING if building else RefreshPhase.QUEUED,
+                since=state.get("started_at" if building else "queued_at"),
+                changed_paths=None if paths is None or self.pending.get(root, set()) is None else len(paths),
+            )
+        if root in self.announced:
+            return PendingRefresh(root=root, phase=RefreshPhase.ANNOUNCED)
+        return None
+
+    def pending_roots(self) -> tuple[str, ...]:
+        """The roots with a refresh announced, queued or running, for keying answers that carry one."""
+        running = {root for root, job in self.jobs.items() if not job.done()}
+        return tuple(sorted(running | set(self.announced)))
 
     def _follow_base(self, root: str) -> None:
         """Rebuild a ready lane overlay whose base moved, in the background; the published one answers meanwhile.
@@ -225,6 +283,7 @@ class GraphJobs:
                     return
                 paths = self.pending.pop(root)
                 self.paths[root] = sorted(paths) if paths is not None else None
+                self.states[root].update(state="queued", queued_at=time.time())
         finally:
             self.jobs.pop(root, None)
             self.paths.pop(root, None)
@@ -287,7 +346,14 @@ class GraphJobs:
                         started_at=time.time(),
                         serving_limit_mb=parent_limit / MIB,
                     )
-                    message = json.dumps({"changed_paths": self.paths.get(root)}).encode()
+                    changed = self.paths.get(root)
+                    logger.info(
+                        "graph refresh of %s started after %.1f s queued: %s",
+                        root,
+                        time.monotonic() - started,
+                        "whole tree checked" if changed is None else f"{len(changed)} changed path(s)",
+                    )
+                    message = json.dumps({"changed_paths": changed}).encode()
                     stdout, stderr = await self.process.communicate(message)
                     if self.process.returncode:
                         # A failure, never a refusal: the client asks again, then answers in its own process.
@@ -298,6 +364,7 @@ class GraphJobs:
                     state["generation"] = self.generations[root]
                     self.ready.add(root)
                     state["state"] = "ready"
+                    _log_finished(root, state, time.monotonic() - started)
                 finally:
                     if self.process is not None and self.process.returncode is None:
                         self.process.terminate()
@@ -308,6 +375,7 @@ class GraphJobs:
             if state["state"] != "dropped":
                 state.update(state="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
             state["error"] = str(exc)
+            _log_unfinished(root, state["state"], time.monotonic() - started, exc)
             raise
         finally:
             state["elapsed_seconds"] = round(time.monotonic() - started, 3)

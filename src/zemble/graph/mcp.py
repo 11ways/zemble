@@ -22,6 +22,7 @@ from zemble.graph.cli import (
 from zemble.graph.facts import TREE_SITTER_SOURCE
 from zemble.graph.model import CallBinding, EdgeKind, Hit, Resolution, Symbol
 from zemble.graph.provider import RESOLUTION_PHRASES, AnyProvider, display_name, open_provider
+from zemble.graph.refresh import refresh_note, stamp
 from zemble.mcp_repo import resolve_repo, with_default_note
 from zemble.nib.parts import Part, PartsBuilder, location_part, nib_answer, text_part
 
@@ -79,11 +80,17 @@ def _hit_json(hit: Hit) -> dict[str, Any]:
     }
 
 
-def _open(repo: str, *, fresh: bool = False) -> AnyProvider:
-    """Build the graph if needed and open a provider on it."""
-    if not fresh:
-        ensure_graph(repo)
-    return open_provider(repo)
+def read_graph(repo: str, work: Callable[[AnyProvider], Any], *, fresh: bool = False) -> Any:
+    """Build or refresh the graph unless `fresh`, run one read on it, and carry the refresh the read came before.
+
+    `fresh` is the daemon's: it keeps the graph fresh itself and stamps what it knows of its own jobs.
+    """
+    pending = None if fresh else ensure_graph(repo)
+    provider = open_provider(repo)
+    try:
+        return stamp(work(provider), pending)
+    finally:
+        provider.close()
 
 
 def _capped(items: list[Any], limit: int, render: Any) -> dict[str, Any]:
@@ -108,47 +115,48 @@ def answer(
         raise ValueError("limit must be positive")
     if method not in PROVIDER_METHODS:
         return {"error": f"Unknown graph command {method!r}."}
-    provider = _open(repo, fresh=True) if fresh else _open(repo)
-    try:
-        candidates = provider.definition(symbol)
-        if method == "definition":
-            if not candidates:
-                refusal = refuse_selection(provider, symbol, candidates)
-                return {"error": refusal.message, "overloads": refusal.overloads, "note": provider.coverage_note()}
-            return _capped(candidates, limit, _symbol_json)
-        chosen, competing = select_symbol(candidates, symbol)
-        if chosen is None:
-            refusal = refuse_selection(provider, symbol, competing)
-            if not competing:
-                return {"error": refusal.message, "overloads": refusal.overloads, "note": provider.coverage_note()}
-            return {
-                "error": refusal.message,
-                "overloads": refusal.overloads,
-                "candidates": [_symbol_json(found) for found in competing],
-            }
-        traversal = method in {"neighbors", "implementations", "supertypes"}
-        if traversal:
-            # One lookahead hit proves truncation without materializing the rest of the graph.
-            kwargs["limit"] = limit + 1
-        hits = getattr(provider, method)(chosen.id, **kwargs)
-        payload: dict[str, Any] = {
-            "symbol": _symbol_json(chosen),
-            "display": display_name(chosen),
-            **_capped(hits, limit, _hit_json),
-            **overload_context(provider, chosen, method),
-            **(inherited_counts(hits) if method == "callers" else {}),
+    return read_graph(repo, lambda provider: _answered(provider, symbol, method, limit, kwargs), fresh=fresh)
+
+
+def _answered(provider: AnyProvider, symbol: str, method: str, limit: int, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Run one provider query for a written name, as a payload object."""
+    candidates = provider.definition(symbol)
+    if method == "definition":
+        if not candidates:
+            refusal = refuse_selection(provider, symbol, candidates)
+            return {"error": refusal.message, "overloads": refusal.overloads, "note": provider.coverage_note()}
+        return _capped(candidates, limit, _symbol_json)
+    chosen, competing = select_symbol(candidates, symbol)
+    if chosen is None:
+        refusal = refuse_selection(provider, symbol, competing)
+        if not competing:
+            return {"error": refusal.message, "overloads": refusal.overloads, "note": provider.coverage_note()}
+        return {
+            "error": refusal.message,
+            "overloads": refusal.overloads,
+            "candidates": [_symbol_json(found) for found in competing],
         }
-        if traversal and provider.traversal_truncated:
-            payload["total_exact"] = False
-            payload["truncated"] = (
-                f"showing {min(limit, len(hits))} of at least {len(hits)}; traversal stopped at its cap; "
-                "raise `limit` to explore further"
-            )
-        if not hits:
-            payload["note"] = provider.coverage_note()
-        return payload
-    finally:
-        provider.close()
+    traversal = method in {"neighbors", "implementations", "supertypes"}
+    if traversal:
+        # One lookahead hit proves truncation without materializing the rest of the graph.
+        kwargs["limit"] = limit + 1
+    hits = getattr(provider, method)(chosen.id, **kwargs)
+    payload: dict[str, Any] = {
+        "symbol": _symbol_json(chosen),
+        "display": display_name(chosen),
+        **_capped(hits, limit, _hit_json),
+        **overload_context(provider, chosen, method),
+        **(inherited_counts(hits) if method == "callers" else {}),
+    }
+    if traversal and provider.traversal_truncated:
+        payload["total_exact"] = False
+        payload["truncated"] = (
+            f"showing {min(limit, len(hits))} of at least {len(hits)}; traversal stopped at its cap; "
+            "raise `limit` to explore further"
+        )
+    if not hits:
+        payload["note"] = provider.coverage_note()
+    return payload
 
 
 def _line_part(root: str, entry: dict[str, Any]) -> Part | None:
@@ -167,8 +175,7 @@ def _error_parts(payload: dict[str, Any]) -> list[Part]:
         lines += [
             f"  {found['kind']} {found['qualified_name']}  {found['file_path']}:{found['line']}" for found in candidates
         ]
-    if payload.get("note"):
-        lines.append(str(payload["note"]))
+    lines += [str(note) for note in (payload.get("note"), refresh_note(payload)) if note]
     return [text_part("\n".join(lines))]
 
 
@@ -184,9 +191,10 @@ def _queried_parts(root: str, payload: dict[str, Any]) -> list[Part]:
 
 
 def _footer_part(payload: dict[str, Any]) -> Part:
-    """State the exact total, and the cap or coverage note when there is one."""
+    """State the exact total, and the cap, coverage or refresh note when there is one."""
     footer = [f"total: {payload['total']}"]
     footer += [str(payload[key]) for key in ("truncated", "overload_note", "note") if payload.get(key)]
+    footer += [note] if (note := refresh_note(payload)) else []
     return text_part("\n".join(footer))
 
 

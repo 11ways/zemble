@@ -578,6 +578,19 @@ The daemon's `graph_ms` is exactly the change-set column: `_refresh_graph` hands
 watcher's paths straight to `build_graph`, so an edit is in the graph one 500 ms
 debounce plus that number after it is saved.
 
+**A pull is the expensive change set.** Measured on a protoblast checkout (2,049 Java files,
+37k symbols, 312k edges) moved forward 80 commits, 235 changed files and 3 removed, in the
+daemon's lane (change set, one extraction process, as `graph_worker` runs it): 19.9 s, of which
+2.0 s extraction, 0.9 s deleting the touched rows, 15.5 s the resolve pass (2.9 s loading
+staged edges, 5.1 s resolving calls and members, 3.3 s publishing the resolved edges, the rest
+the hierarchy, derived edges and staging) and under 0.5 s everything else. The resolve pass
+covers 1,580 files, not 235: the pull changed the declaration set of 3,116 names, and the
+dependents rule re-resolves every file that writes one of them (`of` alone is written in 663
+files, `get` in 583). Names written in fewer than 50 files still pull in 904 dependents, so no
+cut-off on common names avoids it; a narrower invalidation key (name plus arity, or the
+receiver type a call names) would, and is not built. Until 2026-11-21 the pass also re-derived
+each edge's file language and test-ness per edge (1.7 s of 21.6 s); both are memoised now.
+
 The walk lane costs the source walk (0.6 s) plus the facts discovery walk (1.4 s),
 the latter because `**/build/zemble/*.jsonl` can prune nothing - `**` keeps every
 directory alive - so it descends the whole tree. A facts file rewrite is the
@@ -668,6 +681,23 @@ such line ends its reason with `through <declaration>` (or `through override <me
 adds `binding` and `through` per hit and the `direct_total`/`inherited_total`/`inherited_through`
 counts.
 
+### While a refresh runs
+
+A graph is refreshed beside its readers, so a query answered meanwhile reads the version before
+the refresh: after a pull, a method the pull added reads as "No symbol" until the refresh lands,
+which took more than six minutes after a ~900-file pull on the zenit workspace. Every answer read
+while that root's refresh is announced, queued or building says so: `refreshing` in the JSON
+(`phase`, `since`, `changed_paths`, `awaitable`, `note`) and the note on text surfaces (`Not
+final: the symbol graph of <root> is being refreshed (building for 42 s, 900 changed path(s));
+this answer reads the graph as it was before that refresh.`). An answer naming nothing - no such
+symbol, or no result - is not given while a refresh the daemon owns is pending: the daemon
+answers busy and the client waits that out (`docs/daemon.md`, up to `ZEMBLE_QUERY_WAIT_SECONDS`),
+then answers from the refreshed graph; the CLI, which reads the graph in its own process, asks
+the daemon to `ensure` with `settle` before reading again. When the wait runs out the empty
+answer is printed with the note, never as the final word. Without a daemon the only witness is
+another process holding `graph.lock`, read off `/proc/locks` without taking it
+(`store.graph_being_written`); that refresh is stated (`awaitable: false`) but not waited for.
+
 ## MCP
 
 Six tools are registered on the existing zemble MCP server:
@@ -682,6 +712,7 @@ when any is not exact and the tools that wrote edges), then every listed call si
 grouped by file and calling method (`path: Caller L12, L30; Other L5 (ambiguous, 2 candidates)`),
 a site bound through an override relation noted `(through GenerationHandle.result)`, and the
 heading naming both counts (`of all 44: 3 direct, 41 through GenerationHandle.result`).
+An answer read while a refresh is pending carries `refreshing` and prints its note.
 An ambiguous name comes back as an `error` (with `overloads`, the signatures to retry
 with, when the candidates are one callable's overloads)
 with a `candidates` list rather than as a failure. Every answer is capped at

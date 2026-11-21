@@ -570,6 +570,27 @@ def _writer_lock(folder: Path, *, wait: bool) -> Iterator[bool]:
         os.close(descriptor)
 
 
+def graph_being_written(path: str) -> bool:
+    """Whether some process holds a workspace graph's writer lock, read off `/proc/locks` without taking it.
+
+    AIDEV-NOTE: taking the lock to test it, even for a moment, makes a `refresh_graph` starting in that
+    moment skip its refresh. The lock is matched by inode alone: btrfs reports a subvolume's device to
+    `stat` and the filesystem's to `/proc/locks`. False where `/proc/locks` cannot answer.
+    """
+    folder = graph_folder(path)
+    try:
+        inode = (folder / GRAPH_LOCK_NAME).stat().st_ino
+        table = Path("/proc/locks").read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return False
+    # `1: FLOCK  ADVISORY  WRITE 1234 00:28:5678 0 EOF`; a waiter's line reads `1: -> FLOCK ...`.
+    for line in table.splitlines():
+        fields = line.split()
+        if len(fields) > 5 and fields[1] == "FLOCK" and fields[3] == "WRITE" and fields[5].endswith(f":{inode}"):
+            return True
+    return False
+
+
 def _next_version(folder: Path) -> str:
     """Name a version above every one on disk, so a new build never reuses a published name."""
     numbers = [int(match.group(1)) for entry in os.listdir(folder) if (match := _VERSION_FILE.fullmatch(entry))]

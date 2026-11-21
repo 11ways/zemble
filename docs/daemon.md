@@ -59,10 +59,31 @@ with nothing to read. `graph_construction.jobs` reports queued/building/ready/fa
 states, worker PID, budget, elapsed/build time and peak worker RSS. Stop closes graph jobs
 and drains running reads before exiting.
 
+A graph answer given while that root's refresh is announced (its index pass runs first),
+queued or building carries it under `refreshing` (`zemble/graph/refresh.py`: phase, since,
+changed paths, and a `note` every text surface prints), because the published generation it
+read lacks what the refresh brings. A lookup that names nothing meanwhile - `graph *`,
+`outline` and `signatures` answering "no symbol" or zero results - is not answered at all:
+the daemon calls it `busy`, naming the refresh, and the client waits that out like any busy
+daemon, up to `ZEMBLE_QUERY_WAIT_SECONDS`. A `graph` `ensure` with `settle: true` is busy the
+same way, which is how the CLI waits before it reads its own answer again. Whole-graph reads
+(`health`, `home`, `explain`) are never held back, since finding nothing is a real answer
+there. After a pull of ~900 files on the zenit workspace, `graph callers` of a method the
+pull added answered "No symbol" for more than six minutes with nothing saying a refresh was
+running.
+
+The graph jobs log every refresh at INFO on `zemble.daemon.graph_jobs`: `graph refresh of
+<root> started after <s> queued: <n> changed path(s)` (or `whole tree checked`), then
+`finished in <s> (worker <s>, peak <MiB>): <a> of <b> file(s) re-extracted, <c> re-resolved,
+<d> removed`, so "why was the graph behind" is answered by the log. A failed refresh logs
+`failed after <s>; the graph stays as it was: <reason>` at WARNING; a dropped or cancelled one
+says so at INFO.
+
 Repeated identical `home` and graph questions join one read computation and reuse
 successful answers in a 64-entry LRU. Keys contain weak serving-index identities
 and successful graph publication generations; edits therefore invalidate answers
-without retaining old indexes. Errors are never cached. During a refresh, readers
+without retaining old indexes. A key also names the roots with a refresh pending, since the
+answer carries it. Errors are never cached. During a refresh, readers
 continue using the last published generation instead of waiting for construction.
 
 The aggregate default is 4096 MiB. Construction is capped at 2048 MiB and narrowed
@@ -473,10 +494,11 @@ edge read back out of sqlite for one changed file - and it is what to attack nex
 
 ## Known limitations
 
-- **A failed graph refresh is reported, never repaired mid-flight.** The daemon logs it
-  at ERROR saying the graph is now STALE and keeps serving the graph it has; the next
-  build is what fixes it, and a store sqlite calls malformed is rebuilt from source
-  there ([storage](graph.md#durability)).
+- **A failed graph refresh is reported, never repaired mid-flight.** The graph jobs log it
+  at WARNING with the worker's reason, the watcher's refresh at ERROR saying the graph is
+  now STALE, and the daemon keeps serving the graph it has; the next build is what fixes
+  it, and a store sqlite calls malformed is rebuilt from source there
+  ([storage](graph.md#durability)).
 - **A change set is trusted, not verified.** Only the paths the watcher reports are
   looked at, so an event the watcher never delivered leaves the index and the graph
   stale until something else touches that file. `zemble daemon restart` is the way back
@@ -485,7 +507,10 @@ edge read back out of sqlite for one changed file - and it is what to attack nex
 - **The symbol graph is still the slow half.** A one-file edit costs ~40 s of graph
   refresh against a workspace this size, essentially all of it the resolve pass; the
   index is ready in a quarter of a second. The graph refresh does not block queries
-  either, but it does compete with them for CPU.
+  either, but it does compete with them for CPU. A pull is the expensive case: its changed
+  declarations re-resolve every file writing one of their names, in one process (1,580 of
+  2,049 files for a 235-file pull of protoblast, 19.9 s; the breakdown is in
+  [graph.md](graph.md#measured)), and a lookup naming nothing waits for it.
 - **Symbol definitions are re-attached only when the rebuild is persisted.** The
   definition lookup is built at save time; between a rebuild and the next write-back
   (10 s throttle) a symbol query reranks with its own scan instead. Results are the
