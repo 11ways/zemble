@@ -7,14 +7,10 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from zemble.daemon.protocol import CONSTRUCTION_WAIT_SECONDS, DEADLINE_FIELD, CommandBusy
+from zemble.daemon.protocol import CONSTRUCTION_WAIT_SECONDS, DEADLINE_FIELD, DRAIN_SECONDS, CommandBusy
 
 #: The deadline of a request that names none: an older client's, whose socket gives up at 30 s.
 LEGACY_DEADLINE_MS = 25000
-
-
-#: How long a stopping daemon waits for its in-flight reads.
-DRAIN_SECONDS = 30.0
 
 
 class AdmissionBusy(CommandBusy):

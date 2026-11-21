@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import logging
 import os
 import socket
+import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -33,6 +36,10 @@ from zemble.daemon.protocol import (
     decode,
     encode,
     error_kind,
+    lock_path,
+    pid_path,
+    read_pid,
+    runtime_directory,
     socket_path,
 )
 from zemble.daemon.watch import IgnoreRules, RootWatcher, WatchSpec
@@ -661,6 +668,155 @@ def test_autostart_spawns_a_daemon_and_stop_removes_it(monkeypatch: pytest.Monke
     while time.monotonic() < deadline and socket_path().exists():
         time.sleep(0.05)
     assert not socket_path().exists(), "the daemon cleaned up after itself"
+
+
+_HOLD_LOCK = (
+    "import fcntl, sys, time\n"
+    "handle = open(sys.argv[1], 'w')\n"
+    "fcntl.flock(handle.fileno(), fcntl.LOCK_EX)\n"
+    "print('held', flush=True)\n"
+    "time.sleep(float(sys.argv[2]))\n"
+)
+
+
+def _stopping_daemon(seconds: float) -> subprocess.Popen:
+    """A process holding the daemon lock without listening for *seconds*, as a daemon draining its reads does."""
+    runtime_directory(create=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_LOCK, str(lock_path()), str(seconds)], stdout=subprocess.PIPE, text=True
+    )
+    assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+    pid_path().write_text(f"{holder.pid}\n", encoding="utf-8")
+    return holder
+
+
+def test_restart_waits_for_a_stopping_daemon_to_release_its_lock(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A daemon whose socket closed but whose drain still runs holds the lock; restart waits, then a daemon runs."""
+    from zemble.daemon.cli import run_daemon
+
+    monkeypatch.setenv("ZEMBLE_DAEMON_IDLE_MINUTES", "1")
+    holder = _stopping_daemon(1.5)
+    try:
+        assert run_daemon(argparse.Namespace(daemon_command="restart")) == 0, capsys.readouterr().err
+        assert holder.poll() is not None, "the old daemon was gone before the new one started"
+        assert client.is_running() and read_pid() != holder.pid, "a new daemon runs"
+    finally:
+        with contextlib.suppress(DaemonError):
+            client.call("shutdown", auto_start=False, timeout=10)
+        client.wait_released(30)
+        holder.kill()
+        holder.wait()
+
+
+def test_restart_names_the_daemon_that_never_releases_its_lock(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stopping daemon that outlives the bound is named, and no daemon is started to fail behind it."""
+    from zemble.daemon.cli import run_daemon
+
+    monkeypatch.setattr(client, "STOP_RELEASE_SECONDS", 0.5)
+    holder = _stopping_daemon(30)
+    try:
+        assert run_daemon(argparse.Namespace(daemon_command="restart")) == 1
+        error = capsys.readouterr().err
+        assert f"pid {holder.pid} still holds" in error and "still stopping" in error, error
+        assert holder.poll() is None and not client.is_running(), "nothing was started behind it"
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def _commits(repo: Path, count: int) -> list[str]:
+    """Make a repository of *count* commits and return their short revisions, oldest first."""
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    revisions = []
+    for number in range(count):
+        (repo / "file.txt").write_text(str(number), encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", f"commit {number}")
+        revisions.append(git(repo, "rev-parse", "--short", "HEAD").strip())
+    return revisions
+
+
+def test_a_daemon_is_older_only_when_it_runs_an_ancestor_of_this_clients_own_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an ancestor revision of the same source root is older; a newer, foreign or unknown one never is."""
+    runtime = sys.modules["zemble.runtime.identity"]
+
+    repo = tmp_path / "zemble"
+    old, new = _commits(repo, 2)
+    source = repo / "src"
+    source.mkdir()
+
+    def client_at(revision: str) -> None:
+        monkeypatch.setattr(
+            runtime,
+            "_IDENTITY",
+            runtime.RuntimeIdentity("0", str(source), True, revision, "2026-11-21T00:00:00+00:00", 1, 0.0),
+        )
+
+    def status(revision: str, root: Path = source) -> dict:
+        return {"pid": 7, "runtime": {"source_revision": revision, "source_root": str(root)}}
+
+    client_at(new)
+    assert "older than this client's" in (client.older_daemon(status(old)) or ""), "an ancestor of mine is older"
+    assert client.older_daemon(status(new)) is None, "the same revision is not"
+    assert client.older_daemon(status(old, tmp_path / "elsewhere")) is None, "another install's daemon is not"
+    assert client.older_daemon(status("0000000")) is None, "an unknown revision is not"
+    client_at(old)
+    assert client.older_daemon(status(new)) is None, "a newer daemon is never replaced by an older client"
+
+
+def test_a_client_replaces_an_older_daemon_only_when_nothing_is_being_built(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An older daemon building something is left (and named); once idle, it is stopped by pid and replaced."""
+    jobs: list[dict] = [{"root": "/ws", "state": "building"}]
+    status = {"pid": 7, "building": [], "indexes": [], "graph_construction": {"jobs": jobs}, "runtime": {}}
+    asked: list[str] = []
+
+    def fake_call(cmd: str, args: dict | None = None, **_kwargs: object) -> dict:
+        asked.append(cmd)
+        return {"source_revision": "0000000"} if cmd == "ping" else status
+
+    stopped: list[int | None] = []
+    spawned: list[bool] = []
+    monkeypatch.setattr(client, "call", fake_call)
+    monkeypatch.setattr(client, "older_daemon", lambda _status: "zemble daemon pid 7 runs an older revision")
+    monkeypatch.setattr(client, "stop", lambda pid=None: stopped.append(pid))
+    monkeypatch.setattr(client, "spawn", lambda *args, **kwargs: spawned.append(True))
+    monkeypatch.setattr(client, "_daemon_revision", "0000000")
+    monkeypatch.setattr(client, "_replace_checked_at", None)
+    caplog.set_level(logging.WARNING)
+
+    # 1. A graph job in flight: the daemon keeps serving, and the warning names what it builds.
+    client._replace_older_daemon()
+    assert not stopped and "graph job of /ws" in caplog.text, "1: a building daemon is not replaced"
+
+    # 2. Within the check interval it is not asked again.
+    asked.clear()
+    client._replace_older_daemon()
+    assert asked == [], "2: one check per interval"
+
+    # 3. Idle, past the interval: it is stopped by the pid that was judged, and a daemon of this code started.
+    jobs[0]["state"] = "ready"
+    monkeypatch.setattr(client, "_replace_checked_at", time.monotonic() - client.REPLACE_CHECK_SECONDS - 1)
+    client._replace_older_daemon()
+    assert stopped == [7] and spawned == [True], "3: replaced"
+
+    # 4. A job state this client does not know counts as in flight.
+    assert client.in_flight({"graph_construction": {"jobs": [{"root": "/x", "state": "melting"}]}}), "4: fail closed"
+
+
+@pytest.mark.anyio
+async def test_a_shutdown_naming_another_pid_stops_nothing() -> None:
+    """A replacing client names the daemon it judged; a newer daemon that took its place keeps running."""
+    daemon = server.Daemon(watch=False)
+    answer = await server._cmd_shutdown(daemon, {"pid": os.getpid() + 1})
+    assert answer == {"stopping": False, "pid": os.getpid()} and not daemon.stop_event.is_set()
 
 
 def test_evidence_commands_answer_over_a_real_socket(graph_fixture_root: Path, no_embedder_load: None) -> None:

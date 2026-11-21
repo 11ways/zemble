@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import sys
-import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, NoReturn
@@ -82,8 +81,8 @@ def run_daemon(args: argparse.Namespace) -> int:
     if command == "stop":
         return _stop()
     if command == "restart":
-        _stop()
-        return _start()
+        # A start right after a stop that did not end would find the lock taken and leave no daemon.
+        return _stop() or _start()
     return _status(getattr(args, "json", False))
 
 
@@ -156,25 +155,15 @@ def _start() -> int:
 
 
 def _stop() -> int:
-    """Ask a running daemon to exit."""
-    if not client.is_running():
+    """Ask a running daemon to exit and wait until it released its socket's lock, or say what still holds it."""
+    if not client.is_running() and not client.lock_held():
         client.clear_stale()
         print("zemble daemon is not running")
         return 0
-    try:
-        client.call("shutdown", auto_start=False, timeout=10.0)
-    except DaemonError as exc:
-        print(f"Failed to stop the daemon: {exc}", file=sys.stderr)
+    problem = client.stop()
+    if problem is not None:
+        print(f"Failed to stop the daemon: {problem}", file=sys.stderr)
         return EXIT_ERROR
-    # Wait for the old process to actually go away, so `restart` (and a start right after a
-    # stop) does not find the socket still owned by the exiting daemon.
-    deadline = time.monotonic() + 10.0
-    while client.is_running() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    if client.is_running():
-        print("zemble daemon did not exit within 10 s", file=sys.stderr)
-        return EXIT_ERROR
-    client.clear_stale()
     print("zemble daemon stopped")
     return 0
 

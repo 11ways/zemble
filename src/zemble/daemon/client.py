@@ -9,15 +9,18 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import fcntl
 import logging
 import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from contextvars import ContextVar
 from itertools import count
+from pathlib import Path
 from typing import Any
 
 from zemble.daemon.protocol import (
@@ -30,17 +33,21 @@ from zemble.daemon.protocol import (
     QUERY_WAIT_ENV,
     REVISION_FIELD,
     START_TIMEOUT_SECONDS,
+    STOP_RELEASE_SECONDS,
     CommandBusy,
     CommandFailed,
     CommandOutgrown,
     CommandRefused,
     DaemonDisabled,
+    DaemonError,
     DaemonUnavailable,
     ErrorKind,
     QueryTimedOut,
     decode,
     encode,
     error_kind,
+    graph_job_in_flight,
+    lock_path,
     log_path,
     pid_path,
     process_alive,
@@ -58,7 +65,12 @@ _daemon_revision: str | None = None
 _disabled_reason: str | None = None
 #: Why the daemon could not answer the request running in this context, which this process then answers.
 _answering_here: ContextVar[str | None] = ContextVar("zemble_answering_here", default=None)
+#: When this process last asked whether the daemon runs older code than its own; None: not yet.
+_replace_checked_at: float | None = None
+_replace_lock = threading.Lock()
 
+#: Seconds between two checks of a daemon whose revision differs from this client's.
+REPLACE_CHECK_SECONDS = 60.0
 #: How long `answer` first waits before asking a busy or failing daemon again, and the longest it waits.
 RETRY_FIRST_SECONDS = 0.25
 RETRY_LONGEST_SECONDS = 5.0
@@ -159,6 +171,60 @@ def is_running() -> bool:
     return True
 
 
+def lock_held() -> bool:
+    """Return whether a daemon process holds the singleton lock: listening, starting, or still stopping.
+
+    AIDEV-NOTE: a stopping daemon closes its socket first and releases the lock only after its read
+    drain, so "not listening" is not "gone": a daemon started meanwhile finds the lock taken and exits.
+    """
+    path = lock_path()
+    if not path.exists():
+        return False
+    try:
+        handle = open(path, "a", encoding="utf-8")
+    except OSError:
+        return False
+    with handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return False
+
+
+def wait_released(timeout: float | None = None) -> bool:
+    """Wait until no daemon holds the singleton lock; whether it was released within *timeout* (default the bound)."""
+    deadline = time.monotonic() + (STOP_RELEASE_SECONDS if timeout is None else timeout)
+    while lock_held():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def stop(pid: int | None = None) -> str | None:
+    """Ask the running daemon to exit and wait, up to `STOP_RELEASE_SECONDS`, until it released its lock.
+
+    :param pid: The daemon to stop; a daemon of another pid listening by now is left running.
+    :return: None once no daemon holds the lock, else what holds it and why it is still held.
+    """
+    if is_running():
+        try:
+            reply = call("shutdown", {} if pid is None else {"pid": pid}, auto_start=False, timeout=10.0)
+        except DaemonError as exc:
+            return f"the daemon did not take the stop request: {exc}"
+        if reply.get("stopping") is False:
+            return f"the daemon listening now is pid {reply.get('pid')}, not pid {pid}; it was left running"
+    if not wait_released():
+        return (
+            f"zemble daemon pid {read_pid() or 'unknown'} still holds {lock_path()} {STOP_RELEASE_SECONDS:.0f} s "
+            f"after it was asked to stop; it is still stopping (see {log_path()})"
+        )
+    clear_stale()
+    return None
+
+
 def clear_stale() -> bool:
     """Remove a socket and pidfile left behind by a dead daemon.
 
@@ -183,9 +249,22 @@ def clear_stale() -> bool:
 def spawn(timeout: float = START_TIMEOUT_SECONDS) -> None:
     """Start a detached daemon and wait for it to accept connections.
 
-    :param timeout: Seconds to wait for the socket to answer.
-    :raises DaemonUnavailable: If the daemon did not come up in time.
+    A daemon that holds the lock without listening is waited out first: one still starting comes
+    up and is used, one still stopping releases the lock and is then replaced.
+
+    :param timeout: Seconds to wait for the spawned daemon's socket to answer.
+    :raises DaemonUnavailable: If the daemon did not come up in time, naming what holds the lock.
     """
+    deadline = time.monotonic() + STOP_RELEASE_SECONDS
+    while lock_held():
+        if is_running():
+            return
+        if time.monotonic() >= deadline:
+            raise DaemonUnavailable(
+                f"zemble daemon pid {read_pid() or 'unknown'} holds {lock_path()} without listening "
+                f"{STOP_RELEASE_SECONDS:.0f} s on (still stopping or starting; see {log_path()})"
+            )
+        time.sleep(0.1)
     clear_stale()
     log_file = log_path()
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -194,7 +273,7 @@ def spawn(timeout: float = START_TIMEOUT_SECONDS) -> None:
     except OSError as exc:
         raise DaemonUnavailable(f"cannot open daemon log {log_file}: {exc}") from exc
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             # --log-file: the child logs through a rotating handler instead of the inherited
             # stderr, so the log below only ever collects crash output written before that.
             [sys.executable, "-m", "zemble.daemon", "run", "--log-file"],
@@ -214,8 +293,85 @@ def spawn(timeout: float = START_TIMEOUT_SECONDS) -> None:
     while time.monotonic() < deadline:
         if is_running():
             return
+        if process.poll() is not None and not lock_held():
+            raise DaemonUnavailable(f"the daemon exited with {process.returncode} before listening (see {log_file})")
         time.sleep(0.05)
     raise DaemonUnavailable(f"did not start within {timeout:.0f}s (see {log_file})")
+
+
+def older_daemon(status: dict[str, Any]) -> str | None:
+    """Return why the daemon reporting *status* runs older code of this client's checkout, else None.
+
+    Older means another revision of the same source root that is a strict ancestor of this
+    client's: a daemon of another install, of a newer revision, or of an unknown one is never older.
+    """
+    from zemble.runtime.identity import identity, is_ancestor
+
+    mine = identity()
+    runtime = status.get("runtime") or {}
+    theirs, root = runtime.get("source_revision"), runtime.get("source_root")
+    if not mine.source_revision or not isinstance(theirs, str) or not isinstance(root, str):
+        return None
+    if Path(root).resolve() != Path(mine.source_root).resolve():
+        return None
+    if not is_ancestor(Path(mine.source_root), theirs, mine.source_revision):
+        return None
+    return (
+        f"zemble daemon pid {status.get('pid')} runs revision {theirs}, older than this client's {mine.source_revision}"
+    )
+
+
+def in_flight(status: dict[str, Any]) -> list[str]:
+    """Name the construction a daemon's status reports running or queued, which stopping it now discards.
+
+    Pending watcher changes are not in it: a new daemon's first full rescan covers them.
+    """
+    busy = [f"index build of {entry.get('root')}" for entry in status.get("building", [])]
+    busy += [f"rebuild of {entry.get('root')}" for entry in status.get("indexes", []) if entry.get("rebuilding")]
+    jobs = (status.get("graph_construction") or {}).get("jobs", [])
+    busy += [f"graph job of {job.get('root')}" for job in jobs if graph_job_in_flight(job.get("state"))]
+    return busy
+
+
+def _replace_older_daemon() -> None:
+    """Replace a daemon running older code of this client's checkout before asking it, unless it is building.
+
+    AIDEV-NOTE: an editable install's daemon keeps the code it started with until something replaces
+    it. Asked once per process, then every REPLACE_CHECK_SECONDS while a response names another revision.
+    """
+    global _replace_checked_at
+    from zemble.runtime.identity import identity
+
+    mine = identity().source_revision
+    with _replace_lock:
+        now = time.monotonic()
+        if _replace_checked_at is not None and (
+            _daemon_revision == mine or now - _replace_checked_at < REPLACE_CHECK_SECONDS
+        ):
+            return
+        _replace_checked_at = now
+        try:
+            if call("ping", auto_start=False, timeout=5.0).get("source_revision") == mine:
+                return
+            status = call("status", auto_start=False, timeout=10.0)
+        except DaemonError:
+            return
+        reason = older_daemon(status)
+        if reason is None:
+            return
+        busy = in_flight(status)
+        if busy:
+            logger.warning("%s; not replaced while it runs %s; continuing through it", reason, ", ".join(busy[:3]))
+            return
+        logger.warning("%s; replacing it", reason)
+        problem = stop(pid=status.get("pid"))
+        if problem is not None:
+            logger.warning("could not replace the older daemon: %s; continuing through it", problem)
+            return
+        try:
+            spawn()
+        except DaemonUnavailable as exc:
+            logger.warning("could not start the newer daemon: %s", exc)
 
 
 def _observe_revision(response: dict[str, Any]) -> None:
@@ -276,6 +432,8 @@ def call(
     reason = disabled_reason()
     if reason is not None:
         raise DaemonDisabled(reason)
+    if auto_start:
+        _replace_older_daemon()
     try:
         client = _connect()
     except DaemonUnavailable:
@@ -283,7 +441,6 @@ def call(
             raise
         spawn()
         client = _connect()
-
     request_id = next(_request_ids)
     # AIDEV-NOTE: a request without a deadline gets the daemon's 25 s legacy default, which turned
     # every cold query into "busy, retry" while one shared construction ran. Construction is joined,

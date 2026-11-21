@@ -1506,7 +1506,13 @@ async def _cmd_evict(daemon: Daemon, args: dict[str, Any]) -> Any:
 
 
 async def _cmd_shutdown(daemon: Daemon, args: dict[str, Any]) -> Any:
-    """Stop the daemon after this response has been written."""
+    """Stop the daemon after this response has been written; a `pid` naming another process stops nothing.
+
+    A client replacing an older daemon names the one it judged, so it never stops a newer one that took its place.
+    """
+    pid = args.get("pid")
+    if pid is not None and int(pid) != os.getpid():
+        return {"stopping": False, "pid": os.getpid()}
     asyncio.get_running_loop().call_later(0.05, daemon.shutdown)
     return {"stopping": True, "pid": os.getpid()}
 

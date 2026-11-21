@@ -88,6 +88,9 @@ def no_real_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.Tem
 
     client._answering_here.set(None)
     monkeypatch.setattr(client, "RETRY_FIRST_SECONDS", 0.0)
+    # A test's daemon runs this code, or is a fake answering a fixed number of requests: the check that replaces
+    # an older daemon would spend one of them. Checked "at infinity", it never comes due; its own tests reset it.
+    monkeypatch.setattr(client, "_replace_checked_at", float("inf"))
     yield
     client._answering_here.set(None)
     # Checked before monkeypatch restores anything: a `monkeypatch.undo()` inside a test drops this

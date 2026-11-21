@@ -67,6 +67,25 @@ def git_revision(root: Path) -> str | None:
     return completed.stdout.strip() or None
 
 
+def is_ancestor(root: Path, older: str, newer: str) -> bool:
+    """Return whether revision *older* is a strict ancestor of *newer* in the checkout holding *root*.
+
+    Never raises: an unknown revision, a missing git or a slow filesystem all answer False.
+    """
+    if older == newer:
+        return False
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", older, newer],
+            capture_output=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
 def _is_editable(root: Path) -> bool:
     """Return whether this source root sits outside an installed package directory."""
     return not any(part in ("site-packages", "dist-packages") for part in root.parts)
@@ -160,6 +179,7 @@ __all__ = [
     "RuntimeIdentity",
     "git_revision",
     "identity",
+    "is_ancestor",
     "stale_note",
     "status_payload",
 ]

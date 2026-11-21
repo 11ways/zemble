@@ -112,7 +112,7 @@ one entry in that table. Nothing else has to change: the client is generic.
 | `signatures` | A symbol's signature and its exactly resolved call sites, with the same refusal shape. |
 | `refresh` | Load one root, then rescan its index until a pass runs on a tree at rest (a pass the watcher postpones is retried after the quiet window), and answer the `stats` payload plus `root` and that pass's counts in `rebuild`. The symbol graph is left to `graph`. `zemble index` asks this. |
 | `evict` | Drop one root from memory and stop its watcher. |
-| `shutdown` | Stop after answering. |
+| `shutdown` | Stop after answering. With `pid`, only the daemon of that pid stops; another answers `stopping: false`. |
 
 ### Which code is answering
 
@@ -131,7 +131,21 @@ its snapshot.
   MCP `status` includes the daemon's runtime and its last observed revision.
 - `zemble status` prints this process's identity and the daemon's side by side.
 
-`zemble daemon restart` is the fix; nothing reloads source in place.
+A client whose code is newer replaces the daemon before its query (`client._replace_older_daemon`,
+asked once per process and then every `REPLACE_CHECK_SECONDS` (60) while a response names another
+revision). Newer is exact: the daemon runs from the same source root, and its revision is a strict
+ancestor of the client's in that checkout (`git merge-base --is-ancestor`); another install, a newer
+daemon or an unknown revision is never replaced. It is replaced only when its `status` shows nothing
+under construction: no index build, no rebuild pass, no graph job queued or building (an unknown job
+state counts as building). Pending watcher changes do not count, since the new daemon's first full
+rescan covers them. The client then stops it by pid (`shutdown` with `pid`, so a newer daemon that
+took its place is left alone), waits for its lock, and starts this checkout's daemon. A daemon that
+is building keeps answering, and the client logs a warning naming what it builds.
+
+`zemble daemon restart` stops the daemon and waits until it released its lock, not just its socket:
+a stopping daemon closes its socket first and drains its reads for up to `DRAIN_SECONDS` (30) after.
+The wait is bounded by `STOP_RELEASE_SECONDS` (60); past it the restart starts nothing and names the
+pid that still holds the lock. Nothing reloads source in place.
 
 ### Index cache
 
@@ -394,7 +408,9 @@ request only. A deliberate refusal is still the answer, never retried or answere
 - `zemble search`, `find-related`, `stats`, `graph *`, `explain`, `outline` and `signatures`
   go through the client by default, as do their MCP tools.
 - If the socket is absent or dead, the client spawns `python -m zemble.daemon run`
-  detached (new session, stdio to the log) and waits up to 10 s for it to answer.
+  detached (new session, stdio to the log) and waits up to 10 s for it to answer. A daemon that
+  holds the lock without listening is waited out first, up to `STOP_RELEASE_SECONDS`: one still
+  starting is then used, one still stopping is replaced once it released the lock.
 - **Busy is waited out, within a bound.** A full waiting room, an expired request deadline,
   memory that running work holds (`MemoryBusy`) or a graph construction still pending answer
   `busy` with `retry_after_ms`, and the client asks again, from 0.25 s doubling to 5 s between
@@ -519,9 +535,10 @@ edge read back out of sqlite for one changed file - and it is what to attack nex
   (10 s throttle) a symbol query reranks with its own scan instead. Results are the
   same, the query is slower.
 - **One embedder per daemon**, the environment default. `--embedder` requires explicit `--no-daemon`.
-- **Staleness is reported, never enforced.** A daemon that finds itself stale keeps
-  serving; only a restart changes the code it runs. Staleness is judged from mtimes of
-  the *.py files present at startup plus the HEAD revision, so a file added after the
-  daemon started is only noticed through a moved revision.
+- **Staleness of a checkout that moved is reported, and replaced only by a newer client.** A daemon
+  that finds itself stale keeps serving until a client of the newer revision replaces it (see
+  "Which code is answering"). Staleness is judged from mtimes of the *.py files present at startup
+  plus the HEAD revision, so a file added after the daemon started is only noticed through a moved
+  revision, and a dirty edit at the same revision is never a reason to replace it.
 - **Unix sockets only.** No Windows named-pipe transport; local client execution there
   requires explicit `--no-daemon`, not an automatic transport fallback.

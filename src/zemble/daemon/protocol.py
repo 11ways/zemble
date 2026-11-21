@@ -37,6 +37,10 @@ ACCEPTS_BUSY_FIELD = "accepts_busy"
 #: How long `client.answer` waits in all, busy retries included, before it reports the wait instead.
 QUERY_WAIT_ENV = "ZEMBLE_QUERY_WAIT_SECONDS"
 DEFAULT_QUERY_WAIT_SECONDS = 180.0
+#: How long a stopping daemon waits for its in-flight reads before it gives up on them and exits.
+DRAIN_SECONDS = 30.0
+#: How long a client waits for a stopping daemon to release its lock: the read drain, then worker teardown.
+STOP_RELEASE_SECONDS = DRAIN_SECONDS + 30.0
 
 
 class ErrorKind(StrEnum):
