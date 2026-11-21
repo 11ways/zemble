@@ -113,9 +113,11 @@ _PRUNE_FIRST_DELAY_SECONDS = 120.0
 #: to the embedding server (`zemble.embedding.referenced`); 0 disables the daemon's own reports.
 REFERENCED_HOURS_ENV = "ZEMBLE_DAEMON_REFERENCED_HOURS"
 _DEFAULT_REFERENCED_HOURS = 6
-#: The first report waits a random time in this range after start, past the first requests and the
-#: first prune, and so that hosts restarted together do not report together.
+#: Without an idle exit the first report waits a random time in this range after start, past the first
+#: requests and the first prune, and so that hosts restarted together do not report together.
 _REFERENCED_FIRST_DELAY_SECONDS = (600.0, 3600.0)
+#: The shortest first wait of a daemon that exits when idle; the longest is half its idle limit.
+_REFERENCED_IDLE_FIRST_DELAY_SECONDS = 60.0
 #: How often a due report looks again while a rebuild runs.
 _REFERENCED_BUSY_RETRY_SECONDS = 60.0
 _MAX_CHANGED_PATHS = 4096
@@ -217,6 +219,17 @@ def _load_stored(cache_key: CacheKey, embedder: Embedder, exclude: Sequence[str]
     except (FileNotFoundError, ValueError) as exc:
         logger.warning("The stored index of %s is unreadable (%s); building it instead", cache_key[0], exc)
         return None
+
+
+def _embed_server_configured() -> bool:
+    """Return whether this process's environment names an embedding server with a key."""
+    from zemble.embedding.wire import server_settings
+
+    try:
+        return server_settings() is not None
+    except ValueError as exc:
+        logger.warning("no referenced-vectors report: %s", exc)
+        return False
 
 
 def _env_int(name: str, default: int) -> int:
@@ -365,6 +378,8 @@ class Daemon:
         self.locks: dict[CacheKey, asyncio.Lock] = {}
         self.pending: set[CacheKey] = set()
         self.rebuilding: set[CacheKey] = set()
+        #: Whether a referenced report is due (from start until its first run) or running; holds the idle exit.
+        self.reporting = False
         self._rebuild_tasks: dict[CacheKey, asyncio.Task[dict[str, Any]]] = {}
         self._rebuild_changes: dict[CacheKey, set[Path] | None] = {}
         #: What the pass running for a root rescans: its named paths, or None for the whole tree.
@@ -1131,19 +1146,37 @@ class Daemon:
             await asyncio.sleep(hours * 3600)
 
     async def referenced_loop(self) -> None:
-        """Report the vectors saved indexes reference to the configured embedding server, once a day per family."""
+        """Report the vectors saved indexes reference to the configured embedding server, once a day per family.
+
+        From start until a report has run, and while one runs, `reporting` holds the idle exit back;
+        a report that failed lets the daemon exit, and its family, unrecorded, goes on the next start.
+        """
         hours = _env_int(REFERENCED_HOURS_ENV, _DEFAULT_REFERENCED_HOURS)
-        if hours <= 0:
+        if hours <= 0 or not _embed_server_configured():
             return
-        await asyncio.sleep(random.uniform(*_REFERENCED_FIRST_DELAY_SECONDS))  # noqa: S311 - jitter
-        while not self.stop_event.is_set():
-            while self.rebuilding:
-                await asyncio.sleep(_REFERENCED_BUSY_RETRY_SECONDS)
-            try:
-                await asyncio.to_thread(self.report_referenced)
-            except Exception:
-                logger.exception("reporting referenced vectors to the embedding server failed")
-            await asyncio.sleep(hours * 3600)
+        self.reporting = True
+        try:
+            await asyncio.sleep(self._first_report_delay())
+            while not self.stop_event.is_set():
+                self.reporting = True
+                while self.rebuilding:
+                    await asyncio.sleep(_REFERENCED_BUSY_RETRY_SECONDS)
+                try:
+                    await asyncio.to_thread(self.report_referenced)
+                except Exception:
+                    logger.exception("reporting referenced vectors to the embedding server failed")
+                self.reporting = False
+                await asyncio.sleep(hours * 3600)
+        finally:
+            self.reporting = False
+
+    def _first_report_delay(self) -> float:
+        """Return a random wait before the first report that ends well inside the daemon's idle life."""
+        low, high = _REFERENCED_FIRST_DELAY_SECONDS
+        if self.idle_minutes > 0:
+            high = min(high, self.idle_minutes * 60 / 2)
+            low = min(low, _REFERENCED_IDLE_FIRST_DELAY_SECONDS, high)
+        return random.uniform(low, high)  # noqa: S311 - jitter, not cryptography
 
     def report_referenced(self) -> None:
         """Send one referenced-vectors report when an embedding server is configured; blocking."""
@@ -1208,7 +1241,7 @@ class Daemon:
         limit = self.idle_minutes * 60
         while not self.stop_event.is_set():
             await asyncio.sleep(min(_IDLE_CHECK_SECONDS, limit))
-            if self.rebuilding or self.pending:
+            if self.rebuilding or self.pending or self.reporting:
                 continue
             if time.monotonic() - self.last_request_at >= limit:
                 logger.info("idle for %d minute(s); shutting down", self.idle_minutes)

@@ -114,8 +114,11 @@ family (a bounded queue of 64 batches; when it is full their stamps are dropped 
 written 250 per write transaction (`STAMPS_PER_TRANSACTION`), so a buyer's insert gets the writer
 between two of them.
 
-Each client also reports what its saved indexes hold: the daemon, a random 10 to 60 minutes after
-it starts (so hosts restarted together do not report together) and then every
+Each client also reports what its saved indexes hold: the daemon, a random time after it starts
+(so hosts restarted together do not report together; 1 minute to half its idle limit, 15 minutes
+for the default 30, or 10 to 60 minutes when it never exits idle; until that first report has run,
+and while any report runs, the daemon does not exit idle; a failed report lets it exit and the
+next start reports again) and then every
 `ZEMBLE_DAEMON_REFERENCED_HOURS` (6; `0` disables), sends the server the text hash of every chunk
 of every saved index and lane overlay of a paid family (`POST /v1/referenced`, 2,000 hashes per
 request, each distinct hash once). The server stamps the ones it holds on the side connection

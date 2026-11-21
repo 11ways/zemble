@@ -559,23 +559,76 @@ def test_referenced_report_journey(
 
 
 @pytest.mark.anyio
-async def test_the_daemon_reports_referenced_vectors_in_the_background(
+async def test_the_daemon_reports_referenced_vectors_before_it_exits_idle(
     served: Running, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The daemon's loop sends the report after its first delay, and its env knob turns it off."""
+    """A short-lived daemon reports before its idle exit, holds that exit while reporting, then exits as before."""
     cache_folder = resolve_cache_folder()
     _index(cache_folder, "a" * 64, [make_chunk("def kept(): pass")], embedder=SPEC)
-    monkeypatch.setattr(daemon_server, "_REFERENCED_FIRST_DELAY_SECONDS", (0.0, 0.0))
-    daemon = daemon_server.Daemon(watch=False)
-    loop = asyncio.create_task(daemon.referenced_loop())
-    try:
-        for _ in range(500):
-            if served.service.counters.referenced_reported:
-                break
-            await asyncio.sleep(0.01)
-    finally:
-        loop.cancel()
-    assert served.service.counters.referenced_reported == 1, "the loop reported the one chunk"
 
+    # 1. The first report waits a random time that fits inside the daemon's idle life.
+    assert all(
+        30.0 <= daemon_server.Daemon(watch=False, idle_minutes=1)._first_report_delay() <= 30.0 for _ in range(5)
+    )
+    assert all(
+        60.0 <= daemon_server.Daemon(watch=False, idle_minutes=30)._first_report_delay() <= 900.0 for _ in range(20)
+    )
+    assert all(
+        600.0 <= daemon_server.Daemon(watch=False, idle_minutes=0)._first_report_delay() <= 3600.0 for _ in range(20)
+    )
+
+    monkeypatch.setattr(daemon_server, "_REFERENCED_FIRST_DELAY_SECONDS", (0.0, 0.0))
+    monkeypatch.setattr(daemon_server, "_IDLE_CHECK_SECONDS", 0.01)
+
+    def idle_daemon() -> daemon_server.Daemon:
+        daemon = daemon_server.Daemon(watch=False, idle_minutes=1)
+        daemon.last_request_at = time.monotonic() - 120
+        return daemon
+
+    # 2. A report that fails lets the daemon exit idle, and records no day, so the next start reports.
+    def unreachable(*args: object, **kwargs: object) -> None:
+        raise EmbeddingRequestError("server unreachable")
+
+    with monkeypatch.context() as failing:
+        failing.setattr("zemble.embedding.referenced.report_referenced", unreachable)
+        daemon = idle_daemon()
+        loop = asyncio.create_task(daemon.referenced_loop())
+        await asyncio.wait_for(daemon.idle_loop(), timeout=5)
+        loop.cancel()
+    assert daemon.stop_event.is_set() and not (cache_folder / REPORTED_FILE).exists(), "step 2"
+
+    # 3. A long-idle daemon holds its exit while the report runs, then reports and exits.
+    release = threading.Event()
+    original = EmbeddingCache.stamp_held
+
+    def stamp_when_released(cache: EmbeddingCache, digests: list[str]) -> int:
+        release.wait(10)
+        return original(cache, digests)
+
+    monkeypatch.setattr(EmbeddingCache, "stamp_held", stamp_when_released)
+    daemon = idle_daemon()
+    loop = asyncio.create_task(daemon.referenced_loop())
+    idle = asyncio.create_task(daemon.idle_loop())
+    await asyncio.sleep(0.3)
+    assert daemon.reporting and not daemon.stop_event.is_set(), "step 3: the running report holds the idle exit"
+    release.set()
+    await asyncio.wait_for(idle, timeout=10)
+    loop.cancel()
+    assert served.service.counters.referenced_reported == 1, "step 3: the report went out before the exit"
+    assert not daemon.reporting, "step 3: and once recorded no longer holds anything"
+
+    # 4. With today's day recorded, the next daemon reports nothing new and exits idle as before.
+    daemon = idle_daemon()
+    loop = asyncio.create_task(daemon.referenced_loop())
+    await asyncio.wait_for(daemon.idle_loop(), timeout=5)
+    loop.cancel()
+    assert served.service.counters.referenced_reported == 1, "step 4"
+
+    # 5. The env knob turns the loop off; so does a host with no embedding server.
     monkeypatch.setenv(daemon_server.REFERENCED_HOURS_ENV, "0")
     await asyncio.wait_for(daemon.referenced_loop(), timeout=5)
+    monkeypatch.delenv(daemon_server.REFERENCED_HOURS_ENV)
+    monkeypatch.delenv(SERVER_ENV)
+    never = idle_daemon()
+    await asyncio.wait_for(never.referenced_loop(), timeout=5)
+    assert not never.reporting
