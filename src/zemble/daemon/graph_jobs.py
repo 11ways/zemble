@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from zemble.daemon.admission import AdmissionBusy
+from zemble.daemon.graph_worker import REPORT_KEY, WorkerReport
 from zemble.daemon.memory import MIB, ReadOutgrown, private_mb
 from zemble.daemon.protocol import GraphJobState
 from zemble.graph.refresh import PendingRefresh, RefreshPhase
@@ -62,18 +63,46 @@ def _lane_base(root: str) -> str | None:
 _BASE_FIRST, _LANE_LAST = 0, 1
 
 
+def _subject(root: str, state: dict[str, Any]) -> str:
+    """Name a job's root in a log line, a lane's with the base its overlay is made on."""
+    return f"{root} (lane of {state['base']})" if state.get("base") else root
+
+
+def _log_published(root: str, state: dict[str, Any], stats: dict[str, Any]) -> None:
+    """Log a lane overlay's first pass landing: the lane answers with its own files while its dependents follow."""
+    logger.info(
+        "graph refresh of %s published its first pass after %.1f s: %d of %d file(s) re-extracted, %d removed, "
+        "%d re-resolved; %d moved name(s) owed to the second pass",
+        _subject(root, state),
+        stats.get("published_seconds") or 0.0,
+        stats.get("extracted_files", 0),
+        stats.get("files_scanned", 0),
+        stats.get("removed_files", 0),
+        stats.get("reresolved_files", 0),
+        stats.get("owed_names", 0),
+    )
+
+
 def _log_finished(root: str, state: dict[str, Any], elapsed: float) -> None:
     """Log a landed refresh: how long it took from its turn being asked for, and the files it read and resolved."""
     if "stats" in state and state["stats"] is None:
         logger.info(
-            "graph refresh of %s finished in %.1f s: another process was writing it, so it read nothing", root, elapsed
+            "graph refresh of %s finished in %.1f s: another process was writing it, so it read nothing",
+            _subject(root, state),
+            elapsed,
         )
         return
     stats = state.get("stats") or {}
+    second = ""
+    if stats.get("published_seconds") is not None:
+        second = (
+            f"; first pass published after {stats['published_seconds']:.1f} s, "
+            f"{stats.get('restored_files', 0)} re-resolved file(s) left to the base unchanged"
+        )
     logger.info(
         "graph refresh of %s finished in %.1f s (worker %.1f s, peak %.0f MiB): %d of %d file(s) re-extracted, "
-        "%d re-resolved, %d removed%s",
-        root,
+        "%d re-resolved, %d removed%s%s",
+        _subject(root, state),
         elapsed,
         state.get("build_seconds", 0.0),
         state.get("peak_rss_mb", 0.0),
@@ -82,19 +111,25 @@ def _log_finished(root: str, state: dict[str, Any], elapsed: float) -> None:
         stats.get("reresolved_files", 0),
         stats.get("removed_files", 0),
         ", then compacted" if stats.get("compacted") else "",
+        second,
     )
 
 
-def _log_unfinished(root: str, outcome: GraphJobState | None, elapsed: float, error: BaseException) -> None:
+def _log_unfinished(
+    root: str, state: dict[str, Any], outcome: GraphJobState | None, elapsed: float, error: BaseException
+) -> None:
     """Log a refresh that did not land: a failure at WARNING with its reason, a cancelled or dropped one at INFO.
 
     :param outcome: None for a job dropped from the job list (its root is gone).
     """
+    subject = _subject(root, state)
     if outcome is GraphJobState.FAILED:
-        logger.warning("graph refresh of %s failed after %.1f s; the graph stays as it was: %s", root, elapsed, error)
+        logger.warning(
+            "graph refresh of %s failed after %.1f s; the graph stays as it was: %s", subject, elapsed, error
+        )
     else:
         word = "dropped" if outcome is None else outcome.value
-        logger.info("graph refresh of %s %s after %.1f s: %s", root, word, elapsed, error)
+        logger.info("graph refresh of %s %s after %.1f s: %s", subject, word, elapsed, error)
 
 
 class GraphJobs:
@@ -217,8 +252,14 @@ class GraphJobs:
             finally:
                 self._stale_checks.discard(root)
 
-        task = asyncio.create_task(check())
-        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        def unchecked(done: asyncio.Task[None]) -> None:
+            # The rebuild itself logs its own failure (`_log_unfinished`); this is the check before it.
+            if not done.cancelled() and (error := done.exception()) is not None:
+                logger.warning(
+                    "graph overlay of %s was not rebuilt after its base moved; it answers as it was: %s", root, error
+                )
+
+        asyncio.create_task(check()).add_done_callback(unchecked)
 
     @staticmethod
     async def _graph_root(path: str) -> str:
@@ -356,21 +397,11 @@ class GraphJobs:
                     changed = self.paths.get(root)
                     logger.info(
                         "graph refresh of %s started after %.1f s queued: %s",
-                        root,
+                        _subject(root, state),
                         time.monotonic() - started,
                         "whole tree checked" if changed is None else f"{len(changed)} changed path(s)",
                     )
-                    message = json.dumps({"changed_paths": changed}).encode()
-                    stdout, stderr = await self.process.communicate(message)
-                    if self.process.returncode:
-                        if not Path(root).is_dir():
-                            # The worker died of its root going away (a lane removed mid-build), not of memory.
-                            self.forget(root)
-                            raise FileNotFoundError(f"{root} was removed while its graph was built; dropped")
-                        # A failure, never a refusal: the client asks again, then answers in its own process.
-                        error = stderr.decode()[-2000:]
-                        raise RuntimeError(f"graph worker failed ({self.process.returncode}): {error}")
-                    state.update(json.loads(stdout))
+                    state.update(await self._exchange(root, state, json.dumps({"changed_paths": changed})))
                     self.generations[root] = self.generations.get(root, 0) + 1
                     state["generation"] = self.generations[root]
                     self.ready.add(root)
@@ -387,12 +418,52 @@ class GraphJobs:
             if self.states.get(root) is state:
                 outcome = GraphJobState.CANCELLED if isinstance(exc, asyncio.CancelledError) else GraphJobState.FAILED
                 state.update(state=outcome, error=str(exc))
-                _log_unfinished(root, outcome, time.monotonic() - started, exc)
+                _log_unfinished(root, state, outcome, time.monotonic() - started, exc)
             else:
-                _log_unfinished(root, None, time.monotonic() - started, exc)
+                _log_unfinished(root, state, None, time.monotonic() - started, exc)
             raise
         finally:
             state["elapsed_seconds"] = round(time.monotonic() - started, 3)
+
+    async def _exchange(self, root: str, state: dict[str, Any], message: str) -> dict[str, Any]:
+        """Hand the worker its change set and act on each report line as it arrives, until the worker exits.
+
+        :return: The finished report's fields.
+        :raises FileNotFoundError: When the worker died of its root going away (a lane removed mid-build).
+        :raises RuntimeError: When the worker failed, or exited without reporting its build.
+        :raises ValueError: On a report kind this version does not know.
+        """
+        process = self.process
+        assert process is not None and process.stdin is not None and process.stdout is not None
+        assert process.stderr is not None
+        errors = asyncio.create_task(process.stderr.read())
+        finished: dict[str, Any] | None = None
+        try:
+            process.stdin.write(message.encode())
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                await process.stdin.drain()
+            process.stdin.close()
+            while line := await process.stdout.readline():
+                fields = json.loads(line)
+                match WorkerReport(fields.pop(REPORT_KEY)):
+                    case WorkerReport.PUBLISHED:
+                        state["published"] = fields["stats"]
+                        _log_published(root, state, fields["stats"])
+                    case WorkerReport.FINISHED:
+                        finished = fields
+            await process.wait()
+            stderr = await errors
+        finally:
+            errors.cancel()
+        if process.returncode:
+            if not Path(root).is_dir():
+                self.forget(root)
+                raise FileNotFoundError(f"{root} was removed while its graph was built; dropped")
+            # A failure, never a refusal: the client asks again, then answers in its own process.
+            raise RuntimeError(f"graph worker failed ({process.returncode}): {stderr.decode()[-2000:]}")
+        if finished is None:
+            raise RuntimeError("graph worker exited without reporting its build")
+        return finished
 
     @contextlib.contextmanager
     def refresh_announced(self, root: str) -> Iterator[None]:

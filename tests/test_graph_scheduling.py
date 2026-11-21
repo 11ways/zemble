@@ -5,8 +5,10 @@ import os
 
 import pytest
 
+from tests.conftest import FakeGraphWorker
 from zemble.daemon import graph_jobs
 from zemble.daemon.graph_jobs import GraphJobs
+from zemble.daemon.graph_worker import WorkerReport, report_line
 
 
 class _Workers:
@@ -23,17 +25,7 @@ class _Workers:
         async with self.spawned:
             self.started.append(args[3])
             self.spawned.notify_all()
-
-        class Process:
-            pid = 1
-            returncode = None
-
-            async def communicate(self, message):
-                await gate.wait()
-                self.returncode = 0
-                return b"{}", b""
-
-        return Process()
+        return FakeGraphWorker(steps=(gate.wait, report_line(WorkerReport.FINISHED)))
 
     async def started_count(self, count: int) -> None:
         async with self.spawned:
@@ -141,16 +133,11 @@ async def test_a_worker_that_dies_of_a_removed_root_is_a_dropped_job_never_a_mem
     _base, lane_a, _ = workspace
 
     async def dying(*args, **kwargs):
-        class Process:
-            pid = 1
-            returncode = None
-
-            async def communicate(self, message):
-                os.rmdir(lane_a)
-                self.returncode = 1
-                return b"", f"ValueError: '{lane_a}' is not a local directory".encode()
-
-        return Process()
+        return FakeGraphWorker(
+            code=1,
+            steps=(lambda: os.rmdir(lane_a),),
+            stderr=f"ValueError: '{lane_a}' is not a local directory".encode(),
+        )
 
     monkeypatch.setattr(graph_jobs.asyncio, "create_subprocess_exec", dying)
     jobs = GraphJobs(asyncio.Lock(), 4096)
@@ -229,3 +216,56 @@ async def test_a_root_that_is_no_lane_is_checked_once_and_never_rebuilt_for_a_ba
         await jobs.ensure(base, None)
         await _settle()
     assert checked == [] and base in jobs._not_lanes and not workers.started, "no lane, no staleness, no rebuild"
+
+
+@pytest.mark.anyio
+async def test_a_background_overlay_rebuild_that_fails_logs_one_warning_with_its_reason(workspace, monkeypatch, caplog):
+    """A lane rebuilt after its base moved says why it was not, once: its rebuild's failure or its check's."""
+    import logging
+
+    from zemble.graph import store
+
+    base, lane_a, lane_b = workspace
+
+    async def failing(*args, **kwargs):
+        return FakeGraphWorker(code=1, steps=(), stderr=b"sqlite3.OperationalError: database is locked")
+
+    monkeypatch.setattr(graph_jobs, "private_mb", lambda: 100)
+    monkeypatch.setattr(graph_jobs.resource, "getrlimit", lambda _: (graph_jobs.resource.RLIM_INFINITY, -1))
+    monkeypatch.setattr(graph_jobs.resource, "setrlimit", lambda *_: None)
+    monkeypatch.setattr(graph_jobs.asyncio, "create_subprocess_exec", failing)
+    caplog.set_level(logging.INFO, logger="zemble.daemon.graph_jobs")
+
+    def warnings() -> list[str]:
+        return [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+
+    # 1. The rebuild's worker fails: one WARNING naming the lane, its base and the worker's reason.
+    monkeypatch.setattr(store, "graph_stale", lambda root: True)
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+    jobs.ready.add(lane_a)
+    await jobs.ensure(lane_a, None)
+    async with asyncio.timeout(2):
+        while not warnings():
+            await asyncio.sleep(0.001)
+    await asyncio.gather(*list(jobs.jobs.values()), return_exceptions=True)
+    await _settle()
+    (failed,) = warnings()
+    assert failed.startswith(f"graph refresh of {lane_a} (lane of {base}) failed after"), failed
+    assert "database is locked" in failed, failed
+
+    # 2. The staleness check itself fails: one WARNING with its reason, never silence.
+    caplog.clear()
+
+    def unreadable(root):
+        raise OSError("graph pointer unreadable")
+
+    monkeypatch.setattr(store, "graph_stale", unreadable)
+    jobs.ready.add(lane_b)
+    await jobs.ensure(lane_b, None)
+    async with asyncio.timeout(2):
+        while not warnings():
+            await asyncio.sleep(0.001)
+    await _settle()
+    (unchecked,) = warnings()
+    assert unchecked.startswith(f"graph overlay of {lane_b} was not rebuilt after its base moved"), unchecked
+    assert "graph pointer unreadable" in unchecked, unchecked

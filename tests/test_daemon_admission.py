@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from tests.conftest import FakeEmbedder
+from tests.conftest import FakeEmbedder, FakeGraphWorker
 from zemble.daemon import server
 from zemble.daemon.admission import AdmissionBusy, ReadAdmission
 from zemble.daemon.graph_jobs import GraphJobs, serving_reserve_mb
@@ -236,16 +236,11 @@ async def test_worker_budget_and_parent_limit_are_separate_and_restored(tmp_path
     jobs = GraphJobs(asyncio.Lock(), 4096)
     jobs.states[str(tmp_path)] = {"state": "queued"}
 
-    class Process:
-        pid = 123
-        returncode = 0
-
-        async def communicate(self, message):
-            return b'{"peak_rss_mb": 2000}', b""
-
     async def spawn(*args, **kwargs):
+        from zemble.daemon.graph_worker import WorkerReport, report_line
+
         assert int(args[-1]) + limits[-1][0] / 1024 / 1024 <= jobs.total_mb
-        return Process()
+        return FakeGraphWorker(pid=123, steps=(report_line(WorkerReport.FINISHED, peak_rss_mb=2000),))
 
     monkeypatch.setattr(graph_jobs.asyncio, "create_subprocess_exec", spawn)
     await jobs._build(str(tmp_path))

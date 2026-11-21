@@ -13,9 +13,10 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import FakeEmbedder
+from tests.conftest import FakeEmbedder, FakeGraphWorker
 from zemble.daemon import client, graph_jobs, server
 from zemble.daemon.graph_jobs import GraphJobs
+from zemble.daemon.graph_worker import WorkerReport, report_line
 from zemble.daemon.memory import MemoryBusy, ReadOutgrown
 from zemble.daemon.protocol import CommandBusy, CommandFailed, CommandOutgrown, CommandRefused, ErrorKind
 from zemble.types import ContentType
@@ -123,31 +124,16 @@ async def test_a_load_that_does_not_fit_is_outgrown_and_an_allocation_failure_to
     assert response["kind"] == ErrorKind.OUTGROWN.value, response
 
 
-class _Worker:
-    """A graph worker that answers once `finish` is set, with `code` as its exit status."""
-
-    pid = 4242
-
-    def __init__(self, finish: asyncio.Event, code: int) -> None:
-        self.finish, self.code, self.returncode = finish, code, None
-
-    async def communicate(self, message: bytes) -> tuple[bytes, bytes]:
-        await self.finish.wait()
-        self.returncode = self.code
-        return b'{"symbols": 1}', b"worker stderr"
-
-    def terminate(self) -> None:
-        """Nothing to stop."""
-
-    async def wait(self) -> int:
-        return self.code
-
-
 def _graph_jobs(monkeypatch: pytest.MonkeyPatch, finish: asyncio.Event, code: int = 0, **kwargs: Any) -> GraphJobs:
-    """Graph jobs whose worker is `_Worker`, never touching the test process's data limit."""
+    """Graph jobs whose worker answers once `finish` is set, never touching the test process's data limit."""
 
-    async def spawn(*args: Any, **spawn_kwargs: Any) -> _Worker:
-        return _Worker(finish, code)
+    async def spawn(*args: Any, **spawn_kwargs: Any) -> FakeGraphWorker:
+        return FakeGraphWorker(
+            code=code,
+            pid=4242,
+            steps=(finish.wait, report_line(WorkerReport.FINISHED, symbols=1)),
+            stderr=b"worker stderr",
+        )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(resource, "setrlimit", lambda *args: None)

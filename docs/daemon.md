@@ -78,9 +78,16 @@ running.
 The graph jobs log every refresh at INFO on `zemble.daemon.graph_jobs`: `graph refresh of
 <root> started after <s> queued: <n> changed path(s)` (or `whole tree checked`), then
 `finished in <s> (worker <s>, peak <MiB>): <a> of <b> file(s) re-extracted, <c> re-resolved,
-<d> removed`, so "why was the graph behind" is answered by the log. A failed refresh logs
-`failed after <s>; the graph stays as it was: <reason>` at WARNING; a dropped or cancelled one
-says so at INFO.
+<d> removed`, so "why was the graph behind" is answered by the log. A lane's job names its base
+(`graph refresh of <lane> (lane of <base>) ...`), logs `published its first pass after <s>: ...;
+<n> moved name(s) owed to the second pass` the moment the lane answers with its own files, and its
+finish line adds what the second pass left to the base unchanged. The worker reports on stdout,
+one JSON line per report (`graph_worker.WorkerReport`: `published`, then `finished` last), and the
+daemon logs each line as it arrives; a report kind it does not know fails the job. A failed
+refresh logs `failed after <s>; the graph stays as it was: <reason>` at WARNING; a dropped or
+cancelled one says so at INFO. A lane overlay whose base moved is rebuilt in the background; that
+rebuild failing is the failed refresh line, and its staleness check failing logs one WARNING
+`graph overlay of <lane> was not rebuilt after its base moved; it answers as it was: <reason>`.
 
 Repeated identical `home` and graph questions join one read computation and reuse
 successful answers in a 64-entry LRU. Keys contain weak serving-index identities

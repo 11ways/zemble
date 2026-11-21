@@ -15,10 +15,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import FakeGraphWorker
 from tests.test_graph_cli import _run
 from zemble.daemon import graph_jobs, server
 from zemble.daemon.admission import AdmissionBusy
 from zemble.daemon.graph_jobs import GraphJobs
+from zemble.daemon.graph_worker import WorkerReport, report_line
 from zemble.daemon.protocol import QueryTimedOut
 from zemble.graph import cli as graph_cli
 from zemble.graph.store import GRAPH_LOCK_NAME, build_graph, graph_folder
@@ -175,41 +177,27 @@ async def test_the_daemon_holds_back_a_lookup_naming_nothing_while_its_refresh_r
 async def test_a_graph_refresh_logs_its_start_end_and_failure(tmp_path: Path, monkeypatch, caplog) -> None:
     """The daemon log answers why a graph was behind: when its refresh started, how long it took, what it read."""
     root = str(tmp_path)
+    finished = report_line(
+        WorkerReport.FINISHED,
+        build_seconds=1.5,
+        peak_rss_mb=80,
+        stats={
+            "files_scanned": 12,
+            "extracted_files": 3,
+            "removed_files": 1,
+            "reresolved_files": 7,
+            "compacted": False,
+        },
+    )
     outcomes = iter(
         [
-            (
-                0,
-                json.dumps(
-                    {
-                        "build_seconds": 1.5,
-                        "peak_rss_mb": 80,
-                        "stats": {
-                            "files_scanned": 12,
-                            "extracted_files": 3,
-                            "removed_files": 1,
-                            "reresolved_files": 7,
-                            "compacted": False,
-                        },
-                    }
-                ).encode(),
-                b"",
-            ),
-            (1, b"", b"Traceback ...\nsqlite3.OperationalError: disk I/O error"),
+            FakeGraphWorker(steps=(finished,)),
+            FakeGraphWorker(code=1, steps=(), stderr=b"Traceback ...\nsqlite3.OperationalError: disk I/O error"),
         ]
     )
 
     async def spawn(*args, **kwargs):
-        code, stdout, stderr = next(outcomes)
-
-        class Process:
-            pid = 1
-            returncode = None
-
-            async def communicate(self, message):
-                self.returncode = code
-                return stdout, stderr
-
-        return Process()
+        return next(outcomes)
 
     monkeypatch.setattr(graph_jobs, "private_mb", lambda: 100)
     monkeypatch.setattr(graph_jobs.resource, "getrlimit", lambda _: (graph_jobs.resource.RLIM_INFINITY, -1))
@@ -236,6 +224,73 @@ async def test_a_graph_refresh_logs_its_start_end_and_failure(tmp_path: Path, mo
     assert "failed after" in failed.getMessage() and "disk I/O error" in failed.getMessage(), failed.getMessage()
 
 
+@pytest.mark.anyio
+async def test_a_lane_refresh_names_its_base_and_logs_its_first_pass_when_it_lands(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """A lane job's lines say whose lane it is, and its first pass is logged while the second still runs."""
+    base, lane = str(tmp_path / "ws"), str(tmp_path / "lane")
+    Path(lane).mkdir()
+    second_pass = asyncio.Event()
+    stats = {"files_scanned": 9, "extracted_files": 2, "removed_files": 1, "reresolved_files": 3, "owed_names": 4}
+    published = report_line(WorkerReport.PUBLISHED, stats={**stats, "published_seconds": 0.4})
+    final = {**stats, "reresolved_files": 40, "restored_files": 25, "published_seconds": 0.4, "compacted": False}
+    worker = FakeGraphWorker(
+        steps=(published, second_pass.wait, report_line(WorkerReport.FINISHED, build_seconds=2.0, stats=final))
+    )
+
+    async def spawn(*args, **kwargs):
+        return worker
+
+    monkeypatch.setattr(graph_jobs, "private_mb", lambda: 100)
+    monkeypatch.setattr(graph_jobs.resource, "getrlimit", lambda _: (graph_jobs.resource.RLIM_INFINITY, -1))
+    monkeypatch.setattr(graph_jobs.resource, "setrlimit", lambda *_: None)
+    monkeypatch.setattr(graph_jobs.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(graph_jobs, "_lane_base", lambda root: base if root == lane else None)
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+    caplog.set_level(logging.INFO, logger="zemble.daemon.graph_jobs")
+    subject = f"graph refresh of {lane} (lane of {base})"
+
+    # 1. The start line names the lane's base.
+    job = jobs._start(lane, refresh=True, changed_paths=None)
+    async with asyncio.timeout(2):
+        while not any("published its first pass" in record.getMessage() for record in caplog.records):
+            await asyncio.sleep(0.001)
+    lines = [record.getMessage() for record in caplog.records]
+    assert any(line.startswith(f"{subject} started after") for line in lines), lines
+
+    # 2. The first pass is logged when the worker reports it, while the second pass still runs.
+    (first,) = [line for line in lines if "published its first pass" in line]
+    assert first.startswith(f"{subject} published its first pass after 0.4 s"), first
+    assert "2 of 9 file(s) re-extracted, 1 removed, 3 re-resolved; 4 moved name(s) owed" in first, first
+    assert not job.done() and jobs.states[lane]["state"] == "building", "logged before the job finished"
+
+    # 3. The finish line names the lane too, and what its second pass left to the base.
+    second_pass.set()
+    await job
+    (done,) = [record.getMessage() for record in caplog.records if "finished in" in record.getMessage()]
+    assert done.startswith(f"{subject} finished in"), done
+    assert "40 re-resolved" in done and "25 re-resolved file(s) left to the base unchanged" in done, done
+
+
+@pytest.mark.anyio
+async def test_an_unknown_worker_report_fails_the_job_closed(tmp_path: Path, monkeypatch) -> None:
+    """A report line this version does not know fails the job instead of being skipped."""
+
+    async def spawn(*args, **kwargs):
+        return FakeGraphWorker(steps=(b'{"report": "halfway"}\n', report_line(WorkerReport.FINISHED)))
+
+    monkeypatch.setattr(graph_jobs, "private_mb", lambda: 100)
+    monkeypatch.setattr(graph_jobs.resource, "getrlimit", lambda _: (graph_jobs.resource.RLIM_INFINITY, -1))
+    monkeypatch.setattr(graph_jobs.resource, "setrlimit", lambda *_: None)
+    monkeypatch.setattr(graph_jobs.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(graph_jobs, "_lane_base", lambda root: None)
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+    with pytest.raises(ValueError, match="halfway"):
+        await jobs._start(str(tmp_path), refresh=True, changed_paths=None)
+    assert jobs.states[str(tmp_path)]["state"] == "failed" and str(tmp_path) not in jobs.ready
+
+
 def test_the_worker_reports_what_its_refresh_read(tmp_path: Path, graph_cache: Path) -> None:
     """The real worker process prints the statistics the daemon logs."""
     root = _workspace(tmp_path / "ws")
@@ -248,5 +303,7 @@ def test_the_worker_reports_what_its_refresh_read(tmp_path: Path, graph_cache: P
         check=True,
         env={**os.environ, "ZEMBLE_DAEMON": "0"},
     )
-    report = json.loads(completed.stdout)
+    *_events, last = completed.stdout.splitlines()
+    report = json.loads(last)
+    assert report["report"] == "finished", report
     assert report["stats"]["extracted_files"] == 1 and report["stats"]["files_scanned"] >= 1, report

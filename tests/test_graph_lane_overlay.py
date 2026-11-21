@@ -347,6 +347,29 @@ def test_a_lane_answers_with_its_edits_before_its_dependents_and_a_stopped_pass_
         provider.close()
 
 
+def test_the_worker_reports_a_lane_overlays_first_pass_before_it_finishes(lanes: tuple[Path, Path, Path]) -> None:
+    """The real graph worker prints the first pass's publish as its own line, ahead of the finished report."""
+    import os
+    import sys
+
+    _workspace, lane, _reference = lanes
+    _lane_edits(lane)
+    completed = subprocess.run(
+        [sys.executable, "-m", "zemble.daemon.graph_worker", str(lane), "2048"],
+        input=json.dumps({"changed_paths": None}),
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "ZEMBLE_DAEMON": "0"},
+    )
+    published, finished = (json.loads(line) for line in completed.stdout.splitlines())
+    assert published["report"] == "published" and finished["report"] == "finished", completed.stdout
+    first = published["stats"]
+    assert first["extracted_files"] == 2 and first["removed_files"] == 1, first
+    assert first["owed_names"] >= 1 and first["published_seconds"] is not None, "the first pass owes the moved names"
+    assert finished["stats"]["reresolved_files"] > first["reresolved_files"], "the second pass re-resolved dependents"
+
+
 #: A lane edit that adds a documented migration: the architectural channel's evidence.
 ADDED_DEPRECATED = ADDED.replace(
     "\n}\n",

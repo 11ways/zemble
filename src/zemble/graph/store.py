@@ -215,6 +215,8 @@ class GraphStats:
     restored_files: int = 0
     #: Seconds until a lane's overlay answered with the lane's own files, before its dependents were re-resolved.
     published_seconds: float | None = None
+    #: Names a lane overlay's first pass moved, which its second pass re-resolves the writers of.
+    owed_names: int = 0
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-ready view of the build statistics."""
@@ -236,6 +238,7 @@ class GraphStats:
             "compacted": self.compacted,
             "restored_files": self.restored_files,
             "published_seconds": None if self.published_seconds is None else round(self.published_seconds, 3),
+            "owed_names": self.owed_names,
         }
 
 
@@ -1446,6 +1449,7 @@ def build_graph(
     force: bool = False,
     workers: int | None = None,
     changed_paths: Iterable[Path] | None = None,
+    on_published: Callable[[GraphStats], None] | None = None,
 ) -> GraphStats:
     """Build or incrementally refresh the symbol graph for a workspace, after any other writer finishes.
 
@@ -1454,19 +1458,23 @@ def build_graph(
     :param workers: Extraction process count; defaults to the CPU count.
     :param changed_paths: The exact paths that moved, from a watcher; None walks the tree.
         The caller must name every path that moved, since nothing else is looked at.
+    :param on_published: Called once a lane overlay's first pass is published, before its second runs.
     :return: Statistics describing the build.
     :raises ValueError: If the path is not a local directory.
     """
     root = _local_root(path)
     folder = _graph_dir(str(root))
     with _writer_lock(folder, wait=True):
-        return _build_locked(root, folder, force=force, workers=workers, changed_paths=changed_paths)
+        return _build_locked(
+            root, folder, force=force, workers=workers, changed_paths=changed_paths, on_published=on_published
+        )
 
 
-def refresh_graph(path: str) -> GraphStats | None:
+def refresh_graph(path: str, *, on_published: Callable[[GraphStats], None] | None = None) -> GraphStats | None:
     """Incrementally refresh the symbol graph for a workspace unless another process is writing it.
 
     :param path: Local directory to index.
+    :param on_published: As `build_graph` takes it.
     :return: Statistics describing the refresh, or None when another writer held the lock; the
         current version stays readable meanwhile.
     :raises ValueError: If the path is not a local directory.
@@ -1477,7 +1485,7 @@ def refresh_graph(path: str) -> GraphStats | None:
         if not taken:
             logger.info("graph: another process is writing the graph of %s; reading the current one", root)
             return None
-        return _build_locked(root, folder, force=False, workers=None, changed_paths=None)
+        return _build_locked(root, folder, force=False, workers=None, changed_paths=None, on_published=on_published)
 
 
 def _local_root(path: str) -> Path:
@@ -1495,6 +1503,7 @@ def _build_locked(
     force: bool,
     workers: int | None,
     changed_paths: Iterable[Path] | None,
+    on_published: Callable[[GraphStats], None] | None = None,
 ) -> GraphStats:
     """Run one build for the writer-lock holder, rebuilding from source when the store is unreadable."""
     started = time.perf_counter()
@@ -1510,7 +1519,16 @@ def _build_locked(
             _sweep(folder, pointer)
             current = pointer.current
         if lane is not None:
-            stats = _build_overlay(root, folder, lane, current, force=force, workers=workers, changed=changed_paths)
+            stats = _build_overlay(
+                root,
+                folder,
+                lane,
+                current,
+                force=force,
+                workers=workers,
+                changed=changed_paths,
+                on_published=on_published,
+            )
         else:
             stats = _build_into(root, folder, current, force=force, workers=workers, changed_paths=changed_paths)
     except (sqlite3.DatabaseError, GraphStoreCorrupt) as exc:
@@ -1518,7 +1536,9 @@ def _build_locked(
             raise
         logger.error("graph store in %s is malformed (%s); rebuilding it from source", folder, exc)
         if lane is not None:
-            stats = _build_overlay(root, folder, lane, None, force=True, workers=workers, changed=None)
+            stats = _build_overlay(
+                root, folder, lane, None, force=True, workers=workers, changed=None, on_published=on_published
+            )
         else:
             stats = _build_into(root, folder, None, force=True, workers=workers, changed_paths=None)
         stats.rebuilt_from_corruption = True
@@ -1602,6 +1622,7 @@ def _build_overlay(
     force: bool,
     workers: int,
     changed: Iterable[Path] | None,
+    on_published: Callable[[GraphStats], None] | None = None,
 ) -> GraphStats:
     """Build a lane's graph as an overlay of its base's current graph version (`zemble.graph.overlay`).
 
@@ -1668,6 +1689,7 @@ def _build_overlay(
             raise
         if not reuse:
             _install(folder, name, current)
+        stats.owed_names = len(owed.names)
         logger.info(
             "graph: lane %s on %s: %d extracted, %d removed, %d resolved, %d own symbols; %d moved names owed",
             root,
@@ -1676,9 +1698,11 @@ def _build_overlay(
             stats.removed_files,
             stats.reresolved_files,
             stats.symbols,
-            len(owed.names),
+            stats.owed_names,
         )
         stats.published_seconds = time.perf_counter() - started
+        if on_published is not None:
+            on_published(stats)
         if owed:
             _resolve_owed(
                 connection_to=lambda: _open_overlay(target, base_folder, base_version),

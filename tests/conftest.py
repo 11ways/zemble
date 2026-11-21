@@ -1,8 +1,9 @@
 import hashlib
+import inspect
 import os
 import subprocess
 import textwrap
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,62 @@ def git(repo: Path, *arguments: str, date: str | None = None) -> str:
         ["git", "-C", str(repo), *arguments], check=True, capture_output=True, text=True, env=env
     )
     return completed.stdout
+
+
+class FakeGraphWorker:
+    """Stand in for a graph worker process: it prints its steps' lines in order, then exits with `code`.
+
+    A step that is a callable runs (and is awaited when it returns an awaitable) when the reader gets there.
+    """
+
+    def __init__(
+        self,
+        *,
+        code: int = 0,
+        steps: tuple[bytes | Callable[[], Awaitable[object] | object], ...] | None = None,
+        stderr: bytes = b"",
+        pid: int = 1,
+    ) -> None:
+        """Exit with *code* after *steps*; the default prints one finished report."""
+        from zemble.daemon.graph_worker import WorkerReport, report_line
+
+        self.code, self.pid, self.returncode, self.message = code, pid, None, b""
+        self._steps = list(steps if steps is not None else (report_line(WorkerReport.FINISHED),))
+        self._stderr = stderr
+        self.stdin, self.stdout, self.stderr = self, self, self
+
+    def write(self, data: bytes) -> None:
+        """Keep what the daemon hands over."""
+        self.message += data
+
+    async def drain(self) -> None:
+        """Nothing buffered."""
+
+    def close(self) -> None:
+        """Nothing to close."""
+
+    async def readline(self) -> bytes:
+        """The next line printed, after running the callables before it; empty once the worker exited."""
+        while self._steps:
+            step = self._steps.pop(0)
+            if isinstance(step, bytes):
+                return step
+            if inspect.isawaitable(outcome := step()):
+                await outcome
+        self.returncode = self.code
+        return b""
+
+    async def read(self) -> bytes:
+        """The worker's stderr."""
+        return self._stderr
+
+    def terminate(self) -> None:
+        """Nothing to stop."""
+
+    async def wait(self) -> int:
+        """Exit."""
+        self.returncode = self.code
+        return self.code
 
 
 @pytest.fixture(autouse=True)

@@ -99,3 +99,7 @@ worker runs. Before is a8afb53 (copy the base whole, then the walking refresh).
 The second pass costs what the base's own incremental refresh pays for the same edits: a lane
 that adds or removes a common name (`get`, `of`) makes thousands of files dependents. It runs after
 the lane already answers.
+
+The daemon log shows both passes of a lane's job: `graph refresh of <lane> (lane of <base>)
+published its first pass after <s>` when the lane starts answering with its edits, then the
+finish line with the dependents re-resolved and those left to the base (`docs/daemon.md`).
