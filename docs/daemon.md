@@ -54,9 +54,12 @@ watcher waits its refresh out. One worker builds at a time: a root that is no la
 workspace lanes reuse) gets it before every lane, and a lane first waits out its base's job, and
 a base's graph refresh counts from the start of the index pass that will queue it, so the lane
 seeds from a current base. A job whose root was removed while queued is dropped without a
-worker. A full construction queue (eight jobs) refuses only a root
-with nothing to read. `graph_construction.jobs` reports queued/building/ready/failed/cancelled/dropped
-states, worker PID, budget, elapsed/build time and peak worker RSS. Stop closes graph jobs
+worker, and a worker that dies because its root went away mid-build is a dropped job too, never
+a memory refusal. A full construction queue (eight jobs) refuses only a root
+with nothing to read. `graph_construction.jobs` reports queued/building/ready/failed/cancelled
+states (`GraphJobState` in `protocol.py` is their one home), worker PID, budget, elapsed/build time
+and peak worker RSS. A root that is gone leaves the list: its dropped job at once, and its failed or
+finished ones when its index is evicted as gone or at the next prune. Stop closes graph jobs
 and drains running reads before exiting.
 
 A graph answer given while that root's refresh is announced (its index pass runs first),

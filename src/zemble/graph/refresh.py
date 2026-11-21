@@ -12,21 +12,36 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, assert_never
+
+from zemble.daemon.protocol import GraphJobState
 
 #: The payload key every graph surface carries a pending refresh under.
 REFRESHING_KEY = "refreshing"
 
 
 class RefreshPhase(str, Enum):
-    """Where a graph refresh is when an answer is given."""
+    """Where a graph refresh is when an answer is given; its job phases are `GraphJobState`'s own members."""
 
     #: The root's index pass runs first; the graph refresh follows it.
     ANNOUNCED = "announced"
     #: Waiting for the daemon's single graph worker.
-    QUEUED = "queued"
+    QUEUED = GraphJobState.QUEUED.value
     #: A process is writing the graph.
-    BUILDING = "building"
+    BUILDING = GraphJobState.BUILDING.value
+
+    @classmethod
+    def of_job(cls, state: GraphJobState) -> RefreshPhase | None:
+        """The phase a graph job in *state* puts its refresh in; None once the job no longer holds a refresh."""
+        match state:
+            case GraphJobState.QUEUED:
+                return cls.QUEUED
+            case GraphJobState.BUILDING:
+                return cls.BUILDING
+            case GraphJobState.READY | GraphJobState.FAILED | GraphJobState.CANCELLED:
+                return None
+            case _:
+                assert_never(state)
 
 
 @dataclass(frozen=True)

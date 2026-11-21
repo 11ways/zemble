@@ -65,7 +65,10 @@ lane's overlay); the prune keeps the lane's graph for the same reason.
 
 An overlay takes no `ZEMBLE_DAEMON_MAX_INDEXES` slot, is re-planned when its lane changes or its
 base is rebuilt, and is evicted with its base. A root that no longer exists is evicted on its next
-rebuild, and the daemon prunes the caches of gone roots on start and every
+rebuild with one INFO line, skipping that rebuild's graph refresh, and its graph jobs leave
+`graph_construction.jobs` (a failed or finished one with it, a queued one when its turn comes, a
+running one whose worker died of the missing root as a dropped job, never a memory refusal). The
+daemon prunes the caches of gone roots, and the jobs of roots it no longer serves, on start and every
 `ZEMBLE_DAEMON_PRUNE_HOURS` (6); `zemble clear gone --dry-run` lists the same set.
 
 ## Measured (archdev, 2026-10-25, 16-checkout lane of the zenit workspace)

@@ -308,6 +308,44 @@ async def test_daemon_journey_lane_overlay_rebuilds_and_a_removed_lane_goes(work
     assert str(workspace) not in removed, "4: a live root's cache is kept"
 
 
+@pytest.mark.anyio
+async def test_a_removed_lane_is_evicted_with_one_info_line_and_leaves_no_graph_job(
+    workspace: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A lane deleted from disk: one INFO line, no traceback, and none of its graph jobs left in the job list."""
+    import logging
+
+    from zemble.graph.store import build_graph
+
+    daemon = _daemon()
+    await daemon.index_for({"path": str(workspace)})
+    build_graph(str(workspace))
+    lane = _lane(workspace, "ws-gone")
+    build_graph(str(lane))
+    key, _served = await daemon.index_for({"path": str(lane)})
+    # What a daemon of a busy day listed: a failed job of this lane and one of a lane long gone.
+    long_gone = str(tmp_path / "long-gone")
+    for root in (str(lane), long_gone):
+        daemon.graphs.states[root] = {"root": root, "state": "failed", "error": "graph worker failed"}
+
+    # 1. Its next rebuild (an edit the watcher saw as the lane went) evicts it with one INFO line.
+    git(workspace / "alpha", "worktree", "remove", "--force", str(lane / "alpha"))
+    lane.rmdir()
+    caplog.set_level(logging.INFO)
+    result = await daemon.rebuild(key, java_changed=True)
+    assert result == {"skipped": "root is gone"} and key not in daemon.cache._tasks, "1: the lane is dropped"
+    lines = [record for record in caplog.records if str(lane) in record.getMessage()]
+    assert [record.levelno for record in lines] == [logging.INFO], f"1: one INFO line: {[r.message for r in lines]}"
+    assert not any(record.exc_info for record in caplog.records), "1: and no traceback"
+    jobs = (await server._cmd_status(daemon, {}))["graph_construction"]["jobs"]
+    assert all(job["root"] != str(lane) for job in jobs), "1: its graph jobs leave the job list"
+
+    # 2. The prune drops the jobs of a root the daemon no longer serves.
+    await daemon.prune_gone_roots()
+    jobs = (await server._cmd_status(daemon, {}))["graph_construction"]["jobs"]
+    assert all(job["root"] != long_gone for job in jobs), "2: a long gone root's job leaves it too"
+
+
 def test_prune_names_folders_by_marker_or_by_the_daemon_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A key folder whose stores do not name their root is pruned once its marker or the logs name a gone root."""
     cache = tmp_path / "cache"

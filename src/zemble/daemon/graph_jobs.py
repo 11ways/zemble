@@ -18,6 +18,7 @@ from typing import Any
 
 from zemble.daemon.admission import AdmissionBusy
 from zemble.daemon.memory import MIB, ReadOutgrown, private_mb
+from zemble.daemon.protocol import GraphJobState
 from zemble.graph.refresh import PendingRefresh, RefreshPhase
 
 logger = logging.getLogger(__name__)
@@ -84,12 +85,16 @@ def _log_finished(root: str, state: dict[str, Any], elapsed: float) -> None:
     )
 
 
-def _log_unfinished(root: str, outcome: str, elapsed: float, error: BaseException) -> None:
-    """Log a refresh that did not land: a failure at WARNING with its reason, a dropped or cancelled one at INFO."""
-    if outcome == "failed":
+def _log_unfinished(root: str, outcome: GraphJobState | None, elapsed: float, error: BaseException) -> None:
+    """Log a refresh that did not land: a failure at WARNING with its reason, a cancelled or dropped one at INFO.
+
+    :param outcome: None for a job dropped from the job list (its root is gone).
+    """
+    if outcome is GraphJobState.FAILED:
         logger.warning("graph refresh of %s failed after %.1f s; the graph stays as it was: %s", root, elapsed, error)
     else:
-        logger.info("graph refresh of %s %s after %.1f s: %s", root, outcome, elapsed, error)
+        word = "dropped" if outcome is None else outcome.value
+        logger.info("graph refresh of %s %s after %.1f s: %s", root, word, elapsed, error)
 
 
 class GraphJobs:
@@ -168,15 +173,17 @@ class GraphJobs:
     def pending_refresh(self, root: str) -> PendingRefresh | None:
         """The refresh of a canonical root's graph that is announced, queued or running, if any."""
         if (job := self.jobs.get(root)) is not None and not job.done():
-            state = self.states.get(root, {})
-            building = state.get("state") == "building"
-            paths = self.paths.get(root)
-            return PendingRefresh(
-                root=root,
-                phase=RefreshPhase.BUILDING if building else RefreshPhase.QUEUED,
-                since=state.get("started_at" if building else "queued_at"),
-                changed_paths=None if paths is None or self.pending.get(root, set()) is None else len(paths),
-            )
+            state = self.states.get(root, {"state": GraphJobState.QUEUED})
+            phase = RefreshPhase.of_job(GraphJobState(state["state"]))
+            if phase is not None:
+                building = phase is RefreshPhase.BUILDING
+                paths = self.paths.get(root)
+                return PendingRefresh(
+                    root=root,
+                    phase=phase,
+                    since=state.get("started_at" if building else "queued_at"),
+                    changed_paths=None if paths is None or self.pending.get(root, set()) is None else len(paths),
+                )
         if root in self.announced:
             return PendingRefresh(root=root, phase=RefreshPhase.ANNOUNCED)
         return None
@@ -243,7 +250,7 @@ class GraphJobs:
                 raise AdmissionBusy("graph construction queue is full")
             if root not in self.ready and not Path(root).is_dir():
                 raise FileNotFoundError(f"{root} is not a directory (a lane removed?); it has no graph to build")
-            self.states[root] = {"root": root, "state": "queued", "queued_at": time.time()}
+            self.states[root] = {"root": root, "state": GraphJobState.QUEUED, "queued_at": time.time()}
             # AIDEV-NOTE: refresh replaces a published graph beside its readers, just like
             # an index rebuild. Keeping the old ready generation avoids turning edits into outages.
             self.paths[root] = [str(path) for path in changed_paths] if changed_paths is not None else None
@@ -283,7 +290,7 @@ class GraphJobs:
                     return
                 paths = self.pending.pop(root)
                 self.paths[root] = sorted(paths) if paths is not None else None
-                self.states[root].update(state="queued", queued_at=time.time())
+                self.states[root].update(state=GraphJobState.QUEUED, queued_at=time.time())
         finally:
             self.jobs.pop(root, None)
             self.paths.pop(root, None)
@@ -340,7 +347,7 @@ class GraphJobs:
                         raise
                 try:
                     state.update(
-                        state="building",
+                        state=GraphJobState.BUILDING,
                         pid=self.process.pid,
                         budget_mb=worker_limit,
                         started_at=time.time(),
@@ -356,6 +363,10 @@ class GraphJobs:
                     message = json.dumps({"changed_paths": changed}).encode()
                     stdout, stderr = await self.process.communicate(message)
                     if self.process.returncode:
+                        if not Path(root).is_dir():
+                            # The worker died of its root going away (a lane removed mid-build), not of memory.
+                            self.forget(root)
+                            raise FileNotFoundError(f"{root} was removed while its graph was built; dropped")
                         # A failure, never a refusal: the client asks again, then answers in its own process.
                         error = stderr.decode()[-2000:]
                         raise RuntimeError(f"graph worker failed ({self.process.returncode}): {error}")
@@ -363,7 +374,7 @@ class GraphJobs:
                     self.generations[root] = self.generations.get(root, 0) + 1
                     state["generation"] = self.generations[root]
                     self.ready.add(root)
-                    state["state"] = "ready"
+                    state["state"] = GraphJobState.READY
                     _log_finished(root, state, time.monotonic() - started)
                 finally:
                     if self.process is not None and self.process.returncode is None:
@@ -372,10 +383,13 @@ class GraphJobs:
                     self.process = None
                     resource.setrlimit(resource.RLIMIT_DATA, (old_soft, hard))
         except BaseException as exc:
-            if state["state"] != "dropped":
-                state.update(state="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
-            state["error"] = str(exc)
-            _log_unfinished(root, state["state"], time.monotonic() - started, exc)
+            # A dropped job has left the job list; its state is nobody's to record any more.
+            if self.states.get(root) is state:
+                outcome = GraphJobState.CANCELLED if isinstance(exc, asyncio.CancelledError) else GraphJobState.FAILED
+                state.update(state=outcome, error=str(exc))
+                _log_unfinished(root, outcome, time.monotonic() - started, exc)
+            else:
+                _log_unfinished(root, None, time.monotonic() - started, exc)
             raise
         finally:
             state["elapsed_seconds"] = round(time.monotonic() - started, 3)
@@ -421,8 +435,7 @@ class GraphJobs:
             await self._base_settled(base)
         async with self._turn(_BASE_FIRST if base is None else _LANE_LAST):
             if not Path(root).is_dir():
-                self.ready.discard(root)
-                state["state"] = "dropped"
+                self.forget(root)
                 raise FileNotFoundError(f"{root} was removed while its graph job was queued; dropped")
             yield
 
@@ -462,6 +475,21 @@ class GraphJobs:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def forget(self, root: str) -> None:
+        """Drop everything kept about a root that is gone, its job list entry included; a running job ends alone."""
+        for key in {root, str(Path(root).resolve())}:
+            for table in (self.states, self.generations, self.paths, self.pending):
+                table.pop(key, None)
+            self.ready.discard(key)
+            self._not_lanes.discard(key)
+
+    def forget_gone(self) -> list[str]:
+        """Forget every root whose folder no longer exists, and return them."""
+        gone = [root for root in list(self.states) if not Path(root).is_dir()]
+        for root in gone:
+            self.forget(root)
+        return gone
 
     def status(self) -> dict[str, Any]:
         """Expose completed/refused jobs as well as active construction."""

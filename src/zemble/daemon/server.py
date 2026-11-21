@@ -101,6 +101,8 @@ _IDLE_CHECK_SECONDS = 30.0
 _QUIET_SECONDS = 2.0
 #: The rebuild answer for a root whose watcher saw a change within the quiet window; the watcher runs it later.
 _STILL_CHANGING = "tree still changing"
+#: The rebuild answer for a root removed from disk; its index, watcher and graph jobs are dropped with it.
+_ROOT_GONE = "root is gone"
 #: Hours between two prunes of the caches of roots that are gone; 0 disables the daemon's own pruning.
 PRUNE_HOURS_ENV = "ZEMBLE_DAEMON_PRUNE_HOURS"
 _DEFAULT_PRUNE_HOURS = 6
@@ -784,6 +786,8 @@ class Daemon:
                 if graph_follows or cache_key in self._rebuild_graph:
                     # Consumed BEFORE the refresh: a mark set while it runs asks for one after it.
                     self._rebuild_graph.discard(cache_key)
+                    if result.get("skipped") == _ROOT_GONE:
+                        return result
                     result["graph_ms"] = await self._refresh_graph(cache_key[0], changed_paths)
             return result
         finally:
@@ -817,7 +821,8 @@ class Daemon:
                     # A lane or checkout removed from under its watcher: nothing will ever rebuild it.
                     logger.info("%s is gone; dropping its index", cache_key[0])
                     self.cache.evict(cache_key)
-                    return {"skipped": "root is gone"}
+                    self.graphs.forget(cache_key[0])
+                    return {"skipped": _ROOT_GONE}
                 if isinstance(current, OverlayIndex):
                     return await self._replan_overlay(cache_key, current, started)
                 # AIDEV-NOTE: a rebuild streams its generation to disk, so its private memory is
@@ -1131,6 +1136,7 @@ class Daemon:
         if roots:
             for key in [key for key in self.cache._tasks if not Path(key[0]).exists()]:
                 self.cache.evict(key)
+            self.graphs.forget_gone()
         removed = []
         for orphan in orphans:
             if await asyncio.to_thread(remove_orphan, orphan):

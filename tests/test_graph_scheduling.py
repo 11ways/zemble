@@ -127,8 +127,38 @@ async def test_a_queued_job_for_a_removed_root_is_dropped_without_a_worker(worke
     with pytest.raises(FileNotFoundError):
         await asyncio.wait_for(asyncio.shield(queued), 2)
     assert workers.started == [base]
-    assert jobs.states[lane_a]["state"] == "dropped"
+    assert lane_a not in jobs.states, "a removed root's job leaves the job list"
     assert lane_a not in jobs.ready
+
+
+@pytest.mark.anyio
+async def test_a_worker_that_dies_of_a_removed_root_is_a_dropped_job_never_a_memory_refusal(
+    workers, workspace, monkeypatch
+):
+    """A lane removed while its worker builds fails that worker; the job is dropped, never reported as memory."""
+    from zemble.daemon.memory import MemoryRefused, ReadOutgrown
+
+    _base, lane_a, _ = workspace
+
+    async def dying(*args, **kwargs):
+        class Process:
+            pid = 1
+            returncode = None
+
+            async def communicate(self, message):
+                os.rmdir(lane_a)
+                self.returncode = 1
+                return b"", f"ValueError: '{lane_a}' is not a local directory".encode()
+
+        return Process()
+
+    monkeypatch.setattr(graph_jobs.asyncio, "create_subprocess_exec", dying)
+    jobs = GraphJobs(asyncio.Lock(), 4096)
+    jobs.states[lane_a] = {"root": lane_a, "state": "failed", "error": "an earlier refresh"}
+    with pytest.raises(FileNotFoundError) as raised:
+        await asyncio.wait_for(jobs._start(lane_a, refresh=True, changed_paths=None), 2)
+    assert not isinstance(raised.value, (MemoryRefused, ReadOutgrown)), "a missing root is no memory refusal"
+    assert lane_a not in jobs.states and lane_a not in jobs.ready, "and its jobs leave the job list"
 
 
 @pytest.mark.anyio

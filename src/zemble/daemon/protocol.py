@@ -65,6 +65,29 @@ def error_kind(raw: object) -> ErrorKind:
         return ErrorKind.FAILED
 
 
+class GraphJobState(StrEnum):
+    """Where one graph construction job is, as `graph_construction.jobs` reports it; the one home of these names."""
+
+    QUEUED = "queued"
+    BUILDING = "building"
+    READY = "ready"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+    @property
+    def in_flight(self) -> bool:
+        """Whether the job holds a queue place or a live worker: stopping its daemon now discards that work."""
+        return self in {GraphJobState.QUEUED, GraphJobState.BUILDING}
+
+
+def graph_job_in_flight(raw: object) -> bool:
+    """Read a reported job state, failing closed: a state this version does not know counts as in flight."""
+    try:
+        return GraphJobState(raw).in_flight
+    except ValueError:
+        return True
+
+
 class DaemonError(Exception):
     """A daemon error; `client.answer` turns all but a refusal into an answer, as this process's own work if need be."""
 
