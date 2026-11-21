@@ -11,6 +11,7 @@ import json
 import os
 import posixpath
 import sqlite3
+from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import replace
 from itertools import chain
@@ -21,6 +22,7 @@ from zemble.graph.facts import TREE_SITTER_SOURCE
 from zemble.graph.model import (
     NAMED_KINDS,
     TYPE_KINDS,
+    CallBinding,
     CallerTally,
     CallTally,
     Edge,
@@ -90,7 +92,7 @@ class GraphProvider(Protocol):
         ...
 
     def callers(self, symbol_id: str) -> list[Hit]:
-        """Find every call site that reaches a callable."""
+        """Find every call site reaching a callable: its own first, then those bound through an override relation."""
         ...
 
     def unattributed_calls(self, symbol_id: str) -> int:
@@ -222,12 +224,27 @@ def _grade(edge: Edge) -> str:
     return phrase
 
 
-def _reason(symbol: Symbol, edge: Edge, depth: int = 1, *, outgoing: bool = False) -> str:
+def _reason(
+    symbol: Symbol,
+    edge: Edge,
+    depth: int = 1,
+    *,
+    outgoing: bool = False,
+    binding: CallBinding = CallBinding.DIRECT,
+    through: Symbol | None = None,
+) -> str:
     """Build the one-line sentence explaining why a hit is in the answer."""
     table = _VERBS_OUT if outgoing else _VERBS
     verb = table.get(edge.kind, edge.kind.value)
     depth_note = f", depth {depth}" if depth > 1 else ""
-    return f"{verb} {display_name(symbol)} (line {edge.line}, {_grade(edge)}{depth_note})"
+    through_note = f", {binding.phrase} {display_name(through)}" if through is not None else ""
+    return f"{verb} {display_name(symbol)} (line {edge.line}, {_grade(edge)}{depth_note}{through_note})"
+
+
+def inherited_tally(hits: Sequence[Hit]) -> tuple[int, Counter[str]]:
+    """Count a callers answer's direct sites, and the others per declaration they were bound through."""
+    through = Counter(display_name(hit.through) for hit in hits if hit.through is not None)
+    return len(hits) - sum(through.values()), through
 
 
 _METRICS_SELECT = "SELECT symbol_id, lines, statements, complexity, nesting FROM symbol_metrics"
@@ -438,7 +455,15 @@ class SqliteGraphProvider:
         finally:
             cursor.close()
 
-    def _hits(self, edges: Sequence[Edge], *, side: str, depth: int = 1) -> list[Hit]:
+    def _hits(
+        self,
+        edges: Sequence[Edge],
+        *,
+        side: str,
+        depth: int = 1,
+        binding: CallBinding = CallBinding.DIRECT,
+        through: Symbol | None = None,
+    ) -> list[Hit]:
         """Turn edges into hits by loading the symbol on the requested side."""
         ids = [edge.src_id if side == "src" else (edge.dst_id or "") for edge in edges]
         symbols = self._symbols(ident for ident in ids if ident)
@@ -453,17 +478,36 @@ class SqliteGraphProvider:
                     edge_kind=edge.kind,
                     line=edge.line,
                     resolution=edge.resolution,
-                    reason=_reason(symbol, edge, depth, outgoing=side == "dst"),
+                    reason=_reason(symbol, edge, depth, outgoing=side == "dst", binding=binding, through=through),
                     depth=depth,
                     source=edge.source,
                     grade=_grade(edge),
+                    binding=binding,
+                    through=through,
                 )
             )
         return hits
 
     def callers(self, symbol_id: str) -> list[Hit]:
-        """Find every call site that reaches a callable."""
-        return self._sorted(self._hits(self._incoming(symbol_id, [EdgeKind.CALLS.value]), side="src"))
+        """Find every call site reaching a callable: its own first, then those bound through an override relation.
+
+        AIDEV-NOTE: a call is bound to its receiver's static type, so `handle.result()` on a
+        `GenerationHandle` names the interface method and never its implementation. The sites
+        bound to every declaration this one overrides (transitively) and to every override of
+        it are answered too, each carrying the declaration it was bound to. The relation is the
+        stored `OVERRIDES` edges, walked by `_walk` as `overrides_of`/`overridden_by` read them;
+        a language whose extractor writes none answers its direct sites only.
+        """
+        calls = [EdgeKind.CALLS.value]
+        direct = self._sorted(self._hits(self._incoming(symbol_id, calls), side="src"))
+        inherited: list[Hit] = []
+        for binding, incoming in ((CallBinding.OVERRIDDEN, False), (CallBinding.OVERRIDER, True)):
+            for related in self._walk(
+                symbol_id, 32, [EdgeKind.OVERRIDES.value], incoming=incoming, limit=None, prefix=""
+            ):
+                edges = self._incoming(related.symbol.id, calls)
+                inherited += self._hits(edges, side="src", binding=binding, through=related.symbol)
+        return direct + self._sorted(inherited)
 
     def callees(self, symbol_id: str) -> list[Hit]:
         """Find every callable invoked from a symbol's body."""
@@ -848,8 +892,16 @@ class SubtreeGraphProvider:
         return [rebased for symbol in symbols if (rebased := self._rebased(symbol)) is not None]
 
     def _hits(self, hits: Iterable[Hit]) -> list[Hit]:
-        """Keep and rebase the hits whose symbol is in the sub-directory, in their order."""
-        return [replace(hit, symbol=rebased) for hit in hits if (rebased := self._rebased(hit.symbol)) is not None]
+        """Keep and rebase the hits whose symbol is in the sub-directory, in their order.
+
+        A hit's `through` is rebased too when it lies in the sub-directory; one outside keeps the
+        ancestor's spelling, because the declaration a call was bound to is named, never dropped.
+        """
+        return [
+            replace(hit, symbol=rebased, through=self._rebased(hit.through) or hit.through)
+            for hit in hits
+            if (rebased := self._rebased(hit.symbol)) is not None
+        ]
 
     def symbol(self, symbol_id: str) -> Symbol | None:
         """Load one in-folder symbol by its view id."""

@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from zemble.graph.model import TYPE_KINDS, Resolution, Symbol, SymbolKind
+from zemble.graph.model import TYPE_KINDS, CallBinding, Resolution, Symbol, SymbolKind
 from zemble.graph.provider import GraphProvider, display_name
 from zemble.home.config import HomeConfig
 from zemble.home.decide import DocHit, HomeAnswer, Mechanism, Similar, decide
@@ -238,7 +238,12 @@ def _describe(graph: GraphProvider, config: HomeConfig, symbol: Symbol, score: f
     `callers` about a class under-reports its consumers to nearly zero.
     """
     incoming = graph.references(symbol.id) if symbol.kind in TYPE_KINDS else graph.callers(symbol.id)
-    callers = [hit for hit in incoming if hit.resolution in (Resolution.EXACT, Resolution.UNIQUE_NAME)]
+    # Direct call sites only: a mechanism's consumers are who names it, as its counts always meant.
+    callers = [
+        hit
+        for hit in incoming
+        if hit.resolution in (Resolution.EXACT, Resolution.UNIQUE_NAME) and hit.binding is CallBinding.DIRECT
+    ]
     implementations = graph.implementations(symbol.id) if symbol.kind in TYPE_KINDS else []
     own = config.module_of(symbol.file_path)
     consumers: list[str] = []

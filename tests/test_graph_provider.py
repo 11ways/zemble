@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from zemble.graph.model import CALLABLE_KINDS, EdgeKind, Resolution
+from zemble.graph.model import CALLABLE_KINDS, CallBinding, EdgeKind, Resolution
 from zemble.graph.provider import GraphProvider, SqliteGraphProvider
 from zemble.languages.metrics import CallableMetrics
 
@@ -69,13 +69,15 @@ def test_bulk_readers_agree_with_the_per_symbol_queries(built_graph: SqliteGraph
     symbols = list(built_graph.all_symbols())
     assert len(symbols) == built_graph.connection.execute("SELECT COUNT(*) FROM symbols").fetchone()[0], "1: all"
 
-    # 2. Inbound CALLS tallies: distinct callers per callee, resolution and test-ness, as `callers` lists them.
+    # 2. Inbound CALLS tallies: distinct callers per callee, resolution and test-ness, as `callers` lists its own
+    # sites; the ones bound through an override relation are other symbols' edges, which their tallies count.
     tallies = built_graph.inbound_tallies([EdgeKind.CALLS])
     assert any(tally.sources for tally in tallies), "2: the fixture has calls"
     for symbol in symbols:
         expected: dict[tuple[Resolution, bool], set[str]] = {}
         for hit in built_graph.callers(symbol.id):
-            expected.setdefault((hit.resolution, hit.symbol.is_test), set()).add(hit.symbol.id)
+            if hit.binding is CallBinding.DIRECT:
+                expected.setdefault((hit.resolution, hit.symbol.is_test), set()).add(hit.symbol.id)
         mine = [tally for tally in tallies if tally.symbol_id == symbol.id]
         found = {(tally.resolution, tally.from_test): tally.sources for tally in mine}
         assert found == {key: len(ids) for key, ids in expected.items()}, f"2: {symbol.id}"

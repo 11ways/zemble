@@ -122,9 +122,40 @@ nearest declaring type.
 no constructor resolves `new Foo()` to the type symbol itself, which is where the
 implicit constructor lives.
 
-**Overrides** are derived, not written: for each method, the supertype chain is
-walked for a method with the same name and arity. Those edges are graded
-`UNIQUE_NAME` because parameter types were never compared.
+**Overrides** are derived, not written: for each method, every direct supertype's chain is
+walked for a method with the same name and arity, and the nearest one on each branch is
+overridden, as the facts contract's `override` has it (one per direct supertype branch): a
+class extending one type and implementing another overrides a declaration on each. Until
+2026-11-21 only the first match in the whole chain was kept, so a class implementing two
+interfaces overrode one of them. Those edges are graded `UNIQUE_NAME` because parameter types
+were never compared. A graph built before then keeps one edge for every file it has not
+re-resolved since; `zemble graph build --force` derives them all again.
+
+### Callers follow the override relation
+
+A call is bound to its receiver's static type: `handle.result()` on a `GenerationHandle` is an
+edge to `GenerationHandle.result`, never to the class implementing it. So `callers` of a
+method answers its own call sites first, then the sites bound to every declaration it
+overrides or implements, transitively, then the sites bound to every method overriding it,
+transitively; a sibling implementation's sites are never included. The relation is the stored
+`OVERRIDES` edges, walked the way `overrides-of`/`overridden-by` read them, so a language
+whose extractor writes none (Go) answers its direct sites only, and a file the javac facts
+cover answers through the compiler's overrides.
+
+Each such hit carries `binding` (`direct`, `overridden`: bound to a declaration this one
+overrides, `overrider`: bound to an override of it; `model.CallBinding`) and `through`, the
+declaration it was bound to, which its reason names: `called from ActionApprovals.wake (line
+1346, zemble-javac-facts, through GenerationHandle.result)`. Measured on the zenit workspace,
+`DefaultGenerationHandle.result` answered 3 call sites where its interface method answered 41,
+and said nothing of the 41; it now answers 44, 3 direct and 41 through `GenerationHandle.result`,
+and the interface method answers 44 too, 41 direct and 3 through its override.
+
+Every surface counts the two apart: the payload's `total` is every listed site, and
+`direct_total`, `inherited_total` and `inherited_through` (sites per declaration) say which.
+`signatures` lists only its exact direct sites and counts the inherited ones on a line of their
+own (`inherited_callers`), never as ambiguous. `explain` takes inherited call sites after the
+direct ones of the same grade, reason included. `home`'s consumer counts and `find_related`
+keep direct sites only: they rank what they collect, and that ranking predates the relation.
 
 ### Honest limits
 
@@ -631,6 +662,12 @@ callers: 8 result(s)
   ...
 ```
 
+A callers answer that includes sites bound through an override relation says how many of
+each it lists (`callers: 44 result(s) (3 direct, 41 through GenerationHandle.result)`), and each
+such line ends its reason with `through <declaration>` (or `through override <method>`); `--json`
+adds `binding` and `through` per hit and the `direct_total`/`inherited_total`/`inherited_through`
+counts.
+
 ## MCP
 
 Six tools are registered on the existing zemble MCP server:
@@ -642,7 +679,9 @@ parameter description), builds the graph on first use and refreshes it once per
 server process, and returns JSON, except `graph_callers`, which returns text: the
 queried symbol, a count of call sites, callers and files (with the resolution tally
 when any is not exact and the tools that wrote edges), then every listed call site
-grouped by file and calling method (`path: Caller L12, L30; Other L5 (ambiguous, 2 candidates)`).
+grouped by file and calling method (`path: Caller L12, L30; Other L5 (ambiguous, 2 candidates)`),
+a site bound through an override relation noted `(through GenerationHandle.result)`, and the
+heading naming both counts (`of all 44: 3 direct, 41 through GenerationHandle.result`).
 An ambiguous name comes back as an `error` (with `overloads`, the signatures to retry
 with, when the candidates are one callable's overloads)
 with a `candidates` list rather than as a failure. Every answer is capped at
@@ -671,4 +710,4 @@ knows - answers the same questions with `EXACT` where this one says
 Every answer is a `Hit`: the symbol at the other end, the edge kind, the line,
 the resolution and a one-line `reason` such as
 `called from RecordSourceHandlers.handleQuery (line 164, exact match)`.
-Hierarchy and neighbour walks also set `depth`.
+Hierarchy and neighbour walks also set `depth`; a callers hit sets `binding` and `through`.

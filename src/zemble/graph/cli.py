@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,7 +23,7 @@ from zemble.graph.facts import (
     load_overlay,
 )
 from zemble.graph.model import CALLABLE_KINDS, TYPE_KINDS, EdgeKind, Hit, Symbol, SymbolKind
-from zemble.graph.provider import AnyProvider, SqliteGraphProvider, display_name, open_provider
+from zemble.graph.provider import AnyProvider, SqliteGraphProvider, display_name, inherited_tally, open_provider
 from zemble.graph.signature import SymbolQuery, signature_form
 from zemble.graph.store import (
     StoredDeclaredSymbols,
@@ -563,11 +563,18 @@ def _answer_query(args: argparse.Namespace, provider: AnyProvider) -> int:
         hits = getattr(provider, _METHODS[args.graph_command])(chosen.id)
     overloads = overload_context(provider, chosen, _METHODS.get(args.graph_command, args.graph_command))
     if args.json:
-        payload = {"symbol": _symbol_json(chosen), "results": [_hit_json(hit) for hit in hits], **overloads}
+        payload = {
+            "symbol": _symbol_json(chosen),
+            "results": [_hit_json(hit) for hit in hits],
+            **overloads,
+            **(inherited_counts(hits) if args.graph_command == "callers" else {}),
+        }
         print(json.dumps(payload, indent=2))
         return 0
     print(f"{display_name(chosen)}  [{chosen.kind.value}]  {chosen.file_path}:{chosen.start_line}")
-    print(f"{args.graph_command}: {len(hits)} result(s)")
+    phrase = inherited_phrase(*inherited_tally(hits)) if args.graph_command == "callers" else ""
+    tally = f" ({phrase})" if phrase else ""
+    print(f"{args.graph_command}: {len(hits)} result(s){tally}")
     for hit in hits:
         print(f"  {hit.symbol.file_path}:{hit.line}  {hit.reason}")
     if overloads:
@@ -610,6 +617,19 @@ def _report_selection_failure(args: argparse.Namespace, provider: AnyProvider, c
     return refusal.exit_code
 
 
+def inherited_counts(hits: Sequence[Hit]) -> dict[str, object]:
+    """State a callers answer's two counts: its own call sites, and those bound through an override relation."""
+    direct, through = inherited_tally(hits)
+    return {"direct_total": direct, "inherited_total": sum(through.values()), "inherited_through": dict(through)}
+
+
+def inherited_phrase(direct: int, through: Mapping[str, int]) -> str:
+    """Word a callers answer's counts (`3 direct, 41 through GenerationHandle.result`); empty when all are direct."""
+    if not through:
+        return ""
+    return ", ".join([f"{direct} direct", *(f"{count} through {name}" for name, count in through.items())])
+
+
 def _symbol_json(symbol: Symbol) -> dict[str, object]:
     """Render a symbol as JSON."""
     return {
@@ -637,6 +657,9 @@ def _hit_json(hit: Hit) -> dict[str, object]:
         "source": hit.source,
         "reason": hit.reason,
         "depth": hit.depth,
+        "binding": hit.binding.value,
+        "through": display_name(hit.through) if hit.through is not None else None,
+        "through_qualified_name": hit.through.qualified_name if hit.through is not None else None,
     }
 
 

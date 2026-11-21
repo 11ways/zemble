@@ -100,6 +100,32 @@ class Resolution(str, Enum):
         return self.strength >= floor.strength
 
 
+class CallBinding(str, Enum):
+    """Which declaration a callers hit's call site was bound to, relative to the callable asked about.
+
+    A call is bound to the declaration its receiver's static type names, so a call through an
+    interface never points at the implementation; a callers answer follows `OVERRIDES` both ways.
+    """
+
+    #: The callable asked about.
+    DIRECT = "direct"
+    #: A declaration the callable asked about overrides or implements, at any depth.
+    OVERRIDDEN = "overridden"
+    #: A callable that overrides the one asked about, at any depth.
+    OVERRIDER = "overrider"
+
+    @property
+    def phrase(self) -> str:
+        """How a hit's reason names the declaration it came through; empty for a direct site."""
+        match self:
+            case CallBinding.DIRECT:
+                return ""
+            case CallBinding.OVERRIDDEN:
+                return "through"
+            case CallBinding.OVERRIDER:
+                return "through override"
+
+
 _RESOLUTION_STRENGTH: dict[Resolution, int] = {
     Resolution.EXACT: 3,
     Resolution.UNIQUE_NAME: 2,
@@ -208,6 +234,9 @@ class Hit:
     source: str = "tree-sitter"
     # How the edge was resolved, as `reason` words it (`exact match`, `ambiguous, 3 candidates`, a tool's name).
     grade: str = ""
+    # Which declaration the edge was bound to; `through` is that declaration when it is not the queried one.
+    binding: CallBinding = CallBinding.DIRECT
+    through: Symbol | None = None
 
 
 @dataclass(frozen=True)

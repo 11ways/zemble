@@ -125,7 +125,11 @@ def _answers(path: Path) -> dict[str, object]:
             if _in_scope(e.src_id)
         )
         callers = {
-            symbol: sorted((hit.symbol.id, hit.line) for hit in provider.callers(symbol) if _in_scope(hit.symbol.id))
+            symbol: sorted(
+                (hit.symbol.id, hit.line, hit.binding.value, hit.through.id if hit.through is not None else "")
+                for hit in provider.callers(symbol)
+                if _in_scope(hit.symbol.id)
+            )
             for symbol, *_fields in symbols
         }
         measured = provider.file_measurements()
@@ -180,6 +184,7 @@ def _write_facts(workspace: Path) -> None:
         {"t": "file", "path": user, "sha256": hashlib.sha256((workspace / "extra" / user).read_bytes()).hexdigest()},
         {"t": "call", "from": "extra.User#use(core.Base)", "to": "core.Base#doubled()", "path": user, "line": 9},
         {"t": "call", "from": "extra.User#use(core.Base)", "to": "core.Gone#gone()", "path": user, "line": 9},
+        {"t": "override", "from": "extra.User#value()", "to": "core.Base#value()"},
     ]
     facts = workspace / "extra/build/zemble/facts-compileJava.jsonl"
     facts.parent.mkdir(parents=True)
@@ -232,6 +237,15 @@ def test_a_lane_overlay_answers_what_a_whole_graph_of_its_edits_would(lanes: tup
     try:
         assert not provider.definition("Lonely"), "1: a checkout the lane does not hold is out of its scope"
         assert provider.definition("laneOnly"), "1: the lane's edit is in its graph"
+        (value,) = [symbol for symbol in provider.definition("User.value") if symbol.file_path.startswith("extra/")]
+        inherited = {
+            (hit.symbol.qualified_name, hit.binding.value, hit.through.qualified_name)
+            for hit in provider.callers(value.id)
+            if hit.through is not None
+        }
+        assert ("core.Base.tripled", "overridden", "core.Base.value") in inherited, (
+            "1: a call the lane's edit binds to the overridden declaration reaches its override"
+        )
         assert all(_in_scope(path) for path, _ in [(p[len(str(lane)) + 1 :], t) for p, t in provider.source_files()])
     finally:
         provider.close()

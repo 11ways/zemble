@@ -10,9 +10,17 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
 
-from zemble.graph.cli import PROVIDER_METHODS, ensure_graph, overload_context, refuse_selection, select_symbol
+from zemble.graph.cli import (
+    PROVIDER_METHODS,
+    ensure_graph,
+    inherited_counts,
+    inherited_phrase,
+    overload_context,
+    refuse_selection,
+    select_symbol,
+)
 from zemble.graph.facts import TREE_SITTER_SOURCE
-from zemble.graph.model import EdgeKind, Hit, Resolution, Symbol
+from zemble.graph.model import CallBinding, EdgeKind, Hit, Resolution, Symbol
 from zemble.graph.provider import RESOLUTION_PHRASES, AnyProvider, display_name, open_provider
 from zemble.mcp_repo import resolve_repo, with_default_note
 from zemble.nib.parts import Part, PartsBuilder, location_part, nib_answer, text_part
@@ -66,6 +74,8 @@ def _hit_json(hit: Hit) -> dict[str, Any]:
         "depth": hit.depth,
         "source": hit.source,
         "reason": hit.reason,
+        "binding": hit.binding.value,
+        "through": display_name(hit.through) if hit.through is not None else None,
     }
 
 
@@ -126,6 +136,7 @@ def answer(
             "display": display_name(chosen),
             **_capped(hits, limit, _hit_json),
             **overload_context(provider, chosen, method),
+            **(inherited_counts(hits) if method == "callers" else {}),
         }
         if traversal and provider.traversal_truncated:
             payload["total_exact"] = False
@@ -213,7 +224,7 @@ class CallSite:
     file_path: str
     line: int
     caller: str
-    # How the call was resolved, when it was not an exact match.
+    # How the call was resolved, when it was not an exact match, and the declaration it was bound through.
     note: str = ""
 
 
@@ -256,8 +267,8 @@ def call_site_parts(root: str, sites: Sequence[CallSite], shown: int = SHOWN_SIT
     return parts
 
 
-def call_sites_heading(sites: Sequence[CallSite], results: Sequence[dict[str, Any]]) -> str:
-    """Count call sites, callers and files; tally resolutions when any is not exact, and the tools that wrote edges."""
+def call_sites_heading(sites: Sequence[CallSite], results: Sequence[dict[str, Any]], payload: dict[str, Any]) -> str:
+    """Count call sites, callers and files, with the resolution, tool and override tallies that say something."""
     callers = len({(site.file_path, site.caller) for site in sites})
     files = len({site.file_path for site in sites})
     heading = f"{len(sites)} call site(s) from {callers} caller(s) in {files} file(s)"
@@ -269,7 +280,9 @@ def call_sites_heading(sites: Sequence[CallSite], results: Sequence[dict[str, An
     if set(resolutions) == {Resolution.EXACT.value}:
         tally = []
     tally += [f"{count} from {tool}" for tool, count in tools.items()]
-    return heading + (f" ({', '.join(tally)})" if tally else "")
+    heading += f" ({', '.join(tally)})" if tally else ""
+    inherited = inherited_phrase(payload.get("direct_total", 0), payload.get("inherited_through") or {})
+    return heading + (f"; of all {payload['total']}: {inherited}" if inherited else "")
 
 
 def _hit_site(entry: dict[str, Any]) -> CallSite:
@@ -283,6 +296,9 @@ def _hit_site(entry: dict[str, Any]) -> CallSite:
     grade = entry.get("grade") or ("" if exact else entry["resolution"])
     if exact and grade in {RESOLUTION_PHRASES[Resolution.EXACT], entry.get("source")}:
         grade = ""
+    if entry.get("through"):
+        phrase = CallBinding(entry["binding"]).phrase
+        grade = f"{grade}, {phrase} {entry['through']}" if grade else f"{phrase} {entry['through']}"
     return CallSite(
         file_path=entry["file_path"],
         line=entry["line"],
@@ -301,7 +317,7 @@ def callers_parts(root: str, payload: Any) -> list[Part] | None:
     sites = [_hit_site(entry) for entry in results]
     parts = _queried_parts(root, payload)
     if sites:
-        heading = call_sites_heading(sites, results)
+        heading = call_sites_heading(sites, results, payload)
         if len(sites) > SHOWN_SITES:
             heading += f"; the lines of the first {SHOWN_SITES}"
         parts.append(text_part(heading))
@@ -322,7 +338,7 @@ def callers_text(payload: Any) -> Any:
         f"  {symbol['file_path']}:{symbol['line']}"
     ]
     if sites:
-        lines.append(call_sites_heading(sites, results))
+        lines.append(call_sites_heading(sites, results, payload))
         lines += [_file_line(file_path, group) for file_path, group in _by_file(sites)]
     lines.append(_footer_part(payload)["text"])
     return "\n".join(lines)
@@ -395,6 +411,9 @@ def register_graph_tools(server: FastMCP) -> None:
         Each result says how confidently it was resolved: `exact` means the declaring
         type was pinned down, `unique_name` means only one symbol in the workspace
         carries that name, `ambiguous` means several did. `total` is always exact.
+        A method's callers include the sites bound to the declarations it overrides or
+        implements and to its overrides, each marked `through` that declaration and counted
+        apart (`direct_total`), so an implementation's callers are found from it too.
         """
         return await _answer(repo, symbol, "callers", build=callers_parts, render=callers_text, limit=limit)
 

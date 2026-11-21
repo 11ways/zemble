@@ -15,6 +15,7 @@ from zemble.evidence.bundle import bundle_header, item_heading, omitted_lines, s
 from zemble.evidence.outline import (
     ambiguous_line,
     callers_heading,
+    inherited_line,
     kind_label,
     no_member_line,
     omitted_line,
@@ -251,6 +252,9 @@ def signatures_parts(root: str, payload: dict[str, Any]) -> list[Part] | None:
     parts += call_site_parts(root, sites)
     if payload["ambiguous_callers"]:
         parts.append(text_part(ambiguous_line(payload["ambiguous_callers"])))
+    # A daemon older than the field sends none.
+    if payload.get("inherited_callers"):
+        parts.append(text_part(inherited_line(payload["inherited_callers"])))
     return parts
 
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from zemble.evidence.counterparts import counterparts, declaration, source_text
-from zemble.graph.model import Resolution, Symbol, SymbolKind
+from zemble.graph.model import CallBinding, Resolution, Symbol, SymbolKind
 from zemble.graph.provider import GraphProvider
 from zemble.types import SearchResult
 from zemble.utils import format_results
@@ -86,7 +86,8 @@ def _graph_candidates(collected: RelatedCandidates, graph: GraphProvider, root: 
     for hit in graph.callees(owner.id)[:12]:
         if hit.resolution in {Resolution.EXACT, Resolution.UNIQUE_NAME}:
             collected.add(hit.symbol, 1.2, hit.reason)
-    for hit in graph.callers(owner.id)[:4]:
+    # Its own call sites only: find_related ranks what it collects, and that ranking predates override relations.
+    for hit in [hit for hit in graph.callers(owner.id) if hit.binding is CallBinding.DIRECT][:4]:
         if hit.resolution in {Resolution.EXACT, Resolution.UNIQUE_NAME}:
             collected.add(hit.symbol, 0.75, hit.reason)
 

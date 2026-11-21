@@ -12,8 +12,8 @@ import fnmatch
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from zemble.graph.model import TYPE_KINDS, Resolution, Symbol, SymbolKind
-from zemble.graph.provider import GraphProvider, display_name
+from zemble.graph.model import TYPE_KINDS, CallBinding, Resolution, Symbol, SymbolKind
+from zemble.graph.provider import GraphProvider, display_name, inherited_tally
 from zemble.graph.visibility import is_runtime_hook, symbol_visibility
 from zemble.index.files import detect_language
 from zemble.languages import Visibility
@@ -143,6 +143,8 @@ class Signatures:
     symbol: Symbol
     callers: list[tuple[str, int, str]]
     ambiguous: int = 0
+    #: Call sites bound through a declaration this one overrides or is overridden by, per declaration.
+    inherited: dict[str, int] | None = None
 
     def render(self) -> str:
         """Render the signature and its callers as plain text."""
@@ -155,6 +157,8 @@ class Signatures:
         lines += [caller_line(path, line, name) for path, line, name in self.callers]
         if self.ambiguous:
             lines.append(ambiguous_line(self.ambiguous))
+        if self.inherited:
+            lines.append(inherited_line(self.inherited))
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -167,6 +171,7 @@ class Signatures:
             "start_line": self.symbol.start_line,
             "callers": [{"file_path": path, "line": line, "caller": name} for path, line, name in self.callers],
             "ambiguous_callers": self.ambiguous,
+            "inherited_callers": dict(self.inherited or {}),
         }
 
 
@@ -201,6 +206,12 @@ def caller_line(path: str, line: int, name: str) -> str:
 def ambiguous_line(count: int) -> str:
     """Count the call sites a signatures answer does not list."""
     return f"  (+{count} by-name or ambiguous call site(s) not listed)"
+
+
+def inherited_line(through: dict[str, int]) -> str:
+    """Count the call sites a signatures answer leaves to `graph callers`: those bound through an override relation."""
+    counted = ", ".join(f"{count} through {name}" for name, count in through.items())
+    return f"  (+{sum(through.values())} call site(s) bound to a related declaration, not listed: {counted})"
 
 
 def _matches(name: str, pattern: str) -> bool:
@@ -391,10 +402,14 @@ def signatures(graph: GraphProvider, symbol: Symbol) -> Signatures:
     :return: The signature and its exact callers, with a count of the weaker ones.
     """
     hits = graph.callers(symbol.id)
+    direct = [hit for hit in hits if hit.binding is CallBinding.DIRECT]
     exact = [
-        (hit.symbol.file_path, hit.line, display_name(hit.symbol)) for hit in hits if hit.resolution is Resolution.EXACT
+        (hit.symbol.file_path, hit.line, display_name(hit.symbol))
+        for hit in direct
+        if hit.resolution is Resolution.EXACT
     ]
-    return Signatures(symbol=symbol, callers=exact, ambiguous=len(hits) - len(exact))
+    _direct, through = inherited_tally(hits)
+    return Signatures(symbol=symbol, callers=exact, ambiguous=len(direct) - len(exact), inherited=dict(through))
 
 
 __all__ = [

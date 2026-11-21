@@ -502,39 +502,51 @@ class Resolver:
     # ---- derived edges ---------------------------------------------------
 
     def derive_overrides(self, symbols: Iterable[Symbol]) -> list[Edge]:
-        """Emit OVERRIDES edges for methods that redeclare a supertype method."""
+        """Emit OVERRIDES edges for methods that redeclare a supertype method, the nearest one on each supertype branch.
+
+        One edge per direct supertype branch, as the facts contract's `override` has it: a class
+        extending one type and implementing another overrides a declaration on each of them.
+        """
         derived: list[Edge] = []
         for symbol in symbols:
             if symbol.kind is not SymbolKind.METHOD or symbol.container_id is None:
                 continue
             owner = self.lookup.by_id(symbol.container_id)
-            start = 1
+            branches: list[str] | None = None
             if owner is not None and owner.kind is SymbolKind.ENUM_CONSTANT:
                 # A method in an enum constant's body overrides the enum's own method, so the
-                # enum itself belongs in the walk rather than being skipped as the method's self.
-                owner, start = self.enclosing_type(owner.id), 0
+                # enum itself is the first branch rather than being skipped as the method's self.
+                owner = self.enclosing_type(owner.id)
+                branches = [owner.id] if owner is not None else None
             if owner is None or owner.kind not in TYPE_KINDS:
                 continue
-            for parent_id in self.chain(owner.id)[start:]:
-                matches = [
-                    member
-                    for member in self.lookup.members(parent_id)
-                    if member.kind is SymbolKind.METHOD and member.name == symbol.name and member.arity == symbol.arity
-                ]
-                if matches:
-                    derived.append(
-                        Edge(
-                            src_id=symbol.id,
-                            dst_name=symbol.name,
-                            kind=EdgeKind.OVERRIDES,
-                            line=symbol.start_line,
-                            dst_id=matches[0].id,
-                            # Parameter types are never compared, only name and arity.
-                            resolution=Resolution.UNIQUE_NAME,
-                            candidates=sorted(m.id for m in matches[1:]),
-                            arity=symbol.arity,
+            reached: set[str] = set()
+            for branch in branches or self.supertypes_of(owner.id):
+                for parent_id in self.chain(branch):
+                    matches = [
+                        member
+                        for member in self.lookup.members(parent_id)
+                        if member.kind is SymbolKind.METHOD
+                        and member.name == symbol.name
+                        and member.arity == symbol.arity
+                    ]
+                    if not matches:
+                        continue
+                    if matches[0].id not in reached:
+                        reached.add(matches[0].id)
+                        derived.append(
+                            Edge(
+                                src_id=symbol.id,
+                                dst_name=symbol.name,
+                                kind=EdgeKind.OVERRIDES,
+                                line=symbol.start_line,
+                                dst_id=matches[0].id,
+                                # Parameter types are never compared, only name and arity.
+                                resolution=Resolution.UNIQUE_NAME,
+                                candidates=sorted(m.id for m in matches[1:]),
+                                arity=symbol.arity,
+                            )
                         )
-                    )
                     break
         return derived
 
