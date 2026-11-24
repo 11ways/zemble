@@ -20,6 +20,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import astuple, dataclass, field
 from functools import partial
 from pathlib import Path
+from typing import ClassVar
 
 from zemble.cache import find_index_from_cache_folder
 from zemble.graph import overlay as lane_overlay
@@ -50,7 +51,7 @@ from zemble.graph.lookup import (
     declaration_keys,
     symbol_from_row,
 )
-from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol
+from zemble.graph.model import Edge, EdgeKind, Resolution, Symbol, SymbolKind
 from zemble.graph.resolve import Resolver
 from zemble.index.file_walker import ignored_prefix, walk_entries
 from zemble.index.files import detect_language, get_extensions
@@ -2026,15 +2027,15 @@ def _run_build(
 
     with _scratch(connection):
         _delete_files(connection, touched)
-        after: dict[str, set[str]] = {}
+        after: dict[str, dict[str, int | None]] = {}
         for batch in _extracted_batches(changed, workers):
             _insert_extractions(connection, batch, scan.stamps)
             _stage(connection, (edge for extraction in batch for edge in extraction.edges))
             if not everything:
-                for name, ids in _index_extractions(batch).items():
-                    after.setdefault(name, set()).update(ids)
+                for name, shapes in _index_extractions(batch).items():
+                    after.setdefault(name, {}).update(shapes)
 
-        moved = owed.names if everything else _moved_names(before, after) | owed.names
+        moved = owed.names if everything else _merged_moves(_moved_names(before, after), owed.names)
         fresh = {job[1] for job in changed}
         if defer_dependents:
             deferred, targets = Owed(names=moved, files=fresh | owed.files), set(touched)
@@ -2078,7 +2079,7 @@ _NO_FACTS = FactsPlan(present={}, states={}, moved=frozenset(), invalidated=froz
 class Owed:
     """What a first pass over a lane's overlay left its second: moved names and the files to map facts onto."""
 
-    names: set[str] = field(default_factory=set)
+    names: dict[str, NameMove] = field(default_factory=dict)
     files: set[str] = field(default_factory=set)
 
     def __bool__(self) -> bool:
@@ -2087,17 +2088,82 @@ class Owed:
 
     def __or__(self, other: Owed) -> Owed:
         """Both debts together."""
-        return Owed(self.names | other.names, self.files | other.files)
+        return Owed(_merged_moves(self.names, other.names), self.files | other.files)
 
     def to_json(self) -> str:
         """The debt as the overlay's meta records it."""
-        return json.dumps({"names": sorted(self.names), "files": sorted(self.files)})
+        return json.dumps(
+            {"moves": {name: move.to_json() for name, move in sorted(self.names.items())}, "files": sorted(self.files)}
+        )
 
     @classmethod
     def from_json(cls, text: str | None) -> Owed:
-        """Read a recorded debt; nothing recorded owes nothing."""
+        """Read a recorded debt; nothing recorded owes nothing, a bare moved name (older debts) every edge of it."""
         raw = json.loads(text) if text else {}
-        return cls(set(raw.get("names", ())), set(raw.get("files", ())))
+        names = {name: NameMove.UNKNOWN for name in raw.get("names", ())}
+        names.update({name: NameMove.from_json(move) for name, move in raw.get("moves", {}).items()})
+        return cls(names, set(raw.get("files", ())))
+
+
+@dataclass(frozen=True)
+class NameMove:
+    """How one written name's declarations moved: which of its symbols left, and the arities a moved callable has.
+
+    AIDEV-NOTE: Java resolution matches a call only against methods of the call's own arity (Resolver._members_named,
+    _resolve_call_by_name, the facts mapper's candidates), so a moved method reaches no Java call written with another
+    arity, and a moved field none at all (only imports and arity-less refs resolve to fields). Any other moved kind (a
+    type, a constructor, whose fallback answer changes with any overload) moves every arity: None. Other languages
+    are not narrowed: an explicit import resolves a call by name alone.
+    """
+
+    #: The symbols of the name that left; None when unknown (a debt recorded before moves were), which reaches all.
+    lost: frozenset[str] | None = frozenset()
+    arities: frozenset[int] | None = frozenset()
+
+    UNKNOWN: ClassVar[NameMove]
+
+    def __or__(self, other: NameMove) -> NameMove:
+        """Both moves of one name together."""
+        lost = None if self.lost is None or other.lost is None else self.lost | other.lost
+        arities = None if self.arities is None or other.arities is None else self.arities | other.arities
+        return NameMove(lost, arities)
+
+    def reaches(self, *, dst_id: str | None, arity: int | None, source: str | None, java: bool) -> bool:
+        """Whether an edge written to the name, stored as given, may resolve differently after this move.
+
+        A compiler fact named its target's owner and descriptor, so one mapped onto a symbol that stayed keeps it
+        whatever method moved; a moved type or constructor may change its mapping (a type stands for a constructor
+        it lacked).
+        """
+        if self.lost is None or (dst_id is not None and dst_id in self.lost) or self.arities is None:
+            return True
+        if (source or TREE_SITTER_SOURCE) != TREE_SITTER_SOURCE:
+            return dst_id is None
+        return not java or arity is None or arity < 0 or arity in self.arities
+
+    def to_json(self) -> dict[str, list | None]:
+        """The move as an overlay's recorded debt keeps it."""
+        return {
+            "lost": None if self.lost is None else sorted(self.lost),
+            "arities": None if self.arities is None else sorted(self.arities),
+        }
+
+    @classmethod
+    def from_json(cls, raw: dict) -> NameMove:
+        """Read a recorded move."""
+        lost, arities = raw.get("lost"), raw.get("arities")
+        return cls(None if lost is None else frozenset(lost), None if arities is None else frozenset(arities))
+
+
+NameMove.UNKNOWN = NameMove(lost=None, arities=None)
+
+
+def _merged_moves(first: dict[str, NameMove], second: dict[str, NameMove]) -> dict[str, NameMove]:
+    """Every name either map moved, a name both moved with both moves."""
+    merged = dict(first)
+    for name, move in second.items():
+        merged[name] = merged[name] | move if name in merged else move
+    return merged
 
 
 @contextmanager
@@ -2235,30 +2301,52 @@ def _write_coverage(connection: sqlite3.Connection, skipped: dict[str, int]) -> 
     )
 
 
-def _declaration_index(connection: sqlite3.Connection, paths: Sequence[str]) -> dict[str, set[str]]:
-    """Map every written name declared in the given files to the symbol ids that carry it."""
-    index: dict[str, set[str]] = {}
+#: The symbol kinds the resolver matches only at a call's own arity; FIELD no Java call of a known arity reaches.
+_ARITY_MATCHED_KINDS = frozenset({SymbolKind.METHOD.value, SymbolKind.FUNCTION.value})
+_UNCALLED_KINDS = frozenset({SymbolKind.FIELD.value})
+#: The _shape of a symbol no call with a known arity can resolve to.
+_NO_CALL = -1
+
+
+def _shape(kind: str, param_types: Sequence[str]) -> int | None:
+    """The arity a call must write to reach a symbol, _NO_CALL for none, or None when a call of any arity may."""
+    if kind in _UNCALLED_KINDS:
+        return _NO_CALL
+    return len(param_types) if kind in _ARITY_MATCHED_KINDS else None
+
+
+def _declaration_index(connection: sqlite3.Connection, paths: Sequence[str]) -> dict[str, dict[str, int | None]]:
+    """Map every written name declared in the given files to the symbol ids that carry it, each with its _shape."""
+    index: dict[str, dict[str, int | None]] = {}
     for chunk in _chunks(paths):
         placeholders = ",".join("?" * len(chunk))
-        query = f"SELECT name, qualified_name, id FROM symbols WHERE file_path IN ({placeholders})"  # noqa: S608
+        query = f"SELECT name, qualified_name, id, kind, param_types FROM symbols WHERE file_path IN ({placeholders})"  # noqa: S608
         for row in connection.execute(query, chunk):
-            index.setdefault(row["name"], set()).add(row["id"])
-            index.setdefault(row["qualified_name"], set()).add(row["id"])
+            shape = _shape(row["kind"], json.loads(row["param_types"] or "[]"))
+            index.setdefault(row["name"], {})[row["id"]] = shape
+            index.setdefault(row["qualified_name"], {})[row["id"]] = shape
     return index
 
 
-def _index_extractions(extractions: Iterable[FileExtraction]) -> dict[str, set[str]]:
-    """Build the same name -> symbol id map from freshly extracted files."""
-    index: dict[str, set[str]] = {}
+def _index_extractions(extractions: Iterable[FileExtraction]) -> dict[str, dict[str, int | None]]:
+    """Build the same name -> symbol id -> shape map from freshly extracted files."""
+    index: dict[str, dict[str, int | None]] = {}
     for extraction in extractions:
         for symbol in extraction.symbols:
-            index.setdefault(symbol.name, set()).add(symbol.id)
-            index.setdefault(symbol.qualified_name, set()).add(symbol.id)
+            shape = _shape(symbol.kind.value, symbol.param_types)
+            index.setdefault(symbol.name, {})[symbol.id] = shape
+            index.setdefault(symbol.qualified_name, {})[symbol.id] = shape
     return index
 
 
-def _moved_names(before: dict[str, set[str]], after: dict[str, set[str]]) -> set[str]:
-    """Return the names whose declaration set changed, so their users must re-resolve.
+#: What a declaration index answers for a symbol it does not hold: never a shape.
+_ABSENT = object()
+
+
+def _moved_names(
+    before: dict[str, dict[str, int | None]], after: dict[str, dict[str, int | None]]
+) -> dict[str, NameMove]:
+    """Return the names whose declaration set changed, so their users must re-resolve, each with how it moved.
 
     Re-resolving every file that merely mentions a name declared in a touched file
     is correct but hopeless in practice: a common method name like `of` drags in
@@ -2266,7 +2354,17 @@ def _moved_names(before: dict[str, set[str]], after: dict[str, set[str]]) -> set
     name pointing somewhere else, which is exactly a change in this map. A rename, a
     move between packages and a file rename all change it; re-saving a file does not.
     """
-    return {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+    moves: dict[str, NameMove] = {}
+    for name in before.keys() | after.keys():
+        was, now = before.get(name, {}), after.get(name, {})
+        if was == now:
+            continue
+        changed = [was[i] for i in was if now.get(i, _ABSENT) != was[i]] + [
+            now[i] for i in now if was.get(i, _ABSENT) != now[i]
+        ]
+        arities = None if None in changed else frozenset(s for s in changed if s is not None and s != _NO_CALL)
+        moves[name] = NameMove(frozenset(was.keys() - now.keys()), arities)
+    return moves
 
 
 def _delete_files(connection: sqlite3.Connection, paths: Sequence[str]) -> None:
@@ -2285,17 +2383,27 @@ def _delete_files(connection: sqlite3.Connection, paths: Sequence[str]) -> None:
         connection.execute(f"DELETE FROM files WHERE path IN ({placeholders})", chunk)  # noqa: S608
 
 
-def _dependent_files(connection: sqlite3.Connection, names: set[str]) -> set[str]:
-    """Return files holding an edge whose written destination name was declared in a changed file.
+def _dependent_files(connection: sqlite3.Connection, moves: dict[str, NameMove]) -> set[str]:
+    """Return files holding an edge a moved name may now resolve differently (NameMove.reaches).
 
     A rename or a move changes which symbol a name points at, so every file that
     wrote that name must be resolved again even though its own text did not change.
     """
     dependents: set[str] = set()
-    for chunk in _chunks(sorted(names)):
+    for chunk in _chunks(sorted(moves)):
         placeholders = ",".join("?" * len(chunk))
-        query = f"SELECT DISTINCT file_path FROM edges WHERE dst_name IN ({placeholders})"  # noqa: S608
-        dependents.update(row["file_path"] for row in connection.execute(query, chunk))
+        query = (
+            "SELECT DISTINCT file_path, dst_name, dst_id, arity, source FROM edges "  # noqa: S608
+            f"WHERE dst_name IN ({placeholders})"
+        )
+        for row in connection.execute(query, chunk):
+            if row["file_path"] in dependents:
+                continue
+            java = detect_language(Path(row["file_path"])) == "java"
+            if moves[row["dst_name"]].reaches(
+                dst_id=row["dst_id"], arity=row["arity"], source=row["source"], java=java
+            ):
+                dependents.add(row["file_path"])
     return dependents
 
 

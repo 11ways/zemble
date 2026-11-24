@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from zemble.graph.java import extract_java_file
-from zemble.graph.store import build_graph, connect
+from zemble.graph.store import NameMove, Owed, build_graph, connect
 
 CIRCLE = "src/main/java/com/example/core/Circle.java"
 HELPERS = "src/main/java/com/example/util/Helpers.java"
@@ -165,6 +165,51 @@ def test_java_edit_journey_matches_a_full_rebuild(
     circle.write_text(circle.read_text(encoding="utf-8").replace("resize", "scale"), encoding="utf-8")
     build_graph(str(workspace), changed_paths=[circle])
     _assert_matches_full_rebuild(workspace, scratch, "step 5 undo")
+
+    # 6. An overload no call site can pick (another arity) moves the name, yet only its own file re-resolves.
+    extra = workspace / moved
+    one = "    public static double twice(double value) {\n"
+    two = "    public static double twice(double value, double times) {\n        return value * times;\n    }\n\n"
+    extra.write_text(extra.read_text(encoding="utf-8").replace(one, two + one), encoding="utf-8")
+    stats = build_graph(str(workspace), changed_paths=[extra])
+    _assert_matches_full_rebuild(workspace, scratch, "step 6 other-arity overload")
+    assert stats.reresolved_files == 1, "step 6: a one-argument call cannot reach a two-argument overload"
+
+    # 7. An overload of the arity its callers write re-resolves every one of them.
+    three = "    public static int twice(int value) {\n        return value * 2;\n    }\n\n"
+    extra.write_text(extra.read_text(encoding="utf-8").replace(one, three + one), encoding="utf-8")
+    stats = build_graph(str(workspace), changed_paths=[extra])
+    _assert_matches_full_rebuild(workspace, scratch, "step 7 same-arity overload")
+    assert stats.reresolved_files == 5, "step 7: the overload's file and the four files calling twice(x)"
+
+    # 8. A field of the name is reached by no call: only the field's own file re-resolves.
+    field = "    public static final double twice = 2;\n\n"
+    extra.write_text(extra.read_text(encoding="utf-8").replace(one, field + one), encoding="utf-8")
+    stats = build_graph(str(workspace), changed_paths=[extra])
+    _assert_matches_full_rebuild(workspace, scratch, "step 8 same-named field")
+    assert stats.reresolved_files == 1, "step 8: a call never resolves to a field"
+
+
+def test_a_moved_name_reaches_only_the_edges_its_move_can_change() -> None:
+    """Arity narrows Java calls alone; compiler facts keep a mapping that stayed; an older debt reaches every edge."""
+    method = NameMove(lost=frozenset({"A#m(int)"}), arities=frozenset({1}))
+    reach = method.reaches
+    assert reach(dst_id="A#m(int)", arity=2, source="tree-sitter", java=True), "a lost target always re-resolves"
+    assert not reach(dst_id="B#m(int,int)", arity=2, source="tree-sitter", java=True), "another arity cannot pick it"
+    assert reach(dst_id=None, arity=1, source="tree-sitter", java=True), "the moved arity can"
+    assert reach(dst_id="B#m(int,int)", arity=2, source=None, java=True) is False, "a NULL source is zemble's own"
+    assert reach(dst_id="B#m()", arity=0, source="tree-sitter", java=False), "an explicit import ignores arity"
+    assert not reach(dst_id="B#m(int)", arity=1, source="zemble-javac-facts", java=True), "a mapped fact stays"
+    assert reach(dst_id=None, arity=1, source="zemble-javac-facts", java=True), "an unmapped fact may now map"
+    constructor = NameMove(lost=frozenset(), arities=None)
+    assert constructor.reaches(dst_id="Foo", arity=0, source="zemble-javac-facts", java=True), (
+        "a type may lose its ctor"
+    )
+    assert NameMove.UNKNOWN.reaches(dst_id="B#m()", arity=0, source="zemble-javac-facts", java=True)
+    assert Owed.from_json(json.dumps({"names": ["m"], "files": []})).names == {"m": NameMove.UNKNOWN}
+    owed = Owed({"m": method, "n": constructor}, {"F.java"})
+    assert Owed.from_json(owed.to_json()) == owed, "a recorded debt reads back as it was"
+    assert (method | NameMove.UNKNOWN) == NameMove.UNKNOWN, "an unknown move absorbs a known one"
 
 
 def _sha(workspace: Path, relative: str) -> str:
