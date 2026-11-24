@@ -281,7 +281,9 @@ def test_concurrent_buyers_pay_once(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         assert sorted(running.provider.bought()) == sorted(texts), "every text must be bought exactly once"
         assert len(results) == 3
         [row] = running.service.spend.since(today())
-        assert (row.texts, row.tokens) == (6, estimate_tokens(texts)), "the ledger counts each text once too"
+        # Concurrent buyers split the texts into purchases, each estimated (and rounded up) on its own.
+        purchases = sum(estimate_tokens(batch) for batch in running.provider.document_batches)
+        assert (row.texts, row.tokens) == (6, purchases), "the ledger counts each text once too"
 
 
 def test_a_failed_purchase_is_reported_once_and_releases_its_claim(
