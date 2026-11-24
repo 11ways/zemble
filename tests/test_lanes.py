@@ -12,7 +12,7 @@ import pytest
 
 from tests.conftest import FakeEmbedder, git
 from zemble.cache import cache_key, find_index_from_cache_folder, mark_root
-from zemble.cache_orphans import OrphanKind, find_orphans, remove_orphan
+from zemble.cache_orphans import ROOT_GONE_KINDS, OrphanKind, find_orphans, remove_orphan
 from zemble.daemon import client, server
 from zemble.daemon.protocol import QUERY_WAIT_ENV, CommandBusy, QueryTimedOut
 from zemble.daemon.watch import WatchSpec
@@ -416,19 +416,27 @@ def test_prune_names_folders_by_marker_or_by_the_daemon_log(tmp_path: Path, monk
     mark_root(cache / cache_key(gone_marked), gone_marked)
     mark_root(cache / cache_key(str(live)), str(live))
     (cache / "daemon.log").write_text(f"INFO zemble.daemon.server: watching {gone_logged} (299 extensions)\n")
-    unnamed_old, unnamed_new = cache / ("a" * 64), cache / ("b" * 64)
-    for folder in (unnamed_old, unnamed_new):
+    unnamed_old, unnamed_new, unnamed_hours = cache / ("a" * 64), cache / ("b" * 64), cache / ("c" * 64)
+    for folder in (unnamed_old, unnamed_new, unnamed_hours):
         folder.mkdir()
         (folder / "dupes-units.sqlite").write_bytes(b"x")
     long_ago = time.time() - 40 * 86400
     os.utime(unnamed_old / "dupes-units.sqlite", (long_ago, long_ago))
     os.utime(unnamed_old, (long_ago, long_ago))
+    # A graph folder holding no graph names nothing either; two hours unwritten is long enough for nothing to write it.
+    (unnamed_hours / "index").mkdir()
+    (unnamed_hours / "index" / "graph.lock").write_bytes(b"")
+    hours_ago = time.time() - 2 * 3600
+    for path in (unnamed_hours / "dupes-units.sqlite", unnamed_hours / "index" / "graph.lock", unnamed_hours):
+        os.utime(path, (hours_ago, hours_ago))
     found = {orphan.detail or orphan.target.name: orphan.kind for orphan in find_orphans(cache)}
     assert found == {
         gone_marked: OrphanKind.NAMED_ROOT_GONE,
         gone_logged: OrphanKind.NAMED_ROOT_GONE,
         unnamed_old.name: OrphanKind.UNNAMED_STALE,
-    }, "gone roots by marker or log, a nameless folder only once it is old"
+        unnamed_hours.name: OrphanKind.UNNAMED_STALE,
+    }, "gone roots by marker or log, a nameless folder once nothing wrote it for an hour"
+    assert OrphanKind.UNNAMED_STALE in ROOT_GONE_KINDS, "what nothing names is pruned by the daemon"
     for orphan in find_orphans(cache):
         assert remove_orphan(orphan)
     assert sorted(path.name for path in cache.iterdir() if path.is_dir()) == sorted(

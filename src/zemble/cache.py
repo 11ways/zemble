@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Collection, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -139,6 +140,35 @@ def marked_root(folder: Path) -> str | None:
         return (folder / ROOT_MARKER).read_text(encoding="utf-8").strip() or None
     except OSError:
         return None
+
+
+#: The file whose time is a key folder's last use (`mark_used`); the size bound evicts the least recently used first.
+USED_MARKER = "used"
+#: A use within this long of the last stamp writes nothing: one stat per read, one write an hour.
+USE_STAMP_SECONDS = 3600
+
+
+def mark_used(folder: Path) -> None:
+    """Stamp an existing key folder as used now, at most once per USE_STAMP_SECONDS; best effort."""
+    marker = folder / USED_MARKER
+    try:
+        if time.time() - marker.stat().st_mtime < USE_STAMP_SECONDS:
+            return
+    except FileNotFoundError:
+        if not folder.is_dir():
+            return
+    except OSError:
+        return
+    try:
+        marker.touch()
+        os.utime(marker)
+    except OSError:
+        logger.debug("could not stamp %s as used", folder, exc_info=True)
+
+
+def mark_root_used(root: str) -> None:
+    """Stamp the key folder of *root* in this user's cache as used now (`mark_used`)."""
+    mark_used(resolve_cache_folder() / cache_key(root))
 
 
 def _metadata_matches(metadata: dict, embedder_id: str, content: Sequence[ContentType], capsule_key: str) -> bool:

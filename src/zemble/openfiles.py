@@ -25,11 +25,28 @@ def holders(path: Path, *, exclude_self: bool = False) -> list[int] | None:
         target = os.stat(path)
     except FileNotFoundError:
         return []
+    key = (target.st_dev, target.st_ino)
+    found = _open_by_pid(exclude_self=exclude_self)
+    if found is None:
+        return None
+    return [pid for pid, files in found if key in files]
+
+
+def open_files(*, exclude_self: bool = False) -> set[tuple[int, int]] | None:
+    """Return the (device, inode) of every file any process holds open, or None where the platform cannot tell.
+
+    One walk of /proc answers for any number of files, where `holders` walks it per file.
+    """
+    found = _open_by_pid(exclude_self=exclude_self)
+    return None if found is None else set().union(*(files for _pid, files in found))
+
+
+def _open_by_pid(*, exclude_self: bool) -> list[tuple[int, set[tuple[int, int]]]] | None:
+    """Return each readable process's open files as (device, inode), None without a readable /proc."""
     if not (_PROC / "self" / "fd").is_dir():
         return None
-    key = (target.st_dev, target.st_ino)
     me = os.getpid()
-    found: list[int] = []
+    found: list[tuple[int, set[tuple[int, int]]]] = []
     for entry in os.listdir(_PROC):
         if not entry.isdigit() or (exclude_self and int(entry) == me):
             continue
@@ -38,14 +55,14 @@ def holders(path: Path, *, exclude_self: bool = False) -> list[int] | None:
             descriptors = os.listdir(fd_dir)
         except OSError:
             continue
+        files: set[tuple[int, int]] = set()
         for descriptor in descriptors:
             try:
                 linked = os.stat(fd_dir / descriptor)
             except OSError:
                 continue
-            if (linked.st_dev, linked.st_ino) == key:
-                found.append(int(entry))
-                break
+            files.add((linked.st_dev, linked.st_ino))
+        found.append((int(entry), files))
     return found
 
 

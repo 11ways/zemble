@@ -26,6 +26,7 @@ from zemble.cache import (
     covering_content,
     find_index_from_cache_folder,
     load_manifest_for_incremental,
+    mark_root_used,
     resolve_index_root,
     retire_covered_indexes,
 )
@@ -1028,9 +1029,18 @@ class Daemon:
         prepared = {**args, "path": str(resolve_home_root(_root_of(args)))} if command == "home" else args
         if command in {"search", "find_related", "home", "explain", "stats", "architectural"}:
             async with asyncio.timeout_at(deadline):
-                await self.index_for(prepared)
+                cache_key, _index = await self.index_for(prepared)
+            mark_root_used(cache_key[0])
         if command in {"graph", "home", "explain", "outline", "signatures", "health", "find_related", "architectural"}:
-            await self.graphs.ensure(_root_of(prepared), deadline)
+            # A root the graph jobs cannot place (no graph for it, a git URL) answers None: nothing to stamp.
+            if (graph_root := await self.graphs.ensure(_root_of(prepared), deadline)) is not None:
+                mark_root_used(graph_root)
+
+    def held_roots(self) -> set[str]:
+        """The roots this daemon serves, loads, watches or graphs, and their lanes' bases: never evicted."""
+        keys = {key for key, _index in self.cache.loaded()} | set(self.cache._tasks) | set(self.watchers)
+        bases = {base for key in keys if (base := self.cache.base_of(key)) is not None}
+        return {key[0] for key in keys | bases} | set(self.graphs.ready)
 
     # -- serving ------------------------------------------------------------
 
@@ -1145,7 +1155,32 @@ class Daemon:
                 await self.prune_gone_roots()
             except Exception:
                 logger.exception("pruning the cache of roots that are gone failed")
+            try:
+                await self.enforce_bound()
+            except Exception:
+                logger.exception("bounding the cache's size failed")
             await asyncio.sleep(hours * 3600)
+
+    async def enforce_bound(self) -> list[str]:
+        """Remove the least recently used cache entries past ZEMBLE_CACHE_MAX_GB, never one this daemon holds.
+
+        :return: The removed entries' paths.
+        """
+        from zemble.cache import resolve_cache_folder
+        from zemble.cache_orphans import CACHE_MAX_GB_ENV, DEFAULT_CACHE_MAX_GB, over_bound, remove_orphan
+        from zemble.envknob import env_float
+
+        max_bytes = int(env_float(CACHE_MAX_GB_ENV, DEFAULT_CACHE_MAX_GB) * 1024**3)
+        doomed = await asyncio.to_thread(
+            over_bound, resolve_cache_folder(), max_bytes=max_bytes, held_roots=self.held_roots()
+        )
+        removed = [str(orphan.target) for orphan in doomed if await asyncio.to_thread(remove_orphan, orphan)]
+        if removed:
+            freed = sum(orphan.size for orphan in doomed if str(orphan.target) in removed) / MIB
+            logger.info(
+                "bounded the cache to %s, %.0f MiB of least recently used entries: %s", max_bytes, freed, removed
+            )
+        return removed
 
     async def referenced_loop(self) -> None:
         """Report the vectors saved indexes reference to the configured embedding server, once a day per family.

@@ -7,11 +7,14 @@ import os
 import re
 import shutil
 import time
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 from zemble.cache import (
+    ROOT_MARKER,
+    USED_MARKER,
     ancestor_answering,
     cache_key,
     covered_variants,
@@ -32,7 +35,7 @@ from zemble.graph.store import (
     sweep_graph_folder,
 )
 from zemble.index.generation import LOCK_NAME, STAGING_PREFIX
-from zemble.openfiles import held_open
+from zemble.openfiles import held_open, open_files
 
 #: A cache entry's folder name: the sha256 of its source.
 KEY_DIR_NAME = re.compile(r"^[a-f0-9]{64}$")
@@ -73,11 +76,15 @@ class OrphanKind(str, Enum):
     INDEX_UNDER_ANCESTOR = ("index-under-ancestor", "sub-root index an ancestor's index answers for")
     GRAPH_UNDER_ANCESTOR = ("graph-under-ancestor", "sub-root graph an ancestor's graph answers for")
     NAMED_ROOT_GONE = ("named-root-gone", "cache folder whose root is gone")
-    UNNAMED_STALE = ("unnamed-stale", "cache folder naming no root, unwritten past --max-age-days")
+    UNNAMED_STALE = ("unnamed-stale", "cache folder nothing names, unwritten for an hour")
+    LEAST_RECENTLY_USED = ("least-recently-used", "cache entry least recently used past the cache's size bound")
 
 
-#: The kinds whose root no longer exists: what a daemon prunes on its own, on start and periodically.
-ROOT_GONE_KINDS = frozenset({OrphanKind.INDEX_ROOT_GONE, OrphanKind.GRAPH_ROOT_GONE, OrphanKind.NAMED_ROOT_GONE})
+#: The kinds whose root no longer exists, or that nothing names any more: what a daemon prunes on its own, on start
+#: and periodically.
+ROOT_GONE_KINDS = frozenset(
+    {OrphanKind.INDEX_ROOT_GONE, OrphanKind.GRAPH_ROOT_GONE, OrphanKind.NAMED_ROOT_GONE, OrphanKind.UNNAMED_STALE}
+)
 #: What a build whose process is gone left behind: a daemon sweeps these at start and on every prune.
 DEAD_WRITER_KINDS = frozenset({OrphanKind.TEMP_LEFTOVER, OrphanKind.STAGING_LEFTOVER})
 
@@ -108,7 +115,7 @@ def find_orphans(cache_folder: Path, *, max_age_days: int = DEFAULT_MAX_AGE_DAYS
     for entry in sorted(cache_folder.iterdir()) if cache_folder.is_dir() else []:
         if not (entry.is_dir() and KEY_DIR_NAME.match(entry.name)):
             continue
-        orphan = _key_dir_orphan(entry, oldest, logged)
+        orphan = _key_dir_orphan(entry, oldest, logged, now - _TEMP_MIN_AGE_SECONDS)
         if orphan is not None:
             orphans.append(orphan)
             doomed.add(entry)
@@ -126,6 +133,79 @@ def find_orphans(cache_folder: Path, *, max_age_days: int = DEFAULT_MAX_AGE_DAYS
     return orphans
 
 
+#: The cache's size bound when ZEMBLE_CACHE_MAX_GB names none. Measured 2026-11-24 on the workspace host: the key
+#: folders the daemon served in the last day held 11.2 GB (the last three days 12.0 GB) of 17.5 GB.
+DEFAULT_CACHE_MAX_GB = 12.0
+CACHE_MAX_GB_ENV = "ZEMBLE_CACHE_MAX_GB"
+
+
+def over_bound(cache_folder: Path, *, max_bytes: int, held_roots: Collection[str]) -> list[Orphan]:
+    """List the cache entries past the size bound, least recently used first out, deleting nothing.
+
+    Entries are key folders and embedder files. Newest use first, each entry counts while the total stays within
+    *max_bytes*; once one does not fit, every less recently used entry goes, however small. An entry a process holds
+    a file of open, one written within the hour, or a key folder of one of *held_roots* never goes and counts first.
+
+    :param held_roots: The roots a running daemon serves, loads or watches.
+    :return: The entries to remove; empty where /proc cannot say what is open.
+    """
+    opened = open_files()
+    if opened is None or not cache_folder.is_dir():
+        return []
+    held_keys = {cache_key(root) for root in held_roots}
+    fresh = time.time() - _TEMP_MIN_AGE_SECONDS
+    entries: list[tuple[float, bool, Orphan]] = []
+    for entry in sorted(cache_folder.iterdir()):
+        if entry.is_dir() and KEY_DIR_NAME.match(entry.name):
+            files = tuple(_files_under(entry))
+            data_write = _newest_data_write(entry)
+            try:
+                used = (entry / USED_MARKER).stat().st_mtime
+            except FileNotFoundError:
+                used = data_write
+            held = entry.name in held_keys or data_write >= fresh or _any_open(files, opened)
+            orphan = Orphan(OrphanKind.LEAST_RECENTLY_USED, entry, sum(map(_size, files)), files)
+            entries.append((max(used, data_write), held, orphan))
+    directory = cache_folder / "embeddings"
+    for path in sorted(directory.glob("*.sqlite")) if directory.is_dir() else []:
+        files = tuple(candidate for candidate in _embedder_files(path) if candidate.exists())
+        try:
+            held = _any_open(files, opened)
+            used = max(candidate.stat().st_mtime for candidate in files) if held else last_activity(path)
+        except FileNotFoundError:
+            continue
+        orphan = Orphan(OrphanKind.LEAST_RECENTLY_USED, path, sum(map(_size, files)), files)
+        entries.append((used, held or used >= fresh, orphan))
+    entries.sort(key=lambda item: -item[0])
+    total = sum(orphan.size for _used, held, orphan in entries if held)
+    doomed: list[Orphan] = []
+    for _used, held, orphan in entries:
+        if held:
+            continue
+        if not doomed and total + orphan.size <= max_bytes:
+            total += orphan.size
+            continue
+        doomed.append(orphan)
+    return doomed
+
+
+def _any_open(files: Collection[Path], opened: set[tuple[int, int]]) -> bool:
+    """Return whether any of *files* is among the open (device, inode) pairs."""
+    for path in files:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        if (stat.st_dev, stat.st_ino) in opened:
+            return True
+    return False
+
+
+def _embedder_files(path: Path) -> list[Path]:
+    """An embedder cache file and the sqlite files beside it."""
+    return [path, *(path.with_name(path.name + suffix) for suffix in ("-wal", "-shm"))]
+
+
 def remove_orphan(orphan: Orphan) -> bool:
     """Remove one orphan the way its kind says, and return whether anything was removed.
 
@@ -136,12 +216,13 @@ def remove_orphan(orphan: Orphan) -> bool:
             OrphanKind.INDEX_ROOT_GONE
             | OrphanKind.GRAPH_ROOT_GONE
             | OrphanKind.NAMED_ROOT_GONE
-            | OrphanKind.UNNAMED_STALE
             | OrphanKind.GIT_URL_STALE
             | OrphanKind.STAGING_LEFTOVER
         ):
             shutil.rmtree(orphan.target)
             return True
+        case OrphanKind.UNNAMED_STALE | OrphanKind.LEAST_RECENTLY_USED:
+            return _remove_unless_in_use(orphan)
         case OrphanKind.EMBEDDER_UNUSED | OrphanKind.TEMP_LEFTOVER:
             # Checked again right before deleting: the scan may be minutes old.
             if any(held_open(path) for path in orphan.files):
@@ -162,6 +243,29 @@ def remove_orphan(orphan: Orphan) -> bool:
             _prune_empty(orphan.target)
             return removed
 
+
+
+def _remove_unless_in_use(orphan: Orphan) -> bool:
+    """Remove an entry unless, over what it holds NOW, a process has a file of it open or wrote its data in the hour.
+
+    The scan that chose it may be minutes old, and a reader may have opened or written one of its files since.
+    """
+    directory = orphan.target.is_dir()
+    files = tuple(_files_under(orphan.target)) if directory else orphan.files
+    opened = open_files()
+    if opened is None or _any_open(files, opened):
+        return False
+    if directory and _newest_data_write(orphan.target) >= time.time() - _TEMP_MIN_AGE_SECONDS:
+        return False
+    try:
+        if directory:
+            shutil.rmtree(orphan.target)
+        else:
+            for path in files:
+                path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
 
 def _prune_empty(folder: Path) -> None:
     """Remove a variant folder and the root folder above it once nothing but a publish lock is left."""
@@ -211,10 +315,13 @@ def _under_ancestor(entry: Path, covered: set[Path]) -> list[Orphan]:
     return orphans
 
 
-def _key_dir_orphan(entry: Path, oldest: float, logged: dict[str, str]) -> Orphan | None:
-    """Classify one key folder: by its indexes' metadata when it has any, else by its graph or root marker."""
+def _key_dir_orphan(entry: Path, oldest: float, logged: dict[str, str], fresh: float) -> Orphan | None:
+    """Classify one key folder: by its indexes' metadata when it has any, else by its graph or root marker.
+
+    :param fresh: Writes since this time mean a writer may still be naming the folder.
+    """
     metadata = _index_metadata(entry)
-    return _index_orphan(entry, metadata, oldest) if metadata else _graph_orphan(entry, logged, oldest)
+    return _index_orphan(entry, metadata, oldest) if metadata else _graph_orphan(entry, logged, fresh)
 
 
 def _index_orphan(entry: Path, metadata: list[dict], oldest: float) -> Orphan | None:
@@ -246,7 +353,7 @@ def _index_orphan(entry: Path, metadata: list[dict], oldest: float) -> Orphan | 
     return None
 
 
-def _graph_orphan(entry: Path, logged: dict[str, str], oldest: float) -> Orphan | None:
+def _graph_orphan(entry: Path, logged: dict[str, str], fresh: float) -> Orphan | None:
     """Return the orphan a key folder without index metadata is once the root naming it is gone, else None.
 
     Its graph names its root; else its root marker does; else the root the daemon logs served whose key
@@ -260,9 +367,10 @@ def _graph_orphan(entry: Path, logged: dict[str, str], oldest: float) -> Orphan 
         return Orphan(OrphanKind.GRAPH_ROOT_GONE, entry, _tree_size(entry), detail=root)
     named = marked_root(entry) or logged.get(entry.name)
     if named is None:
-        # Nothing names its root, so nothing can tell whether the root still exists: it goes by age.
-        if not (entry / "index").is_dir() and _newest_write(entry) < oldest:
-            return Orphan(OrphanKind.UNNAMED_STALE, entry, _tree_size(entry))
+        # Nothing names its root, and nothing can tell whether it exists: once nothing wrote it for an hour, nothing
+        # will read it again. A graph store that names nothing readable may be mid-build: it stays.
+        if not any(graph.glob("graph-*.sqlite")) and _newest_write(entry) < fresh:
+            return Orphan(OrphanKind.UNNAMED_STALE, entry, _tree_size(entry), tuple(_files_under(entry)))
         return None
     if cache_key(named) != entry.name or Path(named).exists():
         return None
@@ -385,6 +493,30 @@ def _newest_write(folder: Path) -> float:
     return newest
 
 
+#: Files a reader or a marker writes, which say nothing about a key folder's data being in use.
+_NOT_DATA = re.compile(rf"(-shm|-readers|\.lock)$|^({re.escape(ROOT_MARKER)}|{re.escape(USED_MARKER)})$")
+
+
+def _newest_data_write(folder: Path) -> float:
+    """Return when a key folder's data was last written: sqlite shared memory, locks and markers left out."""
+    newest = 0.0
+    for path in _files_under(folder):
+        if _NOT_DATA.search(path.name):
+            continue
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except FileNotFoundError:
+            continue
+    return newest
+
+
+def _files_under(folder: Path) -> Iterator[Path]:
+    """Every file under a folder."""
+    for directory, _subdirectories, names in os.walk(folder):
+        for name in names:
+            yield Path(directory) / name
+
+
 def _tree_size(folder: Path) -> int:
     """Return the bytes every file under a folder takes."""
     total = 0
@@ -397,9 +529,12 @@ __all__ = [
     "DEAD_WRITER_KINDS",
     "DEFAULT_MAX_AGE_DAYS",
     "ROOT_GONE_KINDS",
+    "CACHE_MAX_GB_ENV",
+    "DEFAULT_CACHE_MAX_GB",
     "Orphan",
     "OrphanKind",
     "find_orphans",
+    "over_bound",
     "logged_roots",
     "remove_orphan",
 ]
