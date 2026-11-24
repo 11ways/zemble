@@ -639,6 +639,11 @@ def _declare_file(
         return None
     expected = str(payload.get("sha256", ""))
     actual = file_sha256(hash_root / relative) if hashed else None
+    if actual is None and hashed and hash_root != root:
+        # AIDEV-NOTE: a lane reading its base's facts lacks the build output its base generated, and a
+        # checkout it does not hold; both are still the bytes those facts were written about at the facts'
+        # own tree. Judged gone, every generated class and its template lost its facts in every lane.
+        actual = file_sha256(root / relative)
     if not hashed:
         source = SourceFacts(path=relative, declared_sha256=expected, fresh=False, reason="freshness not checked")
     elif actual is None:
@@ -1146,6 +1151,8 @@ class FactsOverlay:
     tools: dict[str, set[str]] = field(default_factory=dict)
     #: Maps generated Hawkeye Java back onto templates; None when nothing needed it.
     generated: GeneratedSourceMapper | None = None
+    #: A lane's base, where the generated Java the lane never built is read; None outside a lane.
+    home: Path | None = None
     #: Covered file -> the edge kinds the overlay owns for it. Absent means all four.
     owned_kinds: dict[str, frozenset[EdgeKind]] = field(default_factory=dict)
     #: How many generated-source facts were mapped back onto a template.
@@ -1352,7 +1359,7 @@ def _map_chosen(
             found = overlay.mappers[loaded.header.language] = factory(symbols.lookup, declared)
         mapper = found
         if overlay.generated is None:
-            overlay.generated = GeneratedSourceMapper(overlay.root, symbols.templates())
+            overlay.generated = GeneratedSourceMapper(overlay.root, symbols.templates(), home=overlay.home)
     _mark_mapped(overlay, loaded, chosen)
     _map_file(overlay, loaded, mapper, symbols.lookup, chosen)
     mapper.release()

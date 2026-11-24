@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -94,6 +94,8 @@ class _Layer:
     :param rowid: Whether readers order the table by `rowid`, which a view must then spell as a column.
     :param hides_overlay: Whether overlay rows are hidden out of scope too: only edges are, since the
         overlay re-resolves the edges of base files outside the lane when a name they wrote moved.
+    :param mask_key: What a write masks a base row by when that is finer than `key`; a row is then masked
+        by either, since an overlay an older zemble wrote masked by `key` alone.
     """
 
     table: str
@@ -104,6 +106,7 @@ class _Layer:
     upsert: bool = False
     rowid: bool = False
     hides_overlay: bool = False
+    mask_key: str | None = None
 
 
 _LAYERS = (
@@ -139,8 +142,10 @@ _LAYERS = (
         "{a}.facts_file",
         "overlay_masked_facts",
         "overlay_hidden",
-        "facts_file = OLD.facts_file",
+        "facts_file = OLD.facts_file AND file_path = OLD.file_path",
         rowid=True,
+        # Per source: a lane's own build rewrites every facts file, and three in four sources keep their facts.
+        mask_key="{a}.facts_file || char(0) || {a}.file_path",
     ),
     _Layer("facts_status", "{a}.path", "overlay_masked_status", "overlay_hidden", "path = OLD.path", upsert=True),
 )
@@ -256,6 +261,9 @@ def _filters(layer: _Layer, mode: Mode, base_alias: str, own_alias: str) -> tupl
     """The WHERE clauses keeping a layer's unmasked (and, for a reader, in-scope) base rows and its own rows."""
     base_key, own_key = layer.key.format(a=base_alias), layer.key.format(a=own_alias)
     base_filter = f"NOT EXISTS (SELECT 1 FROM main.{layer.mask} m WHERE m.{_key_column(layer)} = {base_key})"
+    if layer.mask_key is not None:
+        finer = layer.mask_key.format(a=base_alias)
+        base_filter += f" AND NOT EXISTS (SELECT 1 FROM main.{layer.mask} m WHERE m.{_key_column(layer)} = {finer})"
     own_filter = "1"
     if mode.hides_out_of_scope:
         hidden = f"SELECT 1 FROM main.{layer.hidden} h WHERE h.{_key_column(layer)}"
@@ -289,7 +297,8 @@ def _create_triggers(connection: sqlite3.Connection, layer: _Layer, columns: lis
     """Turn inserts and deletes on a layered view into overlay rows and masks of the base rows they replace."""
     listed = ", ".join(columns)
     new_values = ", ".join(f"NEW.{column}" for column in columns)
-    new_key, old_key = layer.key.format(a="NEW"), layer.key.format(a="OLD")
+    masked = layer.mask_key or layer.key
+    new_key, old_key = masked.format(a="NEW"), masked.format(a="OLD")
     # A negative edge-file key is the overlay's own text, which no base row can carry.
     guard = " WHERE {} > 0" if _key_column(layer) == "key" else ""
     insert = "INSERT OR REPLACE" if layer.upsert else "INSERT"
@@ -339,36 +348,91 @@ def owned_files(connection: sqlite3.Connection) -> dict[str, tuple[int, int]]:
     return {row[0]: (row[1], row[2]) for row in connection.execute("SELECT path, mtime_ns, size FROM main.files")}
 
 
-def restore_unchanged(connection: sqlite3.Connection) -> int:
+def base_visible_files(connection: sqlite3.Connection, paths: Iterable[str]) -> set[str]:
+    """The files among *paths* whose edges a build reads from the base: its base rows, none of them masked."""
+    listed = sorted(set(paths))
+    visible: set[str] = set()
+    for start in range(0, len(listed), 400):
+        chunk = listed[start : start + 400]
+        marks = ",".join("?" * len(chunk))
+        visible.update(
+            text
+            for (text,) in connection.execute(
+                f"SELECT r.text FROM {BASE_SCHEMA}.refs r WHERE r.text IN ({marks}) "  # noqa: S608
+                "AND NOT EXISTS (SELECT 1 FROM main.overlay_masked_edges m WHERE m.key = r.key)",
+                chunk,
+            )
+        )
+    return visible
+
+
+def base_edges(connection: sqlite3.Connection, paths: Sequence[str], kinds_sql: str, kinds: Sequence[str]) -> list:
+    """Read the base's edge rows of some files as the `edges` view spells them, filtered by a kind clause.
+
+    :param kinds_sql: A clause over `e.kind` with one placeholder per member of *kinds*, like `NOT IN (?, ?)`.
+    """
+    texts = _EDGE_TEXTS.format(dst="d.text")
+    rows = _EDGE_JOINS.format(rows=f"{BASE_SCHEMA}.edge_rows", refs=f"{BASE_SCHEMA}.refs")
+    found: list = []
+    for start in range(0, len(paths), 400):
+        chunk = list(paths[start : start + 400])
+        marks = ",".join("?" * len(chunk))
+        found.extend(
+            connection.execute(
+                f"SELECT {texts} FROM {rows} WHERE f.text IN ({marks}) AND e.kind {kinds_sql} ORDER BY e.rowid",  # noqa: S608
+                [*chunk, *kinds],
+            )
+        )
+    return found
+
+
+#: Edge columns no answer reads, so a re-resolved file differing only in them resolves as before.
+_UNCOMPARED_COLUMNS = frozenset({"candidate_count"})
+
+
+def restore_unchanged(connection: sqlite3.Connection, paths: Sequence[str]) -> int:
     """Drop a build's re-resolved edges of base files that came out exactly as the base's, unmasking the base's.
 
     AIDEV-NOTE: a file the lane did not change is re-resolved when it wrote a name the lane moved, and
     on the zenit workspace one lane's 682 moved names made 11k of 19k files such dependents: stored
     again, the overlay grew to 988 MB, a copy of its base. Nearly all resolve as before; only the
-    ones that differ are the lane's to keep. Runs on the build's staged edges, before they are published.
+    ones that differ are the lane's to keep. Runs on a batch's staged edges, before they are published,
+    so the scratch database holds the differing files only.
 
+    AIDEV-NOTE: an ambiguous edge's candidate count is left out of "the same": an ambiguous edge names no
+    destination, so no answer is built from it, while one declaration of a common name added anywhere
+    changes it in every caller (on a lane 4,072 moved names made 18,600 of 24,621 files dependents, and
+    three in four of the files kept were count changes only).
+
+    :param paths: The files of the batch just resolved; their derived edges are staged with them.
     :return: How many files were left to the base.
     """
     connection.execute("CREATE INDEX IF NOT EXISTS scratch.resolved_file ON resolved (file_path)")
-    columns = ", ".join(row[1] for row in connection.execute("PRAGMA scratch.table_info(resolved)"))
-    candidates = connection.execute(
-        f"SELECT DISTINCT r.file_path, b.key FROM scratch.resolved r JOIN {BASE_SCHEMA}.refs b ON b.text = r.file_path "  # noqa: S608
-        "JOIN main.overlay_masked_edges m ON m.key = b.key "
-        "WHERE NOT EXISTS (SELECT 1 FROM main.files o WHERE o.path = r.file_path)"
-    ).fetchall()
+    compared = [row[1] for row in connection.execute("PRAGMA scratch.table_info(resolved)")]
+    columns = ", ".join(column for column in compared if column not in _UNCOMPARED_COLUMNS)
     texts = _EDGE_TEXTS.format(dst="d.text")
     base_rows = (
-        f"SELECT {texts} FROM {_EDGE_JOINS.format(rows=f'{BASE_SCHEMA}.edge_rows', refs=f'{BASE_SCHEMA}.refs')} "
-        "WHERE e.file = ?"
+        f"SELECT {columns} FROM (SELECT {texts} "  # noqa: S608
+        f"FROM {_EDGE_JOINS.format(rows=f'{BASE_SCHEMA}.edge_rows', refs=f'{BASE_SCHEMA}.refs')} WHERE e.file = ?)"
     )
-    unchanged = [
-        (path, key)
-        for path, key in candidates
-        if Counter(
-            map(tuple, connection.execute(f"SELECT {columns} FROM scratch.resolved WHERE file_path = ?", (path,)))
-        )  # noqa: S608
-        == Counter(map(tuple, connection.execute(base_rows, (key,))))
-    ]
+    unchanged: list[tuple[str, int]] = []
+    for start in range(0, len(paths), 400):
+        chunk = list(paths[start : start + 400])
+        marks = ",".join("?" * len(chunk))
+        candidates = connection.execute(
+            f"SELECT b.text, b.key FROM {BASE_SCHEMA}.refs b "  # noqa: S608
+            "JOIN main.overlay_masked_edges m ON m.key = b.key "
+            f"WHERE b.text IN ({marks}) AND NOT EXISTS (SELECT 1 FROM main.files o WHERE o.path = b.text)",
+            chunk,
+        ).fetchall()
+        unchanged.extend(
+            (path, key)
+            for path, key in candidates
+            if Counter(
+                map(tuple, connection.execute(f"SELECT {columns} FROM scratch.resolved WHERE file_path = ?", (path,)))  # noqa: S608
+            )
+            == Counter(map(tuple, connection.execute(base_rows, (key,))))
+        )
     for start in range(0, len(unchanged), 400):
         chunk = unchanged[start : start + 400]
         marks = ",".join("?" * len(chunk))
@@ -386,9 +450,12 @@ __all__ = [
     "META_SCOPE",
     "OVERLAY_SCHEMA",
     "Mode",
+    "base_edges",
+    "base_visible_files",
     "install",
     "is_overlay",
     "owned_files",
     "record_hidden",
     "recorded_base",
+    "restore_unchanged",
 ]

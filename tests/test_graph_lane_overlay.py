@@ -494,3 +494,197 @@ async def test_a_fresh_lane_parked_inside_its_warm_base_answers_architectural_li
     assert _candidates(answered["result"]), "2: the lane's documented migration is a candidate"
     assert _candidates(answered["result"]) == _candidates(expected["result"]), "2: as a whole graph answers"
     await daemon.graphs.close()
+
+
+def test_a_lane_s_dependents_pass_keeps_one_batch_of_base_edges_in_its_scratch_database(
+    lanes: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The base files a lane re-resolves are read a batch at a time, and those resolving as before leave at once."""
+    from zemble.graph import store
+    from zemble.graph.lookup import HIERARCHY_KINDS
+
+    _workspace, lane, _reference = lanes
+    _lane_edits(lane)
+    monkeypatch.setattr(store, "_BATCH_FILES", 1)
+    seen: list[tuple[set[str], set[str]]] = []
+    staged = store._staged
+    base_files = {"extra/src/main/java/extra/User.java", "other/src/main/java/other/Remote.java"}
+    base_files |= {"other/src/main/java/other/Lonely.java", "extra/src/test/java/extra/UserTest.java"}
+
+    def watched(connection: sqlite3.Connection, paths: list[str], *, hierarchy: bool) -> list:
+        if not hierarchy:
+            marks = ",".join("?" * len(HIERARCHY_KINDS))
+            pending = connection.execute(
+                f"SELECT DISTINCT file_path FROM scratch.pending WHERE kind NOT IN ({marks})", HIERARCHY_KINDS
+            )
+            resolved = connection.execute("SELECT DISTINCT file_path FROM scratch.resolved")
+            seen.append(({row[0] for row in pending} & base_files, {row[0] for row in resolved} & base_files))
+        return staged(connection, paths, hierarchy=hierarchy)
+
+    monkeypatch.setattr(store, "_staged", watched)
+    build_graph(str(lane))
+    assert seen, "the dependents pass resolved its base files"
+    assert all(not pending for pending, _resolved in seen), "no base file's edges wait in the scratch database"
+    assert all("other/src/main/java/other/Lonely.java" not in resolved for _pending, resolved in seen), (
+        "a base file resolving as before leaves the scratch database with its batch"
+    )
+
+
+def test_a_dependent_whose_ambiguous_calls_only_count_one_more_candidate_is_left_to_the_base(
+    lanes: tuple[Path, Path, Path],
+) -> None:
+    """A declaration of a common name the lane adds changes no answer of a call that stays ambiguous."""
+    workspace, lane, _reference = lanes
+    goers = "package other;\n\npublic class {name} {{\n    public int go() {{ return 1; }}\n}}\n"
+    for name in ("GoOne", "GoTwo"):
+        (workspace / f"other/src/main/java/other/{name}.java").write_text(goers.format(name=name), encoding="utf-8")
+    caller = "other/src/main/java/other/Caller.java"
+    (workspace / caller).write_text(
+        "package other;\n\npublic class Caller {\n    int call(Object some) { return some.go(); }\n}\n",
+        encoding="utf-8",
+    )
+    build_graph(str(workspace))
+    (lane / "core/src/main/java/core/GoThree.java").write_text(
+        goers.format(name="GoThree").replace("package other;", "package core;"), encoding="utf-8"
+    )
+    build_graph(str(lane))
+    assert caller not in _own_edge_files(lane), "a call ambiguous before and after is the base's to answer"
+    connection = connect(str(workspace))
+    try:
+        (resolution,) = connection.execute(
+            "SELECT resolution FROM edges WHERE file_path = ? AND dst_name = 'go'", (caller,)
+        ).fetchone()
+    finally:
+        connection.close()
+    assert resolution == "ambiguous", "the base answers it as the ambiguous call it is in the lane too"
+
+
+def test_a_lane_s_own_facts_file_stores_the_symbol_facts_of_only_the_sources_it_changed(
+    lanes: tuple[Path, Path, Path],
+) -> None:
+    """A lane's build rewrites a facts file its base has; the overlay keeps the base's rows of unchanged sources."""
+    workspace, lane, _reference = lanes
+    user, test = "src/main/java/extra/User.java", "src/test/java/extra/UserTest.java"
+
+    def facts(root: Path, test_line: int, stamp: str) -> None:
+        lines = [
+            {"zemble_facts": 1, "tool": "javac-facts", "tool_version": "0.1.0", "generated_at": stamp}
+            | {"language": "java", "root": "../.."},
+            {"t": "file", "path": user, "sha256": hashlib.sha256((root / "extra" / user).read_bytes()).hexdigest()},
+            {"t": "symbol", "ref": "extra.User", "path": user, "line": 9},
+            {"t": "file", "path": test, "sha256": hashlib.sha256((root / "extra" / test).read_bytes()).hexdigest()},
+            {"t": "symbol", "ref": "extra.UserTest", "path": test, "line": test_line},
+        ]
+        target = root / "extra/build/zemble/facts-compileJava.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+
+    facts(workspace, 3, "2026-11-24T05:00:00Z")
+    build_graph(str(workspace))
+    facts(lane, 4, "2026-11-24T06:00:00Z")
+    build_graph(str(lane))
+
+    db_path = graph_db_path(str(lane))
+    assert db_path is not None
+    own = sqlite3.connect(db_path)
+    try:
+        stored = sorted(own.execute("SELECT ref, file_path, line FROM facts_symbols").fetchall())
+    finally:
+        own.close()
+    assert stored == [("extra.UserTest", f"extra/{test}", 4)], "the overlay stores the changed source's facts only"
+    connection = connect(str(lane))
+    try:
+        layered = sorted(tuple(row) for row in connection.execute("SELECT ref, file_path, line FROM facts_symbols"))
+    finally:
+        connection.close()
+    assert layered == [("extra.User", f"extra/{user}", 9), ("extra.UserTest", f"extra/{test}", 4)], (
+        "and the lane reads the base's facts of the source it did not change beside its own"
+    )
+
+
+GENERATED_FIXTURE = Path(__file__).parent / "fixtures" / "generated"
+TEMPLATE = "src/common/templates/widget-display/markdown.hwk"
+FUNCTIONS = "src/common/java/com/example/ui/WidgetFunctions.java"
+GENERATED_ROOT = "build/generated-sources/hawkeye/common/java/be/elevenways/hawkeye/generated"
+TPL = f"{GENERATED_ROOT}/zenitwidget/Tpl_WidgetDisplayMarkdown.java"
+TPL_FROM = (
+    "be.elevenways.hawkeye.generated.zenitwidget.Tpl_WidgetDisplayMarkdown"
+    "#renderRoot(be.elevenways.hawkeye.common.render.RenderContext)"
+)
+TPL_BRANCH = (
+    "be.elevenways.hawkeye.generated.zenitwidget.Tpl_WidgetDisplayMarkdown"
+    "#branch2(be.elevenways.hawkeye.common.render.RenderContext)"
+)
+
+
+def _template_calls(root: Path) -> list[tuple]:
+    """The template's call edges as one graph answers them."""
+    connection = connect(str(root))
+    try:
+        rows = connection.execute(
+            "SELECT dst_id, dst_name, line, resolution, source FROM edges WHERE file_path = ? AND kind = 'calls'",
+            (f"mod/{TEMPLATE}",),
+        ).fetchall()
+    finally:
+        connection.close()
+    return sorted(tuple(row) for row in rows)
+
+
+def test_a_lane_reads_the_build_output_it_lacks_where_its_base_s_facts_were_written(
+    tmp_path: Path, graph_cache: Path
+) -> None:
+    """A lane that never built its module keeps the base's template facts, and stores none of their rows itself."""
+    import os
+
+    workspace = (tmp_path / "ws").resolve()
+    module = workspace / "mod"
+    shutil.copytree(GENERATED_FIXTURE, module)
+    (module / ".gitignore").write_text("build/\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(module)], check=True)
+    git(module, "add", "-A")
+    git(module, "commit", "-q", "-m", "initial")
+    # The base's build generated the class after its template was written, and wrote facts about it.
+    os.utime(module / TEMPLATE, (1_000_000, 1_000_000))
+    os.utime(module / TPL, (2_000_000, 2_000_000))
+    lines = [
+        {"zemble_facts": 1, "tool": "zemble-javac-facts", "tool_version": "0.1.0"}
+        | {"generated_at": "2026-11-24T05:00:00Z", "language": "java", "root": "../.."},
+        {"t": "file", "path": TPL, "sha256": hashlib.sha256((module / TPL).read_bytes()).hexdigest()},
+        {"t": "call", "from": TPL_FROM, "to": "com.example.ui.WidgetFunctions#render(java.lang.String)", "line": 74}
+        | {"path": TPL},
+        {"t": "call", "from": TPL_BRANCH, "to": "com.example.ui.WidgetFunctions#render(java.lang.String)"}
+        | {"path": TPL, "line": 83},
+    ]
+    facts = module / "build/zemble/facts-compileJava.jsonl"
+    facts.parent.mkdir(parents=True)
+    facts.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+    build_graph(str(workspace))
+    in_base = _template_calls(workspace)
+    assert in_base and {row[4] for row in in_base} == {"zemble-javac-facts"}, "the base maps the template's calls"
+
+    # 1. A lane checked out later (its template newer than the base's generated class) with no build output of its
+    # own moves a name the template calls, so the template is re-resolved in the lane.
+    lane = (tmp_path / "lane").resolve()
+    lane.mkdir()
+    git(module, "worktree", "add", "-q", "--detach", str(lane / "mod"))
+    functions = lane / "mod" / FUNCTIONS
+    functions.write_text(
+        functions.read_text(encoding="utf-8").replace(
+            '\n    @HawkeyeFunction(name = "localizedConfig"',
+            "\n    public static String render(String body, int times) {\n        return body;\n    }\n"
+            '\n    @HawkeyeFunction(name = "localizedConfig"',
+        ),
+        encoding="utf-8",
+    )
+    assert not (lane / "mod" / TPL).exists(), "1: the lane holds no generated class"
+    build_graph(str(lane))
+
+    # 2. The lane answers the template's calls as its base does: the facts still describe its unchanged template.
+    assert _template_calls(lane) == in_base, "2: the base's facts describe the lane's unchanged template"
+    assert f"mod/{TEMPLATE}" not in _own_edge_files(lane), "2: and the lane stores none of the template's rows"
+
+    # 3. A template the lane edits is newer than every class the base generated: its facts no longer describe it.
+    template = lane / "mod" / TEMPLATE
+    template.write_text(template.read_text(encoding="utf-8") + "\n<p>lane</p>\n", encoding="utf-8")
+    build_graph(str(lane), changed_paths=[template])
+    assert {row[4] for row in _template_calls(lane)} == {TREE_SITTER_SOURCE}, "3: an edited template is the lane's"

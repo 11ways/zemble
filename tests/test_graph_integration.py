@@ -66,7 +66,10 @@ def test_real_workspace_journey(zenit_graph: SqliteGraphProvider) -> None:
     # 3. Object storage: LocalDiskStorageAdapter is the only shipped StorageAdapter in zenit.
     adapter = [symbol for symbol in zenit_graph.definition("StorageAdapter") if symbol.kind.value == "interface"]
     implementations = _files(
-        hit for hit in zenit_graph.implementations(adapter[0].id) if "/src/test/" not in f"/{hit.symbol.file_path}"
+        # Test sources and the published test-support set (zenit's RecordingStorage) ship nothing.
+        hit
+        for hit in zenit_graph.implementations(adapter[0].id)
+        if "/src/test" not in f"/{hit.symbol.file_path}"
     )
     assert implementations == {"LocalDiskStorageAdapter.java"}, "step 3: exactly one adapter ships in zenit"
 
@@ -90,14 +93,14 @@ def test_real_workspace_journey(zenit_graph: SqliteGraphProvider) -> None:
 
     # 7. Callers through a supertype: ContentStore, DerivedFiles and RemoteJobs delete through the StorageAdapter
     #    interface, so they are callers of LocalDiskStorageAdapter.delete bound through StorageAdapter.delete;
-    #    the adapter's own test calls it directly, and the interface method answers that test as its overrider's.
+    #    ServeStreamStoredTest calls it directly, and the interface method answers that test as its overrider's.
     (delete,) = zenit_graph.definition("LocalDiskStorageAdapter.delete")
     (declared,) = zenit_graph.definition("StorageAdapter.delete")
     hits = zenit_graph.callers(delete.id)
     inherited = [hit for hit in hits if hit.binding is CallBinding.OVERRIDDEN]
     assert {"ContentStore.java", "DerivedFiles.java", "RemoteJobs.java"} <= _files(inherited), "step 7: inherited"
     assert {hit.through.id for hit in inherited} == {declared.id}, "step 7: each through StorageAdapter.delete"
-    assert "LocalDiskStorageAdapterTest.java" in _files(h for h in hits if h.binding is CallBinding.DIRECT), "step 7"
+    assert "ServeStreamStoredTest.java" in _files(h for h in hits if h.binding is CallBinding.DIRECT), "step 7"
     overriders = [hit for hit in zenit_graph.callers(declared.id) if hit.binding is CallBinding.OVERRIDER]
-    assert "LocalDiskStorageAdapterTest.java" in _files(overriders), "step 7: the other direction"
+    assert "ServeStreamStoredTest.java" in _files(overriders), "step 7: the other direction"
     assert {hit.through.id for hit in overriders} >= {delete.id}, "step 7: through the adapter's override"

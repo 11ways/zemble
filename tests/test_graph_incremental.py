@@ -342,7 +342,9 @@ def test_a_rewritten_facts_file_re_resolves_only_the_sources_it_changed(
     resolved: list[list[str]] = []
     unstage = store._unstage
     monkeypatch.setattr(
-        store, "_unstage", lambda connection, paths: resolved.append(list(paths)) or unstage(connection, paths)
+        store,
+        "_unstage",
+        lambda connection, paths, **kw: resolved.append(list(paths)) or unstage(connection, paths, **kw),
     )
 
     def refresh() -> list[str]:

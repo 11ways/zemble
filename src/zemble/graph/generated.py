@@ -23,6 +23,7 @@ The compiler leaves two things behind, and this module is written against both:
 
 from __future__ import annotations
 
+import filecmp
 import json
 import logging
 import re
@@ -198,9 +199,13 @@ class GeneratedSourceMapper:
     is reported rather than approximated.
     """
 
-    def __init__(self, root: Path, symbols: Iterable[Symbol]) -> None:
-        """Index the workspace's template symbols by every name a generated class can carry."""
+    def __init__(self, root: Path, symbols: Iterable[Symbol], *, home: Path | None = None) -> None:
+        """Index the workspace's template symbols by every name a generated class can carry.
+
+        :param home: A lane's base, where the build output a lane never built itself is read.
+        """
         self.root = root
+        self.home = home
         self._by_id: dict[str, list[Symbol]] = {}
         self._by_class: dict[str, list[Symbol]] = {}
         self._by_tag: dict[str, list[Symbol]] = {}
@@ -333,7 +338,7 @@ class GeneratedSourceMapper:
 
     def _read_sidecar(self, source_path: str) -> dict | None:
         """Read the `.sourcemap.json` beside a generated class, or None when it has none."""
-        path = self.root / f"{source_path[: -len('.java')]}{SOURCEMAP_SUFFIX}"
+        path = self._located(f"{source_path[: -len('.java')]}{SOURCEMAP_SUFFIX}")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -364,7 +369,7 @@ class GeneratedSourceMapper:
     def _markers(self, source_path: str) -> list[tuple[int, int]]:
         """Collect the `// @hwk:` markers of a generated file as (Java line, template line)."""
         try:
-            text = (self.root / source_path).read_text(encoding="utf-8", errors="replace")
+            text = self._located(source_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             return []
         found: list[tuple[int, int]] = []
@@ -374,9 +379,28 @@ class GeneratedSourceMapper:
                 found.append((number, int(match.group(1))))
         return found
 
+    def _located(self, relative: str) -> Path:
+        """Return the root's own copy of a generated file, else its home's when the root lacks it."""
+        own = self.root / relative
+        if self.home is None or own.exists():
+            return own
+        return self.home / relative
+
     def _template_is_newer(self, template_path: str, source_path: str) -> bool:
-        """Return whether the template was edited after the class was generated from it."""
-        return template_is_newer(self.root, template_path, source_path)
+        """Return whether the template was edited after the class was generated from it.
+
+        AIDEV-NOTE: a class read at the home was generated from the home's template, and modification
+        times are only comparable inside one tree: a lane checked out after the base's build has every
+        template newer than the base's classes. The class describes the lane's template while the two
+        templates hold the same bytes, and then the home's own verdict holds.
+        """
+        if self.home is None or (self.root / source_path).exists():
+            return template_is_newer(self.root, template_path, source_path)
+        try:
+            same = filecmp.cmp(self.root / template_path, self.home / template_path, shallow=False)
+        except OSError:
+            same = False
+        return not same or template_is_newer(self.home, template_path, source_path)
 
     def _template_line(self, found: _GeneratedFile, java_line: int) -> int | None:
         """Look a generated Java line up in the line map, floor-style like Hawkeye does."""

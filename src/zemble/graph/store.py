@@ -15,7 +15,7 @@ import re
 import sqlite3
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import astuple, dataclass, field
 from functools import partial
@@ -1758,17 +1758,18 @@ def _build_overlay(
         stats.published_seconds = time.perf_counter() - started
         if on_published is not None:
             on_published(stats)
-        if owed:
-            _resolve_owed(
-                connection_to=lambda: _open_overlay(target, base_folder, base_version),
-                stats=stats,
-                root=root,
-                scan=scan,
-                named=named,
-                base=base,
-                owed=owed,
-                workers=workers,
-            )
+        # Always: the first pass maps no facts, so a lane whose own build rewrote facts files but moved no
+        # name had them read by nothing at all.
+        _resolve_owed(
+            connection_to=lambda: _open_overlay(target, base_folder, base_version),
+            stats=stats,
+            root=root,
+            scan=scan,
+            named=named,
+            base=base,
+            owed=owed,
+            workers=workers,
+        )
     finally:
         os.close(base_hold)
     stats.compacted = _compact_if_drifted(folder, name)
@@ -2169,20 +2170,49 @@ def _staged(connection: sqlite3.Connection, paths: Sequence[str], *, hierarchy: 
     return edges
 
 
-def _unstage(connection: sqlite3.Connection, paths: Sequence[str]) -> None:
+def _unstage(
+    connection: sqlite3.Connection, paths: Sequence[str], *, lazy: set[str] | frozenset[str] = frozenset()
+) -> None:
     """Move the stored extracted edges of files about to be re-resolved into the scratch table.
 
     Derived edges are left behind and deleted: they are recomputed from the resolved ones.
+
+    :param lazy: Files whose other edges `_base_members` reads from the base a batch at a time; only
+        their supertype edges are staged here, since every batch resolves against the whole hierarchy.
     """
     derived = ",".join("?" * len(_DERIVED_KINDS))
-    for chunk in _chunks(paths):
-        placeholders = ",".join("?" * len(chunk))
-        connection.execute(
-            f"INSERT INTO scratch.pending SELECT * FROM edges "  # noqa: S608
-            f"WHERE file_path IN ({placeholders}) AND kind NOT IN ({derived})",
-            [*chunk, *_DERIVED_KINDS],
-        )
+    hierarchy = ",".join("?" * len(HIERARCHY_KINDS))
+    eager = [path for path in paths if path not in lazy]
+    supertypes_only = [path for path in paths if path in lazy]
+    for chosen, kinds, values in (
+        (eager, f"NOT IN ({derived})", _DERIVED_KINDS),
+        (supertypes_only, f"IN ({hierarchy})", HIERARCHY_KINDS),
+    ):
+        for chunk in _chunks(chosen):
+            placeholders = ",".join("?" * len(chunk))
+            connection.execute(
+                f"INSERT INTO scratch.pending SELECT * FROM edges "  # noqa: S608
+                f"WHERE file_path IN ({placeholders}) AND kind {kinds}",
+                [*chunk, *values],
+            )
     _delete_edges(connection, paths)
+
+
+def _base_members(connection: sqlite3.Connection, batch: Sequence[str], lazy: set[str]) -> list[Edge]:
+    """Read the unresolved non-supertype edges of a batch's lazy files from the base, as `_staged` does from scratch."""
+    chosen = [path for path in batch if path in lazy]
+    if not chosen:
+        return []
+    excluded = (*HIERARCHY_KINDS, *_DERIVED_KINDS)
+    rows = lane_overlay.base_edges(connection, chosen, f"NOT IN ({','.join('?' * len(excluded))})", excluded)
+    return [_reset(edge_from_row(row)) for row in rows]
+
+
+def _drop_staged(connection: sqlite3.Connection, batch: Sequence[str]) -> None:
+    """Forget a resolved batch's unresolved edges, so the scratch database holds one batch's worth of them."""
+    for chunk in _chunks(batch):
+        placeholders = ",".join("?" * len(chunk))
+        connection.execute(f"DELETE FROM scratch.pending WHERE file_path IN ({placeholders})", chunk)  # noqa: S608
 
 
 def _write_meta(connection: sqlite3.Connection, root: Path) -> None:
@@ -2367,12 +2397,19 @@ def _resolve_pass(
     targets &= known_files
 
     _write_facts_symbols_for_read(connection, root, plan, set(parsed))
-    overlay, targets = _map_overlay_for(connection, root, plan, targets, known_files, list(parsed.values()))
+    overlay, targets = _map_overlay_for(
+        connection, root, plan, targets, known_files, list(parsed.values()), home=facts_home
+    )
     stats.reresolved_files = len(targets)
 
     ordered = sorted(targets)
-    _unstage(connection, ordered)
-    _recover_extracted_edges(connection, plan, overlay, targets - fresh, workers, sources)
+    overlaid = lane_overlay.is_overlay(connection)
+    # An overlay's base rows stay on disk under their masks, so the files whose edges come from the base
+    # stage only their supertype edges now and the rest a batch at a time: a lane's dependents are most
+    # of the workspace, and staging them all at once took the scratch database past 6 GB.
+    lazy = lane_overlay.base_visible_files(connection, ordered) if overlaid else set()
+    _unstage(connection, ordered, lazy=lazy)
+    lazy -= _recover_extracted_edges(connection, plan, overlay, targets - fresh, workers, sources)
 
     lookup = SqliteLookup(connection)
     resolver = Resolver(lookup)
@@ -2390,7 +2427,7 @@ def _resolve_pass(
 
     for batch in _chunks(ordered, _BATCH_FILES):
         files = set(batch)
-        members = _staged(connection, batch, hierarchy=False)
+        members = _staged(connection, batch, hierarchy=False) + _base_members(connection, batch, lazy)
         resolver.resolve_members(members)
         pending = [edge for path in batch for edge in supertypes.pop(path, [])] + members
         pending = _apply_overlay(pending, overlay, files)
@@ -2403,8 +2440,9 @@ def _resolve_pass(
         derived += resolver.derive_exercises(pending)
         _stage(connection, pending + derived, table="resolved")
         lookup.release()
-    if lane_overlay.is_overlay(connection):
-        stats.restored_files += lane_overlay.restore_unchanged(connection)
+        if overlaid:
+            stats.restored_files += lane_overlay.restore_unchanged(connection, batch)
+            _drop_staged(connection, batch)
     _publish_resolved(connection)
     _write_facts_status(connection, overlay, plan)
     stats.facts = _facts_stats(connection)
@@ -2422,13 +2460,15 @@ def _recover_extracted_edges(
     stored_targets: set[str],
     workers: int,
     sources: dict[str, Path],
-) -> None:
+) -> set[str]:
     """Re-extract the target files whose facts coverage may have changed, staging their edges a batch at a time.
 
     A covered file's extracted edges are REPLACED by the overlay's, so they are not in the
     table to reload: a file that loses its facts would otherwise be re-resolved from degraded
     copies of the fact edges rather than from what its source actually says. Re-reading those
     files is the only honest answer; a moved facts file can cover thousands of them.
+
+    :return: The files re-extracted, whose staged edges are now their source's.
     """
     changed_coverage = (plan.invalidated | plan.moved_coverage(overlay)) & stored_targets
     jobs = [
@@ -2436,12 +2476,15 @@ def _recover_extracted_edges(
         for path in sorted(changed_coverage)
         if path in sources and extractor_for(sources[path]) is not None
     ]
+    reread: set[str] = set()
     for batch in _extracted_batches(jobs, workers):
         rereads = sorted({extraction.file_path for extraction in batch})
+        reread.update(rereads)
         for chunk in _chunks(rereads):
             placeholders = ",".join("?" * len(chunk))
             connection.execute(f"DELETE FROM scratch.pending WHERE file_path IN ({placeholders})", chunk)  # noqa: S608
         _stage(connection, (edge for extraction in batch for edge in extraction.edges))
+    return reread
 
 
 def _target_symbols(connection: sqlite3.Connection, targets: set[str]) -> list[Symbol]:
@@ -2479,7 +2522,7 @@ def _plan_facts(
             # Each source's facts lines are hashed whole, `symbol` facts included: a file whose every
             # source hashes as before already has exactly its `symbol` facts stored. A lane's own build
             # rewrites every facts file its base has, and rewriting them all cost it minutes.
-            _write_facts_symbols(connection, loaded)
+            _write_facts_symbols(connection, loaded, sources=changed)
         loaded.release_facts()
         parsed[relative] = loaded
         return changed
@@ -2555,6 +2598,8 @@ def _map_overlay_for(
     targets: set[str],
     known_files: set[str],
     read: list[FactsFile],
+    *,
+    home: Path | None = None,
 ) -> tuple[FactsOverlay, set[str]]:
     """Read and map exactly the facts files, and the sources of them, this build depends on.
 
@@ -2564,14 +2609,15 @@ def _map_overlay_for(
 
     :param read: Facts files planning already read; they join the overlay whether or not anything
         of them is mapped, so their status row records the bytes this build saw.
+    :param home: A lane's base, where the generated Java the lane never built is read.
     :return: The overlay and the target set, grown by what the moved facts files turned out
         to cover.
     """
     request = plan.mapping_request(targets)
     if not request:
-        return FactsOverlay(root=root, files=list(read)), targets
+        return FactsOverlay(root=root, files=list(read), home=home), targets
     # The fact edges wait in the scratch database and are read back a batch of files at a time.
-    overlay = FactsOverlay(root=root, files=list(read), edges=OverlayEdges(connection, "scratch"))
+    overlay = FactsOverlay(root=root, files=list(read), edges=OverlayEdges(connection, "scratch"), home=home)
     symbols = MappingSymbols.stored(connection)
     declared = StoredDeclaredSymbols(connection, "java")
     map_facts_files(overlay, symbols, request, declared, plan.present)
@@ -2638,12 +2684,31 @@ def _write_facts_symbols_for_read(
         _write_facts_symbols(connection, loaded)
 
 
-def _write_facts_symbols(connection: sqlite3.Connection, loaded: FactsFile) -> None:
-    """Replace the `symbol` facts the graph holds for one parsed facts file."""
-    connection.execute("DELETE FROM facts_symbols WHERE facts_file = ?", (loaded.relative_path,))
+def _write_facts_symbols(
+    connection: sqlite3.Connection, loaded: FactsFile, *, sources: Collection[str] | None = None
+) -> None:
+    """Replace the `symbol` facts the graph holds for one parsed facts file, or for only some of its sources.
+
+    :param sources: The sources whose facts changed; every other source's rows are left as stored, so a
+        lane's overlay holds the sources its own build changed rather than a copy of the whole file.
+    """
+    if sources is None:
+        connection.execute("DELETE FROM facts_symbols WHERE facts_file = ?", (loaded.relative_path,))
+    else:
+        chosen = sorted(sources)
+        for chunk in _chunks(chosen):
+            placeholders = ",".join("?" * len(chunk))
+            connection.execute(
+                f"DELETE FROM facts_symbols WHERE facts_file = ? AND file_path IN ({placeholders})",  # noqa: S608
+                [loaded.relative_path, *chunk],
+            )
     connection.executemany(
         "INSERT INTO facts_symbols (ref, file_path, line, facts_file, language) VALUES (?,?,?,?,?)",
-        [(ref, path, line, loaded.relative_path, loaded.header.language) for ref, path, line in symbol_facts(loaded)],
+        [
+            (ref, path, line, loaded.relative_path, loaded.header.language)
+            for ref, path, line in symbol_facts(loaded)
+            if sources is None or path in sources
+        ],
     )
 
 
