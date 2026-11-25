@@ -110,6 +110,11 @@ PRUNE_HOURS_ENV = "ZEMBLE_DAEMON_PRUNE_HOURS"
 _DEFAULT_PRUNE_HOURS = 6
 #: The first prune waits this long after start, so it never competes with the first requests.
 _PRUNE_FIRST_DELAY_SECONDS = 120.0
+#: A lane overlay or a graph no request used for this long is released before the size bound runs, so the bound can
+#: evict its folder: 2026-11-25 the daemon held every lane it had ever served (overlays outside `max_indexes`, graphs
+#: never forgotten), its cache stood at 15.4 GB over a 12 GB bound and nothing was evictable.
+IDLE_RELEASE_HOURS_ENV = "ZEMBLE_DAEMON_IDLE_RELEASE_HOURS"
+_DEFAULT_IDLE_RELEASE_HOURS = 3.0
 #: Hours between two checks whether a paid family's referenced vectors are due for their daily report
 #: to the embedding server (`zemble.embedding.referenced`); 0 disables the daemon's own reports.
 REFERENCED_HOURS_ENV = "ZEMBLE_DAEMON_REFERENCED_HOURS"
@@ -666,6 +671,9 @@ class Daemon:
                     with contextlib.suppress(Exception):
                         await asyncio.shield(loading)
                     continue
+                # The resident future pins the index it resolved to: held across the rebuild below, a replanned
+                # lane kept its old overlay generation mapped, its files deleted (4.4 GB, 2026-11-25).
+                del loading
                 paths = self._watch_changes.pop(cache_key, set())
                 root = Path(cache_key[0])
                 graph = paths is None or any(path.suffix == ".java" or matches_facts_glob(root, path) for path in paths)
@@ -1161,11 +1169,44 @@ class Daemon:
                 logger.exception("bounding the cache's size failed")
             await asyncio.sleep(hours * 3600)
 
+    def release_idle(self, *, now: float | None = None) -> list[str]:
+        """Evict the lane overlays and forget the graphs no request used for IDLE_RELEASE_HOURS_ENV hours.
+
+        A base index stays: `max_indexes` already bounds those. A graph whose root still has a resident index or is
+        the base of one stays with it.
+
+        :return: The released roots.
+        """
+        from zemble.envknob import env_float
+
+        hours = env_float(IDLE_RELEASE_HOURS_ENV, _DEFAULT_IDLE_RELEASE_HOURS)
+        cutoff = (time.time() if now is None else now) - hours * 3600
+        released = []
+        for key in [key for key in self.cache._tasks if self.cache.base_of(key) is not None]:
+            # A lane asked only graph questions is in use too: its overlay's watcher keeps that graph fresh.
+            last = max(self.cache.last_used.get(key, 0.0), self.graphs.used.get(key[0], 0.0))
+            if last < cutoff and key not in self.rebuilding:
+                self.cache.evict(key)
+                released.append(key[0])
+        resident = {key[0] for key in self.cache._tasks}
+        resident |= {base[0] for key in self.cache._tasks if (base := self.cache.base_of(key)) is not None}
+        for root in self.graphs.idle_roots(cutoff):
+            if root not in resident:
+                self.graphs.forget(root)
+                released.append(root)
+        if released:
+            release_free_heap()
+            logger.info("released %d idle root(s): %s", len(released), sorted(set(released)))
+        return released
+
     async def enforce_bound(self) -> list[str]:
         """Remove the least recently used cache entries past ZEMBLE_CACHE_MAX_GB, never one this daemon holds.
 
+        Idle lanes and graphs are released first (`release_idle`), so their folders count as unheld.
+
         :return: The removed entries' paths.
         """
+        self.release_idle()
         from zemble.cache import resolve_cache_folder
         from zemble.cache_orphans import CACHE_MAX_GB_ENV, DEFAULT_CACHE_MAX_GB, over_bound, remove_orphan
         from zemble.envknob import env_float

@@ -126,3 +126,48 @@ async def test_the_daemon_stamps_what_a_read_used_and_holds_what_it_serves(tmp_p
     folder = resolve_cache_folder() / cache_key(str(root))
     assert (folder / USED_MARKER).is_file(), "step 1: THE ASSERTION -- the read stamped its folder"
     assert str(root) in daemon.held_roots(), "step 2: a served root is held"
+
+
+@pytest.mark.anyio
+async def test_the_daemon_releases_idle_lanes_and_graphs_so_the_bound_can_evict_them(tmp_path: Path) -> None:
+    """An overlay or graph unused past the idle release stops being held; a used one, and a resident root's graph, stay.
+
+    2026-11-25: the daemon held every lane it had ever served, so its 15.4 GB cache had nothing the 12 GB bound could
+    evict.
+    """
+    import asyncio
+
+    daemon = server.Daemon(watch=False)
+    base = (str(tmp_path / "base"), ("code",))
+    idle = (str(tmp_path / "idle-lane"), ("code",))
+    used = (str(tmp_path / "used-lane"), ("code",))
+    now = time.time()
+    for key, used_at in ((base, now - 10 * _HOUR), (idle, now - 5 * _HOUR), (used, now - 1 * _HOUR)):
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(object())
+        daemon.cache._tasks[key] = future
+        daemon.cache.last_used[key] = used_at
+    daemon.cache._lane_bases[idle] = base
+    daemon.cache._lane_bases[used] = base
+    gone_graph = str(tmp_path / "graph-only")
+    for root, used_at in ((gone_graph, now - 5 * _HOUR), (base[0], now - 5 * _HOUR), (used[0], now)):
+        daemon.graphs.ready.add(root)
+        daemon.graphs.used[root] = used_at
+    assert idle[0] in daemon.held_roots() and gone_graph in daemon.held_roots(), "step 1: both held before"
+
+    released = daemon.release_idle(now=now)
+
+    assert sorted(released) == sorted([idle[0], gone_graph]), f"step 2: THE ASSERTION -- the idle ones go: {released}"
+    held = daemon.held_roots()
+    assert idle[0] not in held and gone_graph not in held, "step 2: no longer held, so the bound may evict them"
+    assert {base[0], used[0]} <= held, "step 3: a used lane and the base it overlays stay"
+    assert base[0] in daemon.graphs.ready, "step 3: a resident root's graph stays, however old its last ask"
+
+    graph_lane = (str(tmp_path / "graph-lane"), ("code",))
+    future = asyncio.get_running_loop().create_future()
+    future.set_result(object())
+    daemon.cache._tasks[graph_lane] = future
+    daemon.cache.last_used[graph_lane] = now - 5 * _HOUR
+    daemon.cache._lane_bases[graph_lane] = base
+    daemon.graphs.used[graph_lane[0]] = now
+    assert daemon.release_idle(now=now) == [], "step 4: a lane asked only graph questions stays"

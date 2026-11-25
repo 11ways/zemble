@@ -170,6 +170,8 @@ class GraphJobs:
         self._stale_checks: set[str] = set()
         #: Roots found to be no lane: a lane is a lane for good, so they are never checked again.
         self._not_lanes: set[str] = set()
+        #: When a request last asked for each root's graph (`ensure`), for `idle_roots`.
+        self.used: dict[str, float] = {}
 
     async def ensure(
         self, root: str, deadline: float | None, *, refresh: bool = False, changed_paths: Any = None
@@ -184,10 +186,12 @@ class GraphJobs:
         """
         from zemble.graph.store import graph_exists
 
+        self.used[str(Path(root).resolve())] = time.time()
         if (key := str(Path(root).resolve())) in self.ready and not refresh:
             self._follow_base(key)
             return key
         root = await self._graph_root(root)
+        self.used[root] = time.time()
         if root in self.ready and not refresh:
             self._follow_base(root)
             return root
@@ -553,6 +557,7 @@ class GraphJobs:
             for table in (self.states, self.generations, self.paths, self.pending):
                 table.pop(key, None)
             self.ready.discard(key)
+            self.used.pop(key, None)
             self._not_lanes.discard(key)
 
     def forget_gone(self) -> list[str]:
@@ -561,6 +566,14 @@ class GraphJobs:
         for root in gone:
             self.forget(root)
         return gone
+
+    def idle_roots(self, cutoff: float) -> list[str]:
+        """Return the ready roots no request asked for since *cutoff* (`time.time()`) and no job is building."""
+        return sorted(
+            root
+            for root in self.ready
+            if self.used.get(root, 0.0) < cutoff and not (root in self.jobs and not self.jobs[root].done())
+        )
 
     def status(self) -> dict[str, Any]:
         """Expose completed/refused jobs as well as active construction."""
