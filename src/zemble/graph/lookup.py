@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
@@ -260,10 +260,12 @@ class MemoryLookup:
         """Keep everything: this lookup IS its dictionaries, built once for the whole table."""
 
 
-#: How many decoded symbols a `SqliteLookup` keeps across `release()` calls, ~1.3 KiB each. The
+#: How many decoded symbols a `SqliteLookup` holds before a `release()` lets most go, ~1.3 KiB each. The
 #: batches of one build ask for the same popular names (`get`, `of`, `build`) over and over, and
 #: forgetting them after every batch cost the zenit workspace a third more CPU.
 HELD_SYMBOLS = 50_000
+#: How many of those a release keeps (never more than HELD_SYMBOLS): the entries asked for most since the previous one.
+KEPT_SYMBOLS = 25_000
 
 
 class SqliteLookup:
@@ -286,6 +288,16 @@ class SqliteLookup:
         self._declarations: dict[tuple[DeclarationKey, str], list[Symbol]] = {}
         self._supertypes: dict[str, list[str]] = {}
         self._contexts: dict[str, FileContext] = {}
+        #: The symbol caches a release may keep entries of, and how often each entry was asked for since it.
+        self._kept_caches = (
+            self._by_id,
+            self._by_qualified,
+            self._by_name,
+            self._members,
+            self._in_file,
+            self._declarations,
+        )
+        self._asked: Counter[tuple[int, object]] = Counter()
 
     def _select(self, clause: str, *parameters: object) -> list[Symbol]:
         """Run a symbol query and rebuild every row it returned."""
@@ -296,6 +308,7 @@ class SqliteLookup:
 
     def by_id(self, symbol_id: str) -> Symbol | None:
         """Return the symbol with this id, or None."""
+        self._asked[(0, symbol_id)] += 1
         if symbol_id not in self._by_id:
             found = self._select("id = ?", symbol_id)
             self._by_id[symbol_id] = found[0] if found else None
@@ -303,6 +316,7 @@ class SqliteLookup:
 
     def by_qualified(self, qualified_name: str) -> list[Symbol]:
         """Return every symbol carrying this exact qualified name."""
+        self._asked[(1, qualified_name)] += 1
         found = self._by_qualified.get(qualified_name)
         if found is None:
             found = self._select("qualified_name = ?", qualified_name)
@@ -311,6 +325,7 @@ class SqliteLookup:
 
     def _named(self, name: str) -> list[Symbol]:
         """Return every symbol with this simple name, cached across both kind filters."""
+        self._asked[(2, name)] += 1
         found = self._by_name.get(name)
         if found is None:
             found = self._select("name = ?", name)
@@ -329,6 +344,7 @@ class SqliteLookup:
 
     def members(self, container_id: str) -> list[Symbol]:
         """Return the symbols declared directly inside a container."""
+        self._asked[(3, container_id)] += 1
         found = self._members.get(container_id)
         if found is None:
             found = self._select("container_id = ?", container_id)
@@ -341,6 +357,7 @@ class SqliteLookup:
 
     def in_file(self, file_path: str) -> list[Symbol]:
         """Return every declaration of one file."""
+        self._asked[(4, file_path)] += 1
         found = self._in_file.get(file_path)
         if found is None:
             found = self._select("file_path = ?", file_path)
@@ -349,6 +366,7 @@ class SqliteLookup:
 
     def declarations(self, key: DeclarationKey, value: str) -> list[Symbol]:
         """Return the symbols registered under one Hawkeye declaration key."""
+        self._asked[(5, (key, value))] += 1
         found = self._declarations.get((key, value))
         if found is None:
             rows = self._connection.execute(
@@ -384,18 +402,30 @@ class SqliteLookup:
         return found
 
     def release(self) -> None:
-        """Drop every cache once they hold more than :data:`HELD_SYMBOLS`, so a batched build stays bounded."""
+        """Past :data:`HELD_SYMBOLS`, keep the :data:`KEPT_SYMBOLS` worth asked for most and drop the rest.
+
+        AIDEV-NOTE: dropping everything re-decoded the popular names after every batch: the spam-codes lane
+        overlay's whole rebuild (bspeed-z 2026-11-26, one run each) took 208.8 s with it and 195.0 s keeping
+        them. Only symbol caches keep entries; supertypes and file contexts go, as they are cheap to read again.
+        """
         if self._held <= HELD_SYMBOLS:
             return
-        self._held = 0
-        for cache in (
-            self._by_id,
-            self._by_qualified,
-            self._by_name,
-            self._members,
-            self._in_file,
-            self._declarations,
-            self._supertypes,
-            self._contexts,
-        ):
-            cache.clear()
+        keep: list[set[object]] = [set() for _ in self._kept_caches]
+        kept = 0
+        for (index, key), _count in self._asked.most_common():
+            cache = self._kept_caches[index]
+            if key not in cache:
+                continue
+            value = cache[key]
+            rows = len(value) if isinstance(value, list) else 1
+            if kept + rows > min(KEPT_SYMBOLS, HELD_SYMBOLS):
+                continue
+            keep[index].add(key)
+            kept += rows
+        for cache, keys in zip(self._kept_caches, keep, strict=True):
+            for key in [key for key in cache if key not in keys]:
+                del cache[key]
+        self._supertypes.clear()
+        self._contexts.clear()
+        self._asked.clear()
+        self._held = kept

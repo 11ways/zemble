@@ -569,11 +569,28 @@ def test_a_lookup_keeps_its_answers_until_they_pass_the_budget(
         lookup.release()
         assert lookup.by_qualified("com.example.core.Circle") is circle, "step 2: an answer under budget is kept"
 
-        # 3. Past the budget a release drops every cache, and the next answer is read again.
+        # 3. Past the budget, with nothing to keep, a release drops every cache and the next answer is read again.
         lookup.by_qualified("com.example.core.Shape")
+        monkeypatch.setattr(lookup_module, "KEPT_SYMBOLS", 0, raising=False)
         lookup.release()
         again = lookup.by_qualified("com.example.core.Circle")
         assert again is not circle and again == circle, "step 3: past the budget the answer is read anew"
+
+        # 4. THE ASSERTION: a release past the budget keeps the answers asked for most, up to KEPT_SYMBOLS of
+        #    them: a popular name is not decoded again after every batch (bspeed-z 2026-11-26: a lane overlay's
+        #    whole rebuild spent 145 s of 800 in 181,694 symbol selects).
+        lookup = lookup_module.SqliteLookup(connection)
+        popular = lookup.by_qualified("com.example.core.Circle")
+        lookup.by_qualified("com.example.core.Circle")
+        lookup.by_qualified("com.example.core.Circle")
+        rare = lookup.by_qualified("com.example.core.Shape")
+        assert rare, "step 4: the rare one answers too"
+        monkeypatch.setattr(lookup_module, "HELD_SYMBOLS", len(popular) + len(rare) - 1)
+        monkeypatch.setattr(lookup_module, "KEPT_SYMBOLS", len(popular), raising=False)
+        lookup.release()
+        kept = lookup.by_qualified("com.example.core.Circle")
+        assert kept is popular, "step 4: THE ASSERTION -- the popular one stays"
+        assert lookup.by_qualified("com.example.core.Shape") is not rare, "step 4: the rare one is read again"
     finally:
         connection.close()
 
