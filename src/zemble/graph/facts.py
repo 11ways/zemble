@@ -17,6 +17,7 @@ import fnmatch
 import hashlib
 import logging
 import os
+import re
 import sqlite3
 import time
 from collections import Counter
@@ -490,6 +491,7 @@ def load_facts_file(
     relative_path: str | None = None,
     symbols_only: bool = False,
     hashed: bool = True,
+    only: frozenset[str] | None = None,
 ) -> FactsFile:
     """Read one facts file and decide which of its source files are still fresh.
 
@@ -503,7 +505,10 @@ def load_facts_file(
         line that cannot be a `file` or `symbol` fact is never parsed.
     :param hashed: False keeps every fact but hashes no source, leaving each one's freshness undecided: a
         re-read for facts whose freshness an earlier read of the same file already decided.
-    :return: The parsed file, with per-source freshness already decided unless `symbols_only` or not `hashed`.
+    :param hashed: False keeps every fact but hashes no source, leaving each one's freshness undecided: a
+        re-read for facts whose freshness an earlier read of the same file already decided.
+    :param only: Keep the facts of these workspace-relative sources only, and decode no line whose bytes show it
+        belongs to another: a refill's read. Hashes nothing, and its counts of skipped facts cover only what it read.
     :raises FactsFormatError: If the header is missing, unreadable or of another version.
     """
     home = root if relative_path is None else facts_home_of(path, relative_path)
@@ -525,7 +530,16 @@ def load_facts_file(
                 mtime_ns=stat.st_mtime_ns,
                 size=stat.st_size,
             )
-            _read_body(handle, loaded, home, facts_root, symbols_only=symbols_only, hash_root=root, hashed=hashed)
+            _read_body(
+                handle,
+                loaded,
+                home,
+                facts_root,
+                symbols_only=symbols_only,
+                hash_root=root,
+                hashed=hashed and only is None,
+                only=only,
+            )
     except OSError as error:
         raise FactsFormatError(f"{path}: cannot be read") from error
     return loaded
@@ -555,6 +569,7 @@ def _read_body(
     symbols_only: bool = False,
     hash_root: Path | None = None,
     hashed: bool = True,
+    only: frozenset[str] | None = None,
 ) -> None:
     """Group every fact under the source file it was declared for, hashing each source's lines.
 
@@ -565,8 +580,11 @@ def _read_body(
     current: SourceFacts | None = None
     outside: str | None = None
     digests = _SourceDigests(enabled=hashed and not symbols_only)
+    wanted: dict[bytes, bool] = {}
     for raw in lines:
         if not raw.strip() or (symbols_only and b'"symbol"' not in raw and b'"file"' not in raw):
+            continue
+        if only is not None and _belongs_elsewhere(raw, current, only, wanted, root, facts_root):
             continue
         try:
             payload = orjson.loads(raw)
@@ -598,6 +616,45 @@ def _read_body(
         target.facts.append(payload)
         digests.add(target, raw)
     digests.seal(loaded)
+
+
+#: A fact line's `path` value, when it is written without escapes.
+_PATH_VALUE = re.compile(rb'"path"\s*:\s*"([^"\\]*)"')
+
+
+def _belongs_elsewhere(
+    raw: bytes,
+    current: SourceFacts | None,
+    only: frozenset[str],
+    wanted: dict[bytes, bool],
+    root: Path,
+    facts_root: Path,
+) -> bool:
+    """Return whether a fact line's bytes alone show it attaches to no source in *only*.
+
+    AIDEV-NOTE: a refill keeps a few sources' facts of a file of hundreds, and decoding every line cost a lane
+    overlay's whole rebuild 39 s of 660 in 195 refills (bspeed-z 2026-11-26). Only a flat line (one `{`, no escape
+    anywhere) is judged here; a `file` line, a nested or escaped one, or a `path` that is not a plain string is
+    decoded as before, so a doubt always costs a decode and never a fact.
+    """
+    if b'"file"' in raw or b"\\" in raw or raw.count(b"{") != 1:
+        return False
+    found = _PATH_VALUE.search(raw) if b'"path"' in raw else None
+    if found is None and b'"path"' in raw:
+        return False
+    if found is None or not found.group(1):
+        # No path, or an empty one as `_target_of` reads it: the fact attaches to the last `file` line.
+        return current is None or current.path not in only
+    written = found.group(1)
+    keep = wanted.get(written)
+    if keep is None:
+        try:
+            declared = written.decode("utf-8")
+        except UnicodeDecodeError:
+            return False
+        relative = _relative_to_workspace(root, facts_root, declared)
+        keep = wanted[written] = relative is not None and relative in only
+    return not keep
 
 
 class _SourceDigests:
@@ -1336,10 +1393,17 @@ def map_facts_files(
         loaded.release_facts()
 
 
-def _parse(overlay: FactsOverlay, path: Path, relative_path: str, *, hashed: bool = True) -> FactsFile | None:
+def _parse(
+    overlay: FactsOverlay,
+    path: Path,
+    relative_path: str,
+    *,
+    hashed: bool = True,
+    only: frozenset[str] | None = None,
+) -> FactsFile | None:
     """Parse one facts file, recording why when it cannot be read."""
     try:
-        return load_facts_file(path, overlay.root, relative_path=relative_path, hashed=hashed)
+        return load_facts_file(path, overlay.root, relative_path=relative_path, hashed=hashed, only=only)
     except FactsFormatError as error:
         overlay.errors.append((_display_path(overlay.root, path), str(error)))
         logger.warning("Ignoring facts file: %s", error)
@@ -1353,7 +1417,9 @@ def _refill(overlay: FactsOverlay, loaded: FactsFile, chosen: list[SourceFacts])
     hashing every source of the file again on each refill cost a lane overlay's whole rebuild 37.6 s of the
     800 s builder 51's cProfile measured (bspeed-z 2026-11-26).
     """
-    again = _parse(overlay, loaded.path, loaded.relative_path, hashed=False)
+    again = _parse(
+        overlay, loaded.path, loaded.relative_path, hashed=False, only=frozenset(source.path for source in chosen)
+    )
     if again is None:
         return False
     for source in chosen:

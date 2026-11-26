@@ -470,6 +470,38 @@ def test_a_symbols_only_read_yields_exactly_the_symbol_facts_of_a_full_read(
     assert ("com.example.core.Circle", CIRCLE, 6) in quick and len(quick) == 4, "1: duplicates and paths kept"
 
 
+def test_a_refill_keeps_what_a_full_read_keeps_for_its_sources(graph_fixture_root: Path, tmp_path: Path) -> None:
+    """A read for some sources keeps exactly the facts a full read gives them, whatever form a line is written in."""
+    workspace = _workspace(graph_fixture_root, tmp_path / "ws")
+    path = _write_facts(workspace, [_header()])
+    compact = {"separators": (",", ":")}
+    call = {"t": "call", "from": "com.example.core.Circle#area()", "to": "java.lang.Math#abs(double)", "line": 9}
+    lines = [
+        json.dumps({"t": "file", "path": CONSUMER, "sha256": _sha(workspace, CONSUMER)}, **compact),
+        json.dumps({**call, "line": 1}, **compact),
+        json.dumps({**call, "path": CIRCLE, "line": 2}, **compact),
+        json.dumps({**call, "path": CIRCLE, "line": 3}),
+        json.dumps({**call, "path": "", "line": 4}, **compact),
+        json.dumps({"t": "annotation", "on": "com.example.app.Consumer", "args": {"path": CONSUMER}}, **compact),
+        json.dumps({"t": "file", "path": CIRCLE, "sha256": _sha(workspace, CIRCLE)}, **compact),
+        json.dumps({**call, "line": 5}, **compact),
+        json.dumps({**call, "path": "", "line": 6}, **compact),
+        json.dumps({**call, "to": "xé#y()", "line": 7}, **compact, ensure_ascii=True),
+        json.dumps({**call, "path": CONSUMER, "line": 8}, **compact),
+        json.dumps({"t": "annotation", "on": "com.example.core.Circle", "args": {"path": CONSUMER}}, **compact),
+    ]
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    full = load_facts_file(path, workspace, hashed=False)
+
+    # THE ASSERTION: each source's facts are a full read's, in its order, read for either source alone (bspeed-z
+    # 2026-11-26: a refill decodes only the lines whose bytes may belong to the sources it was asked for).
+    for source in (CIRCLE, CONSUMER):
+        alone = load_facts_file(path, workspace, only=frozenset({source}))
+        assert alone.sources[source].facts == full.sources[source].facts, f"THE ASSERTION -- {source}'s facts"
+        assert full.sources[source].facts, f"{source} has facts to keep"
+
+
 def test_a_facts_file_restored_into_another_checkout_resolves_there(graph_fixture_root: Path, tmp_path: Path) -> None:
     """A build cache copies a facts file byte for byte; its relative root makes it the new checkout's facts."""
     first = _workspace(graph_fixture_root, tmp_path / "a" / "checkout")

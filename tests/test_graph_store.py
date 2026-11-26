@@ -595,6 +595,38 @@ def test_a_lookup_keeps_its_answers_until_they_pass_the_budget(
         connection.close()
 
 
+def test_a_lookup_by_simple_name_decodes_only_types_and_callables(
+    graph_fixture_root: Path, graph_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A name that is a field and a method decodes the method only: fields are most of the popular names' rows."""
+    from zemble.graph import lookup as lookup_module
+
+    build_graph(str(graph_fixture_root))
+    decoded: list[str] = []
+    real = lookup_module.symbol_from_row
+
+    def counting(row: sqlite3.Row):
+        symbol = real(row)
+        decoded.append(symbol.kind.value)
+        return symbol
+
+    monkeypatch.setattr(lookup_module, "symbol_from_row", counting)
+    connection = connect(str(graph_fixture_root))
+    try:
+        lookup = lookup_module.SqliteLookup(connection)
+        callables = lookup.callables_by_simple("name")
+        assert callables and {symbol.kind.value for symbol in callables} == {"method"}, "step 1: Entry.name() answers"
+        assert lookup.types_by_simple("name") == [], "step 1: no type is named name"
+        # 2. THE ASSERTION: the field `Entry.name` is never decoded (bspeed-z 2026-11-26: the spam-codes lane's
+        #    whole rebuild decoded 2.8M symbol rows, 95 s of 145 in 39,537 by-name selects, mostly fields).
+        assert sorted(decoded) == ["method"] * len(callables), f"step 2: THE ASSERTION -- only callables, not {decoded}"
+        # 3. Asked again, the filtered answers come from the cache: nothing is decoded or filtered anew.
+        assert lookup.callables_by_simple("name") is lookup.callables_by_simple("name"), "step 3: one cached list"
+        assert len(decoded) == len(callables), "step 3: nothing is decoded again"
+    finally:
+        connection.close()
+
+
 class _DetachFails(sqlite3.Connection):
     """A connection whose DETACH fails the way an interrupted worker's does."""
 

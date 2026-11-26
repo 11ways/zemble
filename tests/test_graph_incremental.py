@@ -352,8 +352,22 @@ def test_a_facts_file_mapped_in_two_rounds_is_read_again(
     refills: list[str] = []
     refilling: list[int] = []
     hashed_in_refill: list[str] = []
+    # Per refill: the fact lines it decoded (header and `file` lines aside) and the facts it kept for its sources.
+    decoded_in_refill: list[int] = []
+    kept_in_refill: list[int] = []
     refill = facts._refill
     sha = facts.file_sha256
+    real_orjson = facts.orjson
+
+    class CountingOrjson:
+        JSONDecodeError = real_orjson.JSONDecodeError
+
+        @staticmethod
+        def loads(raw):  # noqa: ANN001, ANN205
+            payload = real_orjson.loads(raw)
+            if refilling and isinstance(payload, dict) and payload.get("t") not in ("file", None):
+                decoded_in_refill[-1] += 1
+            return payload
 
     def counted_sha(path: Path) -> str | None:
         if refilling:
@@ -363,13 +377,16 @@ def test_a_facts_file_mapped_in_two_rounds_is_read_again(
     def counted_refill(overlay, loaded, chosen) -> bool:  # noqa: ANN001
         refills.append(loaded.relative_path)
         refilling.append(1)
+        decoded_in_refill.append(0)
         try:
             return refill(overlay, loaded, chosen)
         finally:
             refilling.pop()
+            kept_in_refill.append(sum(len(source.facts) for source in chosen))
 
     monkeypatch.setattr(facts, "file_sha256", counted_sha)
     monkeypatch.setattr(facts, "_refill", counted_refill)
+    monkeypatch.setattr(facts, "orjson", CountingOrjson)
     functions = workspace / FUNCTIONS
     functions.write_text(functions.read_text(encoding="utf-8") + "// edited\n", encoding="utf-8")
     template_facts = _facts_lines(workspace)[1:3]
@@ -379,6 +396,11 @@ def test_a_facts_file_mapped_in_two_rounds_is_read_again(
     # for those are read again to map them; the second is read again for round two.
     assert refills == [first, second], "step 2: each facts file was parsed again for what it had to map"
     assert hashed_in_refill == [], "step 2: THE ASSERTION -- a refill hashes no source"
+    # A refill decodes only the lines of the sources it was asked for (bspeed-z 2026-11-26: 195 refills of a lane
+    # rebuild decoded every line of their files, 39 s of 660, for the few sources each one maps).
+    assert decoded_in_refill == kept_in_refill, (
+        f"step 2: THE ASSERTION -- a refill decodes the facts it keeps ({kept_in_refill}), not {decoded_in_refill}"
+    )
     _assert_matches_full_rebuild(workspace, scratch, "step 2 second round")
 
 

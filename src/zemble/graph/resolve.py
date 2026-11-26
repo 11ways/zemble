@@ -84,6 +84,10 @@ def _grade(matches: list[Symbol], best: Resolution) -> _Match:
     return _Match(None, Resolution.AMBIGUOUS, sorted(symbol.id for symbol in matches))
 
 
+#: How many candidate ids the by-name call memo holds before it starts again (~100 bytes each).
+MEMO_CANDIDATE_IDS = 500_000
+
+
 class Resolver:
     """Resolves extracted edges against the whole workspace symbol table."""
 
@@ -93,6 +97,8 @@ class Resolver:
         #: Supertypes resolved by THIS pass, layered over the ones the lookup already knows.
         self._resolved_supertypes: dict[str, list[str]] = {}
         self._chain_cache: dict[str, list[str]] = {}
+        self._by_name_calls: dict[tuple[str, str | None, int], _Match] = {}
+        self._by_name_held = 0
 
     # ---- lookup helpers -------------------------------------------------
 
@@ -364,13 +370,29 @@ class Resolver:
         return None
 
     def _resolve_call_by_name(self, edge: Edge, context: FileContext) -> _Match:
-        """Last rung: match a call against every same-named callable of the file's language family."""
-        candidates = [
-            symbol
-            for symbol in self._same_family(self.lookup.callables_by_simple(edge.dst_name), context.file_path)
-            if edge.arity < 0 or symbol.arity == edge.arity
-        ]
-        return _grade(candidates, Resolution.UNIQUE_NAME)
+        """Last rung: match a call against every same-named callable of the file's language family.
+
+        AIDEV-NOTE: memoised per (name, family, arity) for the pass: a popular name (`get`, `of`) has hundreds of
+        candidates, filtered again for each of its calls, which cost the spam-codes lane's whole rebuild 95M
+        `Symbol.arity` reads and ~80 s of 660 (bspeed-z 2026-11-26). The answer only reads the symbol table, which
+        a pass never changes; the memo holds candidate ids, never symbols, so a lookup's release still frees them.
+        """
+        family = self._family(context.file_path)
+        key = (edge.dst_name, family, edge.arity)
+        found = self._by_name_calls.get(key)
+        if found is None:
+            candidates = [
+                symbol
+                for symbol in self._same_family(self.lookup.callables_by_simple(edge.dst_name), context.file_path)
+                if edge.arity < 0 or symbol.arity == edge.arity
+            ]
+            found = _grade(candidates, Resolution.UNIQUE_NAME)
+            if self._by_name_held + len(found.candidates) > MEMO_CANDIDATE_IDS:
+                self._by_name_calls.clear()
+                self._by_name_held = 0
+            self._by_name_calls[key] = found
+            self._by_name_held += len(found.candidates) + 1
+        return found
 
     # ---- edge resolution ------------------------------------------------
 

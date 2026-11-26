@@ -187,3 +187,50 @@ def test_binding_form_journey(graph_fixture_root: Path, built_graph) -> None:
 
     # 7. A catch binding whose type is outside the workspace leaves the call unresolved, not wrong.
     assert landed("Traversal.guarded()", "getMessage") is None, "step 7: JDK receivers stay unresolved"
+
+
+def test_a_by_name_call_is_answered_once_per_name_and_arity() -> None:
+    """Calls of one popular name are filtered once per arity, with the same answers as before."""
+    from zemble.graph.lookup import MemoryLookup
+    from zemble.graph.model import Edge, Symbol, SymbolKind
+    from zemble.graph.resolve import Resolver
+
+    def method(file_path: str, owner: str, params: list[str]) -> Symbol:
+        qualified = f"{owner}.get"
+        return Symbol(
+            id=f"{file_path}#{qualified}({','.join(params)})",
+            kind=SymbolKind.METHOD,
+            name="get",
+            qualified_name=qualified,
+            file_path=file_path,
+            start_line=1,
+            end_line=1,
+            param_types=params,
+        )
+
+    symbols = [method("a/A.java", "a.A", []), method("b/B.java", "b.B", []), method("b/B.java", "b.B", ["int"])]
+
+    class Counting(MemoryLookup):
+        asked = 0
+
+        def callables_by_simple(self, name: str) -> list[Symbol]:
+            Counting.asked += 1
+            return super().callables_by_simple(name)
+
+    resolver = Resolver(Counting(symbols, {}))
+
+    def call(arity: int) -> Edge:
+        return Edge(src_id="c/C.java#c.C.run()", dst_name="get", kind=EdgeKind.CALLS, line=3, arity=arity, receiver="x")
+
+    edges = [call(0), call(1), call(0), call(1), call(0)]
+    for edge in edges:
+        resolver.resolve_edge(edge)
+    # 1. The answers: two zero-argument candidates are ambiguous, the one-argument overload is the unique name.
+    assert [edge.resolution for edge in edges] == [Resolution.AMBIGUOUS, Resolution.UNIQUE_NAME] * 2 + [
+        Resolution.AMBIGUOUS
+    ], "step 1: by-name answers"
+    assert edges[0].candidates == sorted(symbol.id for symbol in symbols[:2]), "step 1: both candidates named"
+    assert edges[1].dst_id == symbols[2].id, "step 1: the overload by arity"
+    # 2. THE ASSERTION: each (name, arity) asked the lookup and filtered its candidates once (bspeed-z 2026-11-26:
+    #    95M `Symbol.arity` reads in one lane rebuild, every call of `get` filtering every `get` again).
+    assert Counting.asked == 2, f"step 2: THE ASSERTION -- asked once per arity, not {Counting.asked} times"

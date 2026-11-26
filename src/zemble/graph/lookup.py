@@ -94,6 +94,26 @@ class FileContext:
     imports: FileImports = field(default_factory=FileImports)
 
 
+#: Every kind by its stored value: `SymbolKind(value)` goes through `Enum.__call__`, 16 s of a lane rebuild's 51 s
+#: of decoding (bspeed-z 2026-11-26). An unknown value still raises, through the constructor.
+_KIND_BY_VALUE: dict[str, SymbolKind] = {kind.value: kind for kind in SymbolKind}
+#: The kinds a by-name answer serves. Fields and packages are most rows of a popular name (`id`, `server`, `label`)
+#: and no by-name question asks for them.
+_NAMED_KIND_VALUES: tuple[str, ...] = tuple(sorted(kind.value for kind in TYPE_KINDS | CALLABLE_KINDS))
+
+
+@dataclass(frozen=True)
+class _Named:
+    """The types and the callables of one simple name, each filtered once."""
+
+    types: list[Symbol]
+    callables: list[Symbol]
+
+    def __len__(self) -> int:
+        """Count the decoded symbols held."""
+        return len(self.types) + len(self.callables)
+
+
 def symbol_from_row(row: sqlite3.Row) -> Symbol:
     """Rebuild a symbol from a database row.
 
@@ -102,7 +122,7 @@ def symbol_from_row(row: sqlite3.Row) -> Symbol:
     """
     return Symbol(
         id=row["id"],
-        kind=SymbolKind(row["kind"]),
+        kind=_KIND_BY_VALUE.get(row["kind"]) or SymbolKind(row["kind"]),
         name=row["name"],
         qualified_name=row["qualified_name"],
         file_path=row["file_path"],
@@ -282,7 +302,7 @@ class SqliteLookup:
         self._held = 0
         self._by_id: dict[str, Symbol | None] = {}
         self._by_qualified: dict[str, list[Symbol]] = {}
-        self._by_name: dict[str, list[Symbol]] = {}
+        self._by_name: dict[str, _Named] = {}
         self._members: dict[str, list[Symbol]] = {}
         self._in_file: dict[str, list[Symbol]] = {}
         self._declarations: dict[tuple[DeclarationKey, str], list[Symbol]] = {}
@@ -323,24 +343,30 @@ class SqliteLookup:
             self._by_qualified[qualified_name] = found
         return found
 
-    def _named(self, name: str) -> list[Symbol]:
-        """Return every symbol with this simple name, cached across both kind filters."""
+    def _named(self, name: str) -> _Named:
+        """Return the types and callables with this simple name, decoding no symbol of another kind."""
         self._asked[(2, name)] += 1
         found = self._by_name.get(name)
         if found is None:
-            found = self._select("name = ?", name)
+            # `+kind` keeps the planner on the name index: the kind index would scan every method.
+            placeholders = ",".join("?" * len(_NAMED_KIND_VALUES))
+            symbols = self._select(f"name = ? AND +kind IN ({placeholders})", name, *_NAMED_KIND_VALUES)
+            found = _Named(
+                types=[symbol for symbol in symbols if symbol.kind in TYPE_KINDS],
+                callables=[symbol for symbol in symbols if symbol.kind in CALLABLE_KINDS],
+            )
             self._by_name[name] = found
         return found
 
     def types_by_simple(self, name: str) -> list[Symbol]:
         """Return every type declaration with this simple name."""
-        return [symbol for symbol in self._named(name) if symbol.kind in TYPE_KINDS]
+        return self._named(name).types
 
     def callables_by_simple(self, name: str) -> list[Symbol]:
         """Return every method or constructor with this simple name."""
         # The memory index files a symbol under one of the two, never both, so a type that is
         # also a callable kind cannot happen and the filters stay each other's complement.
-        return [symbol for symbol in self._named(name) if symbol.kind in CALLABLE_KINDS]
+        return self._named(name).callables
 
     def members(self, container_id: str) -> list[Symbol]:
         """Return the symbols declared directly inside a container."""
@@ -417,7 +443,7 @@ class SqliteLookup:
             if key not in cache:
                 continue
             value = cache[key]
-            rows = len(value) if isinstance(value, list) else 1
+            rows = len(value) if isinstance(value, (list, _Named)) else 1
             if kept + rows > min(KEPT_SYMBOLS, HELD_SYMBOLS):
                 continue
             keep[index].add(key)
