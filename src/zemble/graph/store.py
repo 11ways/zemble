@@ -2781,7 +2781,7 @@ def _write_facts_symbols_for_read(
     # A facts file the graph already has a version-5 status row for was read by a build that
     # would have written its `symbol` facts, so holding none of them is the truth about it
     # rather than a gap to fill again on every build.
-    stored = {row["facts_file"] for row in connection.execute("SELECT DISTINCT facts_file FROM facts_symbols")}
+    stored = _stored_facts_files(connection)
     present = set(plan.present)
     for relative in sorted(((present - stored - set(plan.states)) | (plan.moved & present)) - written):
         try:
@@ -2790,6 +2790,35 @@ def _write_facts_symbols_for_read(
             # Mapping reports it; the rows a previous read wrote stay until the file is readable.
             continue
         _write_facts_symbols(connection, loaded)
+
+
+#: Every distinct `facts_file` of one schema's own `facts_symbols` table, read off its index one value at a time.
+_DISTINCT_FACTS_FILES = (
+    "WITH RECURSIVE f(name) AS (SELECT MIN(facts_file) FROM {schema}.facts_symbols UNION ALL "
+    "SELECT (SELECT MIN(facts_file) FROM {schema}.facts_symbols WHERE facts_file > f.name) FROM f "
+    "WHERE f.name IS NOT NULL) SELECT name FROM f WHERE name IS NOT NULL"
+)
+
+
+def _stored_facts_files(connection: sqlite3.Connection) -> set[str]:
+    """Return the facts files of which the connection's graph shows at least one `symbol` fact.
+
+    AIDEV-NOTE: a DISTINCT over a lane overlay's layered `facts_symbols` view judged both masks of every base row:
+    24 s of each overlay build over the zenit workspace's 1.09M rows (a spam-codes rebuild profiled 2026-11-26). The
+    candidates are read off each table's `facts_file` index, and the view is asked once per candidate.
+    """
+    if not lane_overlay.is_overlay(connection):
+        return {row[0] for row in connection.execute(_DISTINCT_FACTS_FILES.format(schema="main"))}
+    candidates = {
+        row[0]
+        for schema in ("main", lane_overlay.BASE_SCHEMA)
+        for row in connection.execute(_DISTINCT_FACTS_FILES.format(schema=schema))
+    }
+    return {
+        name
+        for name in candidates
+        if connection.execute("SELECT 1 FROM facts_symbols WHERE facts_file = ? LIMIT 1", (name,)).fetchone()
+    }
 
 
 def _write_facts_symbols(

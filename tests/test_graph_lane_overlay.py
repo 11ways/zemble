@@ -7,6 +7,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -599,6 +600,65 @@ def test_a_lane_s_own_facts_file_stores_the_symbol_facts_of_only_the_sources_it_
         connection.close()
     assert layered == [("extra.User", f"extra/{user}", 9), ("extra.UserTest", f"extra/{test}", 4)], (
         "and the lane reads the base's facts of the source it did not change beside its own"
+    )
+
+
+def test_the_facts_files_an_overlay_holds_are_read_off_the_index_flat_as_the_base_s_facts_grow(
+    lanes: tuple[Path, Path, Path],
+) -> None:
+    """A build asks which facts files hold `symbol` facts; over a lane overlay that must not scan the base's rows.
+
+    A DISTINCT over the layered view judged both masks of every base row: 24 s per overlay build of the zenit
+    workspace (1.09M rows), every time its base republished.
+    """
+    from zemble.graph import store
+
+    workspace, lane, _reference = lanes
+    build_graph(str(lane))
+    facts_file = "extra/build/zemble/facts-compileJava.jsonl"
+    base_db = graph_db_path(str(workspace))
+    assert base_db is not None
+
+    def grow_base(count: int, start: int) -> None:
+        writer = sqlite3.connect(base_db)
+        try:
+            writer.executemany(
+                "INSERT INTO facts_symbols (ref, file_path, line, facts_file, language) VALUES (?,?,?,?,?)",
+                [(f"gen.G{i}", f"extra/src/gen/G{i}.java", 1, facts_file, "java") for i in range(start, start + count)],
+            )
+            writer.commit()
+        finally:
+            writer.close()
+
+    def steps(query: Callable[[sqlite3.Connection], set[str]]) -> tuple[set[str], int]:
+        connection = connect(str(lane))
+        ticks = [0]
+
+        def tick() -> int:
+            ticks[0] += 1
+            return 0
+
+        try:
+            connection.set_progress_handler(tick, 1000)
+            return query(connection), ticks[0]
+        finally:
+            connection.close()
+
+    def naive(connection: sqlite3.Connection) -> set[str]:
+        return {row[0] for row in connection.execute("SELECT DISTINCT facts_file FROM facts_symbols")}
+
+    grow_base(2_000, 0)
+    small, small_steps = steps(store._stored_facts_files)
+    naive_small, naive_small_steps = steps(naive)
+    grow_base(38_000, 2_000)
+    large, large_steps = steps(store._stored_facts_files)
+    naive_large, naive_large_steps = steps(naive)
+
+    assert small == naive_small and large == naive_large, "it answers what the DISTINCT over the view answers"
+    assert facts_file in large, "the base's facts file is held through the overlay"
+    assert naive_large_steps > 10 * max(1, naive_small_steps), "the DISTINCT over the view grows with the base's rows"
+    assert large_steps <= small_steps + 5, (
+        f"THE ASSERTION -- flat as the base's facts grow 20-fold: {small_steps} then {large_steps} thousand steps"
     )
 
 
