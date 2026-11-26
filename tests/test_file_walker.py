@@ -271,3 +271,49 @@ def test_a_lane_parked_inside_its_base_is_its_own_root_never_the_bases(tmp_path:
     assert mirrored == {"alpha/src/a.py", "alpha/src/lane_only.py", "tools/helper.py"}, (
         "walked as a copy of the base root, the base root's ignore files keep its run state out"
     )
+
+
+def test_the_watcher_judges_a_lane_once_and_a_directory_once_per_burst(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lane's churn costs the base's watcher one lane verdict, and a burst in one base directory one look."""
+    import subprocess
+
+    import zemble.daemon.watch as watch
+    from tests.conftest import git
+
+    workspace = (tmp_path / "ws").resolve()
+    _touch(workspace / "alpha/src/a.py")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(workspace / "alpha")], check=True)
+    git(workspace / "alpha", "add", "src")
+    git(workspace / "alpha", "commit", "-q", "-m", "initial")
+    lane = workspace / "lanes" / "one"
+    git(workspace / "alpha", "worktree", "add", "-q", "--detach", str(lane / "alpha"))
+    looks: list[str] = []
+    real = watch.duplicate_tree_prefix
+
+    def counted(root: Path, relative: str) -> str | None:
+        looks.append(relative)
+        return real(root, relative)
+
+    monkeypatch.setattr(watch, "duplicate_tree_prefix", counted)
+    rules = watch.WatchSpec(workspace, (".py",), facts=True).rules()
+    # 1. Twenty edits, build output and a facts file written in the lane: one verdict on the lane.
+    for index in range(20):
+        assert not rules.matches(lane / f"alpha/src/gen{index}.py"), "step 1: a lane's edit is not the base's"
+    assert not rules.matches(lane / "alpha/build/classes/A.class"), "step 1: nor its build output"
+    assert not rules.matches(lane / "alpha/build/zemble/facts-compileJava.jsonl"), "step 1: nor its facts file"
+    assert looks == ["lanes/one/alpha/src/gen0.py"], "step 1: THE ASSERTION -- the lane is judged once"
+    # 2. A burst of writes in one directory of the base: one look, and the base's facts file is its own.
+    looks.clear()
+    for index in range(20):
+        assert not rules.matches(workspace / f"alpha/build/run{index}.log"), "step 2: build output no rule wants"
+    assert looks == ["alpha/build/run0.log"], "step 2: THE ASSERTION -- one look for the directory's burst"
+    _touch(workspace / "alpha/build/zemble/facts-compileJava.jsonl", "{}\n")
+    assert rules.matches(workspace / "alpha/build/zemble/facts-compileJava.jsonl"), "step 2: the base's facts file"
+    assert rules.matches(workspace / "alpha/src/a.py"), "step 2: and the base's edit"
+    # 3. A verdict past its time is judged again.
+    monkeypatch.setattr(watch, "LANE_VERDICT_SECONDS", 0.0)
+    looks.clear()
+    assert not rules.matches(lane / "alpha/src/again.py"), "step 3: the lane still is one"
+    assert looks == ["lanes/one/alpha/src/again.py"], "step 3: an old verdict is judged again"

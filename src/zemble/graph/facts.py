@@ -401,8 +401,12 @@ def discover_facts_files(root: Path) -> list[Path]:
     return sorted({path for path in _walk_for_globs(root, patterns)})
 
 
-def matches_facts_glob(root: Path, path: Path) -> bool:
-    """Return whether a path is one of a workspace's facts files by name alone."""
+def matches_facts_glob(root: Path, path: Path, *, copies_judged: bool = False) -> bool:
+    """Return whether a path is one of a workspace's facts files by name alone.
+
+    :param copies_judged: The caller judged already that the path lies in no lane or worktree copy the walk skips
+        (the watcher's IgnoreRules, which keeps that verdict per directory), so it is not looked for again.
+    """
     globs = facts_source_globs(root)
     # Build output churn must not realpath every ignored .class file before rejecting it.
     if not any(fnmatch.fnmatch(path.name, pattern.rstrip("/").rsplit("/", 1)[-1]) for pattern in globs):
@@ -412,7 +416,7 @@ def matches_facts_glob(root: Path, path: Path) -> bool:
         relative = path.resolve().relative_to(root.resolve())
     except ValueError:
         return False
-    if duplicate_tree_prefix(root, relative.as_posix()) is not None:
+    if not copies_judged and duplicate_tree_prefix(root, relative.as_posix()) is not None:
         return False
     segments = relative.as_posix().split("/")
     for pattern in (_segments(pattern) for pattern in globs):

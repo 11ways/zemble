@@ -28,6 +28,12 @@ STEP_MS = 50
 READY_LINE = "ready"
 #: Longest change-set line read from a worker: a branch switch can name every file of a workspace.
 _LINE_LIMIT = 64 * 1024 * 1024
+#: Seconds a directory found to hold a parked lane or worktree copy stays judged so without a new look.
+LANE_VERDICT_SECONDS = 60.0
+#: Seconds a directory found to hold no such copy stays judged so: short, as a lane being created turns into one.
+PLAIN_VERDICT_SECONDS = 5.0
+#: Most directories the plain verdicts keep before they are forgotten at once.
+_PLAIN_VERDICTS_MAX = 50_000
 
 
 class IgnoreRules:
@@ -58,14 +64,25 @@ class IgnoreRules:
         self.always = always
         self.mirrored_root = mirrored_root
         self.extensions = frozenset(extension.lower() for extension in extensions)
+        # Root-relative directories the walk skips as a lane or worktree copy, and directories holding no such
+        # copy (the parent of a changed path), each with when it was judged so.
+        self._copies: dict[str, float] = {}
+        self._plain: dict[str, float] = {}
 
     def matches(self, path: Path) -> bool:
-        """Return whether a changed path is one the index cares about."""
+        """Return whether a changed path is one the index cares about.
+
+        AIDEV-NOTE: archdev 2026-11-26, the zenit workspace's watcher held 88% of a core for hours: every write
+        under one of ~50 lanes (build output, run state, a compile's facts files) cost 184-220 ms of
+        `duplicate_tree_prefix`, which lists every lane's checkouts again. Now the verdict is kept per directory
+        (LANE_VERDICT_SECONDS for a copy, PLAIN_VERDICT_SECONDS for none), judged before the facts rule, which
+        asks it no more (`copies_judged`).
+        """
         try:
             relative = path.relative_to(self.root).as_posix()
         except ValueError:
             relative = None
-        if relative is not None and duplicate_tree_prefix(self.root, relative) is not None:
+        if relative is not None and self._copy_prefix(relative) is not None:
             # A lane parked inside this root is its own root; its edits are never this root's.
             return False
         if self.always is not None and self.always(path):
@@ -73,6 +90,27 @@ class IgnoreRules:
         if path.suffix.lower() not in self.extensions or relative is None:
             return False
         return ignored_prefix(self.root, relative, mirrored_root=self.mirrored_root) is None
+
+    def _copy_prefix(self, relative: str) -> str | None:
+        """The directory holding a root-relative path that the walk skips as a lane or worktree copy, or None."""
+        now = time.monotonic()
+        segments = relative.split("/")
+        for depth in range(1, len(segments)):
+            judged = self._copies.get("/".join(segments[:depth]))
+            if judged is not None and now - judged < LANE_VERDICT_SECONDS:
+                return "/".join(segments[:depth])
+        parent = "/".join(segments[:-1])
+        plain = self._plain.get(parent)
+        if plain is not None and now - plain < PLAIN_VERDICT_SECONDS:
+            return None
+        prefix = duplicate_tree_prefix(self.root, relative)
+        if prefix is not None:
+            self._copies[prefix] = now
+            return prefix
+        if len(self._plain) >= _PLAIN_VERDICTS_MAX:
+            self._plain.clear()
+        self._plain[parent] = now
+        return None
 
 
 @dataclass(frozen=True)
@@ -93,7 +131,10 @@ class WatchSpec:
 
         root = self.root
         return IgnoreRules(
-            root, self.extensions, always=lambda path: matches_facts_glob(root, path), mirrored_root=self.mirrored_root
+            root,
+            self.extensions,
+            always=lambda path: matches_facts_glob(root, path, copies_judged=True),
+            mirrored_root=self.mirrored_root,
         )
 
     def to_json(self) -> str:
