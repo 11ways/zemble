@@ -484,7 +484,12 @@ def _relative_to_workspace(root: Path, facts_root: Path, declared: str) -> str |
 
 
 def load_facts_file(
-    path: Path, root: Path, *, relative_path: str | None = None, symbols_only: bool = False
+    path: Path,
+    root: Path,
+    *,
+    relative_path: str | None = None,
+    symbols_only: bool = False,
+    hashed: bool = True,
 ) -> FactsFile:
     """Read one facts file and decide which of its source files are still fresh.
 
@@ -496,7 +501,9 @@ def load_facts_file(
     :param symbols_only: Keep only the `symbol` facts and leave every source's freshness
         undecided, which is all the graph's `symbol` table needs: no source is hashed, and a
         line that cannot be a `file` or `symbol` fact is never parsed.
-    :return: The parsed file, with per-source freshness already decided unless `symbols_only`.
+    :param hashed: False keeps every fact but hashes no source, leaving each one's freshness undecided: a
+        re-read for facts whose freshness an earlier read of the same file already decided.
+    :return: The parsed file, with per-source freshness already decided unless `symbols_only` or not `hashed`.
     :raises FactsFormatError: If the header is missing, unreadable or of another version.
     """
     home = root if relative_path is None else facts_home_of(path, relative_path)
@@ -518,7 +525,7 @@ def load_facts_file(
                 mtime_ns=stat.st_mtime_ns,
                 size=stat.st_size,
             )
-            _read_body(handle, loaded, home, facts_root, symbols_only=symbols_only, hash_root=root)
+            _read_body(handle, loaded, home, facts_root, symbols_only=symbols_only, hash_root=root, hashed=hashed)
     except OSError as error:
         raise FactsFormatError(f"{path}: cannot be read") from error
     return loaded
@@ -547,6 +554,7 @@ def _read_body(
     *,
     symbols_only: bool = False,
     hash_root: Path | None = None,
+    hashed: bool = True,
 ) -> None:
     """Group every fact under the source file it was declared for, hashing each source's lines.
 
@@ -556,7 +564,7 @@ def _read_body(
     """
     current: SourceFacts | None = None
     outside: str | None = None
-    digests = _SourceDigests(enabled=not symbols_only)
+    digests = _SourceDigests(enabled=hashed and not symbols_only)
     for raw in lines:
         if not raw.strip() or (symbols_only and b'"symbol"' not in raw and b'"file"' not in raw):
             continue
@@ -571,7 +579,12 @@ def _read_body(
             continue
         if kind == "file":
             current = _declare_file(
-                payload, loaded, root, facts_root, hashed=not symbols_only, hash_root=hash_root or root
+                payload,
+                loaded,
+                root,
+                facts_root,
+                hashed=hashed and not symbols_only,
+                hash_root=hash_root or root,
             )
             outside = str(payload.get("path", "")) if current is None else None
             digests.add(current, raw)
@@ -1323,10 +1336,10 @@ def map_facts_files(
         loaded.release_facts()
 
 
-def _parse(overlay: FactsOverlay, path: Path, relative_path: str) -> FactsFile | None:
+def _parse(overlay: FactsOverlay, path: Path, relative_path: str, *, hashed: bool = True) -> FactsFile | None:
     """Parse one facts file, recording why when it cannot be read."""
     try:
-        return load_facts_file(path, overlay.root, relative_path=relative_path)
+        return load_facts_file(path, overlay.root, relative_path=relative_path, hashed=hashed)
     except FactsFormatError as error:
         overlay.errors.append((_display_path(overlay.root, path), str(error)))
         logger.warning("Ignoring facts file: %s", error)
@@ -1334,8 +1347,13 @@ def _parse(overlay: FactsOverlay, path: Path, relative_path: str) -> FactsFile |
 
 
 def _refill(overlay: FactsOverlay, loaded: FactsFile, chosen: list[SourceFacts]) -> bool:
-    """Parse a released facts file again for the facts of some of its sources."""
-    again = _parse(overlay, loaded.path, loaded.relative_path)
+    """Parse a released facts file again for the facts of some of its sources.
+
+    AIDEV-NOTE: its sources' freshness was decided by the read that released it, so this read hashes none:
+    hashing every source of the file again on each refill cost a lane overlay's whole rebuild 37.6 s of the
+    800 s builder 51's cProfile measured (bspeed-z 2026-11-26).
+    """
+    again = _parse(overlay, loaded.path, loaded.relative_path, hashed=False)
     if again is None:
         return False
     for source in chosen:

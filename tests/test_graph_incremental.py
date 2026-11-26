@@ -347,13 +347,29 @@ def test_a_facts_file_mapped_in_two_rounds_is_read_again(
     ), "step 1: facts replace edges, never the tree-sitter measurements"
 
     # 2. The Java source changes and the first facts file starts covering the markdown template.
+    # A refill hashes no source: the read that released the file decided their freshness (bspeed-z 2026-11-26: 37.6 s
+    # of a lane overlay's whole rebuild was spent hashing every source again on each refill).
     refills: list[str] = []
+    refilling: list[int] = []
+    hashed_in_refill: list[str] = []
     refill = facts._refill
-    monkeypatch.setattr(
-        facts,
-        "_refill",
-        lambda overlay, loaded, chosen: refills.append(loaded.relative_path) or refill(overlay, loaded, chosen),
-    )
+    sha = facts.file_sha256
+
+    def counted_sha(path: Path) -> str | None:
+        if refilling:
+            hashed_in_refill.append(str(path))
+        return sha(path)
+
+    def counted_refill(overlay, loaded, chosen) -> bool:  # noqa: ANN001
+        refills.append(loaded.relative_path)
+        refilling.append(1)
+        try:
+            return refill(overlay, loaded, chosen)
+        finally:
+            refilling.pop()
+
+    monkeypatch.setattr(facts, "file_sha256", counted_sha)
+    monkeypatch.setattr(facts, "_refill", counted_refill)
     functions = workspace / FUNCTIONS
     functions.write_text(functions.read_text(encoding="utf-8") + "// edited\n", encoding="utf-8")
     template_facts = _facts_lines(workspace)[1:3]
@@ -362,6 +378,7 @@ def test_a_facts_file_mapped_in_two_rounds_is_read_again(
     # The first file is read once by planning, to learn which sources it changed, and its facts
     # for those are read again to map them; the second is read again for round two.
     assert refills == [first, second], "step 2: each facts file was parsed again for what it had to map"
+    assert hashed_in_refill == [], "step 2: THE ASSERTION -- a refill hashes no source"
     _assert_matches_full_rebuild(workspace, scratch, "step 2 second round")
 
 
